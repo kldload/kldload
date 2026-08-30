@@ -2,7 +2,11 @@
 set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 # ---------------------------------------------------------------------------
-# kldload-rollback — put the system back the way it was before a package
+# rollback — put the system back the way it was before a package
+# Installed as /usr/sbin/kldload-rollback with a `rollback` symlink beside it;
+# `apt rollback` / `dnf rollback` reach it through kldload-pkg-wrapper. The
+# operator-facing name is `rollback` — the kldload- prefix is kept only so the
+# older name in scripts and docs keeps resolving.
 #                    transaction, using boot environments.
 #
 # What it does, in order:
@@ -18,7 +22,7 @@ trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 #   it DESTROYS every snapshot newer than the target — so the operation has no
 #   way back if the rollback itself was the mistake. Cloning is reversible:
 #   the environment you rolled away from is still there, untouched, and
-#   `kldload-rollback cancel` re-points bootfs at it before you even reboot.
+#   `rollback cancel` re-points bootfs at it before you even reboot.
 #   This is what boot environments are for, and what ZFSBootMenu boots from.
 #
 # WHY no daemon: nothing here runs in the background. The snapshots are made
@@ -44,14 +48,37 @@ trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 # ---------------------------------------------------------------------------
 
 LOG=/var/log/kldload/rollback.log
+
+# A staged rollback is inert until the machine boots into it, and an operator
+# who typed `rollback` has already decided. Staging and then STOPPING made them
+# type a second command to get the thing they asked for, and on a demo bench it
+# reads as "nothing happened" — the packages are still installed, because the
+# old root is still mounted. So `last` and `to` reboot for you.
+# --no-reboot (or KLDLOAD_ROLLBACK_REBOOT=0) restores the stage-and-stop
+# behaviour for anything scripted; `cancel` still un-stages before the reboot.
+REBOOT="${KLDLOAD_ROLLBACK_REBOOT:-1}"
+REBOOT_DELAY="${KLDLOAD_ROLLBACK_DELAY:-10}"
 mkdir -p "$(dirname "$LOG")"
 
 _ts() { date '+%Y-%m-%dT%H:%M:%S'; }
 log() { echo "$(_ts) $*" >>"$LOG"; }
-say() { printf '%s\n' "$*"; }
+# SIGPIPE is IGNORED, and a write to a closed stdout is not an error.
+#
+# WHY: this tool changes boot state. With the default disposition, piping it to
+# `head`, or quitting a pager mid-output, kills it with 141 — and if that lands
+# between `zpool set bootfs` and the restore that follows, the pool is left
+# pointing at an environment that is then destroyed.
+# HISTORY: onyx 2026-08-29. `rollback cancel 2>&1 | head -2` exited 141
+# part-way through the cancel; the staged clone was removed afterwards and the
+# pool was left with bootfs UNSET. Reproduced deterministically:
+#     rollback status | head -2   -> 141
+#     rollback status             -> 0
+# Nobody reading the output is not a reason to abandon a half-applied change.
+trap '' PIPE
+say() { printf '%s\n' "$*" 2>/dev/null || true; }
 die() {
     log "ERROR: $*"
-    printf 'kldload-rollback: %s\n' "$*" >&2
+    printf 'rollback: %s\n' "$*" >&2
     exit 1
 }
 
@@ -61,7 +88,35 @@ command -v zfs >/dev/null 2>&1 || die "zfs is not installed — nothing to roll 
 # bootfs is the authority: it is what ZFSBootMenu reads to pick a default, so
 # it is also what has to change for a rollback to take effect. Fall back to
 # the dataset actually mounted at / when bootfs is unset on an odd pool.
-_pool() { zpool list -H -o name 2>/dev/null | head -1; }
+# NO early-exiting consumer on the right of a pipe anywhere in this file.
+# `producer | awk '...{exit}'` and `producer | head -1` both make the PRODUCER
+# take SIGPIPE, pipefail turns that into 141, and the ERR trap kills the tool.
+# It is racy — it only fires when the producer is still writing as the consumer
+# leaves — so it passes all day and then bites under load.
+# HISTORY: onyx 2026-08-29. `rollback cancel` died at _running_be with
+# "FAIL at line 114", having already repointed nothing back; the clone it had
+# staged was then destroyed and the pool was left with bootfs UNSET. On the ZBM
+# path that is an unbootable machine.
+# The fix everywhere is an awk that reads to EOF (no exit, no head).
+_pool() { zpool list -H -o name 2>/dev/null | awk 'NR==1'; }
+_fsize() { stat -c %s "$1" 2>/dev/null || echo 0; }
+
+# _esp_backup <src> <dst> — copy onto the ESP and PROVE the copy is whole.
+# A short backup is worse than no backup: `cancel` restores these files
+# unconditionally, so a truncated one becomes an unbootable machine. On any
+# shortfall the partial is REMOVED, so cancel finds nothing and skips.
+_esp_backup() {
+    cp -a "$1" "$2" || {
+        rm -f "$2"
+        die "could not back up ${1##*/} onto the ESP"
+    }
+    [[ "$(_fsize "$1")" == "$(_fsize "$2")" ]] || {
+        rm -f "$2"
+        die "the backup of ${1##*/} came up short and was removed, so 'cancel' \
+cannot restore a truncated file. The ESP is almost certainly full. bootfs was \
+set; run 'rollback cancel' to undo it."
+    }
+}
 
 _current_be() {
     local pool bootfs
@@ -74,12 +129,12 @@ _current_be() {
         printf '%s\n' "$bootfs"
         return 0
     fi
-    mount | awk '$3=="/" && $5=="zfs" {print $1; exit}'
+    mount | awk '$3=="/" && $5=="zfs" && !f {print $1; f=1}'
 }
 
 # The environment we are RUNNING from, which is not always the one bootfs
 # names — after a rollback is staged, they differ until the reboot.
-_running_be() { mount | awk '$3=="/" && $5=="zfs" {print $1; exit}'; }
+_running_be() { mount | awk '$3=="/" && $5=="zfs" && !f {print $1; f=1}'; }
 
 BE="$(_current_be)" || die "could not find a ZFS pool"
 [[ -n "$BE" ]] || die "could not determine the boot environment"
@@ -103,6 +158,29 @@ _snapshots() {
     zfs list -H -t snapshot -o name,creation,used -s creation "$BE" 2>/dev/null || true
 }
 
+# _snap_source <tag> — human label for where a snapshot came from.
+# stdout: one short phrase; "-" when the prefix is not one we mint.
+# Shared by `list` and the interactive picker so the two can never disagree.
+_snap_source() {
+    case "$1" in
+    apt-pre-*) echo "before apt" ;;
+    apt-post-*) echo "after apt" ;;
+    dnf-pre-*) echo "before dnf" ;;
+    dnf-post-*) echo "after dnf" ;;
+    kpkg-*) echo "kpkg" ;;
+    auto-*) echo "scheduled" ;;
+    manual-*) echo "manual" ;;
+    rollback-*) echo "pre-rollback" ;;
+    # sanoid's own naming; these are the periodic retention snapshots and are
+    # perfectly valid rollback targets, so they are labelled rather than left
+    # as "-" for an operator to wonder about.
+    autosnap_*) echo "sanoid" ;;
+    install-*) echo "install" ;;
+    smoketest-*) echo "smoke test" ;;
+    *) echo "-" ;;
+    esac
+}
+
 cmd_list() {
     local rows
     rows="$(_snapshots)"
@@ -123,29 +201,12 @@ cmd_list() {
     printf '  %s %s %s  %s\n' "$(_rule 34)" "$(_rule 22)" "$(_rule 8)" "$(_rule 12)"
     while IFS=$'\t' read -r name creation used; do
         [[ -z "$name" ]] && continue
-        local tag="${name#*@}" src
-        case "$tag" in
-        apt-pre-*) src="before apt" ;;
-        apt-post-*) src="after apt" ;;
-        dnf-pre-*) src="before dnf" ;;
-        dnf-post-*) src="after dnf" ;;
-        kpkg-*) src="kpkg" ;;
-        auto-*) src="scheduled" ;;
-        manual-*) src="manual" ;;
-        rollback-*) src="pre-rollback" ;;
-        # sanoid's own naming; these are the periodic retention snapshots and
-        # are perfectly valid rollback targets, so they are labelled rather
-        # than left as "-" for an operator to wonder about.
-        autosnap_*) src="sanoid" ;;
-        install-*) src="install" ;;
-        smoketest-*) src="smoke test" ;;
-        *) src="-" ;;
-        esac
-        printf '  %-34s %-22s %8s  %s\n' "${tag:0:34}" "${creation:0:22}" "$used" "$src"
+        local tag="${name#*@}"
+        printf '  %-34s %-22s %8s  %s\n' "${tag:0:34}" "${creation:0:22}" "$used" "$(_snap_source "$tag")"
     done <<<"$rows"
     say ""
-    say "Roll back with:  kldload-rollback to <snapshot>"
-    say "Or the newest pre-transaction one:  kldload-rollback last"
+    say "Roll back with:  rollback to <snapshot>"
+    say "Or the newest pre-transaction one:  rollback last"
 }
 
 # _pick_last — newest snapshot taken BEFORE a package transaction.
@@ -262,24 +323,59 @@ Nothing is broken; see $LOG"
 
     local kern initrd
     kern="$(find "$mnt/boot" -maxdepth 1 -name 'vmlinuz-*' -printf '%T@ %p\n' 2>/dev/null |
-        sort -rn | head -1 | cut -d' ' -f2-)"
-    initrd="$(find "$mnt/boot" -maxdepth 1 -name 'initrd.img-*' -printf '%T@ %p\n' 2>/dev/null |
-        sort -rn | head -1 | cut -d' ' -f2-)"
+        sort -rn | awk 'NR==1{sub(/^[^ ]* /, ""); print}')"
+    # BOTH naming conventions. initrd.img-<ver> is Debian/Ubuntu; the RPM
+    # families (Fedora/RHEL/Rocky/CentOS) write initramfs-<ver>.img, and
+    # matching only the deb name made every rollback on an RPM host die here —
+    # AFTER the clone and `zpool set bootfs` had already happened, leaving the
+    # pool pointed at a half-staged environment that `cancel` had to undo.
+    # HISTORY: onyx 2026-08-29, F44 desktop. `dnf install vlc` then
+    # `dnf rollback` → "the snapshot has a kernel but no initrd", with
+    # /boot/initramfs-7.2.2-300.fc44.x86_64.img sitting in the snapshot the
+    # whole time. bootloader.sh:1398 already globbed both; this did not.
+    # kdump is excluded on purpose: it is a crash-capture initrd, it sorts
+    # newest right after a kdump rebuild, and booting it strands the machine.
+    initrd="$(find "$mnt/boot" -maxdepth 1 \
+        \( -name 'initramfs-*.img' -o -name 'initrd.img-*' \) \
+        ! -name '*kdump*' -printf '%T@ %p\n' 2>/dev/null |
+        sort -rn | awk 'NR==1{sub(/^[^ ]* /, ""); print}')"
 
     [[ -n "$kern" && -f "$kern" ]] ||
         die "the snapshot contains no kernel under /boot — refusing to stage a \
 rollback that would leave this machine unbootable. bootfs was set; run \
-'kldload-rollback cancel' to undo it."
+'rollback cancel' to undo it."
     [[ -n "$initrd" && -f "$initrd" ]] ||
         die "the snapshot has a kernel but no initrd — refusing to stage an \
-unbootable rollback. Run 'kldload-rollback cancel' to undo the bootfs change."
+unbootable rollback. Run 'rollback cancel' to undo the bootfs change."
 
     log "restoring kernel from snapshot: $(basename "$kern") / $(basename "$initrd")"
 
+    # ── ESP capacity gate ───────────────────────────────────────────────────
+    # The ESP is a fixed ~512MB vfat and a dracut initrd is ~233MB of it. Peak
+    # footprint here is the three live files, PLUS a .kldload-bak of each, PLUS
+    # the two .new temporaries below — far more than 512MB holds. Check first,
+    # because a cp that dies halfway leaves a TRUNCATED backup and `cancel`
+    # restores backups unconditionally.
+    # HISTORY: onyx 2026-08-29 — ESP hit 100%, the initrd backup stopped at
+    # 105MB of 233MB. Caught by hand before cancel ran; cancel would have moved
+    # that stub over the good initrd and left the machine unbootable.
+    local _need _free
+    _need=$(($(_fsize "$ESP_GRUB_CFG") + $(_fsize "$ESP_DIR/vmlinuz") + \
+    $(_fsize "$ESP_DIR/initrd.img") + $(_fsize "$kern") + $(_fsize "$initrd")))
+    _free="$(df -P --block-size=1 "$ESP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
+    [[ "$_free" =~ ^[0-9]+$ ]] || _free=0
+    if ((_free < _need)); then
+        die "the ESP has $((_free / 1048576))MB free but staging this rollback \
+needs $((_need / 1048576))MB (backups of the current kernel/initrd/grub.cfg plus \
+the incoming pair). Refusing BEFORE any copy, so nothing is half-written. bootfs \
+was set; run 'rollback cancel' to undo it. Then free space on the ESP, or \
+rebuild a host-only initrd (dracut -f --hostonly) to shrink it."
+    fi
+
     # Back up before overwriting, so cancel is a real undo and not a rebuild.
-    cp -a "$ESP_GRUB_CFG" "${ESP_GRUB_CFG}.kldload-bak" || die "could not back up grub.cfg"
-    [[ -f "$ESP_DIR/vmlinuz" ]] && cp -a "$ESP_DIR/vmlinuz" "$ESP_DIR/vmlinuz.kldload-bak"
-    [[ -f "$ESP_DIR/initrd.img" ]] && cp -a "$ESP_DIR/initrd.img" "$ESP_DIR/initrd.img.kldload-bak"
+    _esp_backup "$ESP_GRUB_CFG" "${ESP_GRUB_CFG}.kldload-bak"
+    [[ -f "$ESP_DIR/vmlinuz" ]] && _esp_backup "$ESP_DIR/vmlinuz" "$ESP_DIR/vmlinuz.kldload-bak"
+    [[ -f "$ESP_DIR/initrd.img" ]] && _esp_backup "$ESP_DIR/initrd.img" "$ESP_DIR/initrd.img.kldload-bak"
 
     # Write to a temp name and mv into place: a half-copied kernel on the ESP
     # is an unbootable machine, and vfat gives us no atomicity for free.
@@ -317,7 +413,7 @@ unbootable rollback. Run 'kldload-rollback cancel' to undo the bootfs change."
 # reports healthy while being wrong.
 #
 # HISTORY .137 2026-08-26 (Secure Boot off, encrypted pool, ZBM boot path):
-# seven packages installed, `kldload-rollback last`, reboot. Every mechanical
+# seven packages installed, `rollback last`, reboot. Every mechanical
 # step was correct — snapshot taken by the apt hook, clone made from it, bootfs
 # re-pointed, ZBM booted the clone unattended, original BE left intact, and the
 # binaries genuinely gone. dpkg still said 1128 packages instead of 1117 and
@@ -359,7 +455,7 @@ _clone_be() {
     local _bad
     if _bad="$(_pkgdb_outside_be)"; then
         local _dbpath="${_bad%% *}" _dbds="${_bad##* }"
-        printf 'kldload-rollback: REFUSING — the package database is not part of this boot environment.\n\n' >&2
+        printf 'rollback: REFUSING — the package database is not part of this boot environment.\n\n' >&2
         printf '  package database : %s\n' "$_dbpath" >&2
         printf '  lives on dataset : %s\n' "$_dbds" >&2
         printf '  boot environment : %s\n\n' "$BE" >&2
@@ -369,9 +465,9 @@ _clone_be() {
         printf 'validates dependencies, not file presence.\n\n' >&2
         printf 'This pool predates the layout fix. To repair it, move the database into the\n' >&2
         printf 'boot environment (one reboot, no reinstall):\n\n' >&2
-        printf '    kldload-rollback migrate-pkgdb\n\n' >&2
+        printf '    rollback migrate-pkgdb\n\n' >&2
         printf 'Or override, understanding the result will be inconsistent:\n\n' >&2
-        printf '    KLDLOAD_ROLLBACK_ALLOW_SPLIT_PKGDB=1 kldload-rollback %s\n' "${1:-last}" >&2
+        printf '    KLDLOAD_ROLLBACK_ALLOW_SPLIT_PKGDB=1 rollback %s\n' "${1:-last}" >&2
         if [[ "${KLDLOAD_ROLLBACK_ALLOW_SPLIT_PKGDB:-0}" != "1" ]]; then
             log "REFUSED: package DB on $_dbds, BE is $BE"
             exit 1
@@ -381,7 +477,39 @@ _clone_be() {
     fi
 
     zfs list -H -t snapshot "$snap" >/dev/null 2>&1 ||
-        die "no such snapshot: $snap (see: kldload-rollback list)"
+        die "no such snapshot: $snap (see: rollback list)"
+
+    # ── ESP capacity, checked BEFORE anything is created ────────────────────
+    # This function's contract is "refuse before touching anything", and until
+    # now the ESP check did not honour it: it lived in _sync_esp, which runs
+    # after `zfs clone` AND after `zpool set bootfs`. So a host with a full ESP
+    # got a refusal that had already repointed the pool, and the operator was
+    # told both "Refusing BEFORE any copy" and "bootfs was set" in one message
+    # — true, contradictory, and leaving them a `cancel` to run.
+    # HISTORY: onyx 2026-08-29, reported from the console after exactly that.
+    #
+    # A snapshot's /boot is readable without cloning, via .zfs/snapshot/<tag>/,
+    # so the whole budget can be computed up front.
+    local _sk _si _need _free
+    _sk="$(find "/.zfs/snapshot/${tag}/boot" -maxdepth 1 -name 'vmlinuz-*' \
+        -printf '%s\n' 2>/dev/null | sort -rn | awk 'NR==1')"
+    _si="$(find "/.zfs/snapshot/${tag}/boot" -maxdepth 1 \
+        \( -name 'initramfs-*.img' -o -name 'initrd.img-*' \) \
+        ! -name '*kdump*' -printf '%s\n' 2>/dev/null | sort -rn | awk 'NR==1')"
+    # Unreadable snapshot dir (permissions, or an older layout) is not fatal —
+    # _sync_esp still gates later. Only refuse on a number we actually have.
+    if [[ "$_sk" =~ ^[0-9]+$ && "$_si" =~ ^[0-9]+$ ]]; then
+        _need=$((_sk + _si + $(_fsize "$ESP_GRUB_CFG") + \
+        $(_fsize "$ESP_DIR/vmlinuz") + $(_fsize "$ESP_DIR/initrd.img")))
+        _free="$(df -P --block-size=1 "$ESP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
+        [[ "$_free" =~ ^[0-9]+$ ]] || _free=0
+        if ((_free < _need)); then
+            die "the ESP has $((_free / 1048576))MB free but this rollback needs \
+$((_need / 1048576))MB (a backup of the current kernel/initrd/grub.cfg plus the \
+incoming pair). NOTHING has been changed — no clone, no bootfs, nothing to undo. \
+Free space on the ESP, or install onto a machine with a larger one."
+        fi
+    fi
 
     # Name the new environment after what it restores, plus when the rollback
     # happened — two rollbacks to the same snapshot must not collide.
@@ -449,26 +577,112 @@ still boot the CURRENT environment, so nothing is broken. See $LOG"
     fi
     say "  the current environment ($BE) is untouched."
     say ""
-    say "  reboot to apply   :  systemctl reboot"
-    say "  changed your mind :  kldload-rollback cancel"
+}
+
+# _reboot_now — apply a freshly staged rollback by rebooting into it.
+# Args:    none. Reads REBOOT / REBOOT_DELAY.
+# Returns: 0 when reboot is suppressed; otherwise does not return.
+# The countdown is the confirmation: Ctrl-C leaves the rollback STAGED rather
+# than unwinding it, because the operator asked for the rollback and only
+# changed their mind about the timing. `cancel` is the way to undo the staging.
+_reboot_now() {
+    if ((REBOOT == 0)); then
+        say "  reboot to apply   :  systemctl reboot"
+        say "  changed your mind :  ${0##*/} cancel"
+        say ""
+        return 0
+    fi
+    say "  changed your mind :  ${0##*/} cancel   (until the reboot below)"
     say ""
+    trap 'printf "\n"
+        say "Reboot cancelled. The rollback is still STAGED and applies on the next boot."
+        say "Un-stage it with:  ${0##*/} cancel"
+        exit 0' INT
+    local i
+    for ((i = REBOOT_DELAY; i > 0; i--)); do
+        printf '\r  rebooting in %2ds — Ctrl-C to stay here ' "$i"
+        sleep 1
+    done
+    trap - INT
+    printf '\r%*s\r' 46 ''
+    log "rebooting to apply the staged rollback"
+    say "Rebooting."
+    systemctl reboot
+}
+
+# cmd_pick — what bare `rollback` does: show the snapshots, let the operator
+# pick one, act on it. Args: none. Does not return when it reboots.
+# The default is the newest PRE-transaction snapshot, which is what someone who
+# just broke an install wants, so the whole interaction is `rollback`, Enter.
+# Non-interactive callers keep the old scriptable meaning (= `last`) rather
+# than hanging forever on a prompt nobody can see.
+cmd_pick() {
+    [[ -t 0 && -t 1 ]] || {
+        cmd_last
+        return
+    }
+
+    local rows
+    rows="$(_snapshots)"
+    if [[ -z "$rows" ]]; then
+        cmd_list
+        return 0
+    fi
+
+    local -a tags=()
+    local n=0 default_n=0 dtag name creation used tag
+    dtag="$(_pick_last)"
+
+    say "Snapshots of $BE (newest last):"
+    say ""
+    printf '   #  %-34s %-22s %8s  %s\n' "SNAPSHOT" "CREATED" "USED" "SOURCE"
+    printf '  %s  %s %s %s  %s\n' "$(_rule 2)" "$(_rule 34)" "$(_rule 22)" "$(_rule 8)" "$(_rule 12)"
+    while IFS=$'\t' read -r name creation used; do
+        [[ -z "$name" ]] && continue
+        tag="${name#*@}"
+        n=$((n + 1))
+        tags+=("$tag")
+        [[ "$tag" == "$dtag" ]] && default_n=$n
+        printf '  %2d  %-34s %-22s %8s  %s\n' \
+            "$n" "${tag:0:34}" "${creation:0:22}" "$used" "$(_snap_source "$tag")"
+    done <<<"$rows"
+    # No pre-transaction snapshot on this box yet: default to the newest of
+    # whatever does exist rather than offering no default at all.
+    ((default_n > 0)) || default_n=$n
+
+    say ""
+    local ans=""
+    read -r -p "Roll back to which? [${default_n}] (q = quit): " ans || ans=q
+    case "$ans" in
+    q | Q) say "Nothing staged." && return 0 ;;
+    "") ans="$default_n" ;;
+    esac
+    [[ "$ans" =~ ^[0-9]+$ ]] && ((ans >= 1 && ans <= n)) ||
+        die "not one of the ${n} choices: ${ans}"
+
+    say ""
+    say "Rolling back to: ${tags[$((ans - 1))]}"
+    _clone_be "${tags[$((ans - 1))]}"
+    _reboot_now
 }
 
 cmd_to() {
     local tag="${1:-}"
-    [[ -n "$tag" ]] || die "usage: kldload-rollback to <snapshot>"
+    [[ -n "$tag" ]] || die "usage: rollback to <snapshot>"
     tag="${tag#*@}" # accept either the full name or the bare tag
     _clone_be "$tag"
+    _reboot_now
 }
 
 cmd_last() {
     local tag
     tag="$(_pick_last)"
     [[ -n "$tag" ]] ||
-        die "no pre-transaction snapshot found. 'kldload-rollback list' shows \
-what exists; 'kldload-rollback to <snap>' takes any of them."
+        die "no pre-transaction snapshot found. 'rollback list' shows \
+what exists; 'rollback to <snap>' takes any of them."
     say "Most recent pre-transaction snapshot: $tag"
     _clone_be "$tag"
+    _reboot_now
 }
 
 cmd_cancel() {
@@ -495,10 +709,14 @@ cmd_cancel() {
     # staged kernel in place is consistent, whereas the reverse is not.
     if [[ $esp_staged -eq 1 ]]; then
         log "restoring ESP from backup"
-        [[ -f "$ESP_DIR/vmlinuz.kldload-bak" ]] &&
+        # -s not -f: an empty backup is a failed copy, and restoring it is a
+        # brick. _esp_backup removes short copies, so reaching here with one is
+        # already abnormal — drop it rather than install it.
+        [[ -s "$ESP_DIR/vmlinuz.kldload-bak" ]] &&
             mv -f "$ESP_DIR/vmlinuz.kldload-bak" "$ESP_DIR/vmlinuz"
-        [[ -f "$ESP_DIR/initrd.img.kldload-bak" ]] &&
+        [[ -s "$ESP_DIR/initrd.img.kldload-bak" ]] &&
             mv -f "$ESP_DIR/initrd.img.kldload-bak" "$ESP_DIR/initrd.img"
+        rm -f "$ESP_DIR/vmlinuz.kldload-bak" "$ESP_DIR/initrd.img.kldload-bak"
         mv -f "${ESP_GRUB_CFG}.kldload-bak" "$ESP_GRUB_CFG" ||
             die "could not restore grub.cfg from backup"
         sync
@@ -525,20 +743,20 @@ cmd_status() {
         # Show what GRUB will really do, not what bootfs says, because on this
         # path they can disagree and only one of them is the truth.
         local cfg_be
-        cfg_be="$(grep -oE 'root=ZFS=[^ ]+' "$ESP_GRUB_CFG" 2>/dev/null | head -1 | cut -d= -f3)"
+        cfg_be="$(grep -oE 'root=ZFS=[^ ]+' "$ESP_GRUB_CFG" 2>/dev/null | awk 'NR==1{n=split($0,a,"="); print a[n]}')"
         say "Boot path        : direct kernel (Secure Boot compatible)"
         say "grub.cfg boots   : ${cfg_be:-unknown}"
         if [[ -n "$cfg_be" && -n "$running" && "$cfg_be" != "$running" ]]; then
             say ""
             say "  ** A rollback is STAGED — GRUB will boot $cfg_be on next"
-            say "     restart. 'kldload-rollback cancel' undoes it."
+            say "     restart. 'rollback cancel' undoes it."
         fi
     else
         say "Boot path        : ZFSBootMenu (follows bootfs)"
         if [[ -n "$running" && "$BE" != "$running" ]]; then
             say ""
             say "  ** A rollback is STAGED — this system will boot a different"
-            say "     environment on next restart. 'kldload-rollback cancel' undoes it."
+            say "     environment on next restart. 'rollback cancel' undoes it."
         fi
     fi
     local n
@@ -574,25 +792,45 @@ cmd_status() {
 
 cmd_help() {
     cat <<'EOF'
-kldload-rollback — return the system to a previous boot environment
+rollback — return the system to a previous boot environment
 
-  kldload-rollback list            Show snapshots of the current environment
-  kldload-rollback last            Roll back to the newest PRE-transaction
-                                   snapshot (the one apt/dnf took before it
-                                   changed anything)
-  kldload-rollback to <snapshot>   Roll back to a specific snapshot
-  kldload-rollback cancel          Un-stage a rollback that has not booted yet
-  kldload-rollback migrate-pkgdb   Move the package database into the boot
-                                   environment. For pools old enough to
-                                   have it on its own dataset. One reboot.
-  kldload-rollback status          What is running, what boots next
-  kldload-rollback help            This text
+  rollback list             Show snapshots of the current environment
+  rollback last             Roll back to the newest PRE-transaction snapshot
+                            (the one apt/dnf took before it changed anything),
+                            then REBOOT into it
+  rollback to <snapshot>    Roll back to a specific snapshot, then REBOOT into
+                            it. `list` names the candidates.
+  rollback cancel           Un-stage a rollback that has not booted yet
+  rollback migrate-pkgdb    Move the package database into the boot
+                            environment. For pools old enough to have it on
+                            its own dataset. One reboot.
+  rollback status           What is running, what boots next
+  rollback help             This text
+
+  Reachable as `apt rollback` / `dnf rollback` too — same tool, same verbs.
+
+OPTIONS
+  --no-reboot, -n           Stage the rollback and stop instead of rebooting
+                            into it. It still applies on the next boot,
+                            whenever that is. KLDLOAD_ROLLBACK_REBOOT=0 is
+                            the same thing.
+
+ENVIRONMENT
+  KLDLOAD_ROLLBACK_REBOOT   0 to never reboot automatically (default 1).
+  KLDLOAD_ROLLBACK_DELAY    Seconds to count down before rebooting
+                            (default 10). Ctrl-C during the countdown leaves
+                            the rollback staged.
 
 HOW IT WORKS
   A rollback clones the chosen snapshot into a new boot environment and points
-  the pool's bootfs at it. Nothing is overwritten and nothing is destroyed —
-  the environment you are running is still there afterwards, and `cancel`
-  reverses the whole thing until you reboot.
+  the pool's bootfs at it, then reboots into it. Nothing is overwritten and
+  nothing is destroyed — the environment you are running is still there
+  afterwards, and `cancel` reverses the whole thing until you reboot.
+
+  The reboot is not cosmetic. The old root stays mounted until the machine
+  boots, so before it the packages you rolled back are all still installed and
+  nothing looks like it worked. Ctrl-C during the countdown, or --no-reboot,
+  leaves the rollback staged for the next boot.
 
   Snapshots are taken automatically before every apt/dnf transaction. There is
   no daemon; apt and dnf invoke the hook themselves.
@@ -602,15 +840,18 @@ WHAT IT DOES NOT DO
   so rolling back a bad kernel does not also roll back your data.
 
 EXAMPLES
-  An upgrade broke the system; go back to just before it:
-      kldload-rollback last && systemctl reboot
+  An upgrade broke the system; go back to just before it and reboot:
+      rollback last
 
   Look first, then choose:
-      kldload-rollback list
-      kldload-rollback to apt-pre-20260816-141230
+      rollback list
+      rollback to apt-pre-20260816-141230
+
+  Stage it now, reboot during the next maintenance window:
+      rollback last --no-reboot
 
   Staged one by mistake:
-      kldload-rollback cancel
+      rollback cancel
 
 EXIT STATUS
   0 on success, 1 on any failure (no snapshot, clone failed, bootfs unset).
@@ -695,7 +936,19 @@ cmd_migrate_pkgdb() {
     say "  undo:  zfs set canmount=on ${dbds}   (data untouched, plus @${stamp})"
 }
 
-case "${1:-help}" in
+# --no-reboot is positional-agnostic on purpose: `rollback --no-reboot to X`
+# and `rollback to X --no-reboot` both read naturally and both must work.
+_argv=()
+for _arg in "$@"; do
+    case "$_arg" in
+    --no-reboot | -n) REBOOT=0 ;;
+    *) _argv+=("$_arg") ;;
+    esac
+done
+set -- ${_argv[@]+"${_argv[@]}"}
+
+case "${1:-pick}" in
+pick) cmd_pick ;;
 list | ls) cmd_list ;;
 last) cmd_last ;;
 to)
@@ -707,7 +960,7 @@ migrate-pkgdb) cmd_migrate_pkgdb ;;
 status) cmd_status ;;
 help | -h | --help) cmd_help ;;
 *)
-    printf 'kldload-rollback: unknown command: %s\n\n' "$1" >&2
+    printf 'rollback: unknown command: %s\n\n' "$1" >&2
     cmd_help >&2
     exit 1
     ;;
