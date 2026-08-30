@@ -212,13 +212,29 @@ k_zfs_partition_disk() {
 
     k_zfs_log "Partitioning boot disk ${disk} (topology: ${KLDLOAD_ZFS_TOPOLOGY})"
 
+    # ESP SIZE: 2G, not the 512M this used to cut.
+    # kldload deliberately ships a PORTABLE initramfs (hostonly="no", set by
+    # bootloader.sh so a disk can be moved between machines), and that costs
+    # ~233MB. Steady state the ESP already holds ~384MB: ZFSBootMenu x2 (125MB),
+    # shim+GRUB, a 19MB kernel and that initrd. A `rollback` then needs room for
+    # a .kldload-bak of kernel+initrd+grub.cfg AND the incoming pair before it
+    # swaps them — about 504MB more, so ~888MB at peak.
+    # On a 512M ESP that is not tight, it is IMPOSSIBLE: rollback could never
+    # complete on any kldload install, and before the capacity gate went in it
+    # failed HALFWAY through the backup copy, leaving a truncated initrd that
+    # `cancel` would then restore over the good one.
+    # HISTORY: onyx 2026-08-29, fresh 1.4.2 install. ESP 511M, 123M free,
+    # rollback needed 502M. Caught by hand before cancel bricked the box.
+    # 2G costs nothing on any disk kldload installs to and leaves room for a
+    # second kernel generation.
+    local _esp_size="${KLDLOAD_ESP_SIZE:-2G}"
     if [[ "${KLDLOAD_ZFS_TOPOLOGY}" == "single" ]]; then
         # Single-disk: EFI (part 1) + rpool (part 2)
-        sgdisk -n1:1M:+512M -t1:EF00 -c1:"EFI System Partition" "${disk}"
+        sgdisk -n1:1M:+"${_esp_size}" -t1:EF00 -c1:"EFI System Partition" "${disk}"
         sgdisk -n2:0:0 -t2:BF01 -c2:"KLDload rpool" "${disk}"
     else
         # Multi-disk: EFI on boot disk only; rpool lives on the data disks
-        sgdisk -n1:1M:+512M -t1:EF00 -c1:"EFI System Partition" "${disk}"
+        sgdisk -n1:1M:+"${_esp_size}" -t1:EF00 -c1:"EFI System Partition" "${disk}"
     fi
 
     partprobe "${disk}" || true

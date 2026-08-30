@@ -44,7 +44,9 @@ wipe_disk() {
 
 # ---------------------------------------------------------------------------
 # partition_disk_single — create 2-partition layout on a single disk
-# Partition 1: 512M EFI System (EF00)
+# Partition 1: 2G EFI System (EF00) — see lib/storage-zfs.sh for why 2G and
+#              not 512M: the portable (hostonly=no) initramfs is ~233MB and a
+#              `rollback` needs backups plus an incoming pair on the same ESP.
 # Partition 2: remainder ZFS (BF01)
 # ---------------------------------------------------------------------------
 
@@ -53,7 +55,7 @@ partition_disk_single() {
     log "Partitioning disk (single): $dev"
 
     run sgdisk \
-        -n "1:0:+512M" -t "1:EF00" -c "1:EFI" \
+        -n "1:0:+${KLDLOAD_ESP_SIZE:-2G}" -t "1:EF00" -c "1:EFI" \
         -n "2:0:0" -t "2:BF01" -c "2:ZFS" \
         "$dev"
 
