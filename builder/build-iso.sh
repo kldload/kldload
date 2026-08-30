@@ -2447,10 +2447,18 @@ HELMCHARTS
     # goldens). Without it on the live ISO the installer's cp to target is
     # a silent no-op, which is the 1.0.4/1.0.5 root cause for installs
     # finishing but never building goldens, K8s, or AI.
-    for sbin_tool in kldload-install-target kldload-firstboot kldload-autodeploy kldload-recovery kldload-snapshot kldload-apply-platform-holds kldload-export-deferred kldload-rollback; do
-        src="/build/live-build/config/includes.chroot/usr/sbin/${sbin_tool}"
-        [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/sbin/${sbin_tool}" && chmod +x "${ROOTFS}/usr/sbin/${sbin_tool}"
-    done
+    # Copied WHOLESALE, for exactly the reason the systemd units below are: a
+    # hand-maintained list silently rots. This one had rotted in both
+    # directions — `kldload-export-deferred` was listed and no longer exists,
+    # and `rollback` (the symlink beside kldload-rollback, which is the name
+    # operators actually type) was added to includes.chroot and never shipped,
+    # because nobody thought to also edit a list in a different file.
+    # HISTORY: onyx 2026-08-29 — caught by mounting the built squashfs and
+    # diffing it against includes.chroot; /usr/sbin/rollback was simply absent.
+    # -a so the symlink stays a SYMLINK instead of becoming a second 41KB copy
+    # that drifts from the original on the next edit.
+    cp -a /build/live-build/config/includes.chroot/usr/sbin/. "${ROOTFS}/usr/sbin/"
+    chmod +x "${ROOTFS}"/usr/sbin/kldload-* 2>/dev/null || true
 
     # ─── systemd units shipped via includes.chroot ────────────────────────
     # Copied WHOLESALE, deliberately, because the alternative was a hand

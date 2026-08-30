@@ -661,6 +661,16 @@ cmd_build() {
         # on disk, so the build logged "K8s images cached: 763M (14 images)"
         # and pulled none of the new ones (2026-08-16).
         local _want _have
+        # mkdir FIRST. `find` on a missing directory exits 1; 2>/dev/null hides
+        # the message but not the status, pipefail promotes it out of the
+        # pipeline, and set -e then kills the build with no diagnostic at all —
+        # deploy.sh has no ERR trap, so the log simply stops mid-stage.
+        # This made `./deploy.sh build` fail on ANY clean checkout, because
+        # nothing else creates this directory: the puller below would have, but
+        # the build died two lines before reaching it.
+        # HISTORY: onyx 2026-08-29 — ship exited 1 right after "Note: Arch
+        # installs require internet", no error printed, no ISO, no burn.
+        mkdir -p "$k8s_images_dir"
         _want="$(grep -cvE '^\s*(#|$)' "$k8s_images_list")"
         _have="$(find "$k8s_images_dir" -name '*.tar' 2>/dev/null | wc -l)"
         if [[ "$_have" -lt "$_want" ]]; then
