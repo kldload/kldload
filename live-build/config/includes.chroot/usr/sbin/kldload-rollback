@@ -334,9 +334,17 @@ _sync_esp() {
 the ESP was NOT updated, so this system still boots the current environment. \
 Nothing is broken; see $LOG"
 
+    # `|| kern=""` / `|| initrd=""`: a missing or unreadable $mnt/boot makes
+    # find exit 1, pipefail promotes it, and set -e kills the tool HERE — so
+    # the two carefully worded refusals below ("no kernel under /boot ...
+    # bootfs was set; run 'rollback cancel' to undo it") were unreachable in
+    # exactly the case they were written for. The operator got a bare
+    # "FAIL at line 339" instead, with bootfs already moved and no hint that
+    # `cancel` was the way out.
+    # HISTORY: onyx 2026-08-30, found while re-testing the b1268 ESP gate.
     local kern initrd
     kern="$(find "$mnt/boot" -maxdepth 1 -name 'vmlinuz-*' -printf '%T@ %p\n' 2>/dev/null |
-        sort -rn | awk 'NR==1{sub(/^[^ ]* /, ""); print}')"
+        sort -rn | awk 'NR==1{sub(/^[^ ]* /, ""); print}')" || kern=""
     # BOTH naming conventions. initrd.img-<ver> is Debian/Ubuntu; the RPM
     # families (Fedora/RHEL/Rocky/CentOS) write initramfs-<ver>.img, and
     # matching only the deb name made every rollback on an RPM host die here —
@@ -351,7 +359,7 @@ Nothing is broken; see $LOG"
     initrd="$(find "$mnt/boot" -maxdepth 1 \
         \( -name 'initramfs-*.img' -o -name 'initrd.img-*' \) \
         ! -name '*kdump*' -printf '%T@ %p\n' 2>/dev/null |
-        sort -rn | awk 'NR==1{sub(/^[^ ]* /, ""); print}')"
+        sort -rn | awk 'NR==1{sub(/^[^ ]* /, ""); print}')" || initrd=""
 
     [[ -n "$kern" && -f "$kern" ]] ||
         die "the snapshot contains no kernel under /boot — refusing to stage a \
@@ -364,18 +372,20 @@ unbootable rollback. Run 'rollback cancel' to undo the bootfs change."
     log "restoring kernel from snapshot: $(basename "$kern") / $(basename "$initrd")"
 
     # ── ESP capacity gate ───────────────────────────────────────────────────
-    # The ESP is a fixed ~512MB vfat and a dracut initrd is ~233MB of it. Peak
-    # footprint here is the three live files PLUS the two .new temporaries.
-    # (The backup used to sit here too, which is what made a 512MB ESP
-    # impossible; it now goes to ESP_BAK_DIR on ZFS.) Check first,
-    # because a cp that dies halfway leaves a TRUNCATED backup and `cancel`
-    # restores backups unconditionally.
+    # The ESP is a fixed vfat (512MB on installs before the 2G change) and a
+    # dracut initrd is ~233MB of it. What this has to fit is the two .new
+    # temporaries alongside the live pair — the backup of the live trio goes
+    # to ESP_BAK_DIR on ZFS, which is what made a 512MB ESP survivable at all.
+    # So the budget is the INCOMING pair, and nothing else.
+    # Check first, because a cp that dies halfway leaves a TRUNCATED file on a
+    # partition the machine boots from.
     # HISTORY: onyx 2026-08-29 — ESP hit 100%, the initrd backup stopped at
     # 105MB of 233MB. Caught by hand before cancel ran; cancel would have moved
     # that stub over the good initrd and left the machine unbootable.
+    # This gate is the second line: _clone_be checks the same budget up front,
+    # before the clone and before bootfs moves, so the common case never gets
+    # here with a full ESP.
     local _need _free
-    # Backups live on ZFS (ESP_BAK_DIR), so the ESP only has to hold the two
-    # .new temporaries alongside the live pair.
     _need=$(($(_fsize "$kern") + $(_fsize "$initrd")))
     _free="$(df -P --block-size=1 "$ESP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
     [[ "$_free" =~ ^[0-9]+$ ]] || _free=0
@@ -389,10 +399,20 @@ rebuild a host-only initrd (dracut -f --hostonly) to shrink it."
 
     # Back up before overwriting, so cancel is a real undo and not a rebuild.
     install -d -m 0700 "$ESP_BAK_DIR" || die "could not create $ESP_BAK_DIR"
+    # There is only ever ONE backup set. Anything already here belongs to a
+    # rollback that has since been cancelled or booted, and restoring it would
+    # plant a stale kernel — so it goes before this set is written.
+    # `|| true` covers exactly one case: an empty directory, where the glob
+    # stays literal and rm -f is a no-op anyway.
     rm -f "$ESP_BAK_DIR"/* 2>/dev/null || true
     _esp_backup "$ESP_GRUB_CFG" "$ESP_BAK_DIR/grub.cfg"
     [[ -f "$ESP_DIR/vmlinuz" ]] && _esp_backup "$ESP_DIR/vmlinuz" "$ESP_BAK_DIR/vmlinuz"
     [[ -f "$ESP_DIR/initrd.img" ]] && _esp_backup "$ESP_DIR/initrd.img" "$ESP_BAK_DIR/initrd.img"
+    # The marker is written LAST and is what `cancel` keys off, so a backup
+    # interrupted partway leaves no marker and cancel skips it rather than
+    # restoring a partial trio. It records WHICH environment these files came
+    # from; see cmd_cancel for why that matters.
+    printf '%s\n' "$(_running_be)" >"$ESP_BAK_DIR/for-be"
 
     # Write to a temp name and mv into place: a half-copied kernel on the ESP
     # is an unbootable machine, and vfat gives us no atomicity for free.
@@ -507,12 +527,21 @@ _clone_be() {
     #
     # A snapshot's /boot is readable without cloning, via .zfs/snapshot/<tag>/,
     # so the whole budget can be computed up front.
+    # `|| _sk=""` is load-bearing, not decoration: when the directory does not
+    # exist `find` exits 1, pipefail promotes that out of the pipeline, and a
+    # bare assignment under set -e kills the tool — the ERR trap prints
+    # "FAIL at line 522" and the operator gets no diagnostic at all. That is
+    # the OPPOSITE of the "not fatal" this block is documented to be, and it
+    # fires whenever the snapshot lives on a BE other than the running one
+    # (i.e. any second `rollback to` while one is already staged).
+    # HISTORY: onyx 2026-08-30, reproduced by running `rollback last` where
+    # /.zfs/snapshot/<tag>/boot was absent: died before the clone, line 522.
     local _sk _si _need _free
     _sk="$(find "/.zfs/snapshot/${tag}/boot" -maxdepth 1 -name 'vmlinuz-*' \
-        -printf '%s\n' 2>/dev/null | sort -rn | awk 'NR==1')"
+        -printf '%s\n' 2>/dev/null | sort -rn | awk 'NR==1')" || _sk=""
     _si="$(find "/.zfs/snapshot/${tag}/boot" -maxdepth 1 \
         \( -name 'initramfs-*.img' -o -name 'initrd.img-*' \) \
-        ! -name '*kdump*' -printf '%s\n' 2>/dev/null | sort -rn | awk 'NR==1')"
+        ! -name '*kdump*' -printf '%s\n' 2>/dev/null | sort -rn | awk 'NR==1')" || _si=""
     # Unreadable snapshot dir (permissions, or an older layout) is not fatal —
     # _sync_esp still gates later. Only refuse on a number we actually have.
     if [[ "$_sk" =~ ^[0-9]+$ && "$_si" =~ ^[0-9]+$ ]]; then
@@ -632,12 +661,27 @@ _reboot_now() {
 # pick one, act on it. Args: none. Does not return when it reboots.
 # The default is the newest PRE-transaction snapshot, which is what someone who
 # just broke an install wants, so the whole interaction is `rollback`, Enter.
-# Non-interactive callers keep the old scriptable meaning (= `last`) rather
-# than hanging forever on a prompt nobody can see.
 cmd_pick() {
+    # No terminal and no verb is a USAGE ERROR, not a scripted rollback.
+    #
+    # HISTORY: onyx 2026-08-30. b1268 made bare `rollback` mean `pick`, and
+    # sent the no-TTY case to cmd_last — which clones a BE, moves bootfs and
+    # REBOOTS. So `ssh box rollback`, `rollback | tee log` or a cron line
+    # rolled a machine back and restarted it for an operator who typed one
+    # word and was shown no prompt. Before b1268 bare `rollback` printed help.
+    # Verified by running it with stdin closed: it went straight to the clone.
+    #
+    # `rollback last` and `rollback to <snap>` still work unattended, and
+    # kldload-pkg-wrapper passes `last` explicitly, so `apt rollback` /
+    # `dnf rollback` are unaffected. exit 2, not return 2: a non-zero return
+    # here would trip set -e and the ERR trap and bury the message.
     [[ -t 0 && -t 1 ]] || {
-        cmd_last
-        return
+        printf 'rollback: refusing to choose a snapshot with no terminal.\n' >&2
+        printf 'NOTHING has been changed. Name the one you mean:\n\n' >&2
+        printf '    rollback last            newest pre-transaction snapshot\n' >&2
+        printf '    rollback to <snapshot>   a specific one (see: rollback list)\n\n' >&2
+        printf 'Both reboot into it; add --no-reboot to stage it and stop.\n' >&2
+        exit 2
     }
 
     local rows
@@ -708,8 +752,31 @@ cmd_cancel() {
     running="$(_running_be)"
     [[ -n "$running" ]] || die "could not determine the running environment"
 
-    local esp_staged=0
-    [[ -f "$ESP_BAK_DIR/grub.cfg" ]] && esp_staged=1
+    # A backup set is restorable only if it was taken FROM the environment we
+    # are running right now, and it is consumed the moment it is used.
+    #
+    # HISTORY: onyx 2026-08-30. ESP_BAK_DIR was written at stage time and never
+    # removed, so esp_staged latched at 1 for the life of the install. b1275
+    # turned the restore from `mv` (which consumed the backup) into `cp` (which
+    # does not) and nothing took over the job. `rollback cancel` on a machine
+    # with NOTHING staged then copied an old kernel and a grub.cfg naming a
+    # destroyed BE over the live ESP — an unbootable machine, produced by the
+    # one command whose whole purpose is to put things back. Reproduced with a
+    # stubbed root: ESP vmlinuz went from NEW-KERNEL-v2 to OLD-KERNEL-v1 and
+    # grub.cfg to root=ZFS=...-rollback-OLD, on a `cancel` that printed
+    # "Cancelled" and exited 0.
+    local esp_staged=0 bak_be=""
+    [[ -f "$ESP_BAK_DIR/for-be" ]] && bak_be="$(<"$ESP_BAK_DIR/for-be")"
+    if [[ -n "$bak_be" && "$bak_be" == "$running" ]]; then
+        esp_staged=1
+    elif [[ -e "$ESP_BAK_DIR" ]]; then
+        # Either no marker (an interrupted backup) or one naming a different
+        # environment, which describes an ESP state that is no longer current.
+        # Neither can be restored safely, and keeping it re-arms the bug above.
+        [[ -n "$bak_be" ]] &&
+            log "discarding ESP backup taken from $bak_be (running $running)"
+        rm -rf "$ESP_BAK_DIR"
+    fi
 
     if [[ "$staged" == "$running" && $esp_staged -eq 0 ]]; then
         say "Nothing staged — this system already boots what it is running:"
@@ -737,6 +804,10 @@ cmd_cancel() {
         cp -f "$ESP_BAK_DIR/grub.cfg" "$ESP_GRUB_CFG" ||
             die "could not restore grub.cfg from backup"
         sync
+        # CONSUMED. A backup that outlives the cancel that used it is the bug
+        # in the HISTORY note above; removing it here is what `mv` used to do
+        # for free.
+        rm -rf "$ESP_BAK_DIR"
     fi
 
     say "Cancelled. Next boot returns to the running environment:"
@@ -811,6 +882,11 @@ cmd_help() {
     cat <<'EOF'
 rollback — return the system to a previous boot environment
 
+  rollback                  Show the snapshots and ask which one, then REBOOT
+                            into it. Needs a terminal: with none (a cron line,
+                            `ssh box rollback`, a pipe) it changes nothing and
+                            exits 2, because it will not restart a machine for
+                            an operator who was shown no prompt.
   rollback list             Show snapshots of the current environment
   rollback last             Roll back to the newest PRE-transaction snapshot
                             (the one apt/dnf took before it changed anything),
@@ -871,10 +947,22 @@ EXAMPLES
       rollback cancel
 
 EXIT STATUS
-  0 on success, 1 on any failure (no snapshot, clone failed, bootfs unset).
+  0  success.
+  1  failure (no snapshot, clone failed, bootfs unset, ESP too small). When a
+     failure happens after bootfs was moved, the message says so and names
+     `rollback cancel` as the undo.
+  2  usage error: an unknown verb, or a bare `rollback` with no terminal to
+     prompt on. Nothing is changed.
 
 FILES
   /var/log/kldload/rollback.log    every action this tool takes
+  /var/lib/kldload/esp-backup/     the ESP's boot trio as it was before a
+                                   rollback was staged, plus a `for-be` marker
+                                   naming the environment it was taken from.
+                                   `cancel` restores it only when that marker
+                                   matches what is running, and deletes it
+                                   once used — a backup kept past its cancel
+                                   is a stale kernel waiting to be installed.
 EOF
 }
 
@@ -979,6 +1067,8 @@ help | -h | --help) cmd_help ;;
 *)
     printf 'rollback: unknown command: %s\n\n' "$1" >&2
     cmd_help >&2
-    exit 1
+    # 2, not 1: a typo'd verb is a usage error and nothing was attempted, so a
+    # caller can tell it apart from a rollback that genuinely failed.
+    exit 2
     ;;
 esac
