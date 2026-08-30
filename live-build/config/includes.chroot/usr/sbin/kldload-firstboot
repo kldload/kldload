@@ -4092,7 +4092,35 @@ GRAFEMBED
                     # KLDLOAD_DOMAIN overrides for a deployment that has put a real
                     # name in front of :8443 AND an allow rule beside it
                     # (kldload-access-*.conf). Unset is the norm.
-                    sed -i "s|__KLDLOAD_LAN_IP__|${KLDLOAD_DOMAIN:-localhost}|" /etc/grafana/grafana.ini
+                    #
+                    # BUT localhost is only right while nginx is localhost-only.
+                    # A debug build (KLDLOAD_DEBUG_ALLOW) ships a
+                    # kldload-access-*.conf that allows a remote host, and on
+                    # those the LAN address does NOT 403 — pinning localhost
+                    # there sends a remote browser's /grafana/* redirect to its
+                    # OWN machine, which is the same broken homepage by a
+                    # different route. So: an explicit domain wins; otherwise an
+                    # access file means "reachable off-box", and the address to
+                    # advertise is the one on the DEFAULT ROUTE.
+                    #
+                    # LAN_IP, not a fresh lookup. The bug this replaced computed
+                    # its own with `ip -o -4 addr show scope global | head -1`
+                    # and got virbr0's 192.168.122.1, because firstboot brings
+                    # the libvirt bridge up at 08:03:44 and this block runs at
+                    # 08:04:28. LAN_IP is derived from `ip route get 1.1.1.1`
+                    # at the top of this script and cannot pick a bridge that
+                    # carries no default route.
+                    _graf_host="${KLDLOAD_DOMAIN:-}"
+                    if [[ -z "$_graf_host" ]]; then
+                        if compgen -G '/etc/nginx/conf.d/kldload-access-*.conf' >/dev/null &&
+                            [[ -n "$LAN_IP" ]]; then
+                            _graf_host="$LAN_IP"
+                        else
+                            _graf_host="localhost"
+                        fi
+                    fi
+                    log "Grafana root_url host: ${_graf_host}"
+                    sed -i "s|__KLDLOAD_LAN_IP__|${_graf_host}|" /etc/grafana/grafana.ini
                     systemctl restart grafana-server 2>/dev/null || true
                     ok "Grafana anonymous + iframe embedding via proxy (/grafana) enabled"
                 fi
