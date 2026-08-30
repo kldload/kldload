@@ -181,64 +181,115 @@ print(sum(1 for v in d.get("vms",[]) if v.get("ip_addr")))' 2>/dev/null || echo 
         done < <(virsh domiflist "$_dom" 2>/dev/null | awk 'NR>2 && NF {print $5}')
     done < <(virsh list --all --name 2>/dev/null)
 
+    # ── Pass 1: leases give ADDRESSES, nothing else ──────────────────────
+    # A lease is a lookup table, not the list of things to reconcile. Driving
+    # the loop from leases meant a VM with no current lease was never visited
+    # at all, so its address in the DB was never cleared -- and dnsmasq expires
+    # leases, so every stale row eventually became permanent.
+    # HISTORY: onyx 2026-08-30 -- 25 VMs defined, 0 running, and the inventory
+    # still handed Ansible 7 targets. test-cloud (.40) and klab-golden-ubuntu
+    # (.60) held no lease, so nothing ever touched them.
+    local -A _dom_ip=()
     while read -r net; do
         [[ -z "$net" ]] && continue
-        # `virsh net-dhcp-leases` columns are:
-        #   1 date  2 time  3 MAC  4 protocol  5 IP/prefix  6 hostname  7 client-id
-        # Hostname is SIX, not seven. Reading seven silently fed client-ids to
-        # the updater and matched no rows at all.
         while read -r _ _ mac _ ip name _; do
             [[ -z "${ip:-}" ]] && continue
             ip="${ip%%/*}"
-
-            # A lease with no hostname is NOT a lease to skip.
-            #
-            # dnsmasq records the hostname the GUEST announced. A VM cloned
-            # straight off a golden never announces one: kvm-clone copies the
-            # zvol and the domain and regenerates no cloud-init seed, so the
-            # clone carries the golden's identity and sends nothing. The lease
-            # is real, the address works, and the hostname column is "-".
-            #
-            # Skipping those meant every raw kvm-clone was invisible to the
-            # inventory forever — three clones on .110 held .115, .44 and .246
-            # and none of them reached Ansible (2026-08-21). kspawn clones were
-            # unaffected because it writes a per-node seed that sets a hostname,
-            # which is exactly why this went unnoticed.
-            #
-            # The host does not need the guest to identify itself. libvirt
-            # assigned the MAC and knows which domain owns it, so resolve the
-            # MAC instead — authoritative, and true of an uncooperative guest.
+            # A lease with no hostname is still a real lease -- a raw kvm-clone
+            # announces nothing, because it carries the golden's identity. The
+            # host does not need the guest to identify itself: libvirt assigned
+            # the MAC and knows which domain owns it.
             if [[ -z "${name:-}" || "$name" == "-" ]]; then
                 name="${_mac_owner[${mac,,}]:-}"
                 [[ -z "$name" ]] && continue
             fi
+            _dom_ip["$name"]="$ip"
             seen=$((seen + 1))
-
-            # A DHCP lease OUTLIVES the guest that held it. Trusting the lease
-            # alone marked three sealed, powered-off goldens as running with
-            # stale addresses, and the inventory then handed Ansible three
-            # machines that were not on — every one UNREACHABLE. libvirt knows
-            # the truth; ask it.
-            local _state
-            _state="$(virsh domstate "$name" 2>/dev/null | head -1 | tr -d '\r')"
-
-            if [[ "$_state" == "running" ]]; then
-                # Reconcile the address for a VM the DB already knows. This
-                # does not invent inventory from stray leases on the bridge.
-                kldload-db vm-status --name "$name" --ip "$ip" --status running >/dev/null 2>&1 &&
-                    attempted=$((attempted + 1))
-                log "sync: ${name} -> ${ip} (${net}, running)"
-            else
-                # Clear the address so kldload-inventory (which selects
-                # `WHERE ip_addr != ''`) drops it. A powered-off VM must not
-                # appear as a target: a play that "fails" against a machine
-                # that was never up teaches operators to ignore failures.
-                kldload-db vm-status --name "$name" --ip "" --status "${_state:-shut}" >/dev/null 2>&1 || true
-                log "sync: ${name} is ${_state:-absent} — address cleared (stale lease ${ip})"
-                stale=$((stale + 1))
-            fi
         done < <(virsh net-dhcp-leases "$net" 2>/dev/null | tail -n +3)
     done < <(virsh net-list --name 2>/dev/null)
+
+    # ── Pass 2: visit EVERY domain libvirt defines ───────────────────────
+    # This is the reconcile. Every VM is decided on its OWN state, whether or
+    # not it currently holds a lease.
+    local _dom _state _ip
+    while read -r _dom; do
+        [[ -z "$_dom" ]] && continue
+        # awk, not head -- see the note on the crash this used to cause.
+        _state="$(virsh domstate "$_dom" 2>/dev/null | awk 'NR==1' | tr -d '\r')"
+        _ip="${_dom_ip[$_dom]:-}"
+        if [[ "$_state" == "running" && -n "$_ip" ]]; then
+            kldload-db vm-status --name "$_dom" --ip "$_ip" --status running >/dev/null 2>&1 &&
+                attempted=$((attempted + 1))
+            log "sync: ${_dom} -> ${_ip} (running)"
+        else
+            # Clear the address so kldload-inventory (`WHERE ip_addr != ''`)
+            # drops it. A powered-off VM must not be an Ansible target: worse
+            # than failing, DHCP reuses addresses, so a stale entry can resolve
+            # to a DIFFERENT machine and the play SUCCEEDS against the wrong
+            # host. onyx had kldload-cp and test-xfce both claiming .57.
+            kldload-db vm-status --name "$_dom" --ip "" --status "${_state:-shut}" >/dev/null 2>&1 || true
+            log "sync: ${_dom} is ${_state:-absent} — address cleared"
+            stale=$((stale + 1))
+        fi
+    done < <(virsh list --all --name 2>/dev/null)
+
+    # ── Pass 4: NODES whose backing VM is not running ────────────────────
+    # Nodes are handled by STATUS, not by address: kldload-inventory falls back
+    # ip_mgmt -> ip_wg0 -> hostname, so blanking one field just moves the
+    # target rather than removing it.
+    #
+    # The rule is deliberately narrow: a node is marked offline ONLY when
+    # libvirt defines a domain of the same name and that domain is not running.
+    # A physical node has no libvirt domain and is never touched by this -- a
+    # broad "unreachable means retired" rule would drop real hardware from the
+    # inventory during a transient outage, which is worse than the bug.
+    # Nothing is deleted; deleted_at stays the operator's decision.
+    # HISTORY: onyx 2026-08-30 -- kldload-cp and kldload-w-1..3 sat status=ready
+    # with addresses while all four domains were shut off, and kldload-cp's
+    # .57 had been reassigned to test-xfce.
+    local _node _nstate _nstatus
+    while read -r _node _nstatus; do
+        [[ -z "$_node" ]] && continue
+        _nstate="$(virsh domstate "$_node" 2>/dev/null | awk 'NR==1' | tr -d '\r')"
+        [[ -z "$_nstate" ]] && continue # not a VM -- physical, leave alone
+        if [[ "$_nstate" == "running" ]]; then
+            # Only lift a mark this reconcile set, so a richer status written
+            # by node-register or the cluster tooling is never clobbered.
+            if [[ "$_nstatus" == "offline" ]]; then
+                kldload-db node-status --hostname "$_node" --status ready >/dev/null 2>&1 || true
+                log "sync: node ${_node} is back — status ready"
+            fi
+        elif [[ "$_nstatus" != "offline" ]]; then
+            kldload-db node-status --hostname "$_node" --status offline >/dev/null 2>&1 || true
+            log "sync: node ${_node} is ${_nstate} — status offline"
+            stale=$((stale + 1))
+        fi
+    done < <(kldload-db dump 2>/dev/null |
+        python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+for n in d.get("nodes",[]):
+    if not n.get("deleted_at"): print(n.get("hostname",""), n.get("status",""))' 2>/dev/null)
+
+    # ── Pass 3: rows for domains libvirt no longer defines at all ────────
+    # A VM destroyed AND undefined never appears in pass 2, so its row would
+    # keep its address forever. Deleting is not this tool's job -- clearing the
+    # address is enough to take it out of the inventory, and the row stays for
+    # history.
+    local _known _dbvm
+    _known="$(virsh list --all --name 2>/dev/null | tr '\n' '|')"
+    while read -r _dbvm; do
+        [[ -z "$_dbvm" ]] && continue
+        [[ "|${_known}" == *"|${_dbvm}|"* ]] && continue
+        kldload-db vm-status --name "$_dbvm" --ip "" --status undefined >/dev/null 2>&1 || true
+        log "sync: ${_dbvm} is not defined in libvirt — address cleared"
+        stale=$((stale + 1))
+    done < <(kldload-db dump 2>/dev/null |
+        python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+for v in d.get("vms",[]):
+    if v.get("ip_addr"): print(v.get("name",""))' 2>/dev/null)
 
     after="$(_vms_with_ip)"
     log "sync: ${seen} lease(s), ${stale} stale, VMs with an address ${before} -> ${after}"

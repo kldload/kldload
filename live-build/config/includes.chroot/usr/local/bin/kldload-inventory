@@ -62,10 +62,18 @@ def _fetch_nodes(con):
     # Some older DBs may not have deleted_at — fall back gracefully.
     cols = {r["name"] for r in con.execute("PRAGMA table_info(nodes)").fetchall()}
     del_clause = "AND (deleted_at IS NULL OR deleted_at = '')" if "deleted_at" in cols else ""
+    # A node marked offline is NOT a target. kldload-networks sync sets that
+    # when libvirt reports the node's domain is not running, and lifts it when
+    # the node comes back -- reversible, and no operator action needed.
+    # Without it, only an explicit node-delete ever removed anything. That is
+    # worse than a stale row: DHCP reuses addresses, so a dead entry can
+    # resolve to a DIFFERENT live machine and the play SUCCEEDS against the
+    # wrong host. onyx 2026-08-30: kldload-cp and test-xfce both claimed .57.
+    down_clause = "AND COALESCE(status,'') NOT IN ('offline','deleted')"
     try:
         rows = con.execute(
             "SELECT hostname, role, ip_mgmt, ip_wg0, ip_wg1, ip_wg2, ip_wg3, "
-            f"cluster_id, status, facts FROM nodes WHERE 1=1 {del_clause}"
+            f"cluster_id, status, facts FROM nodes WHERE 1=1 {del_clause} {down_clause}"
         ).fetchall()
     except sqlite3.Error:
         return []
