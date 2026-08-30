@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+# ---------------------------------------------------------------------------
+# demo-timer — a big-digit stopwatch/countdown for driving a live demo.
+#
+# What it does, in order:
+#   1. Puts the terminal in raw-ish mode (no echo, cursor hidden) and installs
+#      an EXIT trap that puts it back, whatever happens.
+#   2. Loops at ~60 Hz: reads the clock, renders 7-row block digits into ONE
+#      string, and paints it with a single cursor-home write.
+#   3. The same `read` that waits out the frame also collects a keystroke, so
+#      the loop forks nothing and drifts nowhere.
+#
+# WHY it exists: an on-screen demo needs a clock the audience can read from the
+# back of a room, and one that visibly runs at MILLISECOND resolution — a timer
+# ticking whole seconds proves nothing about whether the thing on screen is
+# live or a recording. The thousandths column is the point, not decoration.
+#
+# WHY bash and not a GUI: the demo is a terminal demo. This drops into a
+# gnome-terminal beside the others, inherits the same theme, and needs no
+# toolkit, no browser and no window manager cooperation.
+#
+# WHY EPOCHREALTIME and not `date`: `date +%s%3N` forks once per frame — 60
+# processes a second to render a clock, and the fork latency is itself
+# measurable at this resolution. EPOCHREALTIME is a bash builtin variable with
+# microsecond precision, so a frame costs no processes at all.
+#
+# Inputs:  flags below; keystrokes while running.
+# Outputs: the display on stdout. Nothing is written to disk.
+# Exit:    0 on a clean quit, 2 on a usage error.
+#
+# Notes:
+#   - Elapsed time is derived from a start TIMESTAMP every frame, never
+#     accumulated per tick. A dropped or slow frame therefore corrects itself
+#     instead of making the clock lose time — which is the whole reason a
+#     visible ms column is trustworthy.
+#   - LC_ALL=C is mandatory, see the comment at the top of _now_ms.
+# ---------------------------------------------------------------------------
+
+# EPOCHREALTIME is formatted with the LOCALE's decimal separator. Under
+# LC_NUMERIC=de_DE it reads "1788109411,820158" and the `/./` substitution
+# below silently misses, leaving a comma in what we then feed to $(( )) —
+# which dies with a syntax error mid-demo. Forcing C makes the format a
+# contract instead of an assumption.
+export LC_ALL=C
+
+# ─── Glyphs ────────────────────────────────────────────────────────────────
+# A 7-row block font, drawn by hand rather than shelled out to figlet: figlet
+# is not installed on a fresh kldload target, and a demo tool that needs a
+# package the demo machine lacks is a tool that fails on stage.
+# '#' is ink, space is ground; the renderer substitutes the block character so
+# the shape stays readable here in the source.
+GLYPH_ROWS=7
+
+_glyph() {
+    case "$1" in
+    0) printf '%s\n' '#######' '##   ##' '##   ##' '##   ##' '##   ##' '##   ##' '#######' ;;
+    1) printf '%s\n' '   ####' '     ##' '     ##' '     ##' '     ##' '     ##' '     ##' ;;
+    2) printf '%s\n' '#######' '     ##' '     ##' '#######' '##     ' '##     ' '#######' ;;
+    3) printf '%s\n' '#######' '     ##' '     ##' '#######' '     ##' '     ##' '#######' ;;
+    4) printf '%s\n' '##   ##' '##   ##' '##   ##' '#######' '     ##' '     ##' '     ##' ;;
+    5) printf '%s\n' '#######' '##     ' '##     ' '#######' '     ##' '     ##' '#######' ;;
+    6) printf '%s\n' '#######' '##     ' '##     ' '#######' '##   ##' '##   ##' '#######' ;;
+    7) printf '%s\n' '#######' '     ##' '     ##' '     ##' '     ##' '     ##' '     ##' ;;
+    8) printf '%s\n' '#######' '##   ##' '##   ##' '#######' '##   ##' '##   ##' '#######' ;;
+    9) printf '%s\n' '#######' '##   ##' '##   ##' '#######' '     ##' '     ##' '#######' ;;
+    :) printf '%s\n' '   ' '## ' '## ' '   ' '## ' '## ' '   ' ;;
+    .) printf '%s\n' '   ' '   ' '   ' '   ' '   ' '## ' '   ' ;;
+    # '+' is the OVERTIME cue and had no glyph, so it fell through to the
+    # blank default: a countdown past zero turned red but showed no sign at
+    # all, which is the one moment the sign carries information.
+    +) printf '%s\n' '      ' '  ##  ' '  ##  ' '######' '  ##  ' '  ##  ' '      ' ;;
+    *) printf '%s\n' '       ' '       ' '       ' '       ' '       ' '       ' '       ' ;;
+    esac
+}
+
+# Glyph cache: _glyph is a case + printf, but calling it 9 times per character
+# per frame at 60 Hz is 5,000 subshell-free-but-still-parsed calls a second.
+# Building the table once at startup keeps the render loop to array reads.
+declare -A GCACHE=()
+_build_cache() {
+    local ch row i
+    for ch in 0 1 2 3 4 5 6 7 8 9 : . +; do
+        i=0
+        while IFS= read -r row; do
+            GCACHE["${ch}_${i}"]="$row"
+            i=$((i + 1))
+        done < <(_glyph "$ch")
+    done
+}
+
+# ─── Colour ────────────────────────────────────────────────────────────────
+# Truecolour, matching tools/demo/social.tape's #0b0e14 ground so a clip that
+# includes this window sits in the same palette as the rest of the demo.
+C_RESET=$'\e[0m'
+C_DIM=$'\e[38;2;90;101;122m'  # slate — labels, idle ink
+C_RUN=$'\e[38;2;120;222;168m' # green — running
+C_HOLD=$'\e[38;2;242;177;52m' # amber — paused
+C_OVER=$'\e[38;2;255;92;92m'  # red   — countdown past zero
+C_MS=$'\e[38;2;96;178;222m'   # blue  — the thousandths, the live column
+BLOCK='█'
+
+# ─── Clock ─────────────────────────────────────────────────────────────────
+# _now_ms — milliseconds since the epoch, with no fork.
+# stdout: an integer. Relies on EPOCHREALTIME's fixed 6-digit fraction, which
+# is why LC_ALL=C is set at the top of the file.
+_now_ms() {
+    local t=${EPOCHREALTIME/./}
+    printf '%s\n' "$((t / 1000))"
+}
+
+MODE=stopwatch
+TARGET_MS=0
+
+usage() {
+    cat <<'EOF'
+demo-timer — big-digit stopwatch and countdown for a live demo
+
+USAGE
+  demo-timer [options]
+
+OPTIONS
+  -c, --countdown <spec>   Count DOWN from <spec>, then keep counting up in
+                           red so an overrun is visible rather than hidden.
+                           <spec> is SS, MM:SS or HH:MM:SS.
+  -p, --paused             Open on a stopped clock and wait for Space.
+                           The default is to start counting immediately.
+  -s, --start              Accepted and ignored; running is now the default.
+  -h, --help               This text.
+
+KEYS
+  Space   pause / resume
+  r       reset to zero (or back to the countdown target)
+  q       quit
+
+  The window shows the digits and nothing else, by design -- it is composited
+  into a capture feed beside other windows. Run state is carried by colour:
+  green running, amber held, red past a countdown's zero.
+
+EXAMPLES
+  Time an install, milliseconds visible so the audience can see it is live:
+      demo-timer
+
+  A five-minute segment that starts the moment it opens:
+      demo-timer -c 5:00
+
+  Ninety seconds:
+      demo-timer -c 90
+
+EXIT STATUS
+  0  clean quit (q)
+  2  usage error — an unknown flag, or a countdown spec that is not SS,
+     MM:SS or HH:MM:SS
+
+NOTES
+  Always-on-top is a window-manager function, and on Wayland no program can
+  ask for it on its own behalf. Right-click the title bar and pick
+  "Always on Top"; GNOME remembers it per window, not per application.
+EOF
+}
+
+# _parse_spec <SS|MM:SS|HH:MM:SS> — to milliseconds.
+# stdout: integer ms. Returns 1 on anything it does not recognise, so the
+# caller can report the bad input rather than silently timing zero seconds.
+_parse_spec() {
+    local s="$1" h=0 m=0 sec=0
+    case "$s" in
+    *:*:*) IFS=: read -r h m sec <<<"$s" ;;
+    *:*) IFS=: read -r m sec <<<"$s" ;;
+    *) sec="$s" ;;
+    esac
+    [[ "$h" =~ ^[0-9]+$ && "$m" =~ ^[0-9]+$ && "$sec" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$(((10#$h * 3600 + 10#$m * 60 + 10#$sec) * 1000))"
+}
+
+while (($#)); do
+    case "$1" in
+    -c | --countdown)
+        [[ -n "${2:-}" ]] || {
+            printf 'demo-timer: --countdown needs a value (SS, MM:SS or HH:MM:SS)\n' >&2
+            exit 2
+        }
+        TARGET_MS="$(_parse_spec "$2")" || {
+            printf 'demo-timer: not a duration: %s (want SS, MM:SS or HH:MM:SS)\n' "$2" >&2
+            exit 2
+        }
+        MODE=countdown
+        shift
+        ;;
+    -s | --start) START_PAUSED=1 ;; # kept as a no-op alias: running is now the default
+    -p | --paused) START_PAUSED=0 ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        printf 'demo-timer: unknown option: %s\n\n' "$1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+    shift
+done
+
+# ─── Terminal state ────────────────────────────────────────────────────────
+# The trap is installed BEFORE the first escape sequence is written. Hiding the
+# cursor and then dying without restoring it leaves the operator with an
+# invisible cursor in that shell for the rest of the session — a small thing
+# that looks terrible if it happens in front of an audience.
+_restore() {
+    printf '\e[?25h\e[0m\n'
+    stty echo 2>/dev/null || : # the terminal may already be gone on a hangup
+}
+# EXIT restores, exactly once. INT/TERM only ask for a clean exit and let EXIT
+# do the work -- putting _restore on all three ran it twice, and worse, the
+# signal lands INSIDE the frame's command substitution, so that returns
+# non-zero, set -e trips, and the ERR trap paints "FAIL at line 298" across the
+# display. Caught on onyx 2026-08-30 by killing the timer while it ran: an
+# operator pressing Ctrl-C in front of an audience would have seen a crash
+# report from a program that was merely asked to stop.
+trap _restore EXIT
+trap 'exit 0' INT TERM
+printf '\e[?25l\e[2J'
+stty -echo 2>/dev/null || : # non-tty stdin (a pipe) has no echo flag to clear
+
+_build_cache
+
+# Starts RUNNING. --paused restores the old wait-for-Space behaviour.
+# A chrome-free window has nothing on it to say "press Space", so a clock
+# that opens frozen just reads as broken -- which is exactly how it was
+# reported on 2026-08-30.
+RUNNING="${START_PAUSED:-1}"
+ACCUM_MS=0
+STARTED_AT=0
+((RUNNING == 1)) && STARTED_AT="$(_now_ms)"
+# _elapsed — ms on the clock right now.
+# Derived from the start timestamp every call, never incremented per frame, so
+# a slow frame is corrected on the next one instead of losing time forever.
+_elapsed() {
+    if ((RUNNING == 1)); then
+        printf '%s\n' "$((ACCUM_MS + $(_now_ms) - STARTED_AT))"
+    else
+        printf '%s\n' "$ACCUM_MS"
+    fi
+}
+
+# _fmt <ms> — split into the display string HH:MM:SS.mmm (hours dropped under
+# an hour, because a demo segment that needs three leading zeros reads worse).
+# stdout: two fields, the "big" part and the thousandths, space separated.
+_fmt() {
+    local ms=$1 h m s
+    h=$((ms / 3600000))
+    m=$((ms / 60000 % 60))
+    s=$((ms / 1000 % 60))
+    if ((h > 0)); then
+        printf '%d:%02d:%02d %03d\n' "$h" "$m" "$s" "$((ms % 1000))"
+    else
+        printf '%02d:%02d %03d\n' "$m" "$s" "$((ms % 1000))"
+    fi
+}
+
+# _render <big> <ms> <colour> — one frame as a single string.
+# Returns it on stdout. Built whole and printed in ONE write, because painting
+# character by character makes the digits tear visibly at 60 Hz.
+_render() {
+    local big="$1" msf="$2" col="$3" out="" r i ch line
+    for ((r = 0; r < GLYPH_ROWS; r++)); do
+        line=""
+        for ((i = 0; i < ${#big}; i++)); do
+            ch="${big:i:1}"
+            line+="${GCACHE[${ch}_${r}]:-}"' '
+        done
+        out+="${col}${line//\#/$BLOCK}"
+        line=""
+        for ((i = 0; i < ${#msf}; i++)); do
+            ch="${msf:i:1}"
+            line+="${GCACHE[${ch}_${r}]:-}"' '
+        done
+        out+="${C_MS}${line//\#/$BLOCK}${C_RESET}"$'\e[K\n'
+    done
+    printf '%s' "$out"
+}
+
+while :; do
+    now="$(_elapsed)"
+    if [[ "$MODE" == countdown ]]; then
+        remain=$((TARGET_MS - now))
+        if ((remain < 0)); then
+            disp=$((-remain))
+            colour="$C_OVER"
+            sign="+"
+        else
+            disp="$remain"
+            colour=$( ((RUNNING == 1)) && printf '%s' "$C_RUN" || printf '%s' "$C_HOLD")
+            sign=""
+        fi
+    else
+        disp="$now"
+        colour=$( ((RUNNING == 1)) && printf '%s' "$C_RUN" || printf '%s' "$C_HOLD")
+        sign=""
+    fi
+    ((RUNNING == 0)) && colour="$C_HOLD"
+
+    read -r big msf <<<"$(_fmt "$disp")"
+
+    # DIGITS AND NOTHING ELSE. A caption, a RUNNING pill and a key legend were
+    # all here and all had to go: this window is composited into a 1920x1080
+    # capture feed beside Grafana and Ansible, and every extra line is one more
+    # thing for a viewer to read instead of the clock. Run state is carried by
+    # COLOUR alone -- green running, amber held, red past zero.
+    frame=$'\e[H'$'\e[K\n'
+    frame+="$(_render "${sign}${big}" ".$msf" "$colour")"
+    frame+=$'\e[J'
+    printf '%s' "$frame"
+
+    # This single builtin is BOTH the frame delay and the key reader: no sleep
+    # process per frame, and a keystroke is acted on immediately instead of
+    # waiting out the remaining 16 ms. `|| key=""` because read returns >128 on
+    # timeout, which is the normal case here and must not trip set -e.
+    # IFS= is THE fix, not a tidy-up. With the default IFS, space is a
+    # delimiter, so `read -rsn1` handed back an EMPTY string when the operator
+    # pressed Space -- the one key that starts the clock -- and the ' ') arm
+    # could never match. The timer rendered perfectly and would not start.
+    # HISTORY: onyx 2026-08-30, reported from the demo bench. My own test drove
+    # it from </dev/null and never pressed a key, so nothing caught it.
+    #     printf ' ' | { read -rsn1 k; echo "[$k]"; }   -> []
+    #     printf ' ' | { IFS= read -rsn1 k; echo "[$k]"; } -> [ ]
+    key=""
+    IFS= read -rsn1 -t 0.016 key || key=""
+    case "$key" in
+    ' ')
+        if ((RUNNING == 1)); then
+            ACCUM_MS="$(_elapsed)"
+            RUNNING=0
+        else
+            STARTED_AT="$(_now_ms)"
+            RUNNING=1
+        fi
+        ;;
+    r | R)
+        ACCUM_MS=0
+        STARTED_AT="$(_now_ms)"
+        ;;
+    q | Q) exit 0 ;;
+    esac
+done
