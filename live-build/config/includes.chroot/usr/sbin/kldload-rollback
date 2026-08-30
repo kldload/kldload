@@ -255,6 +255,19 @@ _pick_last() {
 ESP_GRUB_CFG=/boot/efi/EFI/BOOT/grub.cfg
 ESP_DIR=/boot/efi/EFI/BOOT
 
+# Backups of the ESP's boot trio do NOT live on the ESP.
+#
+# WHY: the ESP is a fixed, small FAT partition — 512M on installs before the
+# 2G change — and kldload's portable initramfs is ~233MB of it. Keeping a
+# .kldload-bak beside each live file DOUBLED the space a rollback needs, from
+# 251MB to 502MB, which is more than a 512M ESP can ever hold. Meanwhile the
+# pool has terabytes free. So they go to ZFS, and the ESP only ever has to fit
+# the live pair plus the incoming pair.
+# HISTORY: onyx 2026-08-29 — the backup ran the ESP to 100% and stopped
+# halfway, leaving a truncated initrd that `cancel` would restore over the good
+# one. Fixed by gating on space; fixed properly by not putting it there at all.
+ESP_BAK_DIR=/var/lib/kldload/esp-backup
+
 # _boot_mode — which entry does this machine ACTUALLY boot?
 #
 # stdout: "direct" (GRUB's signed direct-kernel entry) or "zbm" (ZFSBootMenu).
@@ -306,7 +319,7 @@ _boot_mode() {
 # Args:    dataset name of the freshly cloned boot environment.
 # Returns: 0 on success; dies on failure AFTER restoring what it touched.
 # Side effects: rewrites grub.cfg and replaces vmlinuz/initrd.img on the ESP,
-#               keeping .kldload-bak copies of all three for `cancel`.
+#               keeping copies of all three in ESP_BAK_DIR for `cancel`.
 _sync_esp() {
     local newbe="$1"
     local mnt
@@ -352,30 +365,34 @@ unbootable rollback. Run 'rollback cancel' to undo the bootfs change."
 
     # ── ESP capacity gate ───────────────────────────────────────────────────
     # The ESP is a fixed ~512MB vfat and a dracut initrd is ~233MB of it. Peak
-    # footprint here is the three live files, PLUS a .kldload-bak of each, PLUS
-    # the two .new temporaries below — far more than 512MB holds. Check first,
+    # footprint here is the three live files PLUS the two .new temporaries.
+    # (The backup used to sit here too, which is what made a 512MB ESP
+    # impossible; it now goes to ESP_BAK_DIR on ZFS.) Check first,
     # because a cp that dies halfway leaves a TRUNCATED backup and `cancel`
     # restores backups unconditionally.
     # HISTORY: onyx 2026-08-29 — ESP hit 100%, the initrd backup stopped at
     # 105MB of 233MB. Caught by hand before cancel ran; cancel would have moved
     # that stub over the good initrd and left the machine unbootable.
     local _need _free
-    _need=$(($(_fsize "$ESP_GRUB_CFG") + $(_fsize "$ESP_DIR/vmlinuz") + \
-    $(_fsize "$ESP_DIR/initrd.img") + $(_fsize "$kern") + $(_fsize "$initrd")))
+    # Backups live on ZFS (ESP_BAK_DIR), so the ESP only has to hold the two
+    # .new temporaries alongside the live pair.
+    _need=$(($(_fsize "$kern") + $(_fsize "$initrd")))
     _free="$(df -P --block-size=1 "$ESP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
     [[ "$_free" =~ ^[0-9]+$ ]] || _free=0
     if ((_free < _need)); then
         die "the ESP has $((_free / 1048576))MB free but staging this rollback \
-needs $((_need / 1048576))MB (backups of the current kernel/initrd/grub.cfg plus \
-the incoming pair). Refusing BEFORE any copy, so nothing is half-written. bootfs \
+needs $((_need / 1048576))MB (the incoming kernel and initrd; backups go to \
+ZFS, not here). Refusing BEFORE any copy, so nothing is half-written. bootfs \
 was set; run 'rollback cancel' to undo it. Then free space on the ESP, or \
 rebuild a host-only initrd (dracut -f --hostonly) to shrink it."
     fi
 
     # Back up before overwriting, so cancel is a real undo and not a rebuild.
-    _esp_backup "$ESP_GRUB_CFG" "${ESP_GRUB_CFG}.kldload-bak"
-    [[ -f "$ESP_DIR/vmlinuz" ]] && _esp_backup "$ESP_DIR/vmlinuz" "$ESP_DIR/vmlinuz.kldload-bak"
-    [[ -f "$ESP_DIR/initrd.img" ]] && _esp_backup "$ESP_DIR/initrd.img" "$ESP_DIR/initrd.img.kldload-bak"
+    install -d -m 0700 "$ESP_BAK_DIR" || die "could not create $ESP_BAK_DIR"
+    rm -f "$ESP_BAK_DIR"/* 2>/dev/null || true
+    _esp_backup "$ESP_GRUB_CFG" "$ESP_BAK_DIR/grub.cfg"
+    [[ -f "$ESP_DIR/vmlinuz" ]] && _esp_backup "$ESP_DIR/vmlinuz" "$ESP_BAK_DIR/vmlinuz"
+    [[ -f "$ESP_DIR/initrd.img" ]] && _esp_backup "$ESP_DIR/initrd.img" "$ESP_BAK_DIR/initrd.img"
 
     # Write to a temp name and mv into place: a half-copied kernel on the ESP
     # is an unbootable machine, and vfat gives us no atomicity for free.
@@ -499,14 +516,15 @@ _clone_be() {
     # Unreadable snapshot dir (permissions, or an older layout) is not fatal —
     # _sync_esp still gates later. Only refuse on a number we actually have.
     if [[ "$_sk" =~ ^[0-9]+$ && "$_si" =~ ^[0-9]+$ ]]; then
-        _need=$((_sk + _si + $(_fsize "$ESP_GRUB_CFG") + \
-        $(_fsize "$ESP_DIR/vmlinuz") + $(_fsize "$ESP_DIR/initrd.img")))
+        # Only the INCOMING pair is written to the ESP — the backup of the
+        # live trio goes to ESP_BAK_DIR on ZFS, so it costs nothing here.
+        _need=$((_sk + _si))
         _free="$(df -P --block-size=1 "$ESP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
         [[ "$_free" =~ ^[0-9]+$ ]] || _free=0
         if ((_free < _need)); then
             die "the ESP has $((_free / 1048576))MB free but this rollback needs \
-$((_need / 1048576))MB (a backup of the current kernel/initrd/grub.cfg plus the \
-incoming pair). NOTHING has been changed — no clone, no bootfs, nothing to undo. \
+$((_need / 1048576))MB (the incoming kernel and initrd; the \
+backup of the live pair goes to ZFS, not here). NOTHING has been changed — no clone, no bootfs, nothing to undo. \
 Free space on the ESP, or install onto a machine with a larger one."
         fi
     fi
@@ -691,7 +709,7 @@ cmd_cancel() {
     [[ -n "$running" ]] || die "could not determine the running environment"
 
     local esp_staged=0
-    [[ -f "${ESP_GRUB_CFG}.kldload-bak" ]] && esp_staged=1
+    [[ -f "$ESP_BAK_DIR/grub.cfg" ]] && esp_staged=1
 
     if [[ "$staged" == "$running" && $esp_staged -eq 0 ]]; then
         say "Nothing staged — this system already boots what it is running:"
@@ -712,12 +730,11 @@ cmd_cancel() {
         # -s not -f: an empty backup is a failed copy, and restoring it is a
         # brick. _esp_backup removes short copies, so reaching here with one is
         # already abnormal — drop it rather than install it.
-        [[ -s "$ESP_DIR/vmlinuz.kldload-bak" ]] &&
-            mv -f "$ESP_DIR/vmlinuz.kldload-bak" "$ESP_DIR/vmlinuz"
-        [[ -s "$ESP_DIR/initrd.img.kldload-bak" ]] &&
-            mv -f "$ESP_DIR/initrd.img.kldload-bak" "$ESP_DIR/initrd.img"
-        rm -f "$ESP_DIR/vmlinuz.kldload-bak" "$ESP_DIR/initrd.img.kldload-bak"
-        mv -f "${ESP_GRUB_CFG}.kldload-bak" "$ESP_GRUB_CFG" ||
+        [[ -s "$ESP_BAK_DIR/vmlinuz" ]] &&
+            cp -f "$ESP_BAK_DIR/vmlinuz" "$ESP_DIR/vmlinuz"
+        [[ -s "$ESP_BAK_DIR/initrd.img" ]] &&
+            cp -f "$ESP_BAK_DIR/initrd.img" "$ESP_DIR/initrd.img"
+        cp -f "$ESP_BAK_DIR/grub.cfg" "$ESP_GRUB_CFG" ||
             die "could not restore grub.cfg from backup"
         sync
     fi
