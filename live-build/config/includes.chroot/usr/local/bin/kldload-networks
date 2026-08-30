@@ -256,10 +256,15 @@ print(sum(1 for v in d.get("vms",[]) if v.get("ip_addr")))' 2>/dev/null || echo 
             # Only lift a mark this reconcile set, so a richer status written
             # by node-register or the cluster tooling is never clobbered.
             if [[ "$_nstatus" == "offline" ]]; then
+                # Swallowed: a node row that vanished between the dump above
+                # and this update. Losing the mark is harmless -- the next
+                # tick re-derives it from libvirt.
                 kldload-db node-status --hostname "$_node" --status ready >/dev/null 2>&1 || true
                 log "sync: node ${_node} is back — status ready"
             fi
         elif [[ "$_nstatus" != "offline" ]]; then
+            # Swallowed for the same reason as the ready case above: a row
+            # deleted mid-sweep. Never a reason to abort the remaining nodes.
             kldload-db node-status --hostname "$_node" --status offline >/dev/null 2>&1 || true
             log "sync: node ${_node} is ${_nstate} — status offline"
             stale=$((stale + 1))
@@ -281,6 +286,9 @@ for n in d.get("nodes",[]):
     while read -r _dbvm; do
         [[ -z "$_dbvm" ]] && continue
         [[ "|${_known}" == *"|${_dbvm}|"* ]] && continue
+        # Swallowed: this row was read from the dump moments ago, so the only
+        # way the update fails is that something else removed it first --
+        # which is the outcome we wanted anyway.
         kldload-db vm-status --name "$_dbvm" --ip "" --status undefined >/dev/null 2>&1 || true
         log "sync: ${_dbvm} is not defined in libvirt — address cleared"
         stale=$((stale + 1))
