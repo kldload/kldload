@@ -57,7 +57,12 @@ LOG=/var/log/kldload/rollback.log
 # --no-reboot (or KLDLOAD_ROLLBACK_REBOOT=0) restores the stage-and-stop
 # behaviour for anything scripted; `cancel` still un-stages before the reboot.
 REBOOT="${KLDLOAD_ROLLBACK_REBOOT:-1}"
-REBOOT_DELAY="${KLDLOAD_ROLLBACK_DELAY:-10}"
+# 2s, not 10. The countdown is a last chance to abort, not a pause for
+# thought -- the operator already typed the command, and `cancel` undoes a
+# staged rollback at leisure afterwards. Ten seconds of dead air is also
+# most of a short demo clip. Raise it with KLDLOAD_ROLLBACK_DELAY when a
+# slower confirmation is wanted; --no-reboot skips the reboot entirely.
+REBOOT_DELAY="${KLDLOAD_ROLLBACK_DELAY:-2}"
 mkdir -p "$(dirname "$LOG")"
 
 _ts() { date '+%Y-%m-%dT%H:%M:%S'; }
@@ -915,8 +920,10 @@ OPTIONS
 ENVIRONMENT
   KLDLOAD_ROLLBACK_REBOOT   0 to never reboot automatically (default 1).
   KLDLOAD_ROLLBACK_DELAY    Seconds to count down before rebooting
-                            (default 10). Ctrl-C during the countdown leaves
-                            the rollback staged.
+                            (default 2). Ctrl-C during the countdown leaves
+                            the rollback staged; `rollback cancel` un-stages it
+                            afterwards, so the countdown is not the only way
+                            back.
 
 HOW IT WORKS
   A rollback clones the chosen snapshot into a new boot environment and points
