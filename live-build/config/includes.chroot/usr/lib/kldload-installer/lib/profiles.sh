@@ -895,6 +895,32 @@ k_install_system_files() {
             fi
         done
 
+        # The SYMLINKS beside those binaries, which the loop above cannot see:
+        # it tests -f, and a symlink to a file passes -f but `cp` without -a
+        # would flatten it into a second copy that drifts on the next edit.
+        #
+        # `rollback` is the name an operator actually types, and it is the name
+        # in --help, in the man page and in every error message the tool prints.
+        # b1273 fixed exactly this on the ISO by copying usr/sbin wholesale --
+        # and this list, which populates the INSTALLED system, was left behind.
+        # So the live ISO had /usr/sbin/rollback and every installed machine did
+        # not: `rollback last` was "command not found" on the very system the
+        # tool exists to rescue.
+        # HISTORY: fiend 10.100.10.124, 2026-08-31, first install of b1284 --
+        # kldload-rollback present at 52414 bytes, rollback absent.
+        for lnk in rollback; do
+            if [[ -L "/usr/sbin/${lnk}" ]]; then
+                cp -a "/usr/sbin/${lnk}" "${target}/usr/sbin/${lnk}" &&
+                    k_log "installed /usr/sbin/${lnk} -> $(readlink "/usr/sbin/${lnk}")"
+            elif [[ -f "${target}/usr/sbin/kldload-${lnk}" ]]; then
+                # Live root lost it somehow; the target still needs the name.
+                ln -sf "kldload-${lnk}" "${target}/usr/sbin/${lnk}" &&
+                    k_log "created /usr/sbin/${lnk} -> kldload-${lnk} (live root had no symlink)"
+            else
+                k_log "WARNING: cannot provide /usr/sbin/${lnk} — kldload-${lnk} is not on the target"
+            fi
+        done
+
         # ── apt/dnf snapshot+rollback wrappers ────────────────────────────
         # Installed as /usr/local/bin/{apt,apt-get,dnf}, which precede
         # /usr/bin in both the login PATH and sudo's secure_path, so a plain

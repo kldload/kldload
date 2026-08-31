@@ -547,6 +547,26 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     else
         k_zfs_log "WARNING: /etc/hostid unusable — pool import may fail on a hostid mismatch"
     fi
+    # ZFS MODULE PARAMS BELONG HERE TOO, not only on the GRUB direct entry.
+    #
+    # /etc/modprobe.d/zfs.conf is read by nothing at boot on root-on-ZFS: the
+    # module loads from the initramfs, before /etc exists. bootloader.sh rescues
+    # the values onto _direct_bootargs -- but that is the SECURE BOOT path only.
+    # A machine installed with Secure Boot off boots ZFSBootMenu, which builds
+    # its command line from this property and from nowhere else, so it got none
+    # of them.
+    # HISTORY: fiend 10.100.10.124, 2026-08-31, secureboot=0 install of b1284.
+    # zfs.conf asked for arc_max=33657518080, txg_timeout=10, l2arc_noprefetch=0;
+    # the kernel had 0, 5 and 1 -- every one a default, and arc_max=0 means
+    # UNCAPPED, so ARC could take the whole 62 GB out from under the VM fleet.
+    # That is the 2026-08-13 freeze all over again, on the half of the matrix
+    # the earlier fix did not reach.
+    local _zbm_ram _zbm_arc
+    _zbm_ram="$(awk '/MemTotal/{print $2 * 1024}' /proc/meminfo 2>/dev/null || echo 0)"
+    _zbm_arc=$((_zbm_ram / 2))
+    ((_zbm_arc > 0)) || _zbm_arc=8589934592
+    _zbm_args+=" zfs.zfs_arc_max=${_zbm_arc} zfs.zfs_txg_timeout=10 zfs.l2arc_noprefetch=0"
+    k_zfs_log "pinned ZFS module params on the ZBM cmdline (arc_max=${_zbm_arc})"
     zfs set org.zfsbootmenu:commandline="${_zbm_args} psi=1 selinux=0" rpool/ROOT
 
     # ── Make the boot menu reachable ─────────────────────────────────────────
