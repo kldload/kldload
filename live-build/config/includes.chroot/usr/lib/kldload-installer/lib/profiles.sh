@@ -1177,6 +1177,35 @@ k_install_system_files() {
         fi
         # Session metadata dir (kldload-session writes here).
         mkdir -p "${target}/var/lib/kldload/sessions"
+
+        # ── the kldload group owns the state database ───────────────────────
+        # state.db is the fleet's record: every node, VM, cluster and event.
+        # It was root:root 0644, so ONLY root could write it -- and the tools
+        # that need to write it do not all run as root. vmxplore deletes a VM
+        # with `sudo -n zfs destroy` (fine) and then calls `kldload-db
+        # vm-delete` WITHOUT sudo, which fails "attempt to write a readonly
+        # database", rc=1, silently. The VM disappears from libvirt and ZFS and
+        # stays in the database forever -- so Ansible keeps targeting a machine
+        # that no longer exists.
+        # HISTORY: fiend 2026-08-31 -- kldload-cp-2 and cp-3 deleted from the
+        # vmxplore UI, both still listed as inventory targets afterwards.
+        #
+        # The directory needs the group bit too: SQLite writes -wal, -shm and
+        # journal files BESIDE the database, so a writable db in a read-only
+        # directory still fails.
+        #
+        # 0664/2775, NOT 2770. The group gains WRITE; everyone keeps the READ
+        # they had under the old 0644. kldload-inventory, the webui and the
+        # exporters only read, and several run as neither root nor a kldload
+        # member -- 2770 would have broken every one of them to fix a writer.
+        # setgid on the directory so files created later inherit the group.
+        chroot "${target}" sh -c 'getent group kldload >/dev/null 2>&1 || groupadd -r kldload' 2>/dev/null || true
+        chroot "${target}" sh -c 'chgrp -R kldload /var/lib/kldload 2>/dev/null; chmod 2775 /var/lib/kldload 2>/dev/null; [ -f /var/lib/kldload/state.db ] && chmod 0664 /var/lib/kldload/state.db' 2>/dev/null || true
+        # The operator account is the one driving vmxplore, kvm-* and the webui.
+        if [[ -n "${KLDLOAD_USERNAME:-}" ]]; then
+            chroot "${target}" sh -c "usermod -aG kldload '${KLDLOAD_USERNAME}'" 2>/dev/null || true
+            k_log "state.db writable by group kldload (${KLDLOAD_USERNAME} added)"
+        fi
         # Enable nginx at boot.
         ln -sf "/usr/lib/systemd/system/nginx.service" \
             "${target}/etc/systemd/system/multi-user.target.wants/nginx.service" || true

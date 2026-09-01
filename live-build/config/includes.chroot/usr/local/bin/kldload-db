@@ -50,8 +50,46 @@ def _now():
         return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _heal_perms():
+    """Make the database writable by the kldload group. Root-only, best effort.
+
+    WHY: state.db is the fleet's record, and the tools that write it do not all
+    run as root. vmxplore deletes a VM with `sudo -n zfs destroy` and then calls
+    `kldload-db vm-delete` WITHOUT sudo -- which fails "attempt to write a
+    readonly database", rc=1, silently. The VM leaves libvirt and ZFS and stays
+    in the database forever, so Ansible keeps targeting a machine that is gone.
+    (fiend 2026-08-31: kldload-cp-2 and cp-3, deleted from the vmxplore UI,
+    still listed as inventory targets afterwards.)
+
+    The installer sets this up; this is the healing net for a pool that predates
+    it, or one where the group was lost. Every root invocation repairs it, and
+    root invocations are constant -- firstboot, kube-cluster, the reconcile.
+
+    The DIRECTORY matters as much as the file: SQLite writes -wal, -shm and
+    journal files beside the database, so a writable db under a read-only
+    directory still fails. setgid so files created later inherit the group.
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        import grp
+        gid = grp.getgrnam("kldload").gr_gid
+    except (KeyError, ImportError):
+        return  # group not created yet -- the installer owns that
+    for path, mode in ((DB_PATH.parent, 0o2775), (DB_PATH, 0o664)):
+        try:
+            if path.exists():
+                if path.stat().st_gid != gid:
+                    os.chown(path, -1, gid)
+                if (path.stat().st_mode & 0o7777) != mode:
+                    os.chmod(path, mode)
+        except OSError:
+            pass  # a read-only mount or an odd filesystem is not fatal here
+
+
 def _connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _heal_perms()
     con = sqlite3.connect(str(DB_PATH))
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
