@@ -250,7 +250,15 @@ print(sum(1 for v in d.get("vms",[]) if v.get("ip_addr")))' 2>/dev/null || echo 
     local _node _nstate _nstatus
     while read -r _node _nstatus; do
         [[ -z "$_node" ]] && continue
-        _nstate="$(virsh domstate "$_node" 2>/dev/null | awk 'NR==1' | tr -d '\r')"
+        # `|| _nstate=""` -- virsh domstate exits non-zero for a domain that no
+        # longer exists, pipefail promotes it, and set -e then kills the whole
+        # reconcile mid-sweep. That is exactly the case this pass exists to
+        # handle: a node whose VM was destroyed. Without the guard the crash
+        # takes the ORPHAN pass down with it, so rows for vanished domains are
+        # never cleared and Ansible keeps targeting them.
+        # HISTORY: fiend 2026-08-31 -- "FAIL at line 253" on every run after a
+        # kube-cluster destroy; six dead nodes stayed in the inventory.
+        _nstate="$(virsh domstate "$_node" 2>/dev/null | awk 'NR==1' | tr -d '\r')" || _nstate=""
         [[ -z "$_nstate" ]] && continue # not a VM -- physical, leave alone
         if [[ "$_nstate" == "running" ]]; then
             # Only lift a mark this reconcile set, so a richer status written

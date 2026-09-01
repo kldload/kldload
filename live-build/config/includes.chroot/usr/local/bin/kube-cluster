@@ -1843,12 +1843,42 @@ cmd_bootstrap() {
     _ensure_libvirt_default_net
     _ensure_cloud_init_pool
 
-    # Step 0: Clean slate — destroy any existing cluster + golden
-    # No half-states, no stale VMs, no orphaned zvols. Every bootstrap
-    # starts from zero so the result is always predictable.
+    # Step 0: Clean slate — destroy any existing CLUSTER. The golden is KEPT.
+    # No half-states, no stale VMs, no orphaned zvols, so the result is always
+    # predictable -- but a validated golden is not a half-state, it is the
+    # expensive, already-verified input every node is cloned from.
+    #
+    # This used to nuke the golden too, which quietly made two other things
+    # untrue. build_golden has a "already exists — skipping build" fast path
+    # that could therefore never fire, and cmd_destroy tells the operator
+    # "Golden image preserved for fast rebuild" -- a rebuild that then threw it
+    # away regardless.
+    #
+    # The cost was not small: rebuilding means a fresh cloud image, a boot, and
+    # an Ansible run that installs kubeadm, kubelet, containerd, helm and
+    # cilium-cli from scratch. Measured on fiend 2026-08-31: 45 minutes, 44 of
+    # them in that one task, and the run then failed when the VM went
+    # unreachable -- so the cluster was rebuilt from nothing for no benefit.
+    #
+    # REBUILD_GOLDEN=1 forces the old behaviour, and `destroy --all` still
+    # removes it outright. A golden with no @golden snapshot is not trustworthy
+    # and is rebuilt regardless of the flag.
+    local _keep_golden=1
+    if [[ "${REBUILD_GOLDEN:-0}" == "1" ]]; then
+        _keep_golden=0
+        log "REBUILD_GOLDEN=1 — the golden will be rebuilt from scratch"
+    elif ! zfs list -H "${POOL}/vms/${GOLDEN}@golden" >/dev/null 2>&1; then
+        _keep_golden=0
+        log "No ${GOLDEN}@golden snapshot — the golden will be built"
+    else
+        log "Reusing existing golden ${GOLDEN} (REBUILD_GOLDEN=1 to force a rebuild)"
+    fi
+    local _keep_re="^${CLUSTER_NAME}-"
+    ((_keep_golden == 0)) && _keep_re="^${CLUSTER_NAME}-|^${GOLDEN}"
+
     log "Cleaning up any existing cluster..."
     systemctl stop sanoid.timer 2>/dev/null || true
-    for vm in $(virsh list --all --name 2>/dev/null | grep -E "^${CLUSTER_NAME}-|^${GOLDEN}" || true); do
+    for vm in $(virsh list --all --name 2>/dev/null | grep -E "$_keep_re" || true); do
         [[ -z "$vm" ]] && continue
         virsh destroy "$vm" 2>/dev/null || true
         virsh undefine "$vm" --nvram 2>/dev/null || virsh undefine "$vm" 2>/dev/null || true
@@ -1857,8 +1887,10 @@ cmd_bootstrap() {
     # Nuke ONLY this cluster's zvols — match the cluster prefix + golden name.
     # Previous version nuked every zvol under rpool/vms, taking out klab goldens
     # and any other non-kube VMs. -Rf handles snapshots and dependent clones.
+    local _ds_re="^${POOL}/vms/(${CLUSTER_NAME}-)"
+    ((_keep_golden == 0)) && _ds_re="^${POOL}/vms/(${CLUSTER_NAME}-|${GOLDEN}\$)"
     for ds in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null |
-        grep -E "^${POOL}/vms/(${CLUSTER_NAME}-|${GOLDEN}\$)" || true); do
+        grep -E "$_ds_re" || true); do
         zfs destroy -Rf "$ds" 2>/dev/null || true
     done
     # Clean host state
@@ -2694,6 +2726,25 @@ cmd_destroy() {
     for vm in "${_all_vms[@]}"; do
         virsh destroy "$vm" 2>/dev/null || true
         virsh undefine "$vm" --nvram 2>/dev/null || virsh undefine "$vm" 2>/dev/null || true
+        # DEREGISTER as well as undefine. Creating a node registers it in the
+        # state DB (bootstrap and both scale paths all call _db_register_node);
+        # nothing ever removed it again, so every teardown left rows behind at
+        # status=ready with live-looking addresses, and kldload-inventory kept
+        # handing them to Ansible.
+        #
+        # The reconcile cannot rescue this on its own: once the domain is
+        # UNDEFINED it is indistinguishable from a physical node that simply is
+        # not a VM, and the reconcile deliberately leaves those alone rather
+        # than retiring real hardware during an outage. So removal has to be
+        # recorded where the removal happens -- here.
+        #
+        # Soft-delete: kldload-db sets deleted_at and status=deleted, keeping
+        # the history. Both node- and vm- forms, because bootstrap registers
+        # cluster members as nodes while kvm-clone tracks them as vms.
+        # HISTORY: fiend 2026-08-31 -- `kube-cluster destroy` removed six VMs
+        # and Ansible still listed all six afterwards.
+        _db node-delete --hostname "$vm"
+        _db vm-delete --name "$vm"
         rm -f "/var/lib/kldload/cloud-init/${vm}-ci.iso" "/var/lib/kldload/cloud-init/${vm}-cloud-init.iso" 2>/dev/null
     done
 
