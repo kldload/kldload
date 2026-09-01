@@ -1105,6 +1105,30 @@ if [[ -f "$_r2" ]]; then
     fi
 fi
 
+# The Timer ships as a GTK4 app, and a GUI app is three things that must agree:
+# a binary, a .desktop whose filename matches the app_id, and an icon named the
+# same again. Get any one wrong and GNOME shows a generic diamond and opens a
+# SECOND dock entry beside the launcher -- which is exactly what happened on
+# onyx 2026-08-30 before the names were aligned.
+_tmr_bin="$ROOT/live-build/config/includes.chroot/usr/local/bin/timer"
+_tmr_dsk="$ROOT/live-build/config/includes.chroot/usr/share/applications/com.kldload.Timer.desktop"
+_tmr_ico="$ROOT/live-build/config/includes.chroot/usr/share/icons/hicolor/scalable/apps/com.kldload.Timer.svg"
+if [[ -f "$_tmr_bin" ]]; then
+    _tmr_bad=""
+    [[ -f "$_tmr_dsk" ]] || _tmr_bad+=" no-desktop-file"
+    [[ -f "$_tmr_ico" ]] || _tmr_bad+=" no-icon"
+    grep -q 'APP_ID = "com.kldload.Timer"' "$_tmr_bin" || _tmr_bad+=" app-id-mismatch"
+    grep -q '^Icon=com.kldload.Timer$' "$_tmr_dsk" 2>/dev/null || _tmr_bad+=" icon-name-mismatch"
+    grep -q '^Exec=/usr/local/bin/timer$' "$_tmr_dsk" 2>/dev/null || _tmr_bad+=" exec-mismatch"
+    grep -rq '^python3-gobject$' "$ROOT"/build/*/config/package-sets/*.txt 2>/dev/null ||
+        _tmr_bad+=" pygobject-not-packaged"
+    if [[ -z "$_tmr_bad" ]]; then
+        _pass "Timer: binary, .desktop, icon and app_id all agree; PyGObject packaged"
+    else
+        _fail "Timer: app_id / icon / packaging mismatch" "problems:${_tmr_bad}"
+    fi
+fi
+
 # Debian needs the same hardware sweep, and had it worse. Measured on .105
 # 2026-08-28 from a fresh install: amd-ucode AND intel-ucode both EMPTY, so the
 # machine ran with no CPU microcode on any processor -- Fedora at least got its

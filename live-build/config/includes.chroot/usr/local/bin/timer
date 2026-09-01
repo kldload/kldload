@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Timer — a millisecond stopwatch/countdown sized for a capture feed.
+
+WHY a GTK app and not the TUI next door (tools/demo/demo-timer): a terminal
+timer can only ever borrow gnome-terminal's identity. GNOME keys the dock icon,
+the app-grid entry and the window icon off the app_id the toolkit emits, and
+gnome-terminal emits org.gnome.Terminal no matter what the .desktop file
+claims -- so the TUI showed up under a generic terminal icon and produced a
+SECOND dock entry beside the real terminal. Owning the app_id is the whole
+reason this exists; the clock itself is the easy part.
+
+WHY milliseconds: the window is composited into a 1920x1080 Blackmagic capture
+feed beside Grafana and Ansible while cloud desktops come up. A clock ticking
+whole seconds proves nothing about whether the feed is live; a thousandths
+column that never stops moving is the proof. It is the point, not decoration.
+
+WHAT IS DELIBERATELY ABSENT: labels, a run-state pill, a key legend, a header
+bar. Every extra glyph is something a viewer reads instead of the clock. Run
+state is carried by COLOUR alone -- green running, amber held, red past zero.
+
+Timing: elapsed is derived from a monotonic START TIMESTAMP on every frame,
+never accumulated per tick, so a dropped frame corrects itself on the next one
+instead of silently losing time. time.monotonic() is used rather than
+time.time() so an NTP step mid-demo cannot make the clock jump backwards.
+
+Keys:  space pause/resume · r reset · f fullscreen · q quit
+       (click the window also toggles pause -- easier than finding focus
+       mid-demo)
+
+Exit:  0 normally, 2 on a usage error.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+# Gdk needs its own pin. Without it PyGObject guesses, and prints a
+# PyGIWarning to stderr on every single launch -- noise in the journal and
+# in any terminal the app is started from.
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo  # noqa: E402
+
+# Reverse-DNS under the project. It is invisible in the app grid
+# -- the grid shows Name= from the .desktop -- but GNOME keys WM_CLASS off it,
+# so it has to be unique or the window merges with another app's.
+APP_ID = "com.kldload.Timer"
+
+# Palette lifted from tools/demo/social.tape's MarginFill so a clip that frames
+# this window sits in the same ground as the rest of the demo set.
+GROUND = (0x0B / 255, 0x0E / 255, 0x14 / 255)
+RUN = (120 / 255, 222 / 255, 168 / 255)  # green  — counting
+HOLD = (242 / 255, 177 / 255, 52 / 255)  # amber  — paused
+OVER = (255 / 255, 92 / 255, 92 / 255)  # red    — past a countdown's zero
+MS_INK = (96 / 255, 178 / 255, 222 / 255)  # blue — the live thousandths
+
+
+def parse_spec(spec: str) -> int:
+    """Parse SS, MM:SS or HH:MM:SS into milliseconds.
+
+    Raises argparse.ArgumentTypeError so a bad duration is a usage error the
+    parser reports, rather than a timer that silently counts down from zero.
+    """
+    parts = spec.split(":")
+    if len(parts) > 3 or not all(p.isdigit() for p in parts):
+        raise argparse.ArgumentTypeError(
+            f"not a duration: {spec!r} (want SS, MM:SS or HH:MM:SS)"
+        )
+    secs = 0
+    for p in parts:
+        secs = secs * 60 + int(p)
+    return secs * 1000
+
+
+class TimerWindow(Gtk.ApplicationWindow):
+    def __init__(self, app: Gtk.Application, target_ms: int, paused: bool) -> None:
+        super().__init__(application=app, title="Timer")
+        self.target_ms = target_ms
+        self.running = not paused
+        self.accum_ms = 0
+        self.started_at = time.monotonic()
+        self.set_default_size(760, 280)
+
+        self.area = Gtk.DrawingArea()
+        self.area.set_draw_func(self._draw)
+        self.set_child(self.area)
+
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
+
+        click = Gtk.GestureClick()
+        click.connect("pressed", lambda *_: self.toggle())
+        self.area.add_controller(click)
+
+        # 16 ms ~= 60 fps. The clock is read from a timestamp inside _draw, so
+        # this interval sets only how smooth the digits look, never how
+        # accurate they are -- a missed tick costs a frame, not a millisecond.
+        GLib.timeout_add(16, self._tick)
+
+    def elapsed_ms(self) -> int:
+        if self.running:
+            return self.accum_ms + int((time.monotonic() - self.started_at) * 1000)
+        return self.accum_ms
+
+    def toggle(self) -> None:
+        if self.running:
+            self.accum_ms = self.elapsed_ms()
+            self.running = False
+        else:
+            self.started_at = time.monotonic()
+            self.running = True
+
+    def reset(self) -> None:
+        self.accum_ms = 0
+        self.started_at = time.monotonic()
+
+    def _tick(self) -> bool:
+        self.area.queue_draw()
+        return GLib.SOURCE_CONTINUE
+
+    def _on_key(self, _c, keyval, _kc, _st) -> bool:
+        name = Gdk.keyval_name(keyval)
+        if name == "space":
+            self.toggle()
+        elif name in ("r", "R"):
+            self.reset()
+        elif name in ("f", "F"):
+            self.unfullscreen() if self.is_fullscreen() else self.fullscreen()
+        elif name in ("q", "Q", "Escape"):
+            self.close()
+        else:
+            return False
+        return True
+
+    def _face(self) -> tuple[str, str, tuple[float, float, float]]:
+        """Return (big, thousandths, colour) for the current instant."""
+        ms = self.elapsed_ms()
+        colour = RUN if self.running else HOLD
+        sign = ""
+        if self.target_ms:
+            remain = self.target_ms - ms
+            if remain < 0:
+                ms, colour, sign = -remain, OVER, "+"
+            else:
+                ms = remain
+        h, rem = divmod(ms, 3_600_000)
+        m, rem = divmod(rem, 60_000)
+        s, milli = divmod(rem, 1000)
+        big = f"{sign}{h}:{m:02d}:{s:02d}" if h else f"{sign}{m:02d}:{s:02d}"
+        return big, f".{milli:03d}", colour
+
+    def _draw(self, _area, cr, width: int, height: int) -> None:
+        cr.set_source_rgb(*GROUND)
+        cr.paint()
+        big, milli, colour = self._face()
+
+        # Size the type to the WINDOW, not to a constant: this gets dragged
+        # between a corner of the capture feed and fullscreen mid-demo, and a
+        # fixed point size is either unreadable or clipped at one of them.
+        layout = PangoCairo.create_layout(cr)
+        size = max(8, int(height * 0.62))
+        while size > 8:
+            desc = Pango.FontDescription(f"monospace Bold {size}")
+            layout.set_font_description(desc)
+            layout.set_text(big + milli, -1)
+            tw, th = layout.get_pixel_size()
+            if tw <= width * 0.92 and th <= height * 0.95:
+                break
+            size = int(size * 0.94)
+
+        layout.set_text(big, -1)
+        bw, bh = layout.get_pixel_size()
+        layout.set_text(milli, -1)
+        mw, _ = layout.get_pixel_size()
+
+        x = (width - (bw + mw)) / 2
+        y = (height - bh) / 2
+        cr.move_to(x, y)
+        cr.set_source_rgb(*colour)
+        layout.set_text(big, -1)
+        PangoCairo.show_layout(cr, layout)
+
+        # The thousandths get their own ink so the eye reads them as the live
+        # column rather than as four more digits of the same number.
+        cr.move_to(x + bw, y)
+        cr.set_source_rgb(*MS_INK)
+        layout.set_text(milli, -1)
+        PangoCairo.show_layout(cr, layout)
+
+
+class TimerApp(Gtk.Application):
+    def __init__(self, target_ms: int, paused: bool) -> None:
+        super().__init__(application_id=APP_ID)
+        self.target_ms = target_ms
+        self.paused = paused
+
+    def do_activate(self) -> None:  # noqa: N802  (GObject naming)
+        # PRESENT the existing window; only build one if there is none.
+        #
+        # Gtk.Application with an application_id is single-instance: a second
+        # launch does not start a second process, it delivers `activate` to the
+        # one already running. Unconditionally constructing a TimerWindow here
+        # therefore piled up a NEW clock on every click of the icon, each
+        # landing on whatever workspace was current -- timers scattered across
+        # desktops from a single process.
+        # HISTORY: onyx 2026-08-30, reported from the demo bench.
+        win = self.props.active_window
+        if win is None:
+            win = TimerWindow(self, self.target_ms, self.paused)
+        win.present()
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="timer",
+        description="Millisecond stopwatch and countdown for a live demo.",
+        epilog=(
+            "keys: space pause/resume, r reset, f fullscreen, q quit; "
+            "clicking the window also pauses. "
+            "Always-on-top is a window-manager function and no Wayland client "
+            "can request it for itself -- right-click the title bar and pick "
+            "'Always on Top'."
+        ),
+    )
+    ap.add_argument(
+        "-c",
+        "--countdown",
+        type=parse_spec,
+        default=0,
+        metavar="SPEC",
+        help="count down from SPEC (SS, MM:SS or HH:MM:SS), then keep counting "
+        "up in red so an overrun stays visible",
+    )
+    ap.add_argument(
+        "-p",
+        "--paused",
+        action="store_true",
+        help="open on a stopped clock; the default is to start counting at once",
+    )
+    args = ap.parse_args(argv[1:])
+    return TimerApp(args.countdown, args.paused).run([])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
