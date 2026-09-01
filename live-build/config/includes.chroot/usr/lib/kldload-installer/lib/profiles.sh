@@ -1200,9 +1200,15 @@ k_install_system_files() {
         # member -- 2770 would have broken every one of them to fix a writer.
         # setgid on the directory so files created later inherit the group.
         chroot "${target}" sh -c 'getent group kldload >/dev/null 2>&1 || groupadd -r kldload' 2>/dev/null || true
+        # Swallowed: a target without /var/lib/kldload yet, or a chroot where
+        # the group step above did not take. Permissions are re-derived by
+        # kldload-db on its next root run, so losing this is not fatal.
         chroot "${target}" sh -c 'chgrp -R kldload /var/lib/kldload 2>/dev/null; chmod 2775 /var/lib/kldload 2>/dev/null; [ -f /var/lib/kldload/state.db ] && chmod 0664 /var/lib/kldload/state.db' 2>/dev/null || true
         # The operator account is the one driving vmxplore, kvm-* and the webui.
         if [[ -n "${KLDLOAD_USERNAME:-}" ]]; then
+            # Swallowed: an install with no operator account, or a distro
+            # whose usermod lives elsewhere. The group still exists and root
+            # still writes; only the convenience is lost.
             chroot "${target}" sh -c "usermod -aG kldload '${KLDLOAD_USERNAME}'" 2>/dev/null || true
             k_log "state.db writable by group kldload (${KLDLOAD_USERNAME} added)"
         fi

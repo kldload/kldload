@@ -1878,6 +1878,8 @@ cmd_bootstrap() {
 
     log "Cleaning up any existing cluster..."
     systemctl stop sanoid.timer 2>/dev/null || true
+    # `|| true`: grep exits 1 when no domain matches, which is the normal
+    # first-bootstrap case. An empty list is the correct answer, not an error.
     for vm in $(virsh list --all --name 2>/dev/null | grep -E "$_keep_re" || true); do
         [[ -z "$vm" ]] && continue
         virsh destroy "$vm" 2>/dev/null || true
@@ -1890,6 +1892,7 @@ cmd_bootstrap() {
     local _ds_re="^${POOL}/vms/(${CLUSTER_NAME}-)"
     ((_keep_golden == 0)) && _ds_re="^${POOL}/vms/(${CLUSTER_NAME}-|${GOLDEN}\$)"
     for ds in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null |
+        # Same as above: no matching zvol is the clean-host case.
         grep -E "$_ds_re" || true); do
         zfs destroy -Rf "$ds" 2>/dev/null || true
     done
@@ -2718,6 +2721,8 @@ cmd_destroy() {
     # kldload-cp and w-1..3 and left kldload-cp-2 and kldload-cp-3 running.
     local _all_vms=("${CP_NAME}")
     for name in $(virsh list --all --name 2>/dev/null |
+        # `|| true`: a single-control-plane cluster matches nothing here, and
+        # that is a valid shape, not a failure.
         grep -E "^${CP_NAME}-[0-9]+$" || true); do
         [[ -n "$name" ]] && _all_vms+=("$name")
     done
@@ -2763,7 +2768,10 @@ cmd_destroy() {
         # ...and the HA control-plane zvols, which have the same omission as the
         # VM list above. Anchored so ${CP_NAME} itself is not matched twice.
         for name in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null |
+            # As above: no HA control-plane zvols is the single-CP case.
             grep -E "/${CP_NAME}-[0-9]+$" || true); do
+            # Swallowed: a zvol already gone, or held by a clone destroyed
+            # moments earlier in this same sweep. Absent is the goal state.
             zfs destroy -Rf "$name" 2>/dev/null || true
         done
         for name in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null | grep "/${WORKER_PREFIX}-" || true); do
@@ -2934,7 +2942,12 @@ cmd_mesh_repair() {
     # Repairing it IS this verb's job, so initialise rather than only complain.
     if [[ -z "$host_pub" ]] && command -v kube-network >/dev/null 2>&1; then
         warn "Hypervisor is NOT on the mesh — no /etc/wireguard/wg-mgmt.pub. Initialising it as node ${host_id}."
+        # Swallowed deliberately: the very next line re-reads the pubkey and
+        # reports honestly whether this worked. A non-zero here is not the
+        # measurement -- the file appearing is.
         kube-network init "$host_id" >/dev/null 2>&1 || true
+        # `|| true`: an absent pubkey is the outcome being TESTED on the next
+        # line, not an error to abort on.
         host_pub="$(cat /etc/wireguard/wg-mgmt.pub 2>/dev/null | tr -d '[:space:]' || true)"
         if [[ -n "$host_pub" ]]; then
             log "  hypervisor initialised — peering it with every node below"

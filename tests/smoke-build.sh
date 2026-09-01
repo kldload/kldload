@@ -1472,6 +1472,13 @@ else
     for f in "${SHELL_SCRIPTS[@]}"; do
         while IFS= read -r _ln; do
             [[ -n "$_ln" ]] || continue
+            # A COMMENT mentioning the swallow is not a swallow -- it is the
+            # explanation this gate asks for. Counting it meant documenting one
+            # RAISED the number the gate polices: the rule punished the fix.
+            # Caught 2026-08-31, when three comments written to satisfy this
+            # gate each added one to its own count.
+            _self="$(sed -n "${_ln}p" "$ROOT/$f" 2>/dev/null)"
+            [[ "$_self" =~ ^[[:space:]]*# ]] && continue
             # A comment directly above is the rule's escape hatch: it must name
             # the specific harmless case being swallowed.
             _prev="$(sed -n "$((_ln - 1))p" "$ROOT/$f" 2>/dev/null)"
