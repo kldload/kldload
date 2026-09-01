@@ -1190,6 +1190,31 @@ NETCFG
         die "ansible provision-golden failed"
     log "  provision-golden complete — kubeadm, helm, cilium-cli installed"
 
+    # ASSERT the image cache, do not assume it. The golden is already built
+    # with the control-plane, Cilium, Hubble and MetalLB images baked in, which
+    # is why a join does not fetch anything over the network -- and why an
+    # air-gapped bootstrap works at all.
+    #
+    # This is a GATE, not an optimisation: `kubeadm config images pull` is a
+    # no-op when the images are present (verified on fiend 2026-08-31 -- 45
+    # images before, 45 after), and the count afterwards proves the cache
+    # survived whatever the build did. If that ever regresses, every node
+    # silently starts pulling at join time: slow on a connected host, fatal on
+    # a darksite one. Better to see the number here than to debug a stalled
+    # join later.
+    #
+    # Non-fatal on purpose -- a warning belongs here, not a failed build.
+    log "Verifying the golden image cache..."
+    if _ssh_cmd "$golden_ip" "kubeadm config images pull" >/dev/null 2>&1; then
+        _img_n="$(_ssh_cmd "$golden_ip" \
+            "ctr -n k8s.io images ls -q 2>/dev/null | wc -l" 2>/dev/null | tr -cd '0-9')"
+        log "  images cached in golden: ${_img_n:-?}"
+        [[ "${_img_n:-0}" -lt 10 ]] &&
+            log "  WARNING: only ${_img_n} images cached — a join will fetch over the network"
+    else
+        log "  WARNING: could not verify the image cache — nodes may fetch at join time"
+    fi
+
     # Seal via Ansible as well. One SSH transport, one idempotent playbook,
     # no per-command sshd rate-limit grief from CentOS.
     log "Sealing golden image for cloning (Ansible)..."
@@ -1222,6 +1247,7 @@ NETCFG
     log "Golden image ready: ${GOLDEN}"
     log "  ZFS zvol: ${POOL}/vms/${GOLDEN}"
     log "  Packages: kubeadm, kubelet, kubectl, helm, cilium-cli, containerd"
+    log "  Images:   control-plane, Cilium, Hubble, MetalLB cached (no fetch at join)"
     log "  Cached for instant cloning (~100ms per node)"
 }
 
