@@ -212,15 +212,26 @@ local_size="$(stat -c %s "$iso")"
 printf '%s  %s\n' "$local_sum" "$iso_name" >"$sidecar"
 echo "r2-publish: ok — ${iso_name}, ${local_size} bytes, ${local_sum:0:12}…"
 
-# rclone reads R2 as an S3-compatible endpoint. Config goes on the command line
-# rather than into ~/.config so the script leaves no credential on disk.
-remote=(
-    --s3-provider Cloudflare
-    --s3-access-key-id "$R2_ACCESS_KEY_ID"
-    --s3-secret-access-key "$R2_SECRET_ACCESS_KEY"
-    --s3-endpoint "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-    --s3-no-check-bucket
-)
+# rclone reads R2 as an S3-compatible endpoint, configured through the
+# ENVIRONMENT rather than argv.
+#
+# Keeping the credential off disk was the right instinct; putting it in argv was
+# the wrong way to do it. /proc/<pid>/cmdline is world-readable, so every flag is
+# visible to every user on the machine for as long as the upload runs -- a
+# multi-gigabyte ISO means minutes with the secret sitting in `ps`. On a
+# hypervisor with other operators that is a credential disclosure, and it is the
+# case the project rule names explicitly: never pass a credential as a
+# command-line argument.
+#
+# /proc/<pid>/environ is mode 400, owner and root only. Same "nothing written to
+# disk" property, without publishing the secret to the process table. rclone
+# reads RCLONE_S3_* natively, so this needs no config file either.
+export RCLONE_S3_PROVIDER="Cloudflare"
+export RCLONE_S3_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+export RCLONE_S3_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+export RCLONE_S3_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+export RCLONE_S3_NO_CHECK_BUCKET="true"
+remote=()
 
 # ─── Upload ──────────────────────────────────────────────────────────────────
 # Versioned key first: see the note in the banner about which direction of
