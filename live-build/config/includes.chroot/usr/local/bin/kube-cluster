@@ -2609,7 +2609,11 @@ cmd_destroy() {
         echo -e "${R}WARNING: This will destroy the Kubernetes cluster${N}"
         echo "  (Golden image preserved — use 'destroy --all' to remove it too)"
     fi
-    echo "  Control plane: ${CP_NAME}"
+    # Count the control planes for real: saying "Control plane: kldload-cp"
+    # while three exist is how the HA members went unnoticed.
+    _cp_list="$(virsh list --all --name 2>/dev/null |
+        grep -E "^${CP_NAME}(-[0-9]+)?$" | tr '\n' ' ' | sed 's/ $//')"
+    echo "  Control plane(s): ${_cp_list:-${CP_NAME}}"
     echo "  Workers: ${WORKER_PREFIX}-1 through ${WORKER_PREFIX}-${WORKERS}"
     echo ""
 
@@ -2643,7 +2647,18 @@ cmd_destroy() {
 
     # Destroy ALL VMs first (stop + undefine), then ZFS.
     # Must undefine all VMs before ZFS destroy because libvirt holds references.
+    # EVERY control plane, not just the first. _scale_control_planes creates
+    # ${CP_NAME}-2, -3, ... and this list was written when a cluster had exactly
+    # one, so `destroy` silently left the HA members behind -- VMs, zvols and
+    # all -- while the summary above cheerfully said "Control plane: kldload-cp".
+    # The next bootstrap then collided with the survivors.
+    # HISTORY: fiend 2026-08-31, reported from a demo run: destroy removed
+    # kldload-cp and w-1..3 and left kldload-cp-2 and kldload-cp-3 running.
     local _all_vms=("${CP_NAME}")
+    for name in $(virsh list --all --name 2>/dev/null |
+        grep -E "^${CP_NAME}-[0-9]+$" || true); do
+        [[ -n "$name" ]] && _all_vms+=("$name")
+    done
     for name in $(virsh list --all --name 2>/dev/null | grep "^${WORKER_PREFIX}-" || true) \
         $(seq -f "${WORKER_PREFIX}-%g" 1 "${WORKERS}"); do
         [[ -n "$name" ]] && _all_vms+=("$name")
@@ -2664,6 +2679,12 @@ cmd_destroy() {
     else
         # Destroy clones only (golden preserved)
         zfs destroy -Rf "${POOL}/vms/${CP_NAME}" 2>/dev/null || true
+        # ...and the HA control-plane zvols, which have the same omission as the
+        # VM list above. Anchored so ${CP_NAME} itself is not matched twice.
+        for name in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null |
+            grep -E "/${CP_NAME}-[0-9]+$" || true); do
+            zfs destroy -Rf "$name" 2>/dev/null || true
+        done
         for name in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null | grep "/${WORKER_PREFIX}-" || true); do
             zfs destroy -Rf "$name" 2>/dev/null || true
         done
