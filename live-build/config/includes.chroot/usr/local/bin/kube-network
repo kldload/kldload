@@ -88,6 +88,31 @@ cmd_init() {
     # --force is the escape hatch for a genuine re-key or a node being moved to
     # a new id; it is deliberately explicit, because the cost of doing this by
     # accident is an estate-wide outage that reports success.
+    # "Initialised" means the CONFIGS exist, not merely that a marker does.
+    #
+    # .node-id alone is not evidence. kube-cluster's clean-slate removes
+    # /etc/wireguard/wg-mgmt.* and wg-k8s.* and leaves .node-id behind, so the
+    # host ends up marked as node N with every config deleted. init then saw the
+    # marker, agreed the id matched, and returned 0 WITHOUT DOING ANYTHING --
+    # silent success, no output, nothing created.
+    #
+    # The cost is not obvious from here: the hypervisor never rejoins the mesh,
+    # kubectl silently falls back to virbr0, wgxplore has no interface to show,
+    # and Prometheus cannot scrape any node. mesh-repair could not fix it either,
+    # because its own repair path calls this function.
+    # HISTORY: fiend 2026-08-31 -- .node-id said 100, both configs gone,
+    # `kube-network init 100` exited 0 and created nothing.
+    #
+    # The refuse-to-clobber guard below still stands on its own history (a
+    # ten-minute enrollment sweep flattening a healthy 6-node mesh); this only
+    # narrows WHEN it applies, to the case where there is a real config to
+    # protect.
+    local _has_cfg=0
+    [[ -s /etc/wireguard/wg-mgmt.conf || -s /etc/wireguard/wg-k8s.conf ]] && _has_cfg=1
+    if [[ -s /etc/wireguard/.node-id && $_has_cfg -eq 0 && "${2:-}" != "--force" ]]; then
+        log "node-id marker says $(tr -cd '0-9' </etc/wireguard/.node-id) but no wg-mgmt/wg-k8s config exists — re-initialising"
+        rm -f /etc/wireguard/.node-id
+    fi
     if [[ -s /etc/wireguard/.node-id && "${2:-}" != "--force" ]]; then
         local _have_id _peers
         _have_id="$(tr -cd '0-9' </etc/wireguard/.node-id)"

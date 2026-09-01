@@ -1897,6 +1897,10 @@ cmd_bootstrap() {
     ip link del wg-mgmt 2>/dev/null || true
     ip link del wg-k8s 2>/dev/null || true
     rm -f /etc/wireguard/wg-mgmt.* /etc/wireguard/wg-k8s.* 2>/dev/null
+    # ...and the node-id marker, or the host is left claiming to be an
+    # initialised mesh member with no config to back it up, and
+    # `kube-network init` then refuses as a silent no-op.
+    rm -f /etc/wireguard/.node-id 2>/dev/null
     rm -f /root/.kube/config 2>/dev/null
     sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
     systemctl start sanoid.timer 2>/dev/null || true
@@ -2906,8 +2910,39 @@ cmd_mesh_repair() {
     # The hypervisor is on the mesh as node 100 and is not a VM, so it never
     # appears in the list above. Prometheus scrapes the nodes across this
     # plane, so leaving it out silently breaks every host-side target.
-    local host_pub host_id=100
+    local host_pub host_id=100 _mesh_host_was_absent=0
     host_pub="$(cat /etc/wireguard/wg-mgmt.pub 2>/dev/null | tr -d '[:space:]' || true)"
+
+    # AN ABSENT HYPERVISOR KEY IS A FINDING, NOT A REASON TO SKIP.
+    #
+    # Every hypervisor branch below is guarded on [[ -n "$host_pub" ]]. With no
+    # key all three become no-ops and the function then reports "Mesh already
+    # correct" -- which is true of the node-to-node mesh and completely wrong
+    # about the machine running the command. A repair tool that cannot see the
+    # most common breakage is decoration.
+    #
+    # It is the common breakage because the host joins at STEP 10 of bootstrap
+    # (kube-network init 100). Any earlier failure -- and there was one today at
+    # provision-golden -- leaves a perfect six-node mesh with the hypervisor
+    # outside it. The symptoms do not look like WireGuard: kubectl falls back to
+    # virbr0 and appears fine, wgxplore shows nothing, and Prometheus quietly
+    # fails to scrape the nodes.
+    # HISTORY: fiend 2026-08-31 -- 6 nodes, 5 peers each, 0 peering the
+    # hypervisor, no wg interface on the host at all, and mesh-repair said the
+    # mesh was correct.
+    #
+    # Repairing it IS this verb's job, so initialise rather than only complain.
+    if [[ -z "$host_pub" ]] && command -v kube-network >/dev/null 2>&1; then
+        warn "Hypervisor is NOT on the mesh — no /etc/wireguard/wg-mgmt.pub. Initialising it as node ${host_id}."
+        kube-network init "$host_id" >/dev/null 2>&1 || true
+        host_pub="$(cat /etc/wireguard/wg-mgmt.pub 2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ -n "$host_pub" ]]; then
+            log "  hypervisor initialised — peering it with every node below"
+            _mesh_host_was_absent=1
+        else
+            warn "  could not initialise the hypervisor: kubectl will use virbr0, wgxplore will stay empty, and node metrics will not scrape"
+        fi
+    fi
 
     local -a live_ids=("${n_id[@]}")
     [[ -n "$host_pub" ]] && live_ids+=("$host_id")
@@ -2986,6 +3021,13 @@ cmd_mesh_repair() {
     fi
 
     if ((added == 0 && removed == 0)); then
+        if [[ -z "$host_pub" ]]; then
+            # Never call a mesh correct while the machine asking is not in it.
+            warn "Node-to-node mesh is correct, but the HYPERVISOR is not on it."
+            warn "  kubectl falls back to virbr0, wgxplore shows nothing, node metrics do not scrape."
+            warn "  Fix: kube-network init ${host_id} && kube-cluster mesh-repair"
+            return 1
+        fi
         log "Mesh already correct — nothing changed"
     else
         log "Mesh reconciled: ${added} peer(s) added, ${removed} stale peer(s) removed"
