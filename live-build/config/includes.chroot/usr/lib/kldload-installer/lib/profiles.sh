@@ -1338,15 +1338,28 @@ DASHSTART
             # GTK4 kldload-webview path; that path was reverted to chrome-app
             # because WebKit fails to map a window on first boot before the NVIDIA
             # akmod loads — windowless processes pile up and "no icon opens".)
+            # The com.kldload.* glob below is NOT those shadows: it carries
+            # genuinely native GTK4 apps that own their window directly, which
+            # today is the Timer and nothing else.
             # zxplore ships its own .desktop (not kldload-*/bob-*), so name it
             # explicitly or the installed target gets the binary with no launcher
             # (observed .139 2026-07-28).
+            # HISTORY: 2026-09-01, fiend .117. The Timer shipped on b1294's
+            # squashfs — binary, launcher and icon all verified present on the
+            # ISO — and reached NONE of them on the installed target. It is
+            # named `timer` and `com.kldload.Timer.*` by request, so it matched
+            # no glob in any of the three curated lists here. That is the FIFTH
+            # time this exact shape has cost an install (ollama.svg, vmxplore,
+            # wgx, ztx, timer), so smoke-build now cross-checks the shipped
+            # tree against these globs instead of trusting the next reader to
+            # notice the warnings above.
             for _lnch in /usr/share/applications/kldload-*.desktop \
                 /usr/share/applications/bob-*.desktop \
                 /usr/share/applications/zxplore.desktop \
                 /usr/share/applications/wgxplore.desktop \
                 /usr/share/applications/vmxplore*.desktop \
-                /usr/share/applications/ztxplore.desktop; do
+                /usr/share/applications/ztxplore.desktop \
+                /usr/share/applications/com.kldload.*.desktop; do
                 [[ -f "$_lnch" ]] || continue
                 # honor the ZFS Console opt-out (checkbox, default on)
                 [[ "$(basename "$_lnch")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
@@ -1371,7 +1384,7 @@ DASHSTART
                     /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg \
                     /${themedir}/zxplore*.svg /${themedir}/wgxplore.svg \
                     /${themedir}/vmxplore.svg /${themedir}/ollama.svg \
-                    /${themedir}/ztxplore.svg; do
+                    /${themedir}/ztxplore.svg /${themedir}/com.kldload.*.svg; do
                     [[ -f "$_ic" ]] || continue
                     # honor the ZFS Console opt-out (checkbox, default on)
                     [[ "$(basename "$_ic")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
@@ -1689,7 +1702,7 @@ DASHSTART
         for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* \
             /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob* \
             /usr/local/bin/wgx /usr/local/bin/vmxplore /usr/local/bin/vmx \
-            /usr/local/bin/ztx /usr/local/bin/ztx-tui; do
+            /usr/local/bin/ztx /usr/local/bin/ztx-tui /usr/local/bin/timer; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
             # ZFS Console is an installer checkbox (default on) — honor an

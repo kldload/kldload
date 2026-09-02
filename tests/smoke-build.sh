@@ -1129,6 +1129,98 @@ if [[ -f "$_tmr_bin" ]]; then
     fi
 fi
 
+# ── Every shipped GUI app has a copy path to the INSTALLED target ──────────
+#
+# The gate above proves the Timer's three files agree with each other. It says
+# NOTHING about whether they reach an installed machine, and on b1294 they did
+# not: the ISO carried /usr/local/bin/timer, com.kldload.Timer.desktop and
+# com.kldload.Timer.svg, every one verified present in the squashfs, and a
+# fresh install at fiend .117 had none of the three (2026-09-01).
+#
+# The cause is that profiles.sh copies launchers, icons and binaries to the
+# target through three hand-curated glob lists. A tool whose name matches no
+# pattern is dropped in total silence -- no error, no log line, and the ISO
+# checks all still pass because the files really are on the ISO. This has now
+# cost five separate installs: ollama.svg, vmxplore, wgx, ztx and timer. Each
+# was fixed by appending one more name and one more warning comment to the
+# lists, and the next tool broke anyway.
+#
+# So check the invariant directly instead: parse the three glob lists out of
+# profiles.sh, and assert every .desktop in the shipped tree matches a launcher
+# pattern, that the binary its Exec= names matches a binary pattern, and that
+# the icon its Icon= names matches an icon pattern. Binaries fetched at build
+# time (ztx, zxplore) are not in the tree, so an Exec= that resolves to nothing
+# here is skipped rather than failed -- this gate reads the repo, not the ISO.
+_cp_prof="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+_cp_tree="$ROOT/live-build/config/includes.chroot"
+if [[ -f "$_cp_prof" && -d "$_cp_tree/usr/share/applications" ]]; then
+    # Launchers deliberately never copied. kldload-installer-live is the live
+    # ISO's own installer tile; profiles.sh explicitly rm -f's it from the
+    # target, so it must NOT be expected to have a copy path.
+    _cp_liveonly=" kldload-installer-live.desktop "
+
+    # The launcher globs come from two places: the main loop, and the small
+    # explicit `for _dt in ...` list further down that carries kexport.
+    _cp_lnch_pat="$(sed -n '/for _lnch in /,/; do$/p' "$_cp_prof" |
+        grep -oE '/usr/share/applications/[^ \\]+\.desktop' | sed 's|.*/||')"
+    _cp_lnch_pat+=$'\n'"$(sed -n '/for _dt in /,/; do$/p' "$_cp_prof" |
+        grep -oE '[A-Za-z0-9._*-]+\.desktop')"
+    _cp_ico_pat="$(sed -n '/for _ic in /,/; do$/p' "$_cp_prof" |
+        grep -oE '\$\{themedir\}/[^ \\]+\.svg' | sed 's|.*/||')"
+    # NB: exclude ';' as well as space/backslash -- the last entry on the last
+    # line of each list is followed by '; do', and without this the pattern
+    # comes out as 'timer;' and matches nothing.
+    _cp_bin_pat="$(sed -n '/for _src in /,/; do$/p' "$_cp_prof" |
+        grep -oE '/usr/local/bin/[^ \\;]+' | sed 's|.*/||')"
+    # Binaries also reach the target through named one-off `cp` lines.
+    _cp_bin_pat+=$'\n'"$(grep -oE 'cp "?/usr/local/bin/[A-Za-z0-9._-]+' "$_cp_prof" | sed 's|.*/||')"
+
+    # _cp_matches <name> <newline-separated patterns> -> 0 if any glob matches.
+    _cp_matches() {
+        local _n="$1" _p
+        while IFS= read -r _p; do
+            [[ -n "$_p" ]] || continue
+            # shellcheck disable=SC2053  # RHS is a glob on purpose here
+            [[ "$_n" == $_p ]] && return 0
+        done <<<"$2"
+        return 1
+    }
+
+    _cp_bad="" _cp_n=0
+    for _cp_d in "$_cp_tree"/usr/share/applications/*.desktop; do
+        [[ -f "$_cp_d" ]] || continue
+        _cp_dn="$(basename "$_cp_d")"
+        case "$_cp_liveonly" in *" $_cp_dn "*) continue ;; esac
+        _cp_n=$((_cp_n + 1))
+        _cp_matches "$_cp_dn" "$_cp_lnch_pat" ||
+            {
+                _cp_bad+=" ${_cp_dn}:launcher-not-copied"
+                continue
+            }
+
+        # Exec= binary, only when the binary actually lives in this repo.
+        _cp_ex="$(sed -n 's/^Exec=\([^ ]*\).*/\1/p' "$_cp_d" | head -1)"
+        if [[ "$_cp_ex" == /usr/local/bin/* && -e "${_cp_tree}${_cp_ex}" ]]; then
+            _cp_matches "$(basename "$_cp_ex")" "$_cp_bin_pat" ||
+                _cp_bad+=" ${_cp_dn}:binary-not-copied($(basename "$_cp_ex"))"
+        fi
+
+        # Icon= svg, only when the icon actually ships in the tree.
+        _cp_ic="$(sed -n 's/^Icon=//p' "$_cp_d" | head -1)"
+        if [[ -n "$_cp_ic" && -f "$_cp_tree/usr/share/icons/hicolor/scalable/apps/${_cp_ic}.svg" ]]; then
+            _cp_matches "${_cp_ic}.svg" "$_cp_ico_pat" ||
+                _cp_bad+=" ${_cp_dn}:icon-not-copied(${_cp_ic}.svg)"
+        fi
+    done
+
+    if [[ -z "$_cp_bad" ]]; then
+        _pass "installer copy paths: all ${_cp_n} shipped launchers reach the target (binary+icon too)"
+    else
+        _fail "installer copy paths: shipped GUI app(s) would NOT reach an installed target" \
+            "add the name to the matching glob list in profiles.sh --${_cp_bad}"
+    fi
+fi
+
 # Debian needs the same hardware sweep, and had it worse. Measured on .105
 # 2026-08-28 from a fresh install: amd-ucode AND intel-ucode both EMPTY, so the
 # machine ran with no CPU microcode on any processor -- Fedora at least got its
