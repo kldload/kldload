@@ -891,11 +891,33 @@ META
 
     local runcmd_extra=""
     [[ -n "$ready_marker" ]] && runcmd_extra="  - touch ${ready_marker}"
-    # Static IP fallback via nmcli (cloud-init network-config often ignored on CentOS)
+    # Static IP via nmcli. cloud-init's own network-config is widely ignored on
+    # the CentOS/Rocky cloud images, hence doing it here.
+    #
+    # This used to guess: `nmcli con mod 'cloud-init eth0' ... || nmcli con mod
+    # 'System eth0' ... || ip addr add ... dev eth0 || ... dev enp1s0 || true`.
+    # Four guesses at a connection name and a device name, and a `|| true`
+    # catching all four misses. On fiend 2026-09-02 every branch missed on every
+    # klab VM -- the images name the connection after the device, and the device
+    # is not eth0 -- so not one VM ever took its static address. They all sat on
+    # DHCP (.128, .210, .106 where the scheme says .201-.206) and NOTHING SAID
+    # SO, because the chain ended in `|| true`. `klab deploy` then SSHed to the
+    # address it had assumed and configured a VM from the other site.
+    #
+    # So: derive the device from the default route, derive the connection from
+    # the device, and write the outcome to a log the operator can find. Still
+    # non-fatal -- a VM on DHCP is usable and get_vm_ip will find it -- but it
+    # is now a recorded failure rather than an invisible one.
     local bootcmd_net=""
     if [[ -n "$static_ip" ]]; then
-        bootcmd_net="  - nmcli con mod 'cloud-init eth0' ipv4.method manual ipv4.addresses ${static_ip}/24 ipv4.gateway 192.168.122.1 ipv4.dns 192.168.122.1 2>/dev/null || nmcli con mod 'System eth0' ipv4.method manual ipv4.addresses ${static_ip}/24 ipv4.gateway 192.168.122.1 ipv4.dns 192.168.122.1 2>/dev/null || ip addr add ${static_ip}/24 dev eth0 2>/dev/null || ip addr add ${static_ip}/24 dev enp1s0 2>/dev/null || true
-  - nmcli con up 'cloud-init eth0' 2>/dev/null || nmcli con up 'System eth0' 2>/dev/null || true"
+        # A YAML LITERAL BLOCK (`- |`), not a plain scalar. The command contains
+        # `echo "klab: ..."`, and a plain scalar may not contain ": " -- YAML
+        # reads it as a mapping key and the whole user-data fails to parse. The
+        # first version of this fix did exactly that and was caught only by
+        # running the generated file through a YAML parser. Inside a block
+        # scalar every byte is literal, so the shell may quote as it likes.
+        bootcmd_net="  - |
+    sh -c 'L=/var/log/klab-staticip.log; D=\$(ip -o -4 route show default 2>/dev/null | awk \"{print \\\$5}\" | head -1); [ -n \"\$D\" ] || D=\$(ls /sys/class/net 2>/dev/null | grep -v lo | head -1); C=\$(nmcli -g GENERAL.CONNECTION device show \"\$D\" 2>/dev/null | head -1); if [ -n \"\$C\" ] && nmcli con mod \"\$C\" ipv4.method manual ipv4.addresses ${static_ip}/24 ipv4.gateway 192.168.122.1 ipv4.dns 192.168.122.1 >>\$L 2>&1 && nmcli con up \"\$C\" >>\$L 2>&1; then echo \"klab ${static_ip} set on \$D via \$C\" >>\$L; elif ip addr add ${static_ip}/24 dev \"\$D\" >>\$L 2>&1; then echo \"klab ${static_ip} set on \$D by ip addr, no NM connection\" >>\$L; else echo \"klab FAILED to set ${static_ip}, device=\$D connection=\$C, this VM stays on DHCP\" >>\$L; fi'"
     fi
 
     cat >"${ci_dir}/user-data" <<USERDATA
@@ -2987,7 +3009,7 @@ deploy_site() {
         ((deployed++))
     done
 
-    log "Waiting for VMs to boot (static IPs: 192.168.122.$((ip_base + 1))-$((ip_base + node_idx)))..."
+    log "Waiting for VMs to boot..."
     sleep 20
 
     echo ""
@@ -3001,7 +3023,28 @@ deploy_site() {
         local sname
         sname="$(site_name "$site" "$distro")"
         virsh domstate "$sname" >/dev/null 2>&1 || continue
-        local ip="192.168.122.$((ip_base + vm_idx))"
+        # ASK, do not COMPUTE. This used to be
+        #     local ip="192.168.122.$((ip_base + vm_idx))"
+        # on the theory that blue lands on .101-106 and green on .201-206. The
+        # VMs take DHCP; nothing assigns those addresses. On fiend 2026-09-02
+        # the green site actually held .128, .210 and .106, and .202 -- green's
+        # computed slot for centos -- belonged to blue-centos. So this loop
+        # SSHed into a VM from the other site and ran `hostnamectl` on it, and
+        # the address it had invented then rode into green's WireGuard config:
+        # a peer whose endpoint was a blue machine, 54 KiB sent, 0 B received,
+        # never a single handshake for the life of the mesh.
+        #
+        # get_vm_ip is right here in this file and the mesh phase twenty lines
+        # below already calls it. It resolves through the guest agent first and
+        # filters leases by the VM's CURRENT MAC, precisely so a recycled
+        # address cannot be mistaken for this VM. Re-deriving an address beside
+        # a working resolver is how you get a second, worse resolver.
+        local ip
+        ip="$(get_vm_ip "$sname")"
+        if [[ -z "$ip" ]]; then
+            printf "  ${R}%-25s${N} %-18s %s\n" "$sname" "(no address)" "unreachable"
+            continue
+        fi
         if wait_for_ssh "$ip" 60; then
             _ssh_cmd "$ip" "hostnamectl set-hostname ${site}-${distro}; systemd-machine-id-setup 2>/dev/null" || true
             local zfs_ver
