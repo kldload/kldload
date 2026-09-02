@@ -1,0 +1,409 @@
+#!/usr/bin/env bash
+# kvm-mesh — put arbitrary VMs on a private WireGuard mesh, after cloning.
+#
+# What it does, in order:
+#   1. Resolves each named VM to an address (guest agent, else DHCP lease).
+#   2. Mints a FRESH keypair inside each guest and writes an interface config.
+#   3. Collects every public key, then peers every VM with every other VM.
+#   4. Joins this host as .254 so the hypervisor can reach the mesh too.
+#   5. Verifies by HANDSHAKE, not by "the interface exists".
+#
+# WHY this is a separate step and not something a golden carries: a golden is
+# cloned. Anything baked into it is identical on every clone — and a WireGuard
+# private key that is identical on five machines is not a mesh, it is five
+# hosts fighting over one identity, with the same AllowedIPs claimed five
+# times. Keys have to be minted per clone, which means after the clone, which
+# means here.
+#
+# WHY it exists at all: klab builds a mesh for its own blue/green sites and
+# kube-cluster builds one for its nodes, but nothing did it for an arbitrary
+# set of VMs. Clone an appliance golden five times and you had five machines
+# on the NAT bridge with no private plane between them. This is that missing
+# step, generalised from the two implementations that already worked.
+#
+# Inputs:  VM names as defined in libvirt. They must be RUNNING with a
+#          reachable address and `wg` installed in the guest.
+# Outputs: an interface named after the mesh inside each guest, the same on
+#          this host at <subnet>.254, and a handshake between every pair.
+# Exit:    0 every peer handshaked, 1 otherwise.
+#
+# Notes: needs no physical NIC. The mesh rides virbr0, which libvirt creates
+# with no member interface at all — the whole thing works on a host whose
+# cable is unplugged, which is the point.
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+[[ $EUID -ne 0 ]] && exec sudo "$0" "$@"
+
+MESH_DIR=/var/lib/kldload/mesh
+SSH_KEY="${KVM_MESH_SSH_KEY:-/root/.ssh/id_ed25519}"
+SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=8)
+
+log() { printf '\033[1;32m[kvm-mesh]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[kvm-mesh]\033[0m %s\n' "$*" >&2; }
+die() {
+    printf '\033[1;31m[kvm-mesh]\033[0m %s\n' "$*" >&2
+    exit 1
+}
+
+# ─── address resolution ──────────────────────────────────────────────────────
+# The guest agent is authoritative and instant. DHCP leases are the fallback,
+# and they are only a fallback: dnsmasq lists leases it issued AND still holds,
+# so a VM with a static address or an aged-out lease appears nowhere in them.
+vm_ip() {
+    local vm="$1" ip
+    ip="$(timeout 10 virsh domifaddr "$vm" --source agent 2>/dev/null |
+        awk '/ipv4/ && $4 !~ /^127\./ {split($4, a, "/"); print a[1]; exit}')" || ip=""
+    [[ -n "$ip" ]] && {
+        printf '%s' "$ip"
+        return 0
+    }
+    for net in $(virsh net-list --name 2>/dev/null); do
+        ip="$(virsh net-dhcp-leases "$net" 2>/dev/null |
+            awk -v n="$vm" '$6 == n {split($5, a, "/"); print a[1]; exit}')" || ip=""
+        [[ -n "$ip" ]] && {
+            printf '%s' "$ip"
+            return 0
+        }
+    done
+    return 1
+}
+
+# `ssh -n` is not optional here. Every call sits inside a `while read` loop
+# over the members file, and a child that inherits the loop's stdin consumes
+# it -- the loop then ends after ONE iteration, with no error anywhere.
+#
+# HISTORY: caught on this tool's first run, 2026-09-02. peer_all peered mesh-1
+# with its two neighbours and left mesh-2 and mesh-3 with zero peers; the host
+# reported 3 peers and 1 handshake and every command exited 0. Identical shape
+# to the batch that skipped 9 of 10 VMs and still exited 0 (2026-08-22) -- this
+# is a standing house rule precisely because it is this easy to write again.
+guest() {
+    local ip="$1"
+    shift
+    timeout 45 ssh -n "${SSH_OPTS[@]}" "root@${ip}" "$@"
+}
+
+# ─── mesh naming ─────────────────────────────────────────────────────────────
+# The interface name is the mesh name, so `wg show` on any member reads as the
+# thing the operator asked for. Linux caps interface names at 15 characters.
+iface_for() {
+    local m="$1"
+    [[ ${#m} -le 15 ]] || die "mesh name '$m' is ${#m} chars; the kernel allows 15"
+    printf '%s' "$m"
+}
+
+# Port is derived from the mesh name, so two meshes on one host never collide
+# and the same mesh always lands on the same port across rebuilds.
+port_for() {
+    local sum
+    sum=$(printf '%s' "$1" | cksum | awk '{print $1}')
+    printf '%d' $((51900 + sum % 600))
+}
+
+usage() {
+    cat <<'EOF'
+kvm-mesh — put arbitrary VMs on a private WireGuard mesh
+
+  kvm-mesh up <mesh> <subnet> <vm>...   build/extend a mesh across these VMs
+  kvm-mesh add <mesh> <vm>...           add VMs to an existing mesh
+  kvm-mesh status <mesh>                peers and handshake age
+  kvm-mesh down <mesh>                  tear the mesh down everywhere
+
+  <subnet> is the first three octets, e.g. 10.254.0
+  The host always joins as <subnet>.254; guests take .1 upward.
+
+Examples:
+  kvm-mesh up appnet 10.254.0 app-1 app-2 app-3
+  kvm-mesh add appnet app-4
+  kvm-mesh status appnet
+
+Notes:
+  Guests need `wg` installed and must be running with a reachable address.
+  Keys are minted per VM at join time — never baked into a golden, because a
+  golden is cloned and a shared private key is not an identity.
+EOF
+}
+
+# ─── state ───────────────────────────────────────────────────────────────────
+# One file per mesh: "<vm> <id> <pubkey> <ip>". It is the record of who is in
+# the mesh, so `add` can peer a newcomer with existing members without having
+# to re-derive everything from live interfaces.
+mesh_file() { printf '%s/%s.members' "$MESH_DIR" "$1"; }
+
+next_id() {
+    local f="$1" used id
+    used="$(awk '{print $2}' "$f" 2>/dev/null)"
+    for id in $(seq 1 253); do
+        grep -qx "$id" <<<"$used" || {
+            printf '%d' "$id"
+            return 0
+        }
+    done
+    die "mesh is full (253 members)"
+}
+
+# ─── join one VM ─────────────────────────────────────────────────────────────
+# Mints a keypair IN the guest. The private key never leaves it and is never
+# read by this host — only the public half comes back.
+join_vm() {
+    local mesh="$1" subnet="$2" vm="$3" f iface port ip id pub
+    f="$(mesh_file "$mesh")"
+    iface="$(iface_for "$mesh")"
+    port="$(port_for "$mesh")"
+
+    if awk -v v="$vm" '$1 == v {found=1} END {exit !found}' "$f" 2>/dev/null; then
+        log "$vm is already a member — refreshing its config"
+        id="$(awk -v v="$vm" '$1 == v {print $2}' "$f")"
+    else
+        id="$(next_id "$f")"
+    fi
+
+    virsh domstate "$vm" 2>/dev/null | grep -q running ||
+        {
+            warn "$vm is not running — skipped"
+            return 1
+        }
+    ip="$(vm_ip "$vm")" || {
+        warn "$vm has no reachable address — skipped"
+        return 1
+    }
+
+    guest "$ip" 'command -v wg >/dev/null 2>&1' ||
+        {
+            warn "$vm has no 'wg' in the guest — install wireguard-tools there first"
+            return 1
+        }
+
+    # `wg genkey` is run in the guest, output stays in the guest. umask 077 so
+    # the key is never briefly world-readable between create and chmod.
+    guest "$ip" "
+        set -e
+        umask 077
+        mkdir -p /etc/wireguard
+        [ -s /etc/wireguard/${iface}.key ] || wg genkey > /etc/wireguard/${iface}.key
+        wg pubkey < /etc/wireguard/${iface}.key > /etc/wireguard/${iface}.pub
+        printf '[Interface]\nPrivateKey = %s\nListenPort = ${port}\n' \
+            \"\$(cat /etc/wireguard/${iface}.key)\" > /etc/wireguard/${iface}.setconf
+    " >/dev/null 2>&1 || {
+        warn "$vm: key generation failed — skipped"
+        return 1
+    }
+
+    pub="$(guest "$ip" "cat /etc/wireguard/${iface}.pub" 2>/dev/null | tr -d '\r\n')"
+    [[ -n "$pub" ]] || {
+        warn "$vm: no public key came back — skipped"
+        return 1
+    }
+
+    # Bring the interface up from the stripped config. `wg setconf` understands
+    # PrivateKey/ListenPort/FwMark and NOTHING else -- Address is a wg-quick
+    # directive and setconf rejects the WHOLE file when it meets one, silently
+    # leaving an interface with no key and a random port. The address is
+    # applied with `ip addr` instead, which is what wg-quick does anyway.
+    # (fiend 2026-09-02: every klab peer had zero handshakes for this reason.)
+    guest "$ip" "
+        # first join on this guest: the iface does not exist yet, and that is
+        # the expected case -- $(ip link del) on a missing iface is the only
+        # error swallowed here. A real failure surfaces on the $(link add) below.
+        ip link del ${iface} 2>/dev/null || true
+        ip link add dev ${iface} type wireguard
+        wg setconf ${iface} /etc/wireguard/${iface}.setconf
+        ip addr add ${subnet}.${id}/24 dev ${iface}
+        ip link set ${iface} up
+    " >/dev/null 2>&1 || {
+        warn "$vm: could not bring up ${iface} — skipped"
+        return 1
+    }
+
+    # First member of a new mesh: the file does not exist yet, so grep exits 2
+    # with nothing on stdout. Any other failure still leaves .tmp truncated and
+    # the append below rebuilds the single line we care about.
+    grep -v "^${vm} " "$f" 2>/dev/null >"${f}.tmp" || true
+    printf '%s %s %s %s\n' "$vm" "$id" "$pub" "$ip" >>"${f}.tmp"
+    mv "${f}.tmp" "$f"
+    log "$vm joined as ${subnet}.${id}"
+    return 0
+}
+
+# ─── peer everyone with everyone ─────────────────────────────────────────────
+peer_all() {
+    local mesh="$1" subnet="$2" f iface port
+    f="$(mesh_file "$mesh")"
+    iface="$(iface_for "$mesh")"
+    port="$(port_for "$mesh")"
+
+    local host_key=/etc/wireguard/"${iface}".key host_pub
+    umask 077
+    mkdir -p /etc/wireguard
+    [[ -s "$host_key" ]] || wg genkey >"$host_key"
+    host_pub="$(wg pubkey <"$host_key")"
+    umask 022
+
+    # Each guest peers with every OTHER guest, plus this host.
+    local vm id pub ip pvm pid ppub pip
+    while read -r vm id pub ip; do
+        [[ -n "$vm" ]] || continue
+        while read -r pvm pid ppub pip; do
+            [[ -n "$pvm" && "$pvm" != "$vm" ]] || continue
+            # Deliberately not fatal: a mesh is useful at N-1 peers, and a
+            # guest that has gone away mid-run should not abort the others.
+            # verify() is the real gate -- it counts HANDSHAKES against the
+            # member roll, so a peer that silently failed here is reported
+            # there as a shortfall rather than passing unnoticed.
+            guest "$ip" "wg set ${iface} peer ${ppub} allowed-ips ${subnet}.${pid}/32 \
+                endpoint ${pip}:${port} persistent-keepalive 25" >/dev/null 2>&1 || true
+        done <"$f"
+        # Same contract as the peer loop above: verify() catches a miss.
+        guest "$ip" "wg set ${iface} peer ${host_pub} allowed-ips ${subnet}.254/32 \
+            endpoint $(host_addr_for "$ip"):${port} persistent-keepalive 25" >/dev/null 2>&1 || true
+    done <"$f"
+
+    # This host's side, built as a real config then loaded in one go.
+    {
+        printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n' "$(cat "$host_key")" "$port"
+        while read -r vm id pub ip; do
+            [[ -n "$vm" ]] || continue
+            printf '\n[Peer]\nPublicKey = %s\nAllowedIPs = %s.%s/32\nEndpoint = %s:%s\nPersistentKeepalive = 25\n' \
+                "$pub" "$subnet" "$id" "$ip" "$port"
+        done <"$f"
+    } >"/etc/wireguard/${iface}.setconf"
+    chmod 0600 "/etc/wireguard/${iface}.setconf"
+
+    # `up` is idempotent by design (re-run after adding a member), so on the
+    # second run the iface exists and on the first it does not. Only that
+    # absence is swallowed; `link add` below is unguarded and will fail loudly.
+    ip link del "$iface" 2>/dev/null || true
+    ip link add dev "$iface" type wireguard
+    wg setconf "$iface" "/etc/wireguard/${iface}.setconf" ||
+        die "wg setconf failed on the host for ${iface}"
+    # EEXIST when the address survived a partial teardown -- harmless, the
+    # address we want is already on the iface. Any other failure shows up
+    # immediately as an unreachable host end in verify().
+    ip addr add "${subnet}.254/24" dev "$iface" 2>/dev/null || true
+    ip link set "$iface" up
+    log "host joined as ${subnet}.254 (${iface}, $(wg show "$iface" peers | grep -c .) peers)"
+}
+
+# host_addr_for — the address a guest should use to reach this host. It is the
+# host's address on the same bridge the guest sits on, not the LAN address:
+# the mesh must keep working when the uplink is unplugged.
+host_addr_for() {
+    local guest_ip="$1" route
+    route="$(ip -o route get "$guest_ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"
+    printf '%s' "${route:-192.168.122.1}"
+}
+
+# count_lines <file> — non-empty line count, always exactly one line on stdout.
+#
+# WHY: `grep -c . f || echo 0` is a trap. On an EMPTY (but existing) file grep
+# prints "0" AND exits 1, so the `|| echo 0` fires too and stdout is "0\n0".
+# The caller then does [[ "$n" -ge "$m" ]] and dies with "syntax error in
+# expression". This is the same shape that cost an installer run on 2026-08-22.
+# awk exits 0 on an empty file and 2 on a missing one, so it prints one number
+# in every case.
+count_lines() {
+    awk 'NF{n++} END{print n+0}' "$1" 2>/dev/null || echo 0
+}
+
+# ─── verify by handshake ─────────────────────────────────────────────────────
+verify() {
+    local mesh="$1" f iface expect ok
+    f="$(mesh_file "$mesh")"
+    iface="$(iface_for "$mesh")"
+    expect="$(count_lines "$f")"
+    log "waiting for handshakes (${expect} peers)..."
+    for _ in $(seq 1 20); do
+        ok="$(wg show "$iface" latest-handshakes 2>/dev/null | awk '$2 > 0' | grep -c . || true)"
+        [[ "$ok" -ge "$expect" ]] && break
+        sleep 2
+    done
+    ok="$(wg show "$iface" latest-handshakes 2>/dev/null | awk '$2 > 0' | grep -c . || true)"
+    if [[ "$ok" -ge "$expect" && "$expect" -gt 0 ]]; then
+        log "mesh '${mesh}' up: ${ok}/${expect} peers handshaked"
+        return 0
+    fi
+    warn "mesh '${mesh}': only ${ok}/${expect} peers have handshaked"
+    return 1
+}
+
+# ─── commands ────────────────────────────────────────────────────────────────
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+up)
+    mesh="${1:?usage: kvm-mesh up <mesh> <subnet> <vm>...}"
+    subnet="${2:?subnet required, e.g. 10.254.0}"
+    shift 2
+    [[ $# -gt 0 ]] || die "name at least one VM"
+    [[ "$subnet" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "subnet must be three octets, e.g. 10.254.0"
+    mkdir -p "$MESH_DIR"
+    : >"$(mesh_file "$mesh")"
+    joined=0
+    for vm in "$@"; do join_vm "$mesh" "$subnet" "$vm" && joined=$((joined + 1)); done
+    # A count is not a result: say how many of what was asked for actually made it.
+    log "joined ${joined}/$# VM(s)"
+    [[ "$joined" -gt 0 ]] || die "no VM joined — nothing to peer"
+    peer_all "$mesh" "$subnet"
+    verify "$mesh"
+    ;;
+add)
+    mesh="${1:?usage: kvm-mesh add <mesh> <vm>...}"
+    shift
+    f="$(mesh_file "$mesh")"
+    [[ -s "$f" ]] || die "mesh '$mesh' does not exist — use 'up' first"
+    subnet="$(
+        awk 'NR==1 {print $0}' "$f" >/dev/null
+        ip -o -4 addr show "$(iface_for "$mesh")" 2>/dev/null |
+            awk '{split($4,a,"/"); split(a[1],b,"."); print b[1]"."b[2]"."b[3]}'
+    )"
+    [[ -n "$subnet" ]] || die "cannot determine the subnet of mesh '$mesh' — is it up?"
+    joined=0
+    for vm in "$@"; do join_vm "$mesh" "$subnet" "$vm" && joined=$((joined + 1)); done
+    log "joined ${joined}/$# VM(s)"
+    peer_all "$mesh" "$subnet"
+    verify "$mesh"
+    ;;
+status)
+    mesh="${1:?usage: kvm-mesh status <mesh>}"
+    iface="$(iface_for "$mesh")"
+    f="$(mesh_file "$mesh")"
+    printf '  members recorded : %s\n' "$(count_lines "$f")"
+    # `ip` exits 1 when the iface is absent -- i.e. the mesh is simply not up,
+    # which is exactly what `status` exists to report. Without this, pipefail
+    # trips the ERR trap and prints a spurious "FAIL at line N" into an
+    # otherwise correct report.
+    printf '  host interface   : %s\n' "$(ip -o -4 addr show "$iface" 2>/dev/null | awk '{print $4}' || true)"
+    printf '  peers            : %s\n' "$(wg show "$iface" peers 2>/dev/null | grep -c . || true)"
+    printf '  handshaked       : %s\n' "$(wg show "$iface" latest-handshakes 2>/dev/null | awk '$2>0' | grep -c . || true)"
+    # `if`, not `[[ ]] && { }`: an empty mesh is a legitimate state to report,
+    # but as the last command in the branch a failing `[[ ]]` becomes the
+    # script's exit status, so `kvm-mesh status` on a fresh mesh returned 1
+    # while printing a perfectly good report.
+    if [[ -s "$f" ]]; then
+        echo "  members:"
+        awk '{printf "    %-24s id=%-4s %s\n", $1, $2, $4}' "$f"
+    else
+        echo "  members:            (none yet)"
+    fi
+    ;;
+down)
+    mesh="${1:?usage: kvm-mesh down <mesh>}"
+    iface="$(iface_for "$mesh")"
+    f="$(mesh_file "$mesh")"
+    while read -r vm id pub ip; do
+        [[ -n "$vm" ]] || continue
+        guest "$ip" "ip link del ${iface} 2>/dev/null || true" >/dev/null 2>&1 || true
+        log "removed ${iface} from ${vm}"
+    done <"$f" 2>/dev/null || true
+    ip link del "$iface" 2>/dev/null || true
+    rm -f "$f" "/etc/wireguard/${iface}.setconf"
+    log "mesh '${mesh}' torn down"
+    ;;
+"" | -h | --help | help) usage ;;
+*)
+    usage
+    exit 2
+    ;;
+esac
