@@ -157,13 +157,15 @@ declare -A OS_VARIANTS=(
 # Non-fatal on purpose: a golden that built and sealed correctly must not be
 # failed by a bookkeeping error. But the miss IS logged, because a silent one
 # is exactly how the estate drifts out of step with the inventory.
-_register_golden() {
-    local _name="$1"
+_register_vm() {
+    local _name="$1" _role="$2" _status="${3:-running}"
     command -v kldload-db >/dev/null 2>&1 || return 0
-    kldload-db vm-register --name "$_name" --role klab-golden --status sealed >/dev/null 2>&1 ||
+    kldload-db vm-register --name "$_name" --role "$_role" --status "$_status" >/dev/null 2>&1 ||
         warn "could not register ${_name} in the state DB — it will not appear in the Ansible inventory"
     return 0
 }
+
+_register_golden() { _register_vm "$1" klab-golden sealed; }
 
 _osvariant_known() {
     local _v="$1"
@@ -1375,13 +1377,26 @@ if [ "$WANT_ZFS" = "1" ] && ! command -v zfs >/dev/null 2>&1; then
     fi
     [ $_ok -eq 1 ] || echo "WARNING: no zfs-release rpm found — ZFS will not install"
   else
-    dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm" 2>/dev/null || true
+    # EL (centos/rocky/rhel). This was one swallowed line: a failed repo
+    # install returned 0, zfs-dkms then quietly did not install, and the golden
+    # sealed with no ZFS. The Fedora branch above already warns loudly about
+    # exactly this; the EL branch never did.
+    # HISTORY: fiend, 2026-08-31 22:19 — the rocky golden sealed ZFS-less while
+    # the 21:30 build of the same distro was fine. That log carried mirror 404s.
+    if ! dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm"; then
+      echo "WARNING: zfs-release rpm did not install for $(rpm --eval "%{dist}") — ZFS will not install" >&2
+    fi
   fi
   if [ "$KLAB_ZFS_DEV" = "1" ]; then
     dnf install -y zfs zfs-dkms zfs-test 2>/dev/null || true
   else
     dnf install -y zfs zfs-dkms 2>/dev/null || true
   fi
+  # Check the ARTEFACT, not the transaction. Both installs above are
+  # best-effort by design (a distro without a ZFS repo must not abort the
+  # golden), so the only honest signal is whether the package landed.
+  rpm -q zfs-dkms >/dev/null 2>&1 ||
+    echo "WARNING: zfs-dkms is NOT installed after the ZFS transaction — this golden will have no ZFS module" >&2
 fi
 if [ "$KLAB_ZFS_DEV" = "1" ] && ! test -f /usr/share/zfs/zfs-tests.sh; then
   dnf install -y zfs-test 2>/dev/null || true
@@ -1521,13 +1536,39 @@ if [ "$KLAB_ZFS_DEV" = "1" ]; then
 fi
 
 # Load ZFS module
+#
+# HISTORY: fiend, 2026-08-31 22:19. The rocky golden sealed with no ZFS at all
+# and `klab verify` reported "ZFS NO" with nothing in 4000 lines of log naming
+# a cause. The 21:30 build of the same distro had been fine.
+#
+# `rpm -q` prints "package <name> is not installed" on STDOUT (not stderr) and
+# exits 1, so `rpm -q --qf ... 2>/dev/null || echo ""` did not suppress it and
+# did not replace it -- it CONCATENATED it. ZFS_VER became the literal sentence
+# "package zfs-dkms is not installed", `[ -n "$ZFS_VER" ]` was therefore true,
+# and dkms went looking for /usr/src/zfs-package zfs-dkms is not installed.
+# Both dkms errors were then eaten by `|| true`. Ask whether the package is
+# installed; never infer it from a version string.
 modprobe zfs || {
-  ZFS_VER=$(rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
-  if [ -n "$ZFS_VER" ]; then
-    dkms build -m zfs -v "$ZFS_VER" -k "$KVER" 2>&1 || true
-    dkms install -m zfs -v "$ZFS_VER" -k "$KVER" 2>&1 || true
+  if ! rpm -q zfs-dkms >/dev/null 2>&1; then
+    echo "FATAL: zfs-dkms is not installed -- the ZFS repo step did not run or failed" >&2
+  else
+    ZFS_VER=$(rpm -q --qf '%{VERSION}' zfs-dkms)
+    echo "klab: building zfs/${ZFS_VER} for ${KVER} via dkms"
+    dkms build -m zfs -v "$ZFS_VER" -k "$KVER" 2>&1 ||
+      echo "WARNING: dkms build failed for zfs/${ZFS_VER} on ${KVER}" >&2
+    dkms install -m zfs -v "$ZFS_VER" -k "$KVER" 2>&1 ||
+      echo "WARNING: dkms install failed for zfs/${ZFS_VER} on ${KVER}" >&2
+    # depmod warns on a stale map; harmless
     depmod -a "$KVER" 2>/dev/null || true
+    # asserted immediately below by the lsmod outcome check
     modprobe zfs 2>/dev/null || true
+  fi
+  # Outcome, not exit code. Every path above can "succeed" and still leave the
+  # module absent, which is the state that actually gets sealed into a golden.
+  if lsmod | grep -q '^zfs '; then
+    echo "klab: ZFS module loaded ($(zfs version 2>/dev/null | head -1))"
+  else
+    echo "FATAL: ZFS module NOT loaded after dkms -- this golden has no ZFS" >&2
   fi
 }
 
@@ -2794,7 +2835,26 @@ deploy_site() {
         # the zvols persisted, and `klab deploy blue` silently no-op'd.
         if zfs list "$spath" >/dev/null 2>&1; then
             if virsh dominfo "$sname" >/dev/null 2>&1; then
-                warn "${sname} already exists and has a libvirt domain — skipping"
+                # A DEFINED domain is not a RUNNING one. This branch used to
+                # `continue` unconditionally, and the caller then sat in
+                # "Waiting for VMs to boot (static IPs: ...)" for an address a
+                # shut-off domain can never acquire. It is the same "disks but
+                # no running VMs" failure the comment above describes, one
+                # state further along, and it makes `klab deploy` non-idempotent
+                # in the exact situation an operator re-runs it: after a reboot.
+                # HISTORY: fiend .117, 2026-09-01 — all five blue VMs defined
+                # and shut off, all five skipped, deploy hung on the boot wait.
+                if [[ "$(virsh domstate "$sname" 2>/dev/null)" == "running" ]]; then
+                    warn "${sname} already exists and is running — skipping"
+                elif virsh start "$sname" >/dev/null 2>&1; then
+                    log "${sname} already existed but was not running — started it"
+                else
+                    warn "${sname} exists and could NOT be started — it will not get an address"
+                fi
+                # vm-register is an upsert-or-warn, and a VM that predates this
+                # code has no row at all. Re-running deploy is how an operator
+                # repairs the estate, so it must repair the bookkeeping too.
+                _register_vm "$sname" "klab-${site}" running
                 ((skipped++))
                 continue
             fi
@@ -2840,6 +2900,17 @@ deploy_site() {
         }
 
         echo -e "  ${G}${sname}${N} started"
+        # Register the SITE vm, not just the golden it came from. Everything the
+        # comment on _register_vm says applies here with more force: a site VM
+        # is the thing playbooks actually target, and until 2026-09-01 klab had
+        # exactly one vm-register call site in the whole file -- the goldens.
+        # Site VMs reached the inventory only by accident, via rows some older
+        # workflow had left behind.
+        # HISTORY: fiend .117, 2026-09-01. Four of the five klab-blue-* VMs had
+        # rows from an earlier run and klab-blue-fedora had none, so it was
+        # invisible to Ansible while its four siblings were listed -- with
+        # nothing anywhere reporting a difference.
+        _register_vm "$sname" "klab-${site}" running
         ((deployed++))
     done
 
@@ -4241,7 +4312,19 @@ cmd_verify() {
         [[ "$zfs_loaded" != "YES" ]] && zc="$R"
         [[ "$tests_found" != "YES" ]] && tc="$Y"
         printf "  %-12s ${G}%-10s${N} ${G}%-10s${N} ${zc}%-12s${N} ${tc}%-10s${N}\n" "$distro" "OK" "$vm_ip" "$zfs_loaded" "$tests_found"
-        [[ "$zfs_loaded" == "YES" ]] && ((pass++)) || ((fail++))
+        # NOT `[[ cond ]] && ((pass++)) || ((fail++))`. `((pass++))` is a
+        # POST-increment: with pass=0 it evaluates to 0, which is a FALSE exit
+        # status, so the `||` branch fired too and the first passing distro
+        # incremented BOTH counters.
+        # HISTORY: fiend, 2026-09-01. Five distros ran, exactly one (rocky) was
+        # bad, and the summary printed "Pass: 4  Fail: 2" -- a failure count
+        # larger than the number of failures, on the one line an operator reads
+        # to decide whether the goldens are good.
+        if [[ "$zfs_loaded" == "YES" ]]; then
+            ((pass++))
+        else
+            ((fail++))
+        fi
 
         virsh destroy "$vm_name" 2>/dev/null || true
         virsh undefine "$vm_name" 2>/dev/null || true
