@@ -485,6 +485,91 @@ else
     fi
 fi
 
+# ── Go trees ───────────────────────────────────────────────────────────────
+#
+# kldload ships a Go console -- wg/, the read-only WireGuard estate lens -- and
+# until 2026-09-02 nothing had ever looked at it. smoke-build gates shell and
+# python; kldload has no GitHub Actions; and wg/ is tracked inside this repo
+# rather than in its own, so it inherited none of the sister consoles' CI.
+#
+# The cost was exactly what you would expect from a tree with no gate: the
+# static binary shipped six symbols nobody called, because manual.go had lost
+# the //go:build gui tag its upstream copy still carries, and its header
+# comment claimed the file was "shared by both consoles" so nobody looked.
+# staticcheck found all six in under a second, the first time it was ever run
+# there.
+#
+# Discovered by module, not by a hardcoded path: a second Go tree added later
+# gets gated automatically instead of quietly repeating this.
+_section "Go trees"
+
+GO_MODS=()
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    while IFS= read -r -d '' f; do
+        [[ "$(basename "$f")" == "go.mod" ]] && GO_MODS+=("$(dirname "$f")")
+    done < <(git -C "$ROOT" ls-files -z '*go.mod')
+fi
+
+if [[ ${#GO_MODS[@]} -eq 0 ]]; then
+    _pass "go trees: none tracked, nothing to gate"
+elif ! command -v go >/dev/null 2>&1; then
+    # Loud, never silent. A gate that cannot run is reported as not having run.
+    _warn "go trees" "go not installed — ${#GO_MODS[@]} Go tree(s) are UNGATED (this check DID NOT RUN)"
+else
+    for _gm in "${GO_MODS[@]}"; do
+        _gd="$ROOT/$_gm"
+        # GOTMPDIR inside the tree: `go test` links a test binary into TMPDIR
+        # and executes it, so a host mounting /tmp noexec (onyx does) fails with
+        # "fork/exec ...: permission denied" — which reads like a broken test
+        # and is actually the gate failing to start.
+        mkdir -p "$_gd/.gotmp"
+        _go_bad=""
+        [[ -n "$(cd "$_gd" && gofmt -l . 2>/dev/null)" ]] && _go_bad+=" gofmt"
+        (cd "$_gd" && go vet ./... >/dev/null 2>&1) || _go_bad+=" vet"
+        (cd "$_gd" && go vet -tags gui ./... >/dev/null 2>&1) || _go_bad+=" vet(gui)"
+        (cd "$_gd" && GOTMPDIR="$_gd/.gotmp" go test ./... >/dev/null 2>&1) || _go_bad+=" test"
+        (cd "$_gd" && GOTMPDIR="$_gd/.gotmp" go test -tags gui ./... >/dev/null 2>&1) || _go_bad+=" test(gui)"
+        if [[ -z "$_go_bad" ]]; then
+            _pass "go ${_gm}: gofmt, vet and test clean (both flavors)"
+        else
+            _fail "go ${_gm}" "failing:${_go_bad} — run 'cd ${_gm} && make check'"
+        fi
+
+        # staticcheck is separate because it catches the class the others miss
+        # entirely: code that compiles, passes vet and is reached by nothing.
+        if command -v staticcheck >/dev/null 2>&1; then
+            _sc_bad=""
+            (cd "$_gd" && staticcheck ./... >/dev/null 2>&1) || _sc_bad+=" static"
+            (cd "$_gd" && staticcheck -tags gui ./... >/dev/null 2>&1) || _sc_bad+=" gui"
+            if [[ -z "$_sc_bad" ]]; then
+                _pass "go ${_gm}: staticcheck clean (both flavors)"
+            else
+                _fail "go ${_gm} staticcheck" "dead or suspect code in:${_sc_bad} — cd ${_gm} && staticcheck ./..."
+            fi
+        else
+            _warn "go ${_gm} staticcheck" "staticcheck not installed — dead code in this tree is UNGATED"
+        fi
+
+        # govulncheck needs the online vulnerability database, and this gate is
+        # expected to work on a darksite host with no route out. So: report what
+        # it found when it ran, and say plainly that it did not when it could
+        # not. Never let the offline case read as clean.
+        if ! command -v govulncheck >/dev/null 2>&1; then
+            _warn "go ${_gm} govulncheck" "govulncheck not installed — dependency advisories are UNGATED"
+        elif ! (cd "$_gd" && timeout 180 govulncheck ./... >/tmp/kld-govuln.$$ 2>&1); then
+            if grep -qiE 'no such host|dial tcp|timeout|connection refused' /tmp/kld-govuln.$$; then
+                _warn "go ${_gm} govulncheck" "no route to the vulnerability database — this check DID NOT RUN"
+            else
+                _fail "go ${_gm} govulncheck" "$(grep -m1 'Vulnerability #' /tmp/kld-govuln.$$ || echo 'see govulncheck ./...')"
+            fi
+            rm -f /tmp/kld-govuln.$$
+        else
+            _pass "go ${_gm}: govulncheck reports no vulnerabilities"
+            rm -f /tmp/kld-govuln.$$
+        fi
+    done
+fi
+
 # ── Unit-copy completeness ─────────────────────────────────────────────────
 #
 # Every kldload systemd unit shipped in includes.chroot must appear in
