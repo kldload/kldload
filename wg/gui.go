@@ -102,7 +102,6 @@ var (
 	palQuiet  = darkPal.quiet
 	palStale  = darkPal.stale
 	palAlarm  = darkPal.alarm
-	palSelect = darkPal.sel
 	palCyan   = darkPal.cyan
 )
 
@@ -113,8 +112,7 @@ func setPalette(v fyne.ThemeVariant) {
 	}
 	palBg, palPanel, palRaised, palLine = p.bg, p.panel, p.raised, p.line
 	palFg, palDim, palBrand, palAmber = p.fg, p.dim, p.brand, p.amber
-	palAlive, palQuiet, palStale, palAlarm, palSelect =
-		p.alive, p.quiet, p.stale, p.alarm, p.sel
+	palAlive, palQuiet, palStale, palAlarm = p.alive, p.quiet, p.stale, p.alarm
 	palCyan = p.cyan
 }
 

@@ -1,4 +1,13 @@
-// manual.go — the built-in manual, shared by both consoles.
+//go:build gui
+
+// manual.go — the built-in manual, rendered in the GUI's Manual tab.
+//
+// GUI-ONLY, and the build tag says so. Nothing outside gui.go references
+// renderManual, manPage, iconSVG or the two regexes, so without the tag the
+// static (nogui) build compiles all six and uses none: staticcheck U1000 on
+// every one of them. The standalone wgxplore tree has carried this tag since
+// it was written; this copy lost it, and the header comment claiming the file
+// was "shared by both consoles" was the reason nobody looked.
 //
 // WHY embedded: an operator reading the estate at 3am should not have to find
 // out whether `man` was installed in this image, or whether the package that
