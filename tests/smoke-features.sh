@@ -259,6 +259,34 @@ fi
 # node and ZERO handshakes for its whole life, because `wg setconf` had been
 # handed a wg-quick config and rejected the entire file — with stderr discarded
 # and a success line printed. Count handshakes, not peers.
+# ─── Baseboard management ───────────────────────────────────────────────────
+# Fedora enables ipmi.service by preset. On a box with no BMC the helper exits
+# 1 and leaves a permanently failed unit, which is worse than it sounds: an
+# operator who sees one failed unit on every machine stops reading
+# `systemctl --failed`, and the next failure — the one that matters — goes
+# unread. A drop-in conditions the unit on DMI type 38 so it SKIPS instead.
+#
+# Report which world we are in either way, because "no BMC" should be visible
+# rather than silent. This has only been exercised on desktop hardware; the
+# BMC-present direction is untested.
+_section "Baseboard management (IPMI)"
+
+if [[ -e /sys/firmware/dmi/entries/38-0 ]]; then
+    # swallow: is-active exits non-zero for every state that is not "active",
+    # and "inactive" is a correct answer here — a oneshot that already ran.
+    _ipmi_state="$(systemctl is-active ipmi.service 2>/dev/null || true)"
+    if [[ "$_ipmi_state" == "active" || "$_ipmi_state" == "inactive" ]]; then
+        _pass "IPMI: BMC present (DMI type 38) and ipmi.service is ${_ipmi_state}"
+    else
+        _fail "IPMI" "a BMC is present but ipmi.service is ${_ipmi_state} — the driver did not come up"
+    fi
+elif systemctl is-failed ipmi.service >/dev/null 2>&1; then
+    _fail "IPMI" \
+        "no BMC on this hardware (no DMI type 38) yet ipmi.service FAILED — the condition drop-in is missing, and a permanently failed unit trains operators to ignore systemctl --failed"
+else
+    _pass "IPMI: no BMC on this hardware — ipmi.service correctly skipped, not failed"
+fi
+
 _section "WireGuard meshes"
 
 if have wg; then
