@@ -53,11 +53,16 @@ build_in_flight() {
 
 # inv_hosts — hostnames the Ansible inventory currently offers
 inv_hosts() {
-    kldload-inventory --list 2>/dev/null |
-        python3 -c 'import json,sys
+    # No `|| true` on the pipeline: capture first and return early instead, so
+    # "the inventory tool is missing" and "the inventory is empty" stay
+    # distinguishable at the call site rather than both collapsing to silence.
+    local _inv
+    _inv="$(kldload-inventory --list 2>/dev/null)" || return 0
+    [[ -n "$_inv" ]] || return 0
+    printf '%s' "$_inv" | python3 -c 'import json,sys
 try: d=json.load(sys.stdin)
 except Exception: sys.exit()
-for h in sorted(d.get("_meta",{}).get("hostvars",{})): print(h)' 2>/dev/null || true
+for h in sorted(d.get("_meta",{}).get("hostvars",{})): print(h)' 2>/dev/null
 }
 
 # ─── 1. Desktop apps that ship as three files ───────────────────────────────
@@ -135,6 +140,8 @@ fi
 _section "Component state"
 
 if have kldload-component && have virsh; then
+    # swallow: grep -c exits 1 on zero matches, and zero control planes is a
+    # valid answer -- it is the "correctly absent" branch below.
     _cp_live=$(virsh list --all --name 2>/dev/null | grep -c '^kldload-cp' || true)
     _k8s_state="$(kldload-component list 2>/dev/null | awk '$1=="k8s"{print $2}')"
     if ((_cp_live > 0)); then
@@ -208,6 +215,8 @@ if have zfs; then
         [[ -n "$_ds" ]] || continue
         _g_total=$((_g_total + 1))
         zfs list -t snapshot "${_ds}@golden" >/dev/null 2>&1 || _g_nosnap+=" ${_ds##*/}"
+        # swallow: grep exits 1 when no golden exists yet, which is the
+        # "none built yet" warning below, not a failure of this check.
     done < <(zfs list -H -o name -r rpool/vms 2>/dev/null | grep -E '/(k8s-golden|klab-golden-[a-z]+|klab-desktop-[a-z0-9]+|kzfstest-golden-[a-z0-9]+)$' || true)
     if ((_g_total == 0)); then
         _warn "golden images" "none built yet"
@@ -234,6 +243,7 @@ if have virsh; then
         [[ -n "$_vm" ]] || continue
         _snd_n=$((_snd_n + 1))
         virsh dumpxml "$_vm" 2>/dev/null | grep -q '<sound' || _snd_missing+=" $_vm"
+        # swallow: grep exits 1 on an empty domain list, handled as "no domains".
     done < <(virsh list --all --name 2>/dev/null | grep . || true)
     if ((_snd_n == 0)); then
         _warn "guest audio" "no domains defined"
@@ -256,8 +266,11 @@ if have wg; then
     while read -r _if; do
         [[ -n "$_if" ]] || continue
         _wg_any=1
+        # swallow: an interface with no peers yet is normal, not an error.
         _peers="$(wg show "$_if" peers 2>/dev/null | grep -c . || true)"
         ((_peers == 0)) && continue
+        # swallow: zero handshakes is the condition this check exists to
+        # report, so grep's exit 1 here is data, not a failure.
         _hs="$(wg show "$_if" latest-handshakes 2>/dev/null | awk '$2>0' | grep -c . || true)"
         if ((_hs > 0)); then
             _pass "${_if}: ${_hs}/${_peers} peer(s) have handshaked"
