@@ -82,11 +82,29 @@ _section "EFI / Bootloader"
 test_succeeds "EFI partition mounted" "mountpoint -q /boot/efi"
 test_dir "EFI directory exists" "/boot/efi/EFI"
 
-# Check for ZFSBootMenu
-if find /boot/efi -name "zfsbootmenu*" -o -name "ZFSBootMenu*" -o -name "vmlinuz*" 2>/dev/null | grep -q .; then
-    _pass "ZFSBootMenu/kernel in EFI"
+# The ESP must carry a bootloader the firmware will actually run.
+#
+# HISTORY: 2026-09-01, fiend .117. This block used to search for a file NAMED
+# zfsbootmenu*/ZFSBootMenu*/vmlinuz*. kldload installs ZFSBootMenu as
+# EFI/zbm/BOOTX64.EFI and the GRUB-direct path as EFI/<vendor>/grubx64.efi, so
+# no kldload install has ever matched it -- every one of them has warned here
+# since the check was written, and nobody looked because it was only a WARN.
+# Worse, it was wrong in BOTH directions: a completely empty ESP produced the
+# identical warning, so the check could neither pass on a healthy machine nor
+# fail on a broken one. That is decoration, not a gate.
+#
+# This is boot-critical, so it FAILS rather than warns: a machine whose ESP has
+# no bootloader does not come back from the next reboot.
+_esp_boot=""
+[[ -f /boot/efi/EFI/zbm/BOOTX64.EFI ]] && _esp_boot="ZFSBootMenu"
+if [[ -z "$_esp_boot" ]] &&
+    find /boot/efi/EFI -maxdepth 2 \( -iname 'grubx64.efi' -o -iname 'shimx64.efi' \) 2>/dev/null | grep -q .; then
+    _esp_boot="GRUB"
+fi
+if [[ -n "$_esp_boot" ]]; then
+    _pass "ESP carries a bootloader ($_esp_boot)"
 else
-    _warn "ZFSBootMenu in EFI" "no ZFSBootMenu or kernel found in /boot/efi"
+    _fail "ESP bootloader" "neither EFI/zbm/BOOTX64.EFI nor EFI/*/grubx64.efi on /boot/efi -- this machine cannot boot"
 fi
 
 test_file "Hostid configured" "/etc/hostid"

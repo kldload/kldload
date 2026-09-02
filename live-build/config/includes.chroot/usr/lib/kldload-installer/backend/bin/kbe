@@ -94,8 +94,21 @@ list)
     # environment as a SNAPSHOT of the active root (rpool/ROOT/<host>@<name>),
     # so listing filesystems alone hid every BE the operator created — created
     # BEs never appeared in `kbe list` (verified on hardware 2026-07-24).
-    zfs list -r -t filesystem,snapshot -o name,creation,used rpool/ROOT 2>/dev/null ||
-        echo "(no boot environments found)"
+    # Do NOT swallow zfs's stderr here. "(no boot environments found)" reads
+    # exactly like a healthy pool that happens to be empty, so a `zfs list`
+    # that failed for any other reason -- pool suspended, dataset renamed,
+    # ZFS module not loaded -- reported itself as "nothing to see".
+    # HISTORY: fiend .117, 2026-09-01. The installed-system smoke test warned
+    # "new BE not visible in kbe list" seconds after `kbe create` had logged
+    # success and the snapshot really was on disk. The BE was fine; this line
+    # had eaten the reason and printed the reassuring message instead.
+    if _be_out="$(zfs list -r -t filesystem,snapshot -o name,creation,used rpool/ROOT 2>&1)"; then
+        printf '%s\n' "$_be_out"
+    else
+        printf 'ERROR: could not list boot environments under rpool/ROOT:\n' >&2
+        printf '%s\n' "$_be_out" >&2
+        exit 1
+    fi
 
     echo ""
     echo "Active bootfs:"

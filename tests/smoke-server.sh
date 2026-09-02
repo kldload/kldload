@@ -135,11 +135,28 @@ else
     _fail "kbe create" "failed to create boot environment"
 fi
 
-if kbe list 2>/dev/null | grep -q "$BE_NAME"; then
+# Do not throw kbe's stderr away here. This check warned "new BE not visible"
+# on install after install with no way to tell WHICH of three very different
+# things had happened: kbe list failed outright, kbe create lied about
+# succeeding, or the BE exists and only the listing missed it. On fiend .117
+# (2026-09-01) the warning fired while the snapshot was demonstrably on disk,
+# and the same sequence run by hand a minute later passed -- so the useful
+# information was in the stderr this line was discarding.
+_be_err="$(mktemp)"
+_be_out="$(kbe list 2>"$_be_err")" && _be_rc=0 || _be_rc=$?
+# grep -c exits 1 when the count is 0, and 0 is a perfectly valid answer here
+# -- it is the answer that distinguishes "kbe create lied" from "listing bug".
+_be_ondisk="$(zfs list -t snapshot -H -o name 2>/dev/null | grep -c "$BE_NAME" || true)"
+if ((_be_rc != 0)); then
+    _fail "kbe list" "exited ${_be_rc}: $(head -1 "$_be_err")"
+elif grep -q "$BE_NAME" <<<"$_be_out"; then
     _pass "kbe list shows new BE"
+elif [[ "$_be_ondisk" == "0" ]]; then
+    _fail "kbe list" "kbe create reported success but ${BE_NAME} is on neither kbe list nor disk"
 else
-    _warn "kbe list" "new BE not visible in kbe list"
+    _warn "kbe list" "${BE_NAME} is on disk but absent from kbe list ($(grep -c . <<<"$_be_out") rows) — listing bug, not data loss"
 fi
+rm -f "$_be_err"
 
 # Clean up
 kbe delete "$BE_NAME" >/dev/null 2>&1 || true
