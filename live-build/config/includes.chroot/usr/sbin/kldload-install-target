@@ -2240,8 +2240,35 @@ main() {
         k_log "BE dataset not mounted at ${KLDLOAD_TARGET_MNT} — mounting now"
         local _be
         _be=$(zfs list -H -o name 2>/dev/null | grep -E '^rpool/ROOT/[^/]+$' | head -1)
-        [[ -n "$_be" ]] && zfs mount "$_be" 2>&1 || true
-        zfs mount -a 2>&1 || true
+        if [[ -n "$_be" ]]; then
+            # `mount -t zfs` takes an EXPLICIT target path. `zfs mount "$_be"`
+            # would honour the dataset's own mountpoint property instead, and on
+            # a pool that is being reinstalled that property is very often "/" —
+            # i.e. it would mount the old root over the live installer.
+            mount -t zfs "$_be" "${KLDLOAD_TARGET_MNT}" 2>&1 ||
+                k_log "WARNING: could not mount ${_be} at ${KLDLOAD_TARGET_MNT}"
+        else
+            k_log "WARNING: no rpool/ROOT/<be> dataset found to mount"
+        fi
+        # There is deliberately no `zfs mount -a` here.
+        #
+        # It was doing exactly what it says: mounting EVERY dataset of every
+        # imported pool at whatever mountpoint each one claims. On a reinstall
+        # that is the previous system's /, /home, /usr/local, /var/log and
+        # /root — mounted over the running live environment.
+        #
+        # HISTORY: fiend, 2026-09-02. The old rpool was imported, this line
+        # mounted it over the live medium, and the installer carried on inside a
+        # half-old filesystem: it wrote its own log into the OLD pool's
+        # /var/log, /home/live disappeared so the Chrome UI froze, the webui
+        # restarted when its files were swapped underneath it, and the install
+        # stopped without ever reaching the wipe. Nothing was lost because the
+        # disk was never touched, but the session could only be recovered by
+        # exporting the pool by hand.
+        #
+        # If the BE above could not be mounted, the hard verify below refuses to
+        # continue — which is the correct outcome and does not require mounting
+        # anything else to reach it.
     fi
     mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
     if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then

@@ -2467,11 +2467,29 @@ CUSTOMREPO
         if ! mountpoint -q "${target}" 2>/dev/null; then
             k_log_to "$log" "  [target unmounted — re-importing rpool with altroot=${target}]"
             zpool import -f -N -R "${target}" rpool >>"$log" 2>&1 || true
-            # Find the BE dataset (rpool/ROOT/<host_short>) and mount it
+            # Find the BE dataset (rpool/ROOT/<host_short>) and mount it AT the
+            # target path explicitly.
+            #
+            # The altroot on the import above only applies when the import
+            # actually happens. If rpool is already imported -- bare, with no
+            # altroot, which is the normal state on a machine being reinstalled
+            # -- that line is a no-op and everything below inherits the pool's
+            # real mountpoint properties instead. `zfs mount "$_be"` would then
+            # mount the old root at "/", and `zfs mount -a` would bring /home,
+            # /usr/local, /var/log and /root with it, over the live installer.
+            #
+            # HISTORY: fiend, 2026-09-02, from the same shape in
+            # kldload-install-target. The installer ended up writing its own log
+            # into the OLD pool's /var/log, /home/live vanished and the UI
+            # froze, and the install stopped before reaching the wipe.
             local _be
             _be=$(zfs list -H -o name 2>/dev/null | grep -E '^rpool/ROOT/[^/]+$' | head -1)
-            [[ -n "$_be" ]] && zfs mount "$_be" >>"$log" 2>&1 || true
-            zfs mount -a >>"$log" 2>&1 || true
+            if [[ -n "$_be" ]]; then
+                mount -t zfs "$_be" "${target}" >>"$log" 2>&1 ||
+                    k_log_to "$log" "  WARNING: could not mount ${_be} at ${target}"
+            fi
+            # No `zfs mount -a`: the caller only needs ${target} itself, and the
+            # blanket form is what mounted a previous install over the live one.
         fi
     }
     _ensure_target_mounted
