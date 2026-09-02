@@ -475,7 +475,15 @@ Commands:
               virsh removal, or if metrics targets for one node go dark.
 
 Options:
-  --workers N      Number of worker nodes (default: 0 — CP runs all platform pods)
+  --control-planes N, --cps N
+                   Control planes to build (default: 3 = real HA, tolerates
+                   losing one). Clamped to an ODD number that fits this host's
+                   RAM — see the "Control planes:" line at the start of a run
+                   for what was actually chosen. A single-CP cluster is not
+                   the supported shape; it exists only as the clamp result on
+                   a host too small for three.
+  --workers N      Number of worker nodes (default: 0 — the control planes run
+                   all platform pods themselves, which is a valid cluster).
   --ram MB         RAM per node in MB (default: 4096)
   --cpus N         vCPUs per node (default: 2)
   --disk GB        Disk per node in GB (default: 40)
@@ -487,7 +495,7 @@ Flow:
     2. Import to ZFS zvol, boot with cloud-init
     3. Run kube-setup inside VM (install kubeadm, containerd, etc.)
     4. Shut down + snapshot = golden image (cached for next time)
-    5. Clone golden → control plane + N workers (~100ms each)
+    5. Clone golden → control planes + N workers (~100ms each)
     6. Boot all, configure WireGuard mesh
     7. kube-init on CP (Cilium + MetalLB + ZFS CSI + Gateway API + Hubble)
     8. kube-join on workers
@@ -496,8 +504,12 @@ Flow:
 Subsequent runs skip steps 1-4 (golden image is cached).
 
 Examples:
-  kube-cluster bootstrap                  # 1 CP + 3 workers, 4GB RAM each
-  kube-cluster bootstrap --workers 5      # 1 CP + 5 workers
+  kube-cluster bootstrap                  # 3 CPs + 0 workers (HA, 4GB each)
+  kube-cluster bootstrap --workers 3      # 3 CPs + 3 workers — the 6-node
+                                          #   reference shape; ~6m45s on fiend
+  kube-cluster bootstrap --workers 5      # 3 CPs + 5 workers
+  kube-cluster bootstrap --cps 1          # single CP — only for a host that
+                                          #   cannot fit three; no HA
   kube-cluster bootstrap --ram 8192       # 8GB RAM per node
   kube-cluster destroy                    # tear down everything
   kube-cluster status                     # cluster health
