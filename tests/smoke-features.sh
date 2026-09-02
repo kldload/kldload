@@ -300,10 +300,47 @@ if have wg; then
         # swallow: zero handshakes is the condition this check exists to
         # report, so grep's exit 1 here is data, not a failure.
         _hs="$(wg show "$_if" latest-handshakes 2>/dev/null | awk '$2>0' | grep -c . || true)"
-        if ((_hs > 0)); then
-            _pass "${_if}: ${_hs}/${_peers} peer(s) have handshaked"
+        # LIVE, not EVER. `$2>0` only says a peer handshook at some point in the
+        # past, and WireGuard keeps that timestamp forever. On 2026-09-02
+        # klab-blue reported a clean 5/5 while all five of its VMs were `shut
+        # off` and the newest handshake was 41 minutes old. With
+        # persistent-keepalive 25 a live peer rekeys about every two minutes, so
+        # 180s is a generous line between "carrying traffic" and "carried some,
+        # once". _never counts peers that have NEVER completed one -- the
+        # original klab failure, where a config wg setconf silently rejected
+        # left five peers that never worked at all.
+        _now="$(date +%s)"
+        _live="$(wg show "$_if" latest-handshakes 2>/dev/null |
+            awk -v n="$_now" '$2>0 && (n-$2)<180' | grep -c . || true)"
+        _never="$(wg show "$_if" latest-handshakes 2>/dev/null |
+            awk '$2==0' | grep -c . || true)"
+        # Three outcomes, not two. This check was written against the failure
+        # where klab had five peers and zero handshakes for its entire life, so
+        # `_hs > 0` was enough to catch it -- but that also means 1 of 100 scores
+        # a clean green. A count is not a result until it is compared with what
+        # was GIVEN. klab-green sat at 4/5 and reported PASS on 2026-09-02.
+        #
+        # Partial is a WARN, not a FAIL: one guest being powered off is a normal
+        # state on a lab host and should not fail a suite. It must still be
+        # visible, and it must name the peer, or the operator has a number and
+        # nowhere to go with it.
+        if ((_hs == 0)); then
+            _fail "${_if}" "${_peers} peer(s) configured and NOT ONE has ever handshaked — the mesh carries nothing"
+        elif ((_never > 0)); then
+            _silent="$(wg show "$_if" latest-handshakes 2>/dev/null |
+                awk '$2==0 {print substr($1,1,16) "..."}' | tr '\n' ' ')"
+            _fail "${_if}" "${_never} of ${_peers} peer(s) have NEVER handshaked — never-worked, not merely idle: ${_silent}"
+        elif ((_live == _peers)); then
+            _pass "${_if}: ${_live}/${_peers} peer(s) live"
+        elif ((_live > 0)); then
+            _warn "${_if}" "only ${_live}/${_peers} peer(s) live right now (all ${_peers} have handshaked before)"
         else
-            _fail "${_if}" "${_peers} peer(s) configured and NOT ONE has handshaked — the mesh carries nothing"
+            # Every peer has worked, none is up now. On a lab host with its
+            # golden VMs powered off this is the expected state, so it is not a
+            # failure -- but it must not read as a green mesh either.
+            _oldest="$(wg show "$_if" latest-handshakes 2>/dev/null |
+                awk -v n="$_now" '$2>0 {print n-$2}' | sort -n | head -1)"
+            _warn "${_if}" "idle: all ${_peers} peer(s) proven but none live (newest handshake ${_oldest:-?}s ago — VMs powered off?)"
         fi
     done < <(wg show interfaces 2>/dev/null | tr ' ' '\n')
     ((_wg_any == 0)) && _warn "WireGuard" "no interfaces up"
