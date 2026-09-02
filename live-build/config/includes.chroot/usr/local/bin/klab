@@ -2925,6 +2925,37 @@ WGINIT
             ((node_id++))
             continue
         }
+        # Bring the interface UP BEFORE adding peers, and configure it from a
+        # stripped copy of its own config. Two bugs lived in the single line
+        # that used to sit AFTER this loop:
+        #
+        #  1. Ordering. `wg set <dev> peer ...` needs the device to exist. On a
+        #     first deploy every peer add below ran against a device that had
+        #     not been created yet and failed into `|| true`; only a SECOND
+        #     deploy -- finding the device left behind by the first -- ever
+        #     populated peers.
+        #  2. `wg setconf` is not wg-quick. Address/DNS/MTU are wg-quick
+        #     directives, and setconf aborts the ENTIRE file on the first one it
+        #     does not recognise, so `ListenPort = 51830` was never applied and
+        #     the kernel assigned a random ephemeral port -- while every peer
+        #     entry, on the VMs and on the host, targets :51830.
+        #
+        # Net effect: the klab mesh had five peers on every node, zero
+        # handshakes, and klab printed "WireGuard mesh configured".
+        # HISTORY: fiend .117, 2026-09-01. wg-lab.conf said ListenPort 51830;
+        # the live interfaces were on 51237, 34090 and 52759; ping across the
+        # 10.252.0.0/24 mesh was 100% loss.
+        _ssh_cmd "${wg_ips[$distro_a]}" bash -s <<WGUP || true
+ip link add dev wg-lab type wireguard 2>/dev/null
+_t="\$(mktemp)"
+grep -vE '^[[:space:]]*(Address|DNS|MTU|Table|SaveConfig|PreUp|PostUp|PreDown|PostDown)[[:space:]]*=' \
+    /etc/wireguard/wg-lab.conf >"\$_t"
+wg setconf wg-lab "\$_t" || echo "WARNING: wg setconf failed on wg-lab" >&2
+rm -f "\$_t"
+ip addr add ${wg_base}.${node_id}/24 dev wg-lab 2>/dev/null
+ip link set wg-lab up 2>/dev/null
+WGUP
+
         local peer_id=1
         for distro_b in "${DISTROS[@]}"; do
             [[ -z "${wg_ips[$distro_b]:-}" ]] && {
@@ -2938,7 +2969,6 @@ WGINIT
             _ssh_cmd "${wg_ips[$distro_a]}" "wg set wg-lab peer ${wg_pubs[$distro_b]} allowed-ips ${wg_base}.${peer_id}/32 endpoint ${wg_ips[$distro_b]}:51830 persistent-keepalive 25" 2>/dev/null || true
             ((peer_id++))
         done
-        _ssh_cmd "${wg_ips[$distro_a]}" "ip link add dev wg-lab type wireguard 2>/dev/null; wg setconf wg-lab /etc/wireguard/wg-lab.conf 2>/dev/null; ip addr add ${wg_base}.${node_id}/24 dev wg-lab 2>/dev/null; ip link set wg-lab up 2>/dev/null" || true
         # Allow WireGuard traffic through firewall
         _ssh_cmd "${wg_ips[$distro_a]}" "nft add table inet filter 2>/dev/null; nft add chain inet filter input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null; nft add rule inet filter input iifname wg-lab accept 2>/dev/null; nft add rule inet filter input udp dport 51830 accept 2>/dev/null" || true
         ((node_id++))
@@ -2985,13 +3015,43 @@ PEER
             ((node_id++))
         done
 
-        # Bring up host WireGuard interface
+        # Bring up host WireGuard interface.
+        #
+        # `wg setconf` is NOT wg-quick. It understands only PrivateKey,
+        # ListenPort and FwMark in [Interface]; Address/DNS/MTU/Table/PostUp are
+        # wg-quick directives. Worse, it does not skip a line it does not know
+        # -- it aborts the ENTIRE file with "Configuration parsing error". The
+        # config written above carries `Address = ...` because the same file is
+        # what an operator would hand to `wg-quick up`, so every setconf here
+        # failed on line 3 and installed NONE of the five peers. With stderr
+        # sent to /dev/null and the success line logged unconditionally, the
+        # deploy printed "Host joined blue mesh" over a mesh with zero peers.
+        # HISTORY: fiend .117, 2026-09-01 — all five blue VMs had wg-lab up
+        # with 5 peers each; `wg show klab-blue` on the host listed none.
+        # The address is applied by `ip addr add` two lines down regardless, so
+        # feed setconf a stripped copy and leave the on-disk file wg-quick-valid.
         ip link del "klab-${site}" 2>/dev/null || true
         ip link add dev "klab-${site}" type wireguard 2>/dev/null
-        wg setconf "klab-${site}" "/etc/wireguard/klab-${site}.conf" 2>/dev/null
+        local _wgconf
+        _wgconf="$(mktemp)"
+        grep -vE '^[[:space:]]*(Address|DNS|MTU|Table|SaveConfig|PreUp|PostUp|PreDown|PostDown)[[:space:]]*=' \
+            "/etc/wireguard/klab-${site}.conf" >"$_wgconf"
+        if ! wg setconf "klab-${site}" "$_wgconf"; then
+            warn "wg setconf failed for klab-${site} — the host will have no peers on this mesh"
+        fi
+        rm -f "$_wgconf"
         ip addr add "${host_wg_ip}/24" dev "klab-${site}" 2>/dev/null
         ip link set "klab-${site}" up 2>/dev/null
-        log "Host joined ${site} mesh as ${host_wg_ip} (klab-${site})"
+        # Outcome, not exit code: report what the interface actually carries.
+        local _npeers
+        # grep -c exits 1 on zero matches, and zero peers is exactly the
+        # condition this line exists to detect.
+        _npeers="$(wg show "klab-${site}" peers 2>/dev/null | grep -c . || true)"
+        if ((_npeers > 0)); then
+            log "Host joined ${site} mesh as ${host_wg_ip} (klab-${site}, ${_npeers} peers)"
+        else
+            warn "Host interface klab-${site} is up but has NO peers — the mesh is not usable"
+        fi
     fi
 
     log "WireGuard mesh configured (${wg_base}.0/24)"
