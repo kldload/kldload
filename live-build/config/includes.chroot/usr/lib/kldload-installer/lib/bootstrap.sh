@@ -1662,7 +1662,14 @@ CUSTOMREPO
         # btop removed in build #51 (d769013) — replaced by kst-dashboard's
         # tmux multi-pane top equivalents; leftover here caused "I dropped
         # btop but it's still on the install" reports (.135 2026-06-05).
-        fzf fd-find ripgrep zoxide fastfetch cloud-init podman
+        #
+        # `bat` sits in the Debian AND Arch lists and was missing from this one
+        # only -- a plain distro-parity hole, not a decision. It is already in
+        # the Fedora darksite manifest, so the mirror has been carrying it all
+        # along and nothing here reaches the network to add it. Caught by the
+        # post-install audit on fiend 2026-09-02, which reported `bat` as
+        # "command not found" on a fedora/desktop install.
+        fzf fd-find ripgrep zoxide fastfetch cloud-init podman bat
         # Sanoid Perl deps (sanoid binary copied by k_install_system_files)
         perl-Config-IniFiles perl-Capture-Tiny
         # Web UI + kldload tools backend
