@@ -2173,6 +2173,32 @@ HELMCHARTS
         [[ -f "$_unit_path" ]] && cp "$_unit_path" "${ROOTFS}/usr/lib/systemd/system/$(basename "$_unit_path")"
     done
 
+    # Drop-in directories, by glob rather than by name.
+    #
+    # The loop above matches unit FILES by pattern, and every pattern is a
+    # kldload-owned name. A drop-in that modifies a STOCK unit -- which is the
+    # only way to change behaviour of something we do not ship -- matches none
+    # of them, so it silently never reaches the ISO.
+    #
+    # HISTORY: 2026-09-02. zfs-mount.service.d/10-kldload-never-on-live.conf was
+    # written to stop a target's filesystems being mounted over the live
+    # installer, committed, built, and was simply absent from the squashfs. The
+    # code half of the same fix shipped fine because it lives in a file this
+    # build already copies. Caught by checking the ISO rather than the build's
+    # exit code -- the same lesson the Timer taught two builds earlier.
+    #
+    # Glob, not a list: a new drop-in is picked up with no edit here.
+    for _dropin_dir in /build/live-build/config/includes.chroot/usr/lib/systemd/system/*.d; do
+        [[ -d "$_dropin_dir" ]] || continue
+        _dropin_dst="${ROOTFS}/usr/lib/systemd/system/$(basename "$_dropin_dir")"
+        mkdir -p "$_dropin_dst"
+        # swallow: a drop-in directory that exists but holds no .conf yet is a
+        # work-in-progress, not a build failure. smoke-build asserts the glob
+        # itself is still wired, which is the part that can silently rot.
+        cp "$_dropin_dir"/*.conf "$_dropin_dst/" 2>/dev/null || true
+        log "systemd drop-in shipped: $(basename "$_dropin_dir") ($(ls "$_dropin_dst" | grep -c .) file(s))"
+    done
+
     # Wholesale-copy /usr/local/lib/kldload-rag/ (RAG service code +
     # indexer + unit-file sources). Same root-cause fix as the unit-file
     # glob above: previous hardcoded approach missed the lib dir entirely,

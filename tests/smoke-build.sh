@@ -1588,6 +1588,32 @@ else
     fi
 fi
 
+# ── systemd drop-ins reach the ISO ──────────────────────────────────────────
+#
+# build-iso.sh copies unit FILES by name pattern, and every pattern is a
+# kldload-owned name. A drop-in that modifies a STOCK unit matches none of them.
+# zfs-mount.service.d/10-kldload-never-on-live.conf was written, committed,
+# built and was simply absent from the squashfs, while the code half of the same
+# fix shipped fine because it lived in a file the build already copied.
+#
+# A glob now handles drop-ins. This asserts the glob is still there, because the
+# failure it prevents is invisible: the build succeeds, the ISO is short a file,
+# and nothing says so until the behaviour it was meant to change does not.
+_section "systemd drop-ins"
+
+_di_src="$ROOT/live-build/config/includes.chroot/usr/lib/systemd/system"
+if [[ -d "$_di_src" ]]; then
+    _di_dirs=("$_di_src"/*.d)
+    if [[ ! -d "${_di_dirs[0]}" ]]; then
+        _pass "systemd drop-ins: none shipped, nothing to carry"
+    elif grep -q 'for _dropin_dir in .*includes.chroot/usr/lib/systemd/system/\*\.d' "$ROOT/builder/build-iso.sh"; then
+        _pass "systemd drop-ins: build-iso.sh carries all ${#_di_dirs[@]} by glob ($(basename "${_di_dirs[0]}"))"
+    else
+        _fail "systemd drop-ins" \
+            "${#_di_dirs[@]} drop-in dir(s) in includes.chroot and no glob in build-iso.sh to copy them — they will not reach the ISO"
+    fi
+fi
+
 # ── Behavioural units (installer/security fixes the ISO checks can't reach) ──
 _section "Behavioural Units"
 if bash "$ROOT/tests/smoke-unit.sh"; then
