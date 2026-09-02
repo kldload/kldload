@@ -1491,14 +1491,50 @@ if ! k_have_func k_seed_ca; then
         esac
 
         if [[ -f "${iso_ca}" ]]; then
-            mkdir -p "${target}/etc/kldload/ca" "${target}/usr/local/share/ca-certificates"
+            mkdir -p "${target}/etc/kldload/ca"
             cp "${iso_ca}" "${target}/etc/kldload/ca/ca.crt"
-            cp "${iso_ca}" "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
-            chmod 0644 "${target}/etc/kldload/ca/ca.crt" \
-                "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
-            chroot "${target}" update-ca-certificates \
-                >>"${KLDLOAD_LOG_DIR}/bootstrap.log" 2>&1 || true
-            k_log "ISO CA cert seeded to target"
+            chmod 0644 "${target}/etc/kldload/ca/ca.crt"
+
+            # Seed into the anchor dir THIS family actually reads, and run the
+            # refresh tool THIS family actually ships.
+            #
+            # HISTORY: this used to mkdir /usr/local/share/ca-certificates and
+            # run `update-ca-certificates` on every target, Fedora included.
+            # Both are Debian-only. The refresh silently did nothing (swallowed
+            # by a bare `|| true`), and worse, the leftover EMPTY-BUT-PRESENT
+            # directory became a false family probe: kldload-ca decides "this is
+            # Debian" by testing -d on that path, so on every RPM install it
+            # took the Debian branch, called a binary that is not installed, and
+            # died with "host trust bundle is OUT OF SYNC" -- while the RPM
+            # anchor had landed correctly and the trust store was perfectly
+            # fine. fiend, 2026-09-02, fedora/desktop: 147 certs in the bundle,
+            # HTTPS working, and a FATAL in the firstboot log every run.
+            local _anchor _refresh
+            case "${distro}" in
+            debian | ubuntu)
+                _anchor="${target}/usr/local/share/ca-certificates"
+                _refresh="update-ca-certificates"
+                ;;
+            arch)
+                _anchor="${target}/etc/ca-certificates/trust-source/anchors"
+                _refresh="trust extract-compat"
+                ;;
+            *)
+                _anchor="${target}/etc/pki/ca-trust/source/anchors"
+                _refresh="update-ca-trust"
+                ;;
+            esac
+            mkdir -p "${_anchor}"
+            cp "${iso_ca}" "${_anchor}/kldload-ca.crt"
+            chmod 0644 "${_anchor}/kldload-ca.crt"
+            if chroot "${target}" ${_refresh} \
+                >>"${KLDLOAD_LOG_DIR}/bootstrap.log" 2>&1; then
+                k_log "ISO CA cert seeded to target (${_refresh})"
+            else
+                # Loud, but not fatal: firstboot's kldload-ca re-runs the same
+                # refresh, so a miss here is recoverable. It must still be SAID.
+                k_log "WARNING: ${_refresh} failed in the target chroot — the kldload CA is staged at ${_anchor#"${target}"} but NOT yet trusted; firstboot will retry"
+            fi
         else
             k_log "No ISO CA at ${iso_ca} — skipping CA seeding"
         fi

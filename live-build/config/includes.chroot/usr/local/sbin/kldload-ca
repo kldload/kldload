@@ -352,7 +352,16 @@ cmd_trust_install() {
     # status, journalctl shows the actual command output.
     local installed=0
 
-    if [[ -d /etc/pki/ca-trust/source/anchors ]]; then
+    # PROBE THE TOOL, NOT THE DIRECTORY. A directory is something any script
+    # can create by accident; the refresh binary is what the family actually
+    # ships. The installer used to mkdir /usr/local/share/ca-certificates on
+    # every target including Fedora, which made the Debian branch below fire on
+    # every RPM host and die on a `update-ca-certificates` that was never
+    # installed -- reporting "trust bundle OUT OF SYNC" while the RPM anchor
+    # had landed correctly and curl was happily doing TLS. fiend, 2026-09-02.
+    # `-d` alone answers "did somebody make a folder"; `command -v` answers
+    # "is this that kind of system".
+    if [[ -d /etc/pki/ca-trust/source/anchors ]] && command -v update-ca-trust >/dev/null 2>&1; then
         install -m 0644 "${ROOT_CRT}" /etc/pki/ca-trust/source/anchors/kldload-ca.crt
         update-ca-trust extract ||
             die "update-ca-trust extract failed — host trust bundle is OUT OF SYNC with the anchors dir."
@@ -386,7 +395,7 @@ cmd_trust_install() {
         log "installed into /etc/pki/ca-trust (RH/CentOS/Fedora/Rocky)"
     fi
 
-    if [[ -d /usr/local/share/ca-certificates ]]; then
+    if [[ -d /usr/local/share/ca-certificates ]] && command -v update-ca-certificates >/dev/null 2>&1; then
         install -m 0644 "${ROOT_CRT}" /usr/local/share/ca-certificates/kldload-ca.crt
         update-ca-certificates ||
             die "update-ca-certificates failed — host trust bundle is OUT OF SYNC with /usr/local/share/ca-certificates/."
@@ -394,7 +403,7 @@ cmd_trust_install() {
         log "installed into /usr/local/share/ca-certificates (Debian/Ubuntu)"
     fi
 
-    if [[ -d /etc/ca-certificates/trust-source/anchors ]]; then
+    if [[ -d /etc/ca-certificates/trust-source/anchors ]] && command -v trust >/dev/null 2>&1; then
         install -m 0644 "${ROOT_CRT}" /etc/ca-certificates/trust-source/anchors/kldload-ca.crt
         trust extract-compat ||
             die "trust extract-compat failed — host trust bundle is OUT OF SYNC with /etc/ca-certificates/trust-source/anchors/."
@@ -402,7 +411,11 @@ cmd_trust_install() {
         log "installed into /etc/ca-certificates/trust-source/anchors (Arch)"
     fi
 
-    [[ $installed -eq 1 ]] || die "no known system trust store found — unsupported distro?"
+    # Still fatal, and now it means what it says: not one of the three known
+    # layouts had BOTH its anchor dir and its refresh tool. Fail closed -- an
+    # untrusted CA is an outage, and an outage is the correct failure here.
+    [[ $installed -eq 1 ]] ||
+        die "no usable system trust store — anchor dir present without its refresh tool, or an unsupported distro?"
 
     # ── Browser trust (NSS) ──────────────────────────────────────────────
     # Chrome and Firefox on Linux do NOT read the system trust store. They
