@@ -27,7 +27,15 @@ COMPONENT_REQUIRES="kvm"
 # to the Kubernetes API and blocks when the cluster is down or libvirt is
 # stale, which is exactly the state an operator runs `list` to diagnose.
 component_status() {
-    if have_vm '^k8s-'; then echo installed; else echo absent; fi
+    # The artefact for this component is the CLUSTER, not the template it gets
+    # cloned from. `^k8s-` matched only k8s-golden, so a host that had built a
+    # golden and never bootstrapped reported "installed", while a live cluster
+    # whose golden had been reaped reported "absent" -- wrong in both
+    # directions. kube-cluster names control planes ${CLUSTER_NAME}-cp[-N],
+    # default cluster name "kldload".
+    # HISTORY: fiend .117, 2026-09-01 -- six nodes Ready, 56/56 pods running,
+    # and `kldload-component list` printed "absent".
+    if have_vm "^${CLUSTER_NAME:-kldload}-cp"; then echo installed; else echo absent; fi
 }
 
 component_install() {

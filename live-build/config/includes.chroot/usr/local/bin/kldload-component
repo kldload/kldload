@@ -264,6 +264,16 @@ cmd_list() {
             if declare -F component_status >/dev/null; then
                 _live="$(component_status 2>/dev/null || true)"
                 [[ "$_state" == "installed" && "$_live" == "absent" ]] && _state="missing"
+                # ...and the mirror image, which was missing until 2026-09-01.
+                # Only the installed->absent direction was reconciled, so a
+                # component deployed by its own tool (`kube-cluster bootstrap`,
+                # `klab golden all`) rather than through this CLI never got a
+                # state file and printed "absent" forever. On fiend .117 that
+                # table said absent for k8s, klab AND kvm while six Kubernetes
+                # nodes were Ready, twenty klab VMs were defined and libvirtd
+                # was serving all of them. An operator trusting it would have
+                # re-installed on top of a live cluster.
+                [[ "$_state" == "absent" && "$_live" == "installed" ]] && _state="unmanaged"
             fi
             printf '%-12s %-12s %-8s %s\n' \
                 "$_n" "$_state" "~${COMPONENT_MINUTES}m" "${COMPONENT_SUMMARY}"
@@ -314,6 +324,7 @@ STATES
   absent       not installed
   installed    installed and its own status check agrees
   missing      recorded as installed, but no longer present on the system
+  unmanaged    present on the system, but not installed through this CLI
   running      a detached worker is doing the work now
   interrupted  a worker was killed (reboot, power cut) mid-run — re-run it
   failed       the verb returned non-zero; see the log
