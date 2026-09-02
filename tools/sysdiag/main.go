@@ -34,7 +34,6 @@ const version = "0.1.0"
 // ─── family palette — matches wgxplore tui.go / gui.go ───────────────────
 var (
 	stTitle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("87"))
-	stSect   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111"))
 	stSel    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("87"))
 	stDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	stOK     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))

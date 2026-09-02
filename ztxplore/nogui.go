@@ -14,10 +14,24 @@
 
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 // RunGUI reports that this binary has no window. main falls back to the TUI.
 func RunGUI(resultsDir string) error {
 	return fmt.Errorf("this is the terminal-only build (ztx-tui); " +
 		"the windowed console is the `ztx` binary")
+}
+
+// runGUIOrFallback goes straight to the text view: this binary has no window.
+//
+// Same two lines on stderr the GUI build prints when its window fails, kept
+// byte-identical on purpose — an operator who sees them in a log should not
+// have to work out which binary produced them.
+func runGUIOrFallback(resultsDir string) {
+	fmt.Fprintln(os.Stderr, "ztx: no GUI available:", RunGUI(resultsDir))
+	fmt.Fprintln(os.Stderr, "ztx: falling back to the text view")
+	os.Exit(RunTUI(resultsDir))
 }

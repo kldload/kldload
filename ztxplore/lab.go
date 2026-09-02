@@ -372,7 +372,7 @@ func GoldenGap(present, missing []string) error {
 	case len(missing) > 0:
 		return fmt.Errorf("no golden image for: %s\n\n"+
 			"Those distros would be silently skipped. Untick them, or build them "+
-			"first from the Lab tab.", strings.Join(missing, ", "))
+			"first from the Lab tab", strings.Join(missing, ", "))
 	}
 	return nil
 }

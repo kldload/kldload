@@ -62,11 +62,6 @@ var buildNum = "0"
 
 const version = "0.1.0"
 
-// windowTitle is the GUI window's title AND, because Fyne derives the X11
-// class from the title, its WM_CLASS. It must stay byte-identical to
-// StartupWMClass in the .desktop file or the shell draws a fallback icon.
-const windowTitle = "OpenZFS Test Lab"
-
 // elevate re-executes this process under sudo when it is not already root.
 //
 // WHY: three of the six panes need privilege — the kernel ring buffer
@@ -144,13 +139,18 @@ func main() {
 		os.Exit(RunTUI(*resultsDir))
 	}
 
-	// A GUI build on a headless box, or a terminal-only build, must not
-	// simply fail: this is the same binary a developer runs over ssh.
-	if err := RunGUI(*resultsDir); err != nil {
-		fmt.Fprintln(os.Stderr, "ztx: no GUI available:", err)
-		fmt.Fprintln(os.Stderr, "ztx: falling back to the text view")
-		os.Exit(RunTUI(*resultsDir))
-	}
+	// A GUI build on a headless box, or a terminal-only build, must not simply
+	// fail: this is the same binary a developer runs over ssh. The decision is
+	// per-flavor and lives in gui.go / nogui.go.
+	//
+	// It used to be `if err := RunGUI(...); err != nil` right here, which reads
+	// fine and is a lie in half the matrix: nogui.go's RunGUI can only ever
+	// return an error, so in the static build that branch is unconditional
+	// (staticcheck SA4023). A //lint:ignore does not help -- staticcheck
+	// analyses one build tag at a time, so the directive is unmatched in the
+	// gui build and becomes a finding of its own. Splitting the function is the
+	// honest fix: each flavor states what it actually does.
+	runGUIOrFallback(*resultsDir)
 }
 
 func usage() {

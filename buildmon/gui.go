@@ -49,13 +49,14 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// iconSVG is the app's own face, carried in the binary so the window and the
-// dock show it even where the hicolor theme is not installed (a bare session,
-// a remote X client). Same file the .desktop points at — one drawing, two
-// consumers, so they cannot drift.
-//
-//go:embed assets/kldload-buildmon.svg
-var iconSVG []byte
+// Moved here from main.go 2026-09-02. main.go carries no build tag, so the
+// static (nogui) binary compiled this constant and used none of it --
+// staticcheck U1000. It is referenced only by the window below.
+// windowTitle is the GUI window's title AND, because Fyne derives the X11
+// class from the title, its WM_CLASS. It MUST stay byte-identical to
+// StartupWMClass in kldload-buildmon.desktop or the shell cannot match the
+// window to its launcher and draws a fallback icon in the dock.
+const windowTitle = "kldload Build & Audit"
 
 // iconPNG is the SAME drawing, rasterised. Fyne hands the app icon to the
 // window manager as _NET_WM_ICON, which is a bitmap property — given only an
@@ -104,11 +105,10 @@ type gui struct {
 	auditList *widget.List
 	findings  []Finding
 
-	doctorBox  *fyne.Container
-	doctorBtn  *widget.Button
-	compBox    *fyne.Container
-	logView    *widget.Entry
-	lastDoctor time.Time
+	doctorBox *fyne.Container
+	doctorBtn *widget.Button
+	compBox   *fyne.Container
+	logView   *widget.Entry
 }
 
 // RunGUI opens the window and blocks until it is closed.
@@ -382,7 +382,7 @@ func (g *gui) refreshComponents() {
 // componentAction confirms first — install and remove are minutes-to-hours of
 // work and remove takes things away, so neither should happen on a stray click.
 func (g *gui) componentAction(verb, name string) {
-	dialog.ShowConfirm(strings.Title(verb)+" "+name+"?",
+	dialog.ShowConfirm(titleFirst(verb)+" "+name+"?",
 		fmt.Sprintf("This runs `kldload-component %s %s`, which detaches and can take a while.\nFollow it in %s",
 			verb, name, ComponentLogPath(name)),
 		func(ok bool) {
@@ -474,4 +474,18 @@ func fmtDur(d time.Duration) string {
 		return fmt.Sprintf("%dh %02dm", h, m)
 	}
 	return fmt.Sprintf("%dm %02ds", m, s)
+}
+
+// titleFirst upper-cases the first rune and leaves the rest alone.
+//
+// Replaces strings.Title, deprecated since Go 1.18 because its word-boundary
+// rule mishandles Unicode punctuation. The alternative the deprecation notice
+// points at, golang.org/x/text/cases, is a dependency this tree does not
+// otherwise need — and the argument here is a verb the caller chose from a
+// fixed set ("install", "remove"), so full title-casing was never the point.
+func titleFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

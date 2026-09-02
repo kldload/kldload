@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"image/color"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,14 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
+
+// Moved here from main.go 2026-09-02. main.go carries no build tag, so the
+// static (nogui) binary compiled this constant and used none of it --
+// staticcheck U1000. It is referenced only by the window below.
+// windowTitle is the GUI window's title AND, because Fyne derives the X11
+// class from the title, its WM_CLASS. It must stay byte-identical to
+// StartupWMClass in the .desktop file or the shell draws a fallback icon.
+const windowTitle = "OpenZFS Test Lab"
 
 // ── theme ──────────────────────────────────────────────────────────────────
 // The family look, ported from zxplore's compactTheme: near-black steel base,
@@ -1046,4 +1055,17 @@ func colouredLabel(s string, c color.Color) fyne.CanvasObject {
 	t := canvas.NewText(s, c)
 	t.TextSize = theme.TextSize()
 	return t
+}
+
+// runGUIOrFallback opens the window, and drops to the text view if it cannot.
+//
+// The GUI build genuinely may fail here — no display, no GL, an X client with
+// no forwarding — and a developer over ssh should get the TUI, not a stack
+// trace.
+func runGUIOrFallback(resultsDir string) {
+	if err := RunGUI(resultsDir); err != nil {
+		fmt.Fprintln(os.Stderr, "ztx: no GUI available:", err)
+		fmt.Fprintln(os.Stderr, "ztx: falling back to the text view")
+		os.Exit(RunTUI(resultsDir))
+	}
 }
