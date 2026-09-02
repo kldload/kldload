@@ -122,6 +122,15 @@ run_suite() {
 # Always run core
 run_suite "Core Tests (ZFS, SSH, Network)" "$SCRIPT_DIR/smoke-core.sh"
 
+# The feature ledger runs on EVERY profile, deliberately. The other suites are
+# organised by subsystem and each one is skipped on the profiles it does not
+# apply to; this one is organised by SHIPPED FEATURE, and a feature that failed
+# to reach the target is exactly the case no subsystem suite is looking for.
+# Its checks degrade to a warning where a subsystem is genuinely absent, so it
+# is safe to run everywhere. See the header of smoke-features.sh for the rule
+# on adding to it: every feature gets a check here in the change that ships it.
+run_suite "Feature Ledger (apps, rollback, estate, goldens, audio, mesh)" "$SCRIPT_DIR/smoke-features.sh"
+
 # Server tests for server, kvm, desktop, ai profiles
 case "$PROFILE" in
 server | kvm | desktop | ai | zfslab)
