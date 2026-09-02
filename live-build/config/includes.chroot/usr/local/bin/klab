@@ -1424,6 +1424,42 @@ dnf install -y qemu-guest-agent 2>/dev/null || echo "klab: WARNING qemu-guest-ag
 # absent or renamed on some releases, and a lab image without eBPF tooling
 # is degraded, not broken — unlike the agent, which now installs alone.
 dnf install -y bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
+
+# Guest audio. The domain already carries an ich9 card (virt-install attaches
+# one), so the HOST half is done — this is the guest half, and without it the
+# card is present and unusable, which looks exactly like a broken host config.
+#
+# Baked into the GOLDEN on purpose: every clone then has working sound the
+# moment it boots, instead of each VM needing the stack pushed into it after
+# the fact. Own transaction, because audio is optional and must never be able
+# to take the guest agent or the kernel down with it (the SPLIT note above).
+#
+# HISTORY (vmxplore audio.go, 2026-08-13, first end-to-end test): the domain
+# had the card, qemu had ich9-intel-hda + hda-duplex, and lspci in the guest
+# showed "Intel ICH9 HD Audio Controller" — yet GNOME offered only "Dummy
+# Output". Cloud images install kernel-core, which deliberately excludes sound
+# drivers to stay small, so snd-hda-intel.ko was not on the disk at all:
+#   lsmod | grep snd_hda_intel -> 0 ;  aplay -l -> no soundcards found
+# That is why kernel-modules is not optional on the RPM side. Debian and
+# Ubuntu ship sound modules inside linux-image, so only RPM needs the extra.
+if dnf install -y kernel-modules-$(uname -r) pipewire pipewire-alsa \
+      pipewire-pulseaudio wireplumber alsa-utils >/dev/null 2>&1; then
+  # The install does not load it; without this the card stays invisible until
+  # a reboot, which a headless golden may never get before it is sealed.
+  modprobe snd-hda-intel 2>/dev/null || true
+  # swallow: --global enable is a no-op when the distro's own presets already
+  # enabled these, which is the common case on anything with a desktop.
+  systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service 2>/dev/null || true
+  # Check the ARTEFACT, not the transaction: userspace can install perfectly
+  # and still have nothing to bind to if the module package was the miss.
+  if [ -d /dev/snd ]; then
+    echo "klab: guest audio ready ($(ls /dev/snd | tr '\n' ' '))"
+  else
+    echo "klab: WARNING audio installed but /dev/snd is absent — no sound card in this guest" >&2
+  fi
+else
+  echo "klab: WARNING guest audio stack did not install — this golden will have no sound" >&2
+fi
 # qemu-guest-agent: IP reporting, a graceful shutdown the hypervisor can
 # actually wait on, and fs-freeze — fs-freeze is what makes a snapshot of a
 # RUNNING guest consistent rather than crash-consistent, which matters for an
@@ -1664,6 +1700,40 @@ apt-get install -y qemu-guest-agent 2>/dev/null || echo "klab: WARNING qemu-gues
 # absent or renamed on some releases, and a lab image without eBPF tooling
 # is degraded, not broken — unlike the agent, which now installs alone.
 apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq 2>/dev/null || true
+
+# Guest audio. The domain already carries an ich9 card (virt-install attaches
+# one), so the HOST half is done — this is the guest half, and without it the
+# card is present and unusable, which looks exactly like a broken host config.
+#
+# Baked into the GOLDEN on purpose: every clone then has working sound the
+# moment it boots, instead of each VM needing the stack pushed into it after
+# the fact. Own transaction, because audio is optional and must never be able
+# to take the guest agent or the kernel down with it (the SPLIT note above).
+#
+# HISTORY (vmxplore audio.go, 2026-08-13, first end-to-end test): the domain
+# had the card, qemu had ich9-intel-hda + hda-duplex, and lspci in the guest
+# showed "Intel ICH9 HD Audio Controller" — yet GNOME offered only "Dummy
+# Output". Cloud images install kernel-core, which deliberately excludes sound
+# drivers to stay small, so snd-hda-intel.ko was not on the disk at all:
+#   lsmod | grep snd_hda_intel -> 0 ;  aplay -l -> no soundcards found
+# That is why kernel-modules is not optional on the RPM side. Debian and
+# Ubuntu ship sound modules inside linux-image, so only RPM needs the extra.
+if DEBIAN_FRONTEND=noninteractive apt-get install -y pipewire pipewire-alsa \
+      pipewire-pulse wireplumber alsa-utils >/dev/null 2>&1; then
+  # swallow: the install does not load the module, and it is absent on a guest
+  # with no sound card at all -- which the /dev/snd check below reports.
+  modprobe snd-hda-intel 2>/dev/null || true
+  # swallow: --global enable is a no-op when the distro's own presets already
+  # enabled these, which is the common case on anything with a desktop.
+  systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service 2>/dev/null || true
+  if [ -d /dev/snd ]; then
+    echo "klab: guest audio ready ($(ls /dev/snd | tr '\n' ' '))"
+  else
+    echo "klab: WARNING audio installed but /dev/snd is absent — no sound card in this guest" >&2
+  fi
+else
+  echo "klab: WARNING guest audio stack did not install — this golden will have no sound" >&2
+fi
 # See the dnf branch for why the guest agent matters on a cloned image.
 systemctl enable --now qemu-guest-agent 2>/dev/null || true
 
@@ -2250,6 +2320,7 @@ build_golden_single() {
         log "  Booting RHEL 10 golden VM (Secure Boot: OFF during build)..."
         log "  Console log: tail -f ${_console_log}"
         virt-install --name "$name" --ram "$RAM" --vcpus "$CPUS" \
+            --sound ich9 \
             --os-variant "${OS_VARIANTS[$distro]}" \
             --disk "path=${zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
             --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole \
@@ -2392,6 +2463,7 @@ build_golden_single() {
     log "  Booting golden VM (Secure Boot: OFF during build, ON for clones)..."
     log "  Console log: tail -f ${_console_log}"
     virt-install --name "$name" --ram "$RAM" --vcpus "$CPUS" \
+        --sound ich9 \
         --os-variant "${OS_VARIANTS[$distro]}" \
         --disk "path=${zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
         --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole \
@@ -2889,6 +2961,7 @@ deploy_site() {
         local ci_iso
         ci_iso="$(make_cloud_init_iso "$sname" "${site}-${distro}" "" "$vm_ip")"
         virt-install --name "$sname" --ram "$RAM" --vcpus "$CPUS" \
+            --sound ich9 \
             --os-variant "${OS_VARIANTS[$distro]}" \
             --disk "path=${sdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
             --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 \
@@ -3746,6 +3819,7 @@ cmd_test() {
         zdev="$(zvol_dev "$name")"
         ci_iso="$(make_cloud_init_iso "$name" "${PREFIX}-test-${distro}")"
         virt-install --name "$name" --ram "$RAM" --vcpus "$CPUS" \
+            --sound ich9 \
             --os-variant "${OS_VARIANTS[$distro]}" \
             --disk "path=${zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
             --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole \
@@ -4281,6 +4355,7 @@ cmd_verify() {
         local ci_iso
         ci_iso="$(make_cloud_init_iso "$vm_name" "$vm_name")"
         virt-install --name "$vm_name" --ram 2048 --vcpus 2 \
+            --sound ich9 \
             --os-variant "${OS_VARIANTS[$distro]}" \
             --disk "path=${vm_zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
             --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole \
