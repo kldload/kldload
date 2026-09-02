@@ -2193,16 +2193,30 @@ LOCKS
         install -m 0644 "$_kf" "${target}/usr/share/konsole/$(basename "$_kf")"
         k_log "carried $(basename "$_kf")"
     done
-    # systemd drop-ins kldload ships (ollama keep-alive, future services).
-    for _dropdir in /etc/systemd/system/*.d; do
-        [[ -d "$_dropdir" ]] || continue
-        _svc=$(basename "$_dropdir")
-        mkdir -p "${target}/etc/systemd/system/${_svc}"
-        for _conf in "$_dropdir"/*.conf; do
-            [[ -f "$_conf" ]] || continue
-            install -m 0644 "$_conf" \
-                "${target}/etc/systemd/system/${_svc}/$(basename "$_conf")"
-            k_log "carried drop-in: ${_svc}/$(basename "$_conf")"
+    # systemd drop-ins kldload ships (ollama keep-alive, the IPMI BMC guard,
+    # the zfs-mount live guard).
+    #
+    # BOTH trees, not just /etc. This loop read /etc/systemd/system/*.d alone
+    # for its whole life, but a vendor drop-in belongs in /usr/lib -- /etc is
+    # the operator's. So the ipmi guard shipped to the live ISO, landed in
+    # /usr/lib/systemd/system/ipmi.service.d, and was never carried to a single
+    # installed system. fiend installed from a 2026-09-02 ISO that contained
+    # the fix and STILL showed `ipmi.service failed` on a box with no BMC,
+    # because the file stopped at the squashfs. Written is not wired.
+    #
+    # Each source tree keeps its own destination: a vendor drop-in stays vendor
+    # so an operator editing /etc still wins.
+    for _droproot in /usr/lib/systemd/system /etc/systemd/system; do
+        for _dropdir in "$_droproot"/*.d; do
+            [[ -d "$_dropdir" ]] || continue
+            _svc=$(basename "$_dropdir")
+            mkdir -p "${target}${_droproot}/${_svc}"
+            for _conf in "$_dropdir"/*.conf; do
+                [[ -f "$_conf" ]] || continue
+                install -m 0644 "$_conf" \
+                    "${target}${_droproot}/${_svc}/$(basename "$_conf")"
+                k_log "carried drop-in: ${_droproot}/${_svc}/$(basename "$_conf")"
+            done
         done
     done
     # /etc/dnf/automatic.conf — security-only nightly upgrade config.

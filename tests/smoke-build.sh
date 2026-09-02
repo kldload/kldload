@@ -1612,6 +1612,23 @@ if [[ -d "$_di_src" ]]; then
         _fail "systemd drop-ins" \
             "${#_di_dirs[@]} drop-in dir(s) in includes.chroot and no glob in build-iso.sh to copy them — they will not reach the ISO"
     fi
+
+    # Second leg: ISO -> INSTALLED TARGET. Reaching the squashfs is only half
+    # the trip, and the half that was already gated. The installer's carry loop
+    # read /etc/systemd/system/*.d only, so every vendor drop-in -- which
+    # correctly lives in /usr/lib, because /etc belongs to the operator -- rode
+    # the ISO and stopped there. fiend installed 2026-09-02 from an ISO that
+    # contained the IPMI BMC guard and still reported `ipmi.service failed` on
+    # a chassis with no BMC. The first leg was green the entire time.
+    if [[ -d "${_di_dirs[0]}" ]]; then
+        if grep -q 'for _droproot in /usr/lib/systemd/system /etc/systemd/system' \
+            "$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"; then
+            _pass "systemd drop-ins: profiles.sh carries both /usr/lib and /etc to the target"
+        else
+            _fail "systemd drop-ins (target)" \
+                "${#_di_dirs[@]} vendor drop-in dir(s) ship in /usr/lib/systemd/system but the installer's carry loop does not walk that tree — they reach the ISO and never the installed system"
+        fi
+    fi
 fi
 
 # ── Behavioural units (installer/security fixes the ISO checks can't reach) ──
