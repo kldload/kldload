@@ -56,6 +56,9 @@ TOUCHED=()
 restore() {
     local f
     for f in "${TOUCHED[@]:-}"; do
+        # A file we never got as far as mutating, or one already restored by
+        # run_case, is the normal path through here -- restore() runs from the
+        # EXIT trap as well as after every case. Only that is swallowed.
         [[ -n "$f" ]] && git checkout -- "$f" 2>/dev/null || true
     done
     TOUCHED=()
@@ -172,11 +175,16 @@ fi
 # The ratchet is the only thing standing between the tree and another 1,400
 # unexplained swallows. If it stops counting, nothing else notices.
 if want_case ratchet; then
+    # The probe is ASSEMBLED rather than written out. The ratchet greps the
+    # tracked sources for the literal string, so spelling it here would make
+    # this test case count itself: the gate under test would fail on its own
+    # tester, permanently, and the only fix would be to stop testing it.
+    _or_true='|'"| true"
     mutate "$VICTIM" \
         '# ─── commands ─' \
-        'gate_selftest_probe() { false || true; }
+        "gate_selftest_probe() { false ${_or_true}; }
 
-# ─── commands ─'
+# ─── commands ─"
     run_case "silent-failure ratchet counts" \
         "bash tests/smoke-build.sh" \
         "silent-failure ratchet"
