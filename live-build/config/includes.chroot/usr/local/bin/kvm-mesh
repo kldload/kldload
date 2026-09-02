@@ -242,23 +242,38 @@ peer_all() {
     umask 022
 
     # Each guest peers with every OTHER guest, plus this host.
+    #
+    # A single unreachable guest must not abort the rest -- a mesh at N-1 is
+    # still a working mesh. But "not fatal" is not "not mentioned": every miss
+    # is COUNTED and reported, because a loop that reports nothing is how nine
+    # of ten items get skipped behind an exit 0. verify() is still the real
+    # gate; this is the diagnostic that tells the operator WHICH peer to look at
+    # rather than just that the total came up short.
     local vm id pub ip pvm pid ppub pip
+    local _tried=0 _missed=0
     while read -r vm id pub ip; do
         [[ -n "$vm" ]] || continue
         while read -r pvm pid ppub pip; do
             [[ -n "$pvm" && "$pvm" != "$vm" ]] || continue
-            # Deliberately not fatal: a mesh is useful at N-1 peers, and a
-            # guest that has gone away mid-run should not abort the others.
-            # verify() is the real gate -- it counts HANDSHAKES against the
-            # member roll, so a peer that silently failed here is reported
-            # there as a shortfall rather than passing unnoticed.
-            guest "$ip" "wg set ${iface} peer ${ppub} allowed-ips ${subnet}.${pid}/32 \
-                endpoint ${pip}:${port} persistent-keepalive 25" >/dev/null 2>&1 || true
+            _tried=$((_tried + 1))
+            if ! guest "$ip" "wg set ${iface} peer ${ppub} allowed-ips ${subnet}.${pid}/32 \
+                endpoint ${pip}:${port} persistent-keepalive 25" >/dev/null 2>&1; then
+                _missed=$((_missed + 1))
+                warn "${vm}: could not program peer ${pvm}"
+            fi
         done <"$f"
-        # Same contract as the peer loop above: verify() catches a miss.
-        guest "$ip" "wg set ${iface} peer ${host_pub} allowed-ips ${subnet}.254/32 \
-            endpoint $(host_addr_for "$ip"):${port} persistent-keepalive 25" >/dev/null 2>&1 || true
+        _tried=$((_tried + 1))
+        if ! guest "$ip" "wg set ${iface} peer ${host_pub} allowed-ips ${subnet}.254/32 \
+            endpoint $(host_addr_for "$ip"):${port} persistent-keepalive 25" >/dev/null 2>&1; then
+            _missed=$((_missed + 1))
+            warn "${vm}: could not program the host peer"
+        fi
     done <"$f"
+    if ((_missed > 0)); then
+        warn "peering: ${_missed} of ${_tried} peer programmings failed"
+    else
+        log "peering: ${_tried}/${_tried} programmed"
+    fi
 
     # This host's side, built as a real config then loaded in one go.
     {
@@ -315,10 +330,15 @@ verify() {
     expect="$(count_lines "$f")"
     log "waiting for handshakes (${expect} peers)..."
     for _ in $(seq 1 20); do
+        # grep -c prints its own "0" and THEN exits 1 on no match, which is the
+        # whole and only reason for the `|| true`: without it pipefail turns a
+        # legitimate "nobody has handshaked yet" into a script abort, one second
+        # into a wait designed to last forty.
         ok="$(wg show "$iface" latest-handshakes 2>/dev/null | awk '$2 > 0' | grep -c . || true)"
         [[ "$ok" -ge "$expect" ]] && break
         sleep 2
     done
+    # Same: zero handshakes is the answer we are measuring, not an error.
     ok="$(wg show "$iface" latest-handshakes 2>/dev/null | awk '$2 > 0' | grep -c . || true)"
     if [[ "$ok" -ge "$expect" && "$expect" -gt 0 ]]; then
         log "mesh '${mesh}' up: ${ok}/${expect} peers handshaked"
@@ -330,6 +350,8 @@ verify() {
 
 # ─── commands ────────────────────────────────────────────────────────────────
 cmd="${1:-}"
+# Bare `kvm-mesh` with no arguments: there is nothing to shift off, and the
+# usage banner below is the correct response to that, not an abort.
 shift || true
 case "$cmd" in
 up)
@@ -375,7 +397,11 @@ status)
     # trips the ERR trap and prints a spurious "FAIL at line N" into an
     # otherwise correct report.
     printf '  host interface   : %s\n' "$(ip -o -4 addr show "$iface" 2>/dev/null | awk '{print $4}' || true)"
+    # Both: grep -c already prints the "0" we want and exits 1 saying so. The
+    # `|| true` keeps that zero and adds nothing -- `|| echo 0` would print a
+    # SECOND zero and the field would read "0 0".
     printf '  peers            : %s\n' "$(wg show "$iface" peers 2>/dev/null | grep -c . || true)"
+    # ditto -- zero handshakes is a reading, not a failure
     printf '  handshaked       : %s\n' "$(wg show "$iface" latest-handshakes 2>/dev/null | awk '$2>0' | grep -c . || true)"
     # `if`, not `[[ ]] && { }`: an empty mesh is a legitimate state to report,
     # but as the last command in the branch a failing `[[ ]]` becomes the
@@ -392,11 +418,20 @@ down)
     mesh="${1:?usage: kvm-mesh down <mesh>}"
     iface="$(iface_for "$mesh")"
     f="$(mesh_file "$mesh")"
+    # Teardown is best-effort BY DESIGN and this is the one place that is
+    # right: `down` exists to get back to a clean state, and every failure here
+    # means the thing being removed is already gone. A guest that is powered
+    # off, a mesh file that never existed, an iface already deleted -- all are
+    # the desired end state arriving early. Refusing to continue would leave
+    # the operator with a half-torn-down mesh and no command to finish it.
     while read -r vm id pub ip; do
         [[ -n "$vm" ]] || continue
+        # unreachable guest == its iface is not coming back either
         guest "$ip" "ip link del ${iface} 2>/dev/null || true" >/dev/null 2>&1 || true
         log "removed ${iface} from ${vm}"
+        # no member file: nothing was ever joined, so nothing to walk
     done <"$f" 2>/dev/null || true
+    # already absent on this host, e.g. a second `down`
     ip link del "$iface" 2>/dev/null || true
     rm -f "$f" "/etc/wireguard/${iface}.setconf"
     log "mesh '${mesh}' torn down"
