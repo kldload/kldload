@@ -1578,11 +1578,42 @@ _darksite_reclaim() {
             log "  KEEPING /root/darksite/ollama ($(du -sh /root/darksite/ollama 2>/dev/null | cut -f1)) — ollama is not installed, so this is still the only copy"
         fi
     fi
-    rm -f /etc/yum.repos.d/kldload-darksite.repo 2>/dev/null
+    _fb_retire_darksite_repo
     systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
     after="$(du -sh /root/darksite 2>/dev/null | cut -f1)"
     log "Darksite package mirrors removed (${before} → ${after}); helm charts kept for offline k8s deploys"
     return 0
+}
+
+# _fb_retire_darksite_repo — drop the offline mirror AND dnf's memory of it.
+#
+# Removing /etc/yum.repos.d/kldload-darksite.repo is only half the job. dnf5
+# keeps each repo's metadata under /var/cache/libdnf5/<id>-<hash>/ (and dnf4
+# under /var/cache/dnf/), and that cache outlives the .repo file. The repo then
+# stops appearing in `dnf repolist --all` while its package list is still
+# resolvable -- so dnf plans a transaction against
+# file:///run/kldload-darksite/..., which is tmpfs and GONE after the reboot,
+# and the whole transaction dies:
+#
+#   Curl error (37): Could not read a file:// file for
+#   file:///run/kldload-darksite/fedora/rpm/python3-dnf-4.24.0-3.fc44.noarch.rpm
+#   Cannot download python3-dnf-4.24.0-3.fc44.noarch.rpm: All mirrors were tried
+#
+# fiend, 2026-09-03: cost python3-dnf, python3-dnf-plugins-core and
+# python3-dnf-plugin-versionlock. The last one is not cosmetic -- the update
+# model is versionlock-based, so package holds silently did not work.
+#
+# The ISO was fine (2038/2038 RPMs, metadata consistent, both files readable),
+# the media was fine (zero I/O errors), and the install itself was fine. Only
+# FIRSTBOOT failed, which is why this looked for two days like a darksite build
+# problem. It never was.
+_fb_retire_darksite_repo() {
+    rm -f /etc/yum.repos.d/kldload-darksite.repo 2>/dev/null
+    # The glob carries the hash suffix dnf appends to the repo id.
+    rm -rf /var/cache/libdnf5/kldload-darksite-* /var/cache/dnf/kldload-darksite-* 2>/dev/null
+    # Belt to that braces: expire whatever else still points at the dead mount.
+    # `|| true` because a cache that is already empty is the success case here.
+    dnf clean metadata >/dev/null 2>&1 || true
 }
 
 # _fb_nvidia_ko_present — is a built NVIDIA kernel module on disk for the
@@ -4289,7 +4320,7 @@ CHROMEPOL
                 fi
             fi
 
-            rm -f /etc/yum.repos.d/kldload-darksite.repo 2>/dev/null
+            _fb_retire_darksite_repo
             if [[ -f /etc/kldload/keep-darksite ]]; then
                 log "LAN-mirror mode: keeping /root/darksite ($(du -sh /root/darksite 2>/dev/null | cut -f1)) and enabling kldload-apt-mirror.service"
                 systemctl enable --now kldload-apt-mirror.service 2>/dev/null || true
