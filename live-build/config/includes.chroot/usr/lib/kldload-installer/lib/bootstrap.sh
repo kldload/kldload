@@ -497,13 +497,33 @@ k_init_tls_ca() {
     fi
 
     if [[ -f "${ca_dir}/root/ca.crt" ]]; then
-        # Stage it where update-ca-certificates will pick it up on first boot,
-        # so host tooling trusts what nginx serves without a manual step.
-        mkdir -p "${target}/usr/local/share/ca-certificates"
-        cp "${ca_dir}/root/ca.crt" \
-            "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
-        chmod 0644 "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
-        k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "TLS trust root ready: ${ca_dir}/root/ca.crt"
+        # Stage it in the anchor dir THIS family reads, so host tooling trusts
+        # what nginx serves without a manual step.
+        #
+        # This used to be an unconditional
+        #     mkdir -p "${target}/usr/local/share/ca-certificates"
+        # with a comment saying "where update-ca-certificates will pick it up".
+        # That is the Debian path and the Debian tool, created on every target
+        # including Fedora, where neither exists. The leftover empty directory
+        # then became a false family probe: kldload-ca decided "this is Debian"
+        # by testing -d on it and died on a binary that was never installed.
+        #
+        # k_seed_ca in kldload-install-target had the identical bug and was
+        # fixed on 2026-09-02; THIS copy was missed, and the audit of the very
+        # next install found the directory back on a Fedora target. Two sites
+        # seeding the same cert two ways is the actual defect; until they are
+        # merged, they have to agree.
+        local _anchor
+        case "${KLDLOAD_DISTRO:-debian}" in
+        debian | ubuntu) _anchor="${target}/usr/local/share/ca-certificates" ;;
+        arch) _anchor="${target}/etc/ca-certificates/trust-source/anchors" ;;
+        *) _anchor="${target}/etc/pki/ca-trust/source/anchors" ;;
+        esac
+        mkdir -p "${_anchor}"
+        cp "${ca_dir}/root/ca.crt" "${_anchor}/kldload-ca.crt"
+        chmod 0644 "${_anchor}/kldload-ca.crt"
+        k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
+            "TLS trust root ready: ${ca_dir}/root/ca.crt (anchored at ${_anchor#"${target}"})"
         return 0
     fi
 
