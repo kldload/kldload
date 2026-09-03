@@ -3155,8 +3155,16 @@ if [[ "$EDITION" != "core" ]]; then
     # Copy Debian darksite APT mirror into the rootfs
     if [[ -d /build/live-build/darksite-debian-cache/apt ]]; then
         mkdir -p "${ROOTFS}/root/darksite/debian"
-        cp -r /build/live-build/darksite-debian-cache/apt "${ROOTFS}/root/darksite/debian/"
-        log "Debian darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/debian" 2>/dev/null | cut -f1)"
+        cp -r /build/live-build/darksite-debian-cache/apt "${ROOTFS}/root/darksite/debian/" ||
+            die "FATAL: copying the Debian darksite into the rootfs failed"
+        # Same outcome check as the Fedora mirror above, and for the same
+        # reason: a bare cp with only a du in the log ships a short mirror in
+        # silence.
+        _ds_src=$(find /build/live-build/darksite-debian-cache/apt -name '*.deb' | wc -l)
+        _ds_dst=$(find "${ROOTFS}/root/darksite/debian/apt" -name '*.deb' | wc -l)
+        [[ "$_ds_src" -eq "$_ds_dst" ]] ||
+            die "FATAL: Debian darksite copy is short — ${_ds_src} debs in the cache, ${_ds_dst} on the ISO"
+        log "Debian darksite verified: ${_ds_dst} debs ($(du -sh "${ROOTFS}/root/darksite/debian" 2>/dev/null | cut -f1))"
     else
         log "WARNING: No Debian darksite found — Debian installs will require internet"
     fi
@@ -3169,8 +3177,16 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ "${KLDLOAD_INCLUDE_UBUNTU_DARKSITE:-0}" == "1" &&
         -d /build/live-build/darksite-ubuntu-cache/apt ]]; then
         mkdir -p "${ROOTFS}/root/darksite/ubuntu"
-        cp -r /build/live-build/darksite-ubuntu-cache/apt "${ROOTFS}/root/darksite/ubuntu/"
-        log "Ubuntu darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/ubuntu" 2>/dev/null | cut -f1)"
+        cp -r /build/live-build/darksite-ubuntu-cache/apt "${ROOTFS}/root/darksite/ubuntu/" ||
+            die "FATAL: copying the Ubuntu darksite into the rootfs failed"
+        # Same outcome check as the Fedora mirror above, and for the same
+        # reason: a bare cp with only a du in the log ships a short mirror in
+        # silence.
+        _ds_src=$(find /build/live-build/darksite-ubuntu-cache/apt -name '*.deb' | wc -l)
+        _ds_dst=$(find "${ROOTFS}/root/darksite/ubuntu/apt" -name '*.deb' | wc -l)
+        [[ "$_ds_src" -eq "$_ds_dst" ]] ||
+            die "FATAL: Ubuntu darksite copy is short — ${_ds_src} debs in the cache, ${_ds_dst} on the ISO"
+        log "Ubuntu darksite verified: ${_ds_dst} debs ($(du -sh "${ROOTFS}/root/darksite/ubuntu" 2>/dev/null | cut -f1))"
     else
         log "No Ubuntu darksite found — Ubuntu installs will require internet"
     fi
@@ -3180,10 +3196,57 @@ if [[ "$EDITION" != "core" ]]; then
     log "Arch darksite: skipped (internet required for Arch installs)"
 
     # Copy Fedora darksite RPM repo into the rootfs
+    #
+    # VERIFIED, not assumed. This was a bare `cp -r` whose only evidence was a
+    # `du -sh` in the log -- no exit check, no count, nothing. A partial copy
+    # therefore shipped in silence, and the failure surfaces at the worst
+    # possible moment: the operator's install, offline, half way through a
+    # transaction.
+    #
+    # fiend, 2026-09-02: libXres-1.2.2-7.fc44 and python3-dnf-4.24.0-3.fc44
+    # were BOTH in the host cache (written 2026-08-30, three days before that
+    # ISO was cut) and absent from the ISO. The install failed with
+    #   Could not read a file:// file .../libXres-1.2.2-7.fc44.x86_64.rpm
+    # -- the repo metadata promising a package the mirror did not have. Free
+    # space was never the issue (1.6T). I could not determine the mechanism
+    # after the fact, which is the whole argument for checking the OUTCOME:
+    # one assertion catches every cause, including the ones nobody names.
     if [[ -d /build/live-build/darksite-fedora-cache/rpm ]]; then
         mkdir -p "${ROOTFS}/root/darksite/fedora"
-        cp -r /build/live-build/darksite-fedora-cache/rpm "${ROOTFS}/root/darksite/fedora/"
-        log "Fedora darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/fedora" 2>/dev/null | cut -f1)"
+        cp -r /build/live-build/darksite-fedora-cache/rpm "${ROOTFS}/root/darksite/fedora/" ||
+            die "FATAL: copying the Fedora darksite into the rootfs failed"
+
+        _ds_src=$(find /build/live-build/darksite-fedora-cache/rpm -name '*.rpm' | wc -l)
+        _ds_dst=$(find "${ROOTFS}/root/darksite/fedora/rpm" -name '*.rpm' | wc -l)
+        if [[ "$_ds_src" -ne "$_ds_dst" ]]; then
+            die "FATAL: Fedora darksite copy is short — ${_ds_src} RPMs in the cache, ${_ds_dst} on the ISO"
+        fi
+
+        # Every package the metadata ADVERTISES must exist as a file. This is
+        # the check that speaks fiend's exact failure: an index promising RPMs
+        # the mirror does not carry is worse than a smaller mirror, because dnf
+        # plans a transaction around it and dies mid-install.
+        _pri=$(find "${ROOTFS}/root/darksite/fedora/rpm/repodata" -name '*primary.xml*' | head -1)
+        if [[ -z "$_pri" ]]; then
+            die "FATAL: Fedora darksite has no primary.xml — createrepo_c did not run"
+        fi
+        case "$_pri" in
+        *.zst) _cat=zstdcat ;;
+        *.gz) _cat=zcat ;;
+        *) _cat=cat ;;
+        esac
+        _missing=0
+        while IFS= read -r _href; do
+            [[ -n "$_href" ]] || continue
+            [[ -f "${ROOTFS}/root/darksite/fedora/rpm/${_href}" ]] && continue
+            _missing=$((_missing + 1))
+            [[ "$_missing" -le 5 ]] && log "  advertised but ABSENT: ${_href}"
+        done < <("$_cat" "$_pri" 2>/dev/null | grep -oE 'href="[^"]+\.rpm"' | sed 's/href="//; s/"$//')
+        if [[ "$_missing" -gt 0 ]]; then
+            die "FATAL: Fedora darksite metadata advertises ${_missing} RPM(s) that are not on the ISO"
+        fi
+
+        log "Fedora darksite verified: ${_ds_dst} RPMs, metadata consistent ($(du -sh "${ROOTFS}/root/darksite/fedora" 2>/dev/null | cut -f1))"
     else
         log "No Fedora darksite found — Fedora installs will require internet"
     fi
