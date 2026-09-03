@@ -2199,6 +2199,19 @@ HELMCHARTS
         log "systemd drop-in shipped: $(basename "$_dropin_dir") ($(ls "$_dropin_dst" | grep -c .) file(s))"
     done
 
+    # environment.d — session-wide environment for the graphical session.
+    #
+    # Copied by glob for the same reason the drop-ins above are: this build
+    # copies files by NAME, so anything landing in a directory nobody
+    # enumerated sits in the repo looking shipped and reaches nothing. That is
+    # how the IPMI guard rode an ISO and stopped at the squashfs on 2026-09-02.
+    if [[ -d /build/live-build/config/includes.chroot/usr/lib/environment.d ]]; then
+        mkdir -p "${ROOTFS}/usr/lib/environment.d"
+        cp /build/live-build/config/includes.chroot/usr/lib/environment.d/*.conf \
+            "${ROOTFS}/usr/lib/environment.d/"
+        log "environment.d shipped: $(ls "${ROOTFS}/usr/lib/environment.d" | grep -c .) file(s)"
+    fi
+
     # Wholesale-copy /usr/local/lib/kldload-rag/ (RAG service code +
     # indexer + unit-file sources). Same root-cause fix as the unit-file
     # glob above: previous hardcoded approach missed the lib dir entirely,

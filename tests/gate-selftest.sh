@@ -211,6 +211,34 @@ if want_case syntax; then
         "syntax"
 fi
 
+# ── 5b. environment.d reaching the installed target ──────────────────────────
+# Shipped 2026-09-02 to fix a cursor that changed size over the title bar in all
+# four Fyne consoles. The file was written, looked shipped, and reached nothing
+# — build-iso.sh copies by NAME, so a new directory is invisible to it. Caught
+# before the first build only because the drop-in failure earlier the same day
+# had made "is it wired?" the reflex.
+if want_case envd-target; then
+    mutate "$PROFILES" \
+        'for _envd in /usr/lib/environment.d/*.conf; do' \
+        'for _envd in /nonexistent/environment.d/*.conf; do'
+    run_case "environment.d reaches the target" \
+        "bash tests/smoke-build.sh" \
+        "environment.d (target)"
+fi
+
+# ── 5c. the cursor-size pair ─────────────────────────────────────────────────
+# XCURSOR_SIZE and dconf cursor-size are the same fact written twice, because
+# GLFW reads the environment and cannot see dconf. Nothing but this gate keeps
+# them in step.
+if want_case cursor-pair; then
+    mutate live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop \
+        'cursor-size=24' \
+        'cursor-size=16'
+    run_case "cursor size pair stays in step" \
+        "bash tests/smoke-build.sh" \
+        "cursor size"
+fi
+
 # ── 6. the Go gate ───────────────────────────────────────────────────────────
 # kldload tracks FOUR Go modules (buildmon, tools/sysdiag, wg, ztxplore) and
 # until 2026-09-02 not one had ever been linted: smoke-build gated shell and

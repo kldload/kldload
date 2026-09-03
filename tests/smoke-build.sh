@@ -485,6 +485,51 @@ else
     fi
 fi
 
+# ── environment.d ──────────────────────────────────────────────────────────
+#
+# Same two-leg trip as the systemd drop-ins, and it fails the same silent way:
+# this build copies files by NAME, so a file in a directory nobody enumerated
+# looks shipped in the repo and reaches nothing. Both legs are asserted, plus
+# the pair-consistency that makes the setting actually correct — XCURSOR_SIZE
+# and dconf's cursor-size are the same fact written twice, because GLFW reads
+# the environment and cannot see dconf.
+_section "environment.d"
+
+_envd_src="$ROOT/live-build/config/includes.chroot/usr/lib/environment.d"
+if [[ ! -d "$_envd_src" ]]; then
+    _pass "environment.d: none shipped, nothing to carry"
+else
+    _envd_n=$(find "$_envd_src" -name '*.conf' | grep -c . || true)
+    if grep -q 'includes.chroot/usr/lib/environment.d' "$ROOT/builder/build-iso.sh"; then
+        _pass "environment.d: build-iso.sh carries all ${_envd_n} to the ISO"
+    else
+        _fail "environment.d (ISO)" \
+            "${_envd_n} file(s) in includes.chroot and nothing in build-iso.sh copies them — they will not reach the ISO"
+    fi
+    if grep -q 'for _envd in /usr/lib/environment.d/\*\.conf' \
+        "$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"; then
+        _pass "environment.d: profiles.sh carries them to an installed target"
+    else
+        _fail "environment.d (target)" \
+            "${_envd_n} file(s) reach the ISO and the installer does not carry them to the target"
+    fi
+
+    # XCURSOR_SIZE and dconf cursor-size must agree, or GLFW apps draw a
+    # different-sized pointer than the rest of the desktop the moment they set
+    # a cursor -- which is at the title bar and the window edges, because those
+    # are client-side decorations. Reported on fiend 2026-09-02.
+    _xc="$(sed -n 's/^XCURSOR_SIZE=//p' "$_envd_src"/*.conf 2>/dev/null | head -1)"
+    _dc="$(sed -n 's/^cursor-size=//p' "$ROOT/live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop" 2>/dev/null | head -1)"
+    if [[ -z "$_xc" || -z "$_dc" ]]; then
+        _warn "cursor size" "XCURSOR_SIZE=${_xc:-unset} dconf cursor-size=${_dc:-unset} — one of the pair is missing"
+    elif [[ "$_xc" == "$_dc" ]]; then
+        _pass "cursor size: XCURSOR_SIZE and dconf cursor-size agree (${_xc})"
+    else
+        _fail "cursor size" \
+            "XCURSOR_SIZE=${_xc} but dconf cursor-size=${_dc} — GLFW apps will draw a different pointer than the desktop"
+    fi
+fi
+
 # ── Go trees ───────────────────────────────────────────────────────────────
 #
 # kldload ships a Go console -- wg/, the read-only WireGuard estate lens -- and

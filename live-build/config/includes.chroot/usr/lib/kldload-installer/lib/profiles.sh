@@ -2219,6 +2219,17 @@ LOCKS
             done
         done
     done
+    # environment.d — session-wide environment for the graphical session.
+    # Same trip as the drop-ins above: reaching the ISO is only half of it, and
+    # the target leg is the half that was missing for every vendor drop-in until
+    # 2026-09-02.
+    for _envd in /usr/lib/environment.d/*.conf; do
+        [[ -f "$_envd" ]] || continue
+        mkdir -p "${target}/usr/lib/environment.d"
+        install -m 0644 "$_envd" "${target}/usr/lib/environment.d/$(basename "$_envd")"
+        k_log "carried environment.d/$(basename "$_envd")"
+    done
+
     # /etc/dnf/automatic.conf — security-only nightly upgrade config.
     if [[ -f /etc/dnf/automatic.conf ]]; then
         mkdir -p "${target}/etc/dnf"
