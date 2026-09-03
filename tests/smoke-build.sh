@@ -499,6 +499,10 @@ _envd_src="$ROOT/live-build/config/includes.chroot/usr/lib/environment.d"
 if [[ ! -d "$_envd_src" ]]; then
     _pass "environment.d: none shipped, nothing to carry"
 else
+    # grep -c prints its own "0" and THEN exits 1 when the directory holds no
+    # .conf yet -- a work-in-progress, not a build failure. The `|| true` keeps
+    # that zero; `|| echo 0` would print a second one and the count would read
+    # "0 0".
     _envd_n=$(find "$_envd_src" -name '*.conf' | grep -c . || true)
     if grep -q 'includes.chroot/usr/lib/environment.d' "$ROOT/builder/build-iso.sh"; then
         _pass "environment.d: build-iso.sh carries all ${_envd_n} to the ISO"
