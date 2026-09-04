@@ -1585,6 +1585,44 @@ _darksite_reclaim() {
     return 0
 }
 
+# _fb_ensure_system_trust — make the OS trust store usable before any HTTPS.
+#
+# NOT the kldload CA. This is the SYSTEM bundle every HTTPS client reads, and
+# firstboot reaches for the network long before kldload-ca trust-install runs.
+#
+# The RPM ships /etc/pki/tls/certs/ca-bundle.crt as a symlink into
+# /etc/pki/ca-trust/extracted/. A `dnf --installroot` bootstrap can land the
+# ca-certificates package without its scriptlet ever running (the scriptlet
+# needs a live trust setup, which a chroot does not have), leaving the symlink
+# present and its TARGET absent. curl then fails every fetch with
+#
+#   Curl error (77): Problem with the SSL CA cert (path? access rights?)
+#   for .../ca-bundle.crt [error adding trust anchors from file ...]
+#
+# fiend 2026-09-03: seven of those between 06:19:57 and 06:20:13, against the
+# NVIDIA container-toolkit repo. kldload-ca repairs exactly this, but it does
+# not run until 370 log lines later -- the install self-healed and the errors
+# were pure noise, but noise that reads like a broken trust store, and on a
+# slower box the retry budget is not guaranteed to cover it.
+#
+# `-e` is false on a dangling symlink too, so this repairs a broken link as
+# well as a missing one. Idempotent; safe to call again from anywhere.
+_fb_ensure_system_trust() {
+    command -v update-ca-trust >/dev/null 2>&1 || return 0
+    local _ext=/etc/pki/ca-trust/extracted
+    if [[ ! -f "${_ext}/pem/tls-ca-bundle.pem" ]]; then
+        log "system trust store not extracted yet — running update-ca-trust before any HTTPS"
+        update-ca-trust extract >>"$LOG" 2>&1 ||
+            log "WARNING: update-ca-trust extract failed — HTTPS fetches may fail verification"
+    fi
+    # The legacy read paths curl/openssl actually open. Shipped by the RPM, and
+    # absent when its scriptlet never ran.
+    [[ -e /etc/pki/tls/certs/ca-bundle.crt ]] ||
+        ln -sf "${_ext}/pem/tls-ca-bundle.pem" /etc/pki/tls/certs/ca-bundle.crt 2>/dev/null
+    [[ -e /etc/pki/tls/cert.pem ]] ||
+        ln -sf "${_ext}/pem/tls-ca-bundle.pem" /etc/pki/tls/cert.pem 2>/dev/null
+}
+
 # _fb_retire_darksite_repo — drop the offline mirror AND dnf's memory of it.
 #
 # Removing /etc/yum.repos.d/kldload-darksite.repo is only half the job. dnf5
@@ -1717,6 +1755,9 @@ main() {
     # Caught on .103: nethogs/iftop/iotop-c absent after install even
     # though they're in the dnf list.
     if command -v dnf >/dev/null 2>&1; then
+        # First network-touching step in firstboot. The trust store has to be
+        # usable BEFORE it, not 370 log lines later.
+        _fb_ensure_system_trust
         local _retry_pkgs=(nethogs iftop iotop-c htop bcc-tools bpftrace osbuild-composer weldr-client)
         local _missing=()
         for _p in "${_retry_pkgs[@]}"; do
