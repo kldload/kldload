@@ -43,7 +43,7 @@
 #     on this host, not attached to a running libvirt domain)
 #
 # Two image shapes are handled:
-#   1. Partition table + ext4 root (cloud-image / klab golden shape):
+#   1. Partition table + ext4/xfs/btrfs root (cloud-image / klab golden shape):
 #      losetup -fP, find largest non-EFI partition, mount, sysprep,
 #      unmount, detach loop.
 #   2. ZFS-on-root inside a zvol (kldload-installed VM shape):
@@ -155,7 +155,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Detect: does the disk contain a ZFS pool, or partitioned ext4?
+# Detect: does the disk contain a ZFS pool, or a partitioned filesystem?
 # Probe via `zdb -l` on the disk itself (and partitions if any). If
 # zdb finds a label, it's ZFS-on-root; otherwise treat as a partitioned
 # image.
@@ -253,6 +253,46 @@ fs)
     [[ -n "$ROOT_PART" ]] || die "no partitions found on $PT_DEV_REAL (lsblk -nrp showed: $(lsblk -nrp -o NAME "$PT_DEV_REAL" 2>&1 | head -5 | tr '\n' ' '))"
     log "mounting root partition $ROOT_PART ($((BEST_SIZE / 1024 / 1024)) MB) at $MNT"
     mount "$ROOT_PART" "$MNT" || die "mount $ROOT_PART failed"
+
+    # btrfs images keep the system in subvolumes, not at the top level.
+    # Fedora Cloud (F41+) mounts subvol=root as /, and var, home, boot as
+    # their own subvolumes — so the top level holds four directories and
+    # no /etc, and this check died "no /etc found". MakeGolden then fell
+    # through to "could not seal", and web-golden shipped with its
+    # machine-id and ssh host keys intact (onyx, 2026-09-03 20:56). The
+    # only clue was rc=1 in the audit log.
+    #
+    # Find the subvolume that carries /etc, remount with it as the root,
+    # and mount every other top-level subvolume at the path of the same
+    # name beneath it — the guest's fstab does exactly that, and the seal
+    # touches /var (dbus machine-id, cloud-init state, the journal) and
+    # /home (shell history), which would otherwise be empty mountpoints
+    # and silently skipped. Subvolume roots are inode 256 on btrfs; that
+    # is how they are told apart from ordinary directories without
+    # btrfs-progs, which a hypervisor host need not have.
+    if [[ ! -d "$MNT/etc" && "$(blkid -o value -s TYPE "$ROOT_PART" 2>/dev/null)" == btrfs ]]; then
+        ROOT_SUBVOL=""
+        SUBVOLS=()
+        for d in "$MNT"/*/; do
+            d="${d%/}"
+            [[ -d "$d" && "$(stat -c %i "$d")" == 256 ]] || continue
+            n="$(basename "$d")"
+            SUBVOLS+=("$n")
+            [[ -d "$d/etc" ]] && ROOT_SUBVOL="$n"
+        done
+        [[ -n "$ROOT_SUBVOL" ]] ||
+            die "$ROOT_PART is btrfs with no subvolume carrying /etc (top level: ${SUBVOLS[*]:-none})"
+        umount "$MNT" || die "could not unmount $MNT to remount subvol=$ROOT_SUBVOL"
+        mount -o "subvol=$ROOT_SUBVOL" "$ROOT_PART" "$MNT" ||
+            die "mount subvol=$ROOT_SUBVOL of $ROOT_PART failed"
+        for n in "${SUBVOLS[@]}"; do
+            [[ "$n" == "$ROOT_SUBVOL" ]] && continue
+            [[ -d "$MNT/$n" ]] || continue
+            mount -o "subvol=$n" "$ROOT_PART" "$MNT/$n" ||
+                die "mount subvol=$n at $MNT/$n failed"
+        done
+        log "btrfs: root is subvol=$ROOT_SUBVOL; mounted ${SUBVOLS[*]} beneath it"
+    fi
     [[ -d "$MNT/etc" ]] || die "$ROOT_PART mounted but no /etc found — wrong partition?"
     ;;
 
