@@ -59,8 +59,24 @@ fi
 
 # Create or use snapshot
 if [[ -n "$SNAP_NAME" ]]; then
-    [[ "$SNAP_NAME" != *@* ]] && SNAP_NAME="${SRC_ZVOL}@${SNAP_NAME}"
-    SNAP="${SNAP_NAME}"
+    # Accept all three spellings, because --help documents the one that used
+    # to fail:  `--snap @golden`, `--snap golden`, `--snap rpool/vms/x@golden`.
+    #
+    # The test was `[[ "$SNAP_NAME" != *@* ]] && SNAP_NAME="${SRC_ZVOL}@..."`,
+    # which asks "does it already contain an @?" — and "@golden" does. So the
+    # dataset prefix was skipped and zfs got a bare "@golden":
+    #   cannot open '@golden': empty component or misplaced '@' delimiter
+    # That is the exact invocation in the EXAMPLES block above
+    # (`kvm-clone myvm test --snap @stable`), so the only form that worked was
+    # the one nobody was told about. Caught on fiend 2026-09-03 cloning a
+    # desktop golden.
+    #
+    # A '/' is what actually distinguishes a fully-qualified snapshot from a
+    # short name; '@' does not.
+    case "$SNAP_NAME" in
+    */*@*) SNAP="$SNAP_NAME" ;;
+    *) SNAP="${SRC_ZVOL}@${SNAP_NAME#@}" ;;
+    esac
 else
     SNAP="${SRC_ZVOL}@clone-$(date +%Y%m%d_%H%M%S%N)"
     # Pause source if running for consistent snapshot
