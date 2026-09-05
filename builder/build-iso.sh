@@ -2539,29 +2539,23 @@ HELMCHARTS
         log "WARNING: ${_unit_src} missing — no shipped systemd units copied"
     fi
 
-    # Copy the sbin-level CLI tools users invoke directly.
-    #   kspawn               — ZFS-native cluster spawner (new in 1.0.5)
-    #   kldload-debug-bundle — post-mortem state collector — needs to ship
-    #     in the LIVE ISO so the lifecycle smoke harness + manual repro on
-    #     a stuck install can capture state from the live env, AND so
-    #     profiles.sh's per-binary copy list can find it as a source when
-    #     installing onto the target.
-    #   kldload-boot-assert  — re-checks the EFI boot path on every boot. Same
-    #     omission as kldload-rhel-composer-build below: the script sat in
-    #     includes.chroot/ and the unit shipped, but this list did not name it,
-    #     so the unit would have failed 203/EXEC on every boot of every install
-    #     (caught 2026-08-25 by grepping the built squashfs, not by any linter).
-    #   kldload-journal-assert — the ExecStart of kldload-journal-flush.service,
-    #     which build-iso enables below. Without this line that unit is 203/EXEC
-    #     on every boot, which is a particularly bad way for the thing that
-    #     guards the log to fail.
-    #   kldload-live-ssh-init — the LIVE ISO's ssh bootstrap. Its unit shipped
-    #     and referenced /usr/local/sbin/kldload-live-ssh-init, but no copy list
-    #     named the script, so it failed 203/EXEC on every live boot. Found
-    #     2026-08-25 by the ExecStart gate in smoke-build, not by any linter.
-    for _lsbin in kspawn kldload-debug-bundle kldload-rhel-composer-build kldload-backup-pack kldload-backup-restore kldload-boot-assert kldload-live-ssh-init kldload-journal-assert; do
-        _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_lsbin}"
-        [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/local/sbin/${_lsbin}" && chmod +x "${ROOTFS}/usr/local/sbin/${_lsbin}"
+    # Copy the sbin-level CLI tools users invoke directly — every regular
+    # file under includes.chroot/usr/local/sbin, exactly as the bin/ loop
+    # above does. This used to be a hand-kept allow-list, and the list
+    # silently dropped a new tool FIVE times: kldload-rhel-composer-build
+    # (build #51, .103), kldload-boot-assert and kldload-journal-assert and
+    # kldload-live-ssh-init (2026-08-25, each a unit failing 203/EXEC on every
+    # boot), and kfire (2026-09-05: its man page shipped, the tool did not —
+    # found by grepping the built squashfs after a 35-minute build). An
+    # allow-list is a second place to remember every tool, and nobody does.
+    #
+    # smoke-build now compares this directory against the squashfs, so a
+    # tool that fails to land is a red gate rather than a 3am discovery.
+    # __pycache__ and other directories are skipped: only files ship.
+    for _src in /build/live-build/config/includes.chroot/usr/local/sbin/*; do
+        [[ -f "$_src" ]] || continue
+        cp -p "$_src" "${ROOTFS}/usr/local/sbin/"
+        chmod +x "${ROOTFS}/usr/local/sbin/$(basename "$_src")"
     done
     # kldload-rhel-composer-build added in build #51 -- caught on .103
     # (build #50): the script was in includes.chroot/ but neither this

@@ -139,6 +139,65 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             _pass "console launcher replaced by Web UI"
         fi
 
+        # ── Every tool in includes.chroot/usr/local/{bin,sbin} must ship ────
+        # The builder copies bin/ by glob and, since 2026-09-05, sbin/ too.
+        # Before that sbin/ was an allow-list, and the list dropped a new tool
+        # five times over four months (rhel-composer-build, boot-assert,
+        # journal-assert, live-ssh-init, kfire) — each one found by hand, in
+        # the built squashfs, after the build. The includes tree is the source
+        # of truth for what ships, so compare it against the artefact: any
+        # regular file there that is not in the image is a red gate, whatever
+        # the copy mechanism of the day is.
+        #
+        # The image is usrmerged one level further than the tree: in the
+        # squashfs usr/local/sbin is a SYMLINK to bin (and usr/sbin to bin).
+        # unsquashfs extracts a path literally and never follows a link in
+        # it, so asking for usr/local/sbin/kfire yields nothing while the file
+        # sits at usr/local/bin/kfire. The first version of this gate did
+        # exactly that and flagged all 27 sbin tools on a correct ISO
+        # (2026-09-05) — a gate that fails on a correct system trains everyone
+        # to ignore the suite. So each directory is resolved through the
+        # image's own link chain first (unsquashfs -lls shows the target).
+        _sq_resolve_dir() { # $1 = image, $2 = dir → the dir the image stores it under
+            local img=$1 d=$2 hop tgt
+            for hop in 1 2 3 4; do
+                tgt=$(unsquashfs -lls "$img" "$d" 2>/dev/null |
+                    awk -v want="squashfs-root/$d" '$1 ~ /^l/ && $(NF-2)==want {print $NF}')
+                [[ -n "$tgt" ]] || break
+                case "$tgt" in
+                /*) d="${tgt#/}" ;;
+                *) d="$(realpath -m "/${d%/*}/$tgt")" && d="${d#/}" ;;
+                esac
+            done
+            printf '%s\n' "$d"
+        }
+        TOOLEXTRACT=$(mktemp -d)
+        declare -a TOOL_FILES=() TOOL_IN_IMAGE=()
+        for _d in usr/local/bin usr/local/sbin; do
+            _img_d=$(_sq_resolve_dir "$MOUNTPOINT/LiveOS/squashfs.img" "$_d")
+            for _t in "$ROOT"/live-build/config/includes.chroot/"$_d"/*; do
+                [[ -f "$_t" ]] || continue
+                TOOL_FILES+=("$_d/${_t##*/}")
+                TOOL_IN_IMAGE+=("$_img_d/${_t##*/}")
+            done
+        done
+        # unsquashfs exits non-zero when any requested path is absent, which is
+        # exactly what the per-file check below reports.
+        unsquashfs -q -f -d "$TOOLEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" "${TOOL_IN_IMAGE[@]}" >/dev/null 2>&1 || true
+        _tool_missing=0
+        for _i in "${!TOOL_FILES[@]}"; do
+            if [[ ! -f "$TOOLEXTRACT/root/${TOOL_IN_IMAGE[$_i]}" ]]; then
+                _fail "squashfs has ${TOOL_FILES[$_i]}" "in includes.chroot but not in the ISO (looked at ${TOOL_IN_IMAGE[$_i]}) — the builder's copy step dropped it"
+                _tool_missing=$((_tool_missing + 1))
+            fi
+        done
+        if ((_tool_missing == 0)); then
+            _pass "all ${#TOOL_FILES[@]} usr/local/{bin,sbin} tools from includes.chroot are in the squashfs"
+        fi
+        # extracted dirs carry the image's 0555 modes; make them removable
+        chmod -R u+w "$TOOLEXTRACT" 2>/dev/null || true
+        rm -rf "$TOOLEXTRACT"
+
         # ── The shipped kernel pin must not exclude itself ──────────────────
         # This is the invariant that was violated: build-iso.sh derived its
         # excludes from the resolver while lib/bootstrap.sh carried its own
@@ -178,6 +237,12 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
         rm -rf "$KPEXTRACT"
 
         rm -rf "$WSEXTRACT"
+    else
+        # A gate that cannot run is not a gate. onyx had no squashfs-tools for
+        # months and every content gate above -- launchers, shipped tools,
+        # kernel pin -- silently skipped, reading as green (found 2026-09-05
+        # when the tool gate was added and printed nothing at all).
+        _warn "squashfs content gates" "unsquashfs missing — launcher, shipped-tool and kernel-pin gates DID NOT RUN (dnf install squashfs-tools)"
     fi
 
     # ── Every shipped unit's ExecStart must EXIST in the rootfs ─────────────
@@ -271,6 +336,8 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             _warn "unit ExecStart gate" "could not list the squashfs — this gate DID NOT RUN"
         fi
         rm -f "$ULIST"
+    else
+        _warn "systemd drop-in gate" "unsquashfs missing — gate DID NOT RUN (dnf install squashfs-tools)"
     fi
 
     umount "$MOUNTPOINT" 2>/dev/null
