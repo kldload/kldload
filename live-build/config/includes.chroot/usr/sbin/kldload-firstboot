@@ -1800,6 +1800,49 @@ main() {
         fi
     fi
 
+    # ── Swap healing net: no host boots without a zram runway ────────────
+    # Install time puts the generator and its config on the target for every
+    # profile (profiles.sh), but an install made before 2026-09-04, or one
+    # whose mirror lacked the package, has neither. onyx that day: desktop
+    # profile, 32GB, zero swap, twelve appliance VMs, and the OOM killer took
+    # the desktop session apart while ARC sat at its 1GB floor. Re-attempt
+    # from the booted system, then read the kernel back — an active swap
+    # device is the fact, the package is only the intent.
+    if [[ -z "$(swapon --show --noheadings 2>/dev/null)" ]]; then
+        if [[ ! -f /usr/lib/systemd/system-generators/zram-generator ]]; then
+            log "no swap and no zram generator — installing"
+            if command -v dnf >/dev/null 2>&1; then
+                dnf install -y zram-generator-defaults >>"${LOG}" 2>&1 ||
+                    log "WARN: zram-generator-defaults install failed"
+            elif command -v apt-get >/dev/null 2>&1; then
+                DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-zram-generator >>"${LOG}" 2>&1 ||
+                    log "WARN: systemd-zram-generator install failed"
+            elif command -v pacman >/dev/null 2>&1; then
+                pacman --noconfirm --needed -S zram-generator >>"${LOG}" 2>&1 ||
+                    log "WARN: zram-generator install failed"
+            fi
+        fi
+        if [[ ! -f /etc/systemd/zram-generator.conf ]]; then
+            # Same policy profiles.sh writes: small on purpose. This is a
+            # hypervisor and guest pages must never land here.
+            cat >/etc/systemd/zram-generator.conf <<'ZRAMCONF'
+[zram0]
+zram-size = min(ram / 8, 4096)
+compression-algorithm = zstd
+swap-priority = 100
+ZRAMCONF
+        fi
+        systemctl daemon-reload
+        # start fails only when the generator produced no unit (package still
+        # missing); the swapon check below is what reports that
+        systemctl start systemd-zram-setup@zram0.service >>"${LOG}" 2>&1 || :
+        if [[ -n "$(swapon --show --noheadings 2>/dev/null)" ]]; then
+            ok "swap: $(swapon --show --noheadings | awk '{print $1, $3}' | head -1) zram"
+        else
+            log "WARNING: this host has NO swap — systemd-oomd has no runway and memory pressure goes straight to the OOM killer"
+        fi
+    fi
+
     # ── /root convenience symlinks ────────────────────────────────────────────
     # Surface the install / runtime logs from /var/log under /root alongside
     # the kldload-debug-bundle output. Standard log handling (logrotate,
@@ -2194,6 +2237,37 @@ main() {
                 ok "Grafana restarted with anon viewer + embedding" ||
                 log "WARNING: grafana-server restart failed"
         fi
+        # No promotion and no phoning home from an embedded viewer. Stock
+        # Grafana shows the anonymous viewer a footer with a grafana.com
+        # link, feedback links, a news feed and the version, and checks
+        # grafana.com for updates on every start — an appliance's Metrics
+        # tab is not the place for any of it ("a line with an ad for
+        # grafana with a link", operator, 2026-09-04). Separate guard from
+        # the block above so hosts that already had anonymous access get
+        # this on their next firstboot too.
+        if ! grep -q '^# kldload override — no promotion' /etc/grafana/grafana.ini; then
+            log "Disabling Grafana promotion, update checks and version footer"
+            {
+                echo ''
+                echo '# kldload override — no promotion, no phoning home, in an embedded viewer'
+                echo '[analytics]'
+                echo 'reporting_enabled = false'
+                echo 'check_for_updates = false'
+                echo 'check_for_plugin_updates = false'
+                echo 'feedback_links_enabled = false'
+                echo ''
+                echo '[news]'
+                echo 'news_feed_enabled = false'
+                echo ''
+                echo '[auth.anonymous]'
+                echo 'enabled = true'
+                echo 'org_role = Viewer'
+                echo 'hide_version = true'
+            } >>/etc/grafana/grafana.ini
+            systemctl restart grafana-server >>"$LOG" 2>&1 &&
+                ok "Grafana restarted without promotion" ||
+                log "WARNING: grafana-server restart failed"
+        fi
     fi
 
     # ── Security: ensure dnf-automatic is installed + enabled ──────────────
@@ -2237,37 +2311,6 @@ main() {
     # existing users immediately.
     if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
         command -v dnf >/dev/null 2>&1; then
-        # No promotion and no phoning home from an embedded viewer. Stock
-        # Grafana shows the anonymous viewer a footer with a grafana.com
-        # link, feedback links, a news feed and the version, and checks
-        # grafana.com for updates on every start — an appliance's Metrics
-        # tab is not the place for any of it ("a line with an ad for
-        # grafana with a link", operator, 2026-09-04). Separate guard from
-        # the block above so hosts that already had anonymous access get
-        # this on their next firstboot too.
-        if ! grep -q '^# kldload override — no promotion' /etc/grafana/grafana.ini; then
-            log "Disabling Grafana promotion, update checks and version footer"
-            {
-                echo ''
-                echo '# kldload override — no promotion, no phoning home, in an embedded viewer'
-                echo '[analytics]'
-                echo 'reporting_enabled = false'
-                echo 'check_for_updates = false'
-                echo 'check_for_plugin_updates = false'
-                echo 'feedback_links_enabled = false'
-                echo ''
-                echo '[news]'
-                echo 'news_feed_enabled = false'
-                echo ''
-                echo '[auth.anonymous]'
-                echo 'enabled = true'
-                echo 'org_role = Viewer'
-                echo 'hide_version = true'
-            } >>/etc/grafana/grafana.ini
-            systemctl restart grafana-server >>"$LOG" 2>&1 &&
-                ok "Grafana restarted without promotion" ||
-                log "WARNING: grafana-server restart failed"
-        fi
         if ! command -v certutil >/dev/null 2>&1; then
             log "nss-tools missing — installing"
             if dnf install -y nss-tools >>"$LOG" 2>&1; then
@@ -3542,6 +3585,33 @@ AIMOTD
             systemctl enable libvirtd 2>/dev/null || true
             systemctl start libvirtd 2>/dev/null || true
             ok "libvirt ready — zvols accessed as raw /dev/zvol/… paths (no pool needed)"
+
+            # ── KSM: share identical guest pages ─────────────────────────
+            # Installed and enabled at install time since 2026-09-04
+            # (profiles.sh); older installs have neither, and an enable in a
+            # chroot is intent. Heal, enable --now, and read the units back.
+            # ksmtuned itself flips /sys/kernel/mm/ksm/run on and off with
+            # free memory, so that switch is not the thing to assert.
+            if [[ ! -f /usr/lib/systemd/system/ksmtuned.service ]]; then
+                if command -v dnf >/dev/null 2>&1; then
+                    dnf install -y ksmtuned >>"${LOG}" 2>&1 || log "WARN: ksmtuned install failed"
+                elif command -v apt-get >/dev/null 2>&1; then
+                    DEBIAN_FRONTEND=noninteractive apt-get install -y ksmtuned >>"${LOG}" 2>&1 ||
+                        log "WARN: ksmtuned install failed"
+                fi
+                # pacman: no ksmtuned in the Arch repos, nothing to heal
+            fi
+            if [[ -f /usr/lib/systemd/system/ksmtuned.service ]]; then
+                systemctl enable --now ksm.service ksmtuned.service >>"${LOG}" 2>&1 ||
+                    log "WARNING: ksmtuned is installed but not enabled — guests will not share pages"
+                if systemctl is-active --quiet ksm.service && systemctl is-active --quiet ksmtuned.service; then
+                    ok "KSM enabled — ksmtuned merges guest pages once free memory drops under a fifth of RAM"
+                else
+                    log "WARNING: ksm/ksmtuned not active — guests will not share pages"
+                fi
+            else
+                log "WARNING: ksmtuned not installed — guests will not share pages (expected on Arch)"
+            fi
 
             # ── Host bridge br0 for LAN-routable VMs ─────────────────────
             #

@@ -531,6 +531,31 @@ k_profile_optional_packages() {
         ;;
     esac
 
+    # ── Swap: a zram runway on every host, whatever the profile ──────────
+    #
+    # The zram config block in k_install_system_files used to sit under the
+    # Kubernetes gate, and NOTHING installed the generator — that block only
+    # wrote a config if the package happened to be on the target already.
+    # So a desktop host got neither. onyx 2026-09-04: desktop profile, 32GB,
+    # twelve appliance VMs asking for 22GB, zero swap. ARC had already given
+    # back everything down to its 1GB floor, and with nothing left to
+    # reclaim the OOM killer took apart pipewire, the terminals, the portals
+    # and the app driving the build. Swap is not capacity here; it is the
+    # runway between "fine" and "kill things" that lets systemd-oomd act.
+    #
+    # One generator, three package names — verified in clean containers
+    # 2026-09-04: Fedora 44 and CentOS Stream 10 zram-generator-defaults,
+    # Debian trixie and Ubuntu noble systemd-zram-generator, Arch
+    # zram-generator (no -defaults split; the config block below writes
+    # /etc/systemd/zram-generator.conf itself, so none is needed).
+    # A zram device and not a zvol or a partition: the config block says why.
+    case "$_distro" in
+    alpine) : ;; # no systemd, so no generator; not claimed
+    arch) out+=(zram-generator) ;;
+    debian | ubuntu) out+=(systemd-zram-generator) ;;
+    *) out+=(zram-generator-defaults) ;;
+    esac
+
     if [[ "${KLDLOAD_ENABLE_EBPF:-0}" == "1" ]]; then
         if [[ "$_distro" == "arch" ]]; then
             out+=(bcc bcc-tools bpftrace perf)
@@ -586,6 +611,15 @@ k_profile_optional_packages() {
         else
             out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-driver-storage libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
         fi
+        # KSM: guests booted from the same cloud image share most of their
+        # page content, and ksmtuned wakes the merger only while free memory
+        # is under a fifth of RAM — idle otherwise, so it costs nothing on a
+        # quiet host. Same package name on RPM, Debian and Ubuntu (verified
+        # 2026-09-04); Arch carries it only in the AUR, so Arch gets none.
+        case "$_distro" in
+        arch | alpine) : ;;
+        *) out+=(ksmtuned) ;;
+        esac
     fi
 
     # Kubernetes (optional checkbox)
@@ -2774,7 +2808,10 @@ ZFSMOD
         # Kernel VM tuning for ZFS on root + KVM
         mkdir -p "${target}/etc/sysctl.d"
         cat >"${target}/etc/sysctl.d/99-zfs-kvm.conf" <<SYSCTL
-# ZFS on root + KVM host — let ARC handle caching, reduce dirty pages
+# ZFS on root + KVM host — let ARC handle caching, reduce dirty pages.
+# swappiness stays at 1 with zram present: the zram device is a last-resort
+# runway for systemd-oomd, not a memory tier. Guest pages must stay resident —
+# a swapped guest is worse than a stopped one.
 vm.swappiness = 1
 vm.vfs_cache_pressure = 50
 vm.dirty_ratio = 10
@@ -2789,6 +2826,19 @@ net.ipv4.ip_forward = 1
 net.bridge.bridge-nf-call-iptables = 0
 net.bridge.bridge-nf-call-ip6tables = 0
 SYSCTL
+
+        # KSM + ksmtuned: installed by k_profile_optional_packages, enabled
+        # here, because a unit on disk that nobody enabled is dead — five of
+        # those were found in one sweep on 2026-08-22. Debian, Ubuntu and the
+        # RPM families all ship both units under this path (checked in the
+        # trixie .deb, 2026-09-04). Absent means Arch, or a mirror that lost
+        # the package; either way say so rather than pass.
+        if [[ -f "${target}/usr/lib/systemd/system/ksmtuned.service" ]]; then
+            chroot "${target}" systemctl enable ksm.service ksmtuned.service >/dev/null 2>&1 ||
+                k_log "WARNING: ksmtuned is on the target but could not be enabled — guests will not share pages"
+        else
+            k_log "WARNING: ksmtuned not on the target — guests will not share pages (expected on Arch, a mirror gap elsewhere)"
+        fi
 
         # ZFS replication script — send VM snapshots to a remote host over WireGuard
         mkdir -p "${target}/usr/local/sbin"
@@ -3350,6 +3400,64 @@ VIRBR0TMR
         k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools, Podman ZFS driver"
     fi
 
+    # ── Host swap: zram, every profile ─────────────────────────────────────
+    # This block sat under the Kubernetes gate until 2026-09-04, so a desktop
+    # or kvm install never ran it — onyx (desktop, 32GB, twelve appliance
+    # VMs) booted with zero swap and the OOM killer dismantled the session
+    # while ARC sat at its floor. Every kldload host is a hypervisor in
+    # waiting, so every host gets the runway. The package comes from
+    # k_profile_optional_packages under three family-specific names.
+    #
+    # No swapoff anywhere, deliberately. kubeadm's "swap must be off" rule
+    # binds the NODE, and on kldload the nodes are VMs: kube-setup already
+    # masks systemd-zram-setup@ and removes zram-generator inside every guest
+    # it builds. A k8s host ships kubectl/k9s/cilium and never kubelet or
+    # kubeadm, so disabling its swap enforced a guest constraint on a
+    # hypervisor and cost it the only memory headroom it had.
+    # HISTORY: onyx 2026-08-29 — 32GB RAM, zero swap, 20GB+ of guests.
+    # systemd-oomd logged "No swap; memory pressure usage will be degraded"
+    # on every boot, and boot -1 died at 08:01:56 mid-firstboot with no
+    # panic, no OOM kill and no watchdog: nothing to reclaim, so pressure
+    # went straight from fine to a hard reset.
+    #
+    # zram, NOT a zvol: swap on a ZFS zvol deadlocks — the kernel needs
+    # memory to write the page out, ZFS needs memory to service that write,
+    # and that memory is exactly what is exhausted. A swap FILE on ZFS is
+    # not supported at all, and a root-on-ZFS disk has no spare partition.
+    # Sized small on purpose: this is a hypervisor, and guest pages must
+    # never end up here — a swapped guest is worse than a stopped one.
+    # The check is the GENERATOR BINARY, not a package name. Every family
+    # ships the same generator under a different package —
+    # zram-generator-defaults on Fedora/EL, systemd-zram-generator on
+    # Debian/Ubuntu, zram-generator on Arch — so `rpm -q <fedora name>` was
+    # false on more than half the matrix and this whole block silently did
+    # nothing there. Those hosts lost the old swapoff too (removed above)
+    # and ended up with no swap AND no zram, which is the failure this
+    # change exists to prevent. A file on disk is family-agnostic and is
+    # fact rather than intent.
+    _zram_pkg="zram-generator-defaults"
+    case "${KLDLOAD_DISTRO:-centos}" in
+    debian | ubuntu) _zram_pkg="systemd-zram-generator" ;;
+    arch) _zram_pkg="zram-generator" ;;
+    esac
+    # -f, not -x. The question is "did the package land", and systemd runs
+    # this generator inside the booted target, not here. -x additionally
+    # asks the KERNEL whether we could exec it right now, which is false on
+    # a target mounted noexec — a false negative whose consequence is the
+    # no-swap host this block exists to prevent. Verified: a 0755 file on a
+    # noexec mount is -f true, -x false.
+    if [[ -f "${target}/usr/lib/systemd/system-generators/zram-generator" ]]; then
+        cat >"${target}/etc/systemd/zram-generator.conf" <<'ZRAMCONF'
+[zram0]
+zram-size = min(ram / 8, 4096)
+compression-algorithm = zstd
+swap-priority = 100
+ZRAMCONF
+        k_log "Host swap: zram configured, min(ram/8, 4G) zstd (guests disable their own via kube-setup)"
+    else
+        k_log "WARNING: no zram generator on the target (/usr/lib/systemd/system-generators/zram-generator) — this host will boot with NO swap and systemd-oomd will have no runway. Install ${_zram_pkg} for ${KLDLOAD_DISTRO:-centos}, or check it made it into the darksite package set."
+    fi
+
     # ── Kubernetes node setup ──────────────────────────────────────────────
     if [[ "${KLDLOAD_ENABLE_K8S:-0}" == "1" ]]; then
         k_log "Configuring Kubernetes node..."
@@ -3388,56 +3496,6 @@ net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 K8SSYS
-
-        # NO swapoff here, deliberately. kubeadm's "swap must be off" rule binds
-        # the NODE, and on kldload the nodes are VMs: kube-setup already masks
-        # systemd-zram-setup@ and removes zram-generator inside every guest it
-        # builds. This host ships kubectl/k9s/cilium and never kubelet or
-        # kubeadm, so disabling its swap enforced a guest constraint on a
-        # hypervisor and cost it the only memory headroom it had.
-        # HISTORY: onyx 2026-08-29 — 32GB RAM, zero swap, 20GB+ of guests.
-        # systemd-oomd logged "No swap; memory pressure usage will be degraded"
-        # on every boot, and boot -1 died at 08:01:56 mid-firstboot with no
-        # panic, no OOM kill and no watchdog: nothing to reclaim, so pressure
-        # went straight from fine to a hard reset.
-        #
-        # zram, NOT a zvol: swap on a ZFS zvol deadlocks — the kernel needs
-        # memory to write the page out, ZFS needs memory to service that write,
-        # and that memory is exactly what is exhausted. A swap FILE on ZFS is
-        # not supported at all, and a root-on-ZFS disk has no spare partition.
-        # Sized small on purpose: this is a hypervisor, and guest pages must
-        # never end up here — a swapped guest is worse than a stopped one.
-        # The check is the GENERATOR BINARY, not a package name. Every family
-        # ships the same generator under a different package —
-        # zram-generator-defaults on Fedora/EL, systemd-zram-generator on
-        # Debian/Ubuntu, zram-generator on Arch — so `rpm -q <fedora name>` was
-        # false on more than half the matrix and this whole block silently did
-        # nothing there. Those hosts lost the old swapoff too (removed above)
-        # and ended up with no swap AND no zram, which is the failure this
-        # change exists to prevent. A file on disk is family-agnostic and is
-        # fact rather than intent.
-        _zram_pkg="zram-generator-defaults"
-        case "${KLDLOAD_DISTRO:-centos}" in
-        debian | ubuntu) _zram_pkg="systemd-zram-generator" ;;
-        arch) _zram_pkg="zram-generator" ;;
-        esac
-        # -f, not -x. The question is "did the package land", and systemd runs
-        # this generator inside the booted target, not here. -x additionally
-        # asks the KERNEL whether we could exec it right now, which is false on
-        # a target mounted noexec — a false negative whose consequence is the
-        # no-swap host this block exists to prevent. Verified: a 0755 file on a
-        # noexec mount is -f true, -x false.
-        if [[ -f "${target}/usr/lib/systemd/system-generators/zram-generator" ]]; then
-            cat >"${target}/etc/systemd/zram-generator.conf" <<'ZRAMCONF'
-[zram0]
-zram-size = min(ram / 8, 4096)
-compression-algorithm = zstd
-swap-priority = 100
-ZRAMCONF
-            k_log "Host swap: zram configured (guests disable their own via kube-setup)"
-        else
-            k_log "WARNING: no zram generator on the target (/usr/lib/systemd/system-generators/zram-generator) — this host will boot with NO swap and systemd-oomd will have no runway. Install ${_zram_pkg} for ${KLDLOAD_DISTRO:-centos}, or check it made it into the darksite package set."
-        fi
 
         # ZFS datasets for K8s components
         local root_pool

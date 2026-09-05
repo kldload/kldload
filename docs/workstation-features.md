@@ -43,8 +43,14 @@ every combination.
 - **NVIDIA proprietary** via akmod (signed, Secure-Boot-capable) with a
   **first-boot healing net** that builds + loads the driver → correct native
   resolution instead of 1024×768.
-- **Swap disabled** (ZFS-safe — avoids the swap-on-zvol deadlock; zram optional
-  for low-RAM boxes).
+- **Swap on zram, never on ZFS.** A small compressed in-RAM swap device
+  (an eighth of RAM, capped at 4 GB) gives systemd-oomd a runway instead of
+  letting memory pressure go straight to the OOM killer. Swap on a zvol
+  deadlocks, so there is no swap partition or zvol; guest pages stay
+  resident because swappiness is 1.
+- **KSM on KVM hosts.** ksmtuned merges identical pages across guests
+  booted from the same image, waking only when free memory drops under a
+  fifth of RAM.
 
 ## Desktop
 
