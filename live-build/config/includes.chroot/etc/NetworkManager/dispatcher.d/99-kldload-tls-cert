@@ -34,7 +34,11 @@ ACTION="${2:-}"
 # generic operator VPN (other wg-*) is still in scope, so remote-access tunnel
 # IPs still land in the cert.
 case "$IFACE" in
-vnet* | virbr* | br-* | veth* | tap* | lo | cilium_* | lxc* | docker* | podman* | wg-mgmt | wg-k8s)
+# Virtual interfaces are not the host's address. Without ap-* (kvm-mesh, one
+# per appliance) and fc-* (kfire, one tap per microVM) in this list, every
+# clone, destroy and enrolment fired the unit: 115 starts on onyx on
+# 2026-09-05, and Grafana and the webui hit systemd's start limit and died.
+vnet* | virbr* | br-* | veth* | tap* | fc-* | ap-* | lo | cilium_* | lxc* | docker* | podman* | wg* | klab-* | testnet)
     exit 0
     ;;
 esac

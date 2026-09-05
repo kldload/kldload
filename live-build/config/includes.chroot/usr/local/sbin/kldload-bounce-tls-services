@@ -23,6 +23,18 @@ KEY=/var/lib/kldload/tls/webui.key
 [[ -e "$CERT" ]] && chmod 0644 "$CERT" 2>/dev/null || true
 [[ -e "$KEY" ]] && chmod 0640 "$KEY" 2>/dev/null || true
 
+# Only a CHANGED certificate is worth a restart. This runs as the unit's
+# ExecStartPost, i.e. on every start of kldload-tls-cert, and the unit is
+# started by the dispatcher on every network event; before this the
+# restarts ran whether or not the cert script had regenerated anything
+# (onyx 2026-09-05: 115 starts in a day, Grafana and the webui start-limited
+# and dead). The last bounced cert's digest is remembered beside the cert.
+_digest_file=/var/lib/kldload/tls/.bounced-sha256
+_digest="$(sha256sum "$CERT" 2>/dev/null | awk '{print $1}')"
+if [[ -n "$_digest" && -r "$_digest_file" && "$(cat "$_digest_file")" == "$_digest" ]]; then
+    logger -t kldload-bounce-tls-services "cert unchanged — nothing to restart"
+    exit 0
+fi
 if [[ -e /var/run/kldload/installer-busy ]]; then
     logger -t kldload-bounce-tls-services "installer busy — skipping webui/ttyd/grafana restart"
     exit 0
@@ -72,3 +84,4 @@ fi
 for svc in ttyd-k9s kldload-webui grafana-server; do
     systemctl --no-block try-restart "$svc" 2>/dev/null || true
 done
+[[ -z "$_digest" ]] || printf '%s\n' "$_digest" >"$_digest_file"
