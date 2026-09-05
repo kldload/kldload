@@ -17,7 +17,13 @@
 // at install time and `kube-network add-peer` is run by hand on each node —
 // deliberately, because a private key that never leaves the machine cannot
 // leak from a central store and dies with the node that owned it. Nothing
-// writes down the intended membership anywhere.
+// writes down the intended membership of the substrate's planes anywhere.
+//
+// The one exception is the appliance meshes: kvm-mesh mints a key for each
+// VM it enrolls and records it in a members file on the host, and the VM
+// is reachable only over that mesh — never a swept host. Those files are
+// read with the sweep (estate.go, parseMembers) and join the roster below,
+// so an appliance peer is declared by the host that made it.
 //
 // That turns out not to matter, because a full-estate sweep already contains
 // the answer. Every legitimate peer entry in a mesh is some other host's own
@@ -71,7 +77,13 @@ type Findings struct {
 	Partial int // hosts that failed to answer; >0 means treat orphans as suspect
 }
 
-// BuildRoster returns every public key owned by an interface in the estate.
+// BuildRoster returns every public key owned by an interface in the estate,
+// plus every key a swept host declares for a VM on one of its appliance
+// meshes (Device.Members).
+//
+// Members go in first and a swept interface overwrites: when an appliance
+// VM is itself in the inventory, its own row names the interface on the VM,
+// which is the more precise owner than the host's record of it.
 //
 // A host that failed to answer contributes nothing, which is why the caller
 // must track Partial — an unreachable host's key would otherwise look like
@@ -80,6 +92,16 @@ func BuildRoster(devs []Device) (map[string]Owner, int) {
 	roster := map[string]Owner{}
 	partial := 0
 	seenBad := map[string]bool{}
+	for _, d := range devs {
+		if d.Err != "" {
+			continue
+		}
+		for _, m := range d.Members {
+			if m.PublicKey != "" {
+				roster[m.PublicKey] = Owner{Host: m.Name, Iface: m.Mesh}
+			}
+		}
+	}
 	for _, d := range devs {
 		if d.Err != "" {
 			// Count hosts, not interfaces: one unreachable host produces one

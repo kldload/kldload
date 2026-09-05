@@ -53,6 +53,93 @@ type Device struct {
 	Peers      []Peer
 	Err        string // populated when the host could not be reached
 	Managed    bool   // this interface's own key appears in a declaration
+	// Members is what THIS HOST declares about the VMs on its appliance
+	// meshes — kvm-mesh's members files, one line per VM with its key. The
+	// same slice rides on every interface of the host; BuildRoster reads it
+	// once per key. See parseMembers for why it exists.
+	Members []MeshMember
+}
+
+// MeshMember is one line of a kvm-mesh members file: a VM the host minted a
+// key for on one of its ap-* meshes.
+type MeshMember struct {
+	Mesh      string // ap-app-adguard — the interface name on the host
+	Name      string // app-adguard-ho — the VM
+	PublicKey string
+	Addr      string // the VM's underlay address, as kvm-mesh recorded it
+}
+
+// meshDir is where kvm-mesh keeps a members file per mesh. World-readable
+// on a kldload host (0644 root:kldload), so no escalation is needed.
+const meshDir = "/var/lib/kldload/mesh"
+
+// membersCmd is the remote half of the sweep for members files: grep -H
+// prefixes every line with its file, which is the only thing the parser
+// needs to know which mesh a VM is on. No files, no output, exit 2 — the
+// redirect and the `|| true` keep the combined command's other sections
+// intact on a host that is not a kldload hypervisor.
+const membersCmd = "grep -H '' " + meshDir + "/*.members 2>/dev/null || true"
+
+// localMembers reads the members files on this host into the same
+// path:line shape membersCmd produces remotely, so both go through one
+// parser. A host without the directory is simply not a hypervisor.
+func localMembers() string {
+	entries, err := os.ReadDir(meshDir)
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".members") {
+			continue
+		}
+		path := meshDir + "/" + e.Name()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue // a file that appeared and went between ReadDir and here
+		}
+		for _, l := range strings.Split(string(data), "\n") {
+			b.WriteString(path + ":" + l + "\n")
+		}
+	}
+	return b.String()
+}
+
+// parseMembers folds grep -H output over members files into MeshMembers.
+// Each line is "<dir>/<mesh>.members:<vm> <id> <pubkey> <addr>".
+//
+// WHY: the roster is built from the swept hosts' own keys, and an
+// appliance VM is not a swept host — it is reachable only over the mesh
+// its host minted for it. So every appliance peer read as undeclared: on
+// onyx, 17 of 17 peers, six of them handshaking within the minute
+// (2026-09-04). kvm-mesh does write down what it meant: the members file
+// is the one declaration the substrate keeps, and it is exactly the
+// registry roster.go says nothing else provides. Reading it turns
+// "undeclared" into "app-adguard-ho/ap-app-adguard" without an ssh into
+// any guest.
+//
+// A line with fewer than three fields is skipped: a failed `kvm-mesh up`
+// leaves an empty members file behind (app-writefreel, 2026-09-04), and
+// empty is a mesh with no members, not an error.
+func parseMembers(out string) []MeshMember {
+	var ms []MeshMember
+	for _, line := range strings.Split(out, "\n") {
+		path, rest, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) < 3 {
+			continue
+		}
+		mesh := strings.TrimSuffix(path[strings.LastIndex(path, "/")+1:], ".members")
+		m := MeshMember{Mesh: mesh, Name: f[0], PublicKey: f[2]}
+		if len(f) > 3 {
+			m.Addr = f[3]
+		}
+		ms = append(ms, m)
+	}
+	return ms
 }
 
 // Health buckets a peer by handshake age — the "is this tunnel alive?"
@@ -225,8 +312,9 @@ func parseDump(host, dump string) []Device {
 	return devs
 }
 
-// sepMark separates the three sections of the combined remote command —
-// dump, addresses, fqdn — so one ssh round-trip gathers all identity data.
+// sepMark separates the four sections of the combined remote command —
+// dump, addresses, fqdn, members files — so one ssh round-trip gathers all
+// identity data.
 const sepMark = "==WGX-SEP=="
 
 // parseAddrs folds `ip -br addr` into iface → its own address(es),
@@ -267,7 +355,7 @@ func CollectEstate(hosts []string) []Device {
 
 	collect := func(host string) {
 		defer wg.Done()
-		var dump, addrOut, fqdn, haddr string
+		var dump, addrOut, fqdn, haddr, members string
 		var err error
 		if host == "" {
 			var out []byte
@@ -279,6 +367,7 @@ func CollectEstate(hosts []string) []Device {
 			if f, e := exec.Command("hostname", "-f").Output(); e == nil {
 				fqdn = strings.TrimSpace(string(f))
 			}
+			members = localMembers()
 		} else {
 			var out []byte
 			out, err = exec.Command("ssh",
@@ -288,9 +377,10 @@ func CollectEstate(hosts []string) []Device {
 				host,
 				"wg show all dump 2>/dev/null; echo "+sepMark+
 					"; ip -br addr 2>/dev/null; echo "+sepMark+
-					"; hostname -f 2>/dev/null || hostname").Output()
-			if parts := strings.SplitN(string(out), sepMark+"\n", 3); len(parts) == 3 {
-				dump, addrOut, fqdn = parts[0], parts[1], strings.TrimSpace(parts[2])
+					"; hostname -f 2>/dev/null || hostname; echo "+sepMark+
+					"; "+membersCmd).Output()
+			if parts := strings.SplitN(string(out), sepMark+"\n", 4); len(parts) == 4 {
+				dump, addrOut, fqdn, members = parts[0], parts[1], strings.TrimSpace(parts[2]), parts[3]
 			}
 			target := sshHostName[host]
 			if target == "" {
@@ -308,10 +398,12 @@ func CollectEstate(hosts []string) []Device {
 		}
 		devs := parseDump(host, dump)
 		addrs := parseAddrs(addrOut)
+		ms := parseMembers(members)
 		for i := range devs {
 			devs[i].Addr = addrs[devs[i].Name]
 			devs[i].HostFQDN = fqdn
 			devs[i].HostAddr = haddr
+			devs[i].Members = ms
 		}
 		// A reachable host with ZERO WireGuard interfaces must still appear —
 		// inventory truth. Without this marker the host silently vanished

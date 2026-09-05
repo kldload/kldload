@@ -142,3 +142,61 @@ func TestPartialCountsHostsNotRows(t *testing.T) {
 		t.Errorf("partial=%d, want 1 — two error rows are one unreachable host", partial)
 	}
 }
+
+// An appliance VM is never a swept host — it is reachable only over the
+// mesh its host minted — so its key comes from the host's kvm-mesh members
+// file. Before this, every appliance peer read as undeclared: 17 of 17 on
+// onyx, six of them handshaking (2026-09-04).
+func TestMembersFilesDeclareAppliancePeers(t *testing.T) {
+	devs := estate()
+	host := Device{Host: "onyx", HostFQDN: "onyx", Name: "ap-app-adguard", PublicKey: "KEYONYX",
+		Peers:   []Peer{{PublicKey: "KEYVM", Handshake: time.Now()}, {PublicKey: "KEYSTRAY"}},
+		Members: []MeshMember{{Mesh: "ap-app-adguard", Name: "app-adguard-ho", PublicKey: "KEYVM"}}}
+	devs = append(devs, host)
+	f := Analyse(devs)
+	d := devs[3]
+	if !d.Peers[0].Declared || d.Peers[0].Label != "app-adguard-ho/ap-app-adguard" {
+		t.Errorf("member peer: declared=%v label=%q, want declared as app-adguard-ho/ap-app-adguard",
+			d.Peers[0].Declared, d.Peers[0].Label)
+	}
+	if d.Peers[1].Declared {
+		t.Error("a key in no members file must still be an orphan")
+	}
+	if len(f.Orphans) != 1 || f.Orphans[0].PublicKey != "KEYSTRAY" {
+		t.Errorf("orphans = %+v, want only KEYSTRAY", f.Orphans)
+	}
+}
+
+// A swept VM's own interface is the more precise owner than its host's
+// record of it, so the sweep wins over the members file.
+func TestSweptInterfaceOutranksMembersFile(t *testing.T) {
+	devs := []Device{
+		{Host: "onyx", HostFQDN: "onyx", Name: "ap-app-x", PublicKey: "KEYH",
+			Members: []MeshMember{{Mesh: "ap-app-x", Name: "app-x", PublicKey: "KEYVM"}}},
+		{Host: "app-x", HostFQDN: "app-x.lan", Name: "wg-app", PublicKey: "KEYVM"},
+	}
+	roster, _ := BuildRoster(devs)
+	if o := roster["KEYVM"]; o.Host != "app-x.lan" || o.Iface != "wg-app" {
+		t.Errorf("KEYVM owned by %q/%q, want the swept app-x.lan/wg-app", o.Host, o.Iface)
+	}
+}
+
+// The parser takes grep -H output: file:line. An empty members file — what a
+// failed `kvm-mesh up` leaves behind — is a mesh with no members, not junk.
+func TestParseMembers(t *testing.T) {
+	out := "/var/lib/kldload/mesh/ap-app-adguard.members:app-adguard-ho 1 wRuf/70VFJj4mYp0fRR5ncVfm4= 192.168.122.214\n" +
+		"/var/lib/kldload/mesh/ap-app-writefre.members:\n" +
+		"/var/lib/kldload/mesh/testnet.members:mesh-2 2 IAFGWEHCUjm3mfF9RjdY5rKG= 192.168.122.179\n" +
+		"garbage without a colon\n"
+	ms := parseMembers(out)
+	if len(ms) != 2 {
+		t.Fatalf("parsed %d members, want 2: %+v", len(ms), ms)
+	}
+	if m := ms[0]; m.Mesh != "ap-app-adguard" || m.Name != "app-adguard-ho" ||
+		m.PublicKey != "wRuf/70VFJj4mYp0fRR5ncVfm4=" || m.Addr != "192.168.122.214" {
+		t.Errorf("first member = %+v", m)
+	}
+	if ms[1].Mesh != "testnet" || ms[1].Name != "mesh-2" {
+		t.Errorf("second member = %+v", ms[1])
+	}
+}

@@ -47,7 +47,14 @@ Nothing writes down who is supposed to be in a WireGuard network, so
 derives it.
 Every legitimate peer entry in a mesh is some other host's own interface, so
 the union of the hosts' own public keys is the membership roster, and set
-difference against it answers the questions an inventory would have:
+difference against it answers the questions an inventory would have.
+The one thing the substrate does write down is read as well: each swept
+host's
+.Xr kvm-mesh 8
+members files, one line per appliance VM with the key the host minted for
+it, so a VM that is reachable only over its host's mesh is declared by that
+host rather than reported as an orphan.
+The questions:
 .Bl -tag -width "one-way link"
 .It Em orphan
 A peer entry whose key belongs to no host in the sweep.
@@ -155,6 +162,11 @@ Fallback inventory.
 Git forges and
 .Ic gh-*
 aliases are skipped.
+.It Pa /var/lib/kldload/mesh/*.members
+On each swept host, the VMs
+.Xr kvm-mesh 8
+enrolled on its appliance meshes, one per line with its public key.
+Read with the sweep; absent on a host that is not a hypervisor.
 .El
 .Sh EXIT STATUS
 .Ex -std
@@ -241,6 +253,9 @@ A peer that is legitimately outside the inventory — a phone, a laptop, a
 host you chose not to sweep — is reported as an orphan, because from the
 sweep's position the two are indistinguishable.
 Handshake age is the tell.
+Appliance VMs are the exception, declared by their host's members files;
+the cluster nodes on the management and kubernetes planes are not, and
+read as orphans until they are in the inventory themselves.
 .Pp
 The estate view works wherever
 .Xr wg 8
