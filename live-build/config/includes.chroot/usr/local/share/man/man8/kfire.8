@@ -3,7 +3,7 @@
 .Os
 .Sh NAME
 .Nm kfire
-.Nd stamp Firecracker microVMs from an appliance's ZFS zvols
+.Nd clone Firecracker microVMs from an appliance's ZFS zvols
 .Sh SYNOPSIS
 .Nm
 .Cm golden
@@ -15,7 +15,7 @@
 .Cm golden-destroy
 .Ar golden
 .Nm
-.Cm stamp
+.Cm clone
 .Ar golden
 .Op Fl n Ar count
 .Op Fl -name Ar prefix
@@ -46,7 +46,7 @@
 .Cm status
 .Sh DESCRIPTION
 .Nm
-turns a kldload appliance VM into a golden and stamps copies of it as
+turns a kldload appliance VM into a golden and clones copies of it as
 Firecracker microVMs.
 The golden is built once, the slow way: a full libvirt first boot with
 cloud-init, the recipe, verification and enrollment, exactly as
@@ -87,8 +87,8 @@ Drop a golden.
 ZFS refuses to destroy a snapshot with clones, and that refusal is the guard:
 .Cm destroy
 the instances first.
-.It Cm stamp Ar golden Op Ar options
-Stamp one or more instances.
+.It Cm clone Ar golden Op Ar options
+Clone one or more instances.
 Each gets a clone of the root zvol and of the data zvol, a NoCloud seed
 carrying its instance-id and hostname, a tap on the bridge, a locally
 administered MAC derived from its name, and a Firecracker configuration;
@@ -103,7 +103,7 @@ Instance name prefix; the default is the golden's name without its
 .Ql app-
 prefix, so
 .Ql app-web-stack
-stamps
+clones
 .Ql web-stack-1 .
 .It Fl -cpu Ar n , Fl -ram Ar mb
 Per instance.
@@ -117,7 +117,7 @@ is libvirt's network, whose DHCP gives the instance an address that
 .Cm list
 can read.
 .It Fl -wait
-Stay until every stamped instance answers on the golden's port, and print
+Stay until every cloned instance answers on the golden's port, and print
 the milliseconds each one took from the start of the run.
 Exit 1 if any does not within three minutes.
 .El
@@ -148,7 +148,7 @@ Firecracker version, bridge state, counts.
 .El
 .Sh OPTIONS
 See the verbs above; every option belongs to
-.Cm stamp .
+.Cm clone .
 .Sh ENVIRONMENT
 .Bl -tag -width "KFIRE_FIRECRACKER" -compact
 .It Ev KFIRE_POOL
@@ -156,7 +156,7 @@ The dataset under which appliance zvols live; default
 .Ql rpool/vms .
 .It Ev KFIRE_BRIDGE
 Default bridge for
-.Cm stamp ;
+.Cm clone ;
 .Ql virbr0 .
 .It Ev KFIRE_FIRECRACKER
 The firecracker binary; default
@@ -189,7 +189,7 @@ names.
 .It 0
 Success.
 .It 1
-Failure: a missing binary, zvol, golden or instance; a stamp whose unit died
+Failure: a missing binary, zvol, golden or instance; a clone whose unit died
 at once; an instance that did not answer under
 .Fl -wait .
 .It 2
@@ -204,12 +204,12 @@ golden app-web-stack: snapshotting rpool/vms/app-web-stack@kfire and rpool/vms/a
 golden app-web-stack ready: root=/dev/vda3 rootflags=subvol=root 2 vCPU / 2048 MB + data pool
 .Ed
 .Pp
-Stamp ten and wait for them, as measured on a 24-core, 32 GB desktop:
+Clone ten and wait for them, as measured on a 24-core, 32 GB desktop:
 .Bd -literal -offset indent
-# kfire stamp app-web-stack -n 10 --wait
-web-stack-1  stamped in 195 ms  (2 vCPU / 2048 MB, aa:fc:ac:a1:b7:20 on virbr0)
+# kfire clone app-web-stack -n 10 --wait
+web-stack-1  cloned in 195 ms  (2 vCPU / 2048 MB, aa:fc:ac:a1:b7:20 on virbr0)
 \&...
-10 stamped in 5014 ms, 0 failed
+10 cloned in 5014 ms, 0 failed
 web-stack-1          192.168.122.33   http 200  answering at  13105 ms
 \&...
 web-stack-7          192.168.122.27   http 200  answering at  33398 ms
@@ -218,7 +218,7 @@ all 10 answering · host: 8796 MB available
 .Pp
 Three at a larger size, on the LAN bridge, named for a customer:
 .Bd -literal -offset indent
-# kfire stamp app-web-stack -n 3 --name acme --cpu 4 --ram 4096 --bridge br0
+# kfire clone app-web-stack -n 3 --name acme --cpu 4 --ram 4096 --bridge br0
 .Ed
 .Pp
 See what is running and where:
@@ -295,7 +295,7 @@ destroy it by hand.
 .Xr zfs 8
 .Sh HISTORY
 Written on 2026-09-05 after the Web Stack tile, four minutes to build under
-libvirt, stamped in 250 milliseconds and served HTTP seven seconds later
+libvirt, cloned in 250 milliseconds and served HTTP seven seconds later
 under Firecracker.
 The first attempt landed in dracut's emergency shell because Firecracker
 appends its own
@@ -314,7 +314,7 @@ The libvirt network's DHCP hands out addresses and
 .Xr kldload-networks 8
 does not touch these rows, so an instance's address in the estate database
 is the one
-.Cm stamp Fl -wait
+.Cm clone Fl -wait
 or
 .Cm start
 last recorded.

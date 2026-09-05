@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# kfire — stamp Firecracker microVMs from a sealed appliance's ZFS zvols
+# kfire — clone Firecracker microVMs from a sealed appliance's ZFS zvols
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # What it does, in order:
@@ -9,7 +9,7 @@
 #                root filesystem into /var/lib/kfire/goldens/<name>/, with an
 #                ELF vmlinux extracted from the bzImage where the installed
 #                Firecracker cannot boot a bzImage itself.
-#   2. stamp   — clones the zvols (milliseconds), writes a NoCloud seed with
+#   2. clone   — clones the zvols (milliseconds), writes a NoCloud seed with
 #                the instance's identity, creates a tap on the bridge, writes
 #                the Firecracker config and starts the microVM as a transient
 #                systemd unit with its API socket; registers it in state.db.
@@ -18,8 +18,8 @@
 #                carries a microVM that nothing can see or remove.
 #
 # Why: the Web Stack tile took 4 min to build under libvirt and 250 ms to
-# stamp from its zvols under Firecracker, then served HTTP 7 s later with
-# 300 MB of host memory per instance (onyx, 2026-09-05: ten stamped in 2.7 s,
+# clone from its zvols under Firecracker, then served HTTP 7 s later with
+# 300 MB of host memory per instance (onyx, 2026-09-05: ten cloned in 2.7 s,
 # all ten answering, host at 7.6 GB available). A golden is built ONCE with
 # the full libvirt + cloud-init pipeline; the copies are microVMs. Nothing in
 # the guest changes: it is the same disk, the same kernel, the same services.
@@ -78,13 +78,13 @@ ms() { echo $(($(date +%s%N) / 1000000)); }
 
 usage() {
     cat <<'EOF'
-kfire — stamp Firecracker microVMs from an appliance's ZFS zvols
+kfire — clone Firecracker microVMs from an appliance's ZFS zvols
 
 Usage:
   kfire golden <vm> [--force]            snapshot a shut-off VM as a golden
   kfire goldens [--json]                 list goldens
   kfire golden-destroy <golden>          drop a golden (refused while clones exist)
-  kfire stamp <golden> [options]         stamp microVMs from a golden
+  kfire clone <golden> [options]         clone microVMs from a golden
       -n, --count N        how many (default 1)
       --name PREFIX        instance names PREFIX-1.. (default: golden name minus app-, e.g. web-stack)
       --cpu C  --ram MB    per instance (default: the golden's own size)
@@ -100,7 +100,7 @@ Usage:
 
 Examples:
   kfire golden app-web-stack             # VM must be shut off; ~5 s
-  kfire stamp app-web-stack -n 10 --wait # ten LAMPs, timed to first HTTP answer
+  kfire clone app-web-stack -n 10 --wait # ten LAMPs, timed to first HTTP answer
   kfire list
   kfire ssh web-stack-3 'systemctl is-active nginx postgresql valkey'
   kfire destroy --all
@@ -228,7 +228,7 @@ cmd_golden() {
         umount "$bmp"
         rmdir "$bmp"
     }
-    # the VM's own size and port are the defaults its stamps inherit
+    # the VM's own size and port are the defaults its clones inherit
     local vcpus=2 ram=2048 port=80
     if command -v virsh >/dev/null 2>&1; then
         vcpus=$(virsh -c qemu:///system dominfo "$vm" 2>/dev/null | awk '/^CPU\(s\)/{print $2}' || echo 2)
@@ -236,7 +236,7 @@ cmd_golden() {
     fi
     if command -v kldload-db >/dev/null 2>&1; then
         # the appliance's role names the tile; the tile's port is in vmxplore's
-        # catalog, not here — 80 unless the operator says otherwise at stamp
+        # catalog, not here — 80 unless the operator says otherwise at clone
         : "${port:=80}"
     fi
     jq -n --arg name "$vm" --arg root "$root_zv" --arg data "$data_zv" --arg snap "$SNAP" \
@@ -250,7 +250,7 @@ cmd_golden() {
 cmd_goldens() {
     local j
     if [[ ${1:-} == --json ]]; then
-        # what vmxplore's stamp dialog reads: the golden files as they are,
+        # what vmxplore's clone dialog reads: the golden files as they are,
         # plus the live clone count
         local first=1
         echo '['
@@ -376,11 +376,11 @@ fc_start() {
         "$(command -v "$FC")" --api-sock "$(sock_of "$name")" --config-file "$dir/config.json"
 }
 
-cmd_stamp() {
-    need_root stamp "$@"
+cmd_clone() {
+    need_root clone "$@"
     need_fc
     local golden=${1:-}
-    [[ -n $golden ]] || usage_die "stamp: which golden? (kfire goldens)"
+    [[ -n $golden ]] || usage_die "clone: which golden? (kfire goldens)"
     shift
     local gj
     gj=$(golden_json "$golden")
@@ -412,10 +412,10 @@ cmd_stamp() {
             wait=1
             shift
             ;;
-        *) usage_die "stamp: unknown option $1" ;;
+        *) usage_die "clone: unknown option $1" ;;
         esac
     done
-    [[ $count =~ ^[0-9]+$ && $count -ge 1 ]] || usage_die "stamp: --count must be a positive number"
+    [[ $count =~ ^[0-9]+$ && $count -ge 1 ]] || usage_die "clone: --count must be a positive number"
     [[ -n $prefix ]] || prefix=${golden#app-}
     [[ $prefix =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "instance prefix must be a-z 0-9 - : $prefix"
     ip -br link show "$bridge" >/dev/null 2>&1 || die "no bridge $bridge"
@@ -484,7 +484,7 @@ cmd_stamp() {
         fc_start "$name"
         b=$(ms)
         # a config Firecracker rejects ends the unit within milliseconds; say
-        # so here rather than report a stamp that is already dead
+        # so here rather than report a clone that is already dead
         sleep 0.2
         if ! systemctl is-active --quiet "$(unit_of "$name")"; then
             log "$name  FAILED to start — $(grep -m1 -oE 'Error: .*' "$dir/console.log" || echo 'see kfire console')"
@@ -494,12 +494,12 @@ cmd_stamp() {
         fi
         db_register "$name"
         made+=("$name")
-        log "$name  stamped in $((b - a)) ms  ($cpu vCPU / $ram MB, $mac on $bridge)"
+        log "$name  cloned in $((b - a)) ms  ($cpu vCPU / $ram MB, $mac on $bridge)"
     done
-    log "${#made[@]} stamped in $(($(ms) - t0)) ms${failed:+, $failed failed}"
+    log "${#made[@]} cloned in $(($(ms) - t0)) ms${failed:+, $failed failed}"
     [[ $failed -eq 0 ]] || return 1
     command -v kldload-db >/dev/null 2>&1 && kldload-db event --type vm --subject "$golden" \
-        --message "kfire: ${#made[@]} microVM(s) stamped: ${made[*]}" >/dev/null 2>&1 || true
+        --message "kfire: ${#made[@]} microVM(s) cloned: ${made[*]}" >/dev/null 2>&1 || true
 
     [[ $wait -eq 1 ]] || {
         log "watch: kfire list · console: kfire console ${made[0]}"
@@ -712,9 +712,15 @@ golden-destroy)
     shift
     cmd_golden_destroy "$@"
     ;;
-stamp)
+clone)
     shift
-    cmd_stamp "$@"
+    cmd_clone "$@"
+    ;;
+stamp)
+    # the verb's first name; kept for a release so a script does not break
+    log "kfire: 'stamp' is now 'clone'"
+    shift
+    cmd_clone "$@"
     ;;
 list)
     shift
