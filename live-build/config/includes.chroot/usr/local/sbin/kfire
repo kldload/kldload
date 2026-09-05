@@ -591,11 +591,12 @@ each_named() { # each_named VERB NAME|--all
     local verb=$1 target=${2:-}
     [[ -n $target ]] || usage_die "$verb: which instance? (or --all)"
     if [[ $target == --all ]]; then
-        local j
+        local j failed=0
         for j in "$INSTANCES"/*/instance.json; do
             [[ -f $j ]] || continue
-            "${verb}_one" "$(jget "$j" .name)"
+            "${verb}_one" "$(jget "$j" .name)" || failed=$((failed + 1))
         done
+        [[ $failed -eq 0 ]] || die "$verb --all: $failed instance(s) failed (see above)"
     else
         [[ -f $(inst_json "$target") ]] || die "no instance $target (kfire list)"
         "${verb}_one" "$target"
@@ -626,24 +627,38 @@ cmd_start() {
     log "$name started"
 }
 
+# destroy_one NAME — stop, then remove tap, zvols, estate row and record.
+# `zfs destroy -r`: sanoid snapshots every rpool/vms zvol, clones included,
+# and a plain destroy refuses a zvol with snapshots. The first destroy
+# --all took one of four instances and quietly left three zvol pairs on
+# the pool WITH their records gone (onyx, 2026-09-05). -r takes the
+# clone's own snapshots and nothing else; a zvol that still survives keeps
+# its record, so the instance stays listed and the failure stays visible.
 destroy_one() {
     local name=$1 j
     j=$(inst_json "$name")
     stop_one "$name" >/dev/null 2>&1 || true
-    local tap z
+    local tap z left=0
     tap=$(jget "$j" .tap)
     ip link show "$tap" >/dev/null 2>&1 && ip link del "$tap"
     for z in "$(jget "$j" .root_zvol)" "$(jget "$j" .data_zvol)"; do
         [[ -n $z ]] || continue
         zfs list -H -o name "$z" >/dev/null 2>&1 || continue
-        local _try
+        local _try out=""
         for _try in 1 2 3 4 5; do
-            # qemu-style: the block device lets go a moment after the process ends
-            zfs destroy "$z" 2>/dev/null && break
+            # the block device lets go a moment after the process ends
+            out=$(zfs destroy -r "$z" 2>&1) && break
             sleep 1
         done
-        zfs list -H -o name "$z" >/dev/null 2>&1 && log "  WARNING: $z still exists (busy) — zfs destroy $z by hand"
+        if zfs list -H -o name "$z" >/dev/null 2>&1; then
+            log "  $name: $z still exists — ${out:-busy}"
+            left=$((left + 1))
+        fi
     done
+    if [[ $left -gt 0 ]]; then
+        log "$name NOT destroyed: $left zvol(s) remain; the record is kept — fix the cause and run kfire destroy $name again"
+        return 1
+    fi
     if command -v kldload-db >/dev/null 2>&1; then
         kldload-db vm-delete --name "$name" >/dev/null 2>&1 || true
         kldload-db event --type vm --subject "$name" --message "destroyed by kfire" >/dev/null 2>&1 || true
