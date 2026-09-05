@@ -91,7 +91,9 @@ Usage:
       --name PREFIX        instance names PREFIX-1.. (default: golden name minus app-, e.g. web-stack)
       --cpu C  --ram MB    per instance (default: the golden's own size)
       --bridge BR          tap onto this bridge (default virbr0: libvirt DHCP + leases)
-      --wait               wait until every instance answers on the golden's port, print ms
+      --wait               wait until every instance answers on the golden's port, print ms,
+                           then enroll each on the substrate (mesh, estate cert, inventory) via vmx
+      --no-enroll          skip that enrollment
   kfire list [--json]                    every instance: state, ip, golden, sizes
   kfire stop <name>|--all                shut the guest down (Ctrl-Alt-Del over the API, then SIGTERM)
   kfire start <name>                     start a stopped instance again (same zvols, same identity)
@@ -292,6 +294,33 @@ cmd_golden_destroy() {
     log "golden $g removed"
 }
 
+# enroll_one NAME IP GOLDEN FLAG — the substrate's enrollment, by vmx, the
+# one implementation of it: WireGuard mesh from kvm-mesh, a leaf from the
+# estate CA pushed into the guest, the inventory row. A microVM that is not
+# enrolled works but is not on the substrate — wgx does not list it, no
+# estate cert ("didn't see them in wgxplore", operator, 2026-09-05).
+enroll_one() {
+    local name=$1 ipa=$2 golden=$3 flag=$4
+    [[ $flag -eq 1 ]] || return 0
+    if ! command -v vmx >/dev/null 2>&1; then
+        log "  $name: not enrolled — vmx is not on this host (kldload ships it)"
+        return 0
+    fi
+    if vmx --enroll "$name" --ip "$ipa" --role "firecracker-$golden" 2>&1 | sed "s/^/  $name: /" >&2; then
+        set_json "$name" enrolled yes
+    else
+        log "  $name: enrollment incomplete — see the lines above"
+    fi
+}
+
+# mesh_of NAME — the mesh kvm-mesh names for a guest: ap-<name>, cut to the
+# kernel's 15-character interface limit, no trailing dash (vmxplore's rule).
+mesh_of() {
+    local m="ap-$1"
+    m=${m:0:15}
+    echo "${m%-}"
+}
+
 # ─── instances ────────────────────────────────────────────────────────────
 
 inst_json() { echo "$INSTANCES/$1/instance.json"; }
@@ -453,7 +482,10 @@ fc_start() {
                  if .drive_id == "rootfs" then .path_on_host = "/rootfs.zvol"
                  elif .drive_id == "data" then .path_on_host = "/data.zvol"
                  elif .drive_id == "seed" then .path_on_host = "/seed.iso"
-                 else . end))' "$dir/config.json" >"$croot/config.json"
+                 else . end))
+             | .metrics.metrics_path = "/metrics.json"' "$dir/config.json" >"$croot/config.json"
+        # klab-exporter reads Firecracker's own counters from here
+        set_json "$name" metrics "$croot/metrics.json"
         chown -R "$JAIL_USER:$JAIL_USER" "$croot"
         # the tap belongs to the jail user: that is what lets an unprivileged
         # process attach to it
@@ -474,6 +506,7 @@ fc_start() {
     mkdir -p "$RUN"
     rm -f "$RUN/$name.sock"
     set_json "$name" sock "$RUN/$name.sock"
+    set_json "$name" metrics "$dir/metrics.json"
     set_json "$name" jailed no
     systemd-run --quiet --unit "$(unit_of "$name")" --collect \
         --property "StandardOutput=append:$dir/console.log" --property "StandardError=append:$dir/console.log" \
@@ -490,7 +523,7 @@ cmd_clone() {
     local gj
     gj=$(golden_json "$golden")
     [[ -f $gj ]] || die "no golden $golden — kfire golden $golden first"
-    local count=1 prefix="" cpu="" ram="" bridge=$BRIDGE wait=0
+    local count=1 prefix="" cpu="" ram="" bridge=$BRIDGE wait=0 enroll=1
     while [[ $# -gt 0 ]]; do
         case $1 in
         -n | --count)
@@ -515,6 +548,10 @@ cmd_clone() {
             ;;
         --wait)
             wait=1
+            shift
+            ;;
+        --no-enroll)
+            enroll=0
             shift
             ;;
         *) usage_die "clone: unknown option $1" ;;
@@ -572,6 +609,7 @@ cmd_clone() {
             echo "    ,{\"drive_id\": \"seed\", \"path_on_host\": \"$dir/seed.iso\", \"is_root_device\": false, \"is_read_only\": true}"
             echo '  ],'
             echo "  \"machine-config\": {\"vcpu_count\": $cpu, \"mem_size_mib\": $ram},"
+            echo "  \"metrics\": {\"metrics_path\": \"$dir/metrics.json\"},"
             echo "  \"network-interfaces\": [{\"iface_id\": \"eth0\", \"guest_mac\": \"$mac\", \"host_dev_name\": \"$tap\"}]"
             echo '}'
         } >"$dir/config.json"
@@ -627,6 +665,7 @@ cmd_clone() {
                 up=$((up + 1))
                 db_register "$nme" "$ipa"
                 printf '%-20s %-16s http %s  answering at %6d ms\n' "$nme" "$ipa" "$code" "${done_at[$nme]}" >&2
+                enroll_one "$nme" "$ipa" "$golden" "$enroll"
             fi
         done
     done
@@ -763,6 +802,12 @@ destroy_one() {
     if [[ $left -gt 0 ]]; then
         log "$name NOT destroyed: $left zvol(s) remain; the record is kept — fix the cause and run kfire destroy $name again"
         return 1
+    fi
+    # the mesh kvm-mesh made for it when it was enrolled — by its members
+    # file, since a failed join can leave the file with no interface
+    if command -v kvm-mesh >/dev/null 2>&1 && [[ -e "/var/lib/kldload/mesh/$(mesh_of "$name").members" ]]; then
+        kvm-mesh down "$(mesh_of "$name")" >/dev/null 2>&1 || log "  $name: kvm-mesh down $(mesh_of "$name") failed — take it down by hand"
+        command -v kldload-networks >/dev/null 2>&1 && kldload-networks sync >/dev/null 2>&1 || true
     fi
     if command -v kldload-db >/dev/null 2>&1; then
         kldload-db vm-delete --name "$name" >/dev/null 2>&1 || true

@@ -41,6 +41,88 @@ def run(cmd):
         return ""
 
 
+# ── Firecracker microVMs ────────────────────────────────────────────────
+FC_INSTANCES = "/var/lib/kfire/instances"
+# Firecracker's block and net counters are DELTAS since the last flush, not
+# totals (checked on onyx 2026-09-05: a flush a second after boot read 0),
+# so the exporter sums them into the monotonic counters Prometheus wants.
+# In-process: a restart resets to zero, which rate() treats as a counter
+# reset and rides through.
+FC_TOTALS = {}
+
+def firecracker_metrics():
+    """libvirt_domain_* lines for every kfire instance, or [] when none."""
+    if not os.path.isdir(FC_INSTANCES):
+        return []
+    out = []
+    for name in sorted(os.listdir(FC_INSTANCES)):
+        rec = os.path.join(FC_INSTANCES, name, "instance.json")
+        try:
+            with open(rec) as f:
+                inst = json.load(f)
+        except Exception:
+            continue
+        dom = inst.get("name", name)
+        unit = f"kfire-{dom}.service"
+        running = run(f"systemctl is-active {unit}") == "active"
+        state, desc = (1, "the domain is running") if running else (5, "the domain is shut off")
+        out.append(f'libvirt_domain_info{{domain="{dom}",os_type="hvm",os_type_arch="x86_64",'
+                   f'os_type_machine="firecracker"}} 1')
+        out.append(f'libvirt_domain_info_state{{domain="{dom}",state_desc="{desc}"}} {state}')
+        out.append(f'libvirt_domain_info_virtual_cpus{{domain="{dom}"}} {int(inst.get("vcpus", 0))}')
+        max_mem = int(inst.get("ram_mb", 0)) * 1024 * 1024
+        out.append(f'libvirt_domain_info_maximum_memory_bytes{{domain="{dom}"}} {max_mem}')
+        if not running:
+            continue
+        props = {}
+        for kv in run(f"systemctl show -p CPUUsageNSec,MemoryCurrent {unit}").splitlines():
+            k, _, v = kv.partition("=")
+            props[k] = v
+        try:
+            cpu_s = int(props.get("CPUUsageNSec", 0)) / 1e9
+            out.append(f'libvirt_domain_info_cpu_time_seconds_total{{domain="{dom}"}} {cpu_s:.2f}')
+        except ValueError:
+            pass
+        if props.get("MemoryCurrent", "").isdigit():
+            out.append(f'libvirt_domain_info_memory_usage_bytes{{domain="{dom}"}} {props["MemoryCurrent"]}')
+        # Firecracker's counters: flush, then the last line of the file.
+        sock, mpath = inst.get("sock"), inst.get("metrics")
+        if sock and os.path.exists(sock):
+            run(f"curl -s --max-time 2 --unix-socket {sock} -X PUT -H 'Content-Type: application/json' "
+                f"-d '{{\"action_type\":\"FlushMetrics\"}}' http://localhost/actions")
+        if not mpath or not os.path.isfile(mpath):
+            continue
+        try:
+            with open(mpath, "rb") as f:
+                last = f.read().strip().splitlines()[-1]
+            m = json.loads(last)
+        except Exception:
+            continue
+        # block_rootfs → vda, block_data → vdb: the order the drives are
+        # attached, which is the order the guest names them
+        def total(series, delta):
+            FC_TOTALS[series] = FC_TOTALS.get(series, 0) + int(delta or 0)
+            return FC_TOTALS[series]
+
+        for key, dev in (("block_rootfs", "vda"), ("block_data", "vdb")):
+            b = m.get(key)
+            if not isinstance(b, dict):
+                continue
+            lbl = f'{{domain="{dom}",target_device="{dev}"}}'
+            for metric, k in (("read_bytes", "read_bytes"), ("write_bytes", "write_bytes"),
+                              ("read_requests", "read_count"), ("write_requests", "write_count")):
+                out.append(f"libvirt_domain_block_stats_{metric}_total{lbl} "
+                           f"{total((dom, dev, k), b.get(k, 0))}")
+        n = m.get("net_eth0")
+        if isinstance(n, dict):
+            lbl = f'{{domain="{dom}",target_device="{inst.get("tap", "eth0")}"}}'
+            for metric, k in (("receive_bytes", "rx_bytes_count"), ("transmit_bytes", "tx_bytes_count"),
+                              ("receive_packets", "rx_packets_count"), ("transmit_packets", "tx_packets_count")):
+                out.append(f"libvirt_domain_interface_stats_{metric}_total{lbl} "
+                           f"{total((dom, 'net', k), n.get(k, 0))}")
+    return out
+
+
 def collect_metrics():
     lines = []
     lines.append("# HELP klab_info klab platform info")
@@ -194,6 +276,23 @@ def collect_metrics():
                 lines.append(f'klab_test_status{{distro="{d}",status="{status}"}} 1')
             if last_test:
                 lines.append(f'klab_test_last_test_info{{distro="{d}",test="{last_test}"}} 1')
+
+    # ── Firecracker microVMs (kfire) ─────────────────────────────────
+    # The VM Estate dashboard is built on the libvirt exporter's
+    # libvirt_domain_* series, and a microVM has no libvirt domain, so ten
+    # clones of the Web Stack were in the Ansible inventory and absent from
+    # Grafana (onyx, 2026-09-05). The same names with the same labels are
+    # emitted here for every kfire instance: state, sizes and CPU/memory
+    # from the instance's systemd unit, block and network counters from
+    # Firecracker's own metrics file (flushed over the API first so they
+    # are current rather than up to a minute old). Label values match the
+    # libvirt exporter's strings exactly — the dashboard's VM picker is
+    # label_values(... state_desc ...) — so a microVM appears as one more
+    # domain in every existing panel.
+    fc_lines = firecracker_metrics()
+    if fc_lines:
+        lines.append("")
+        lines.extend(fc_lines)
 
     # ── ZFS pool health ──────────────────────────────────────────────
     # Names use the klab_zfs_pool_* prefix so they align with the rest of

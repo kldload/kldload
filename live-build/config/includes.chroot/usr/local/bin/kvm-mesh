@@ -51,8 +51,24 @@ die() {
 # The guest agent is authoritative and instant. DHCP leases are the fallback,
 # and they are only a fallback: dnsmasq lists leases it issued AND still holds,
 # so a VM with a static address or an aged-out lease appears nowhere in them.
+# A kfire microVM has no libvirt domain: its record carries the address
+# kfire registered when the guest answered on its port. Checked first
+# because the libvirt lookups below are timeouts on a name libvirt has
+# never heard of.
+kfire_ip() {
+    local rec="/var/lib/kfire/instances/$1/instance.json"
+    [[ -r "$rec" ]] && command -v jq >/dev/null 2>&1 || return 1
+    local ip
+    ip="$(jq -r '.registered_ip // ""' "$rec" 2>/dev/null)"
+    [[ -n "$ip" ]] && printf '%s' "$ip"
+}
+
 vm_ip() {
     local vm="$1" ip
+    if ip="$(kfire_ip "$vm")" && [[ -n "$ip" ]]; then
+        printf '%s' "$ip"
+        return 0
+    fi
     ip="$(timeout 10 virsh domifaddr "$vm" --source agent 2>/dev/null |
         awk '/ipv4/ && $4 !~ /^127\./ {split($4, a, "/"); print a[1]; exit}')" || ip=""
     [[ -n "$ip" ]] && {
@@ -160,11 +176,25 @@ join_vm() {
         id="$(next_id "$f")"
     fi
 
-    virsh domstate "$vm" 2>/dev/null | grep -q running ||
-        {
-            warn "$vm is not running — skipped"
-            return 1
-        }
+    # Running means a running libvirt domain, or a kfire microVM whose unit
+    # is active — the first enrollment of a microVM was refused here with
+    # "is not running" because there was no domain to ask (onyx 2026-09-05).
+    if virsh dominfo "$vm" >/dev/null 2>&1; then
+        virsh domstate "$vm" 2>/dev/null | grep -q running ||
+            {
+                warn "$vm is not running — skipped"
+                return 1
+            }
+    elif [[ -r "/var/lib/kfire/instances/$vm/instance.json" ]]; then
+        systemctl is-active --quiet "kfire-$vm.service" ||
+            {
+                warn "$vm (kfire microVM) is not running — skipped"
+                return 1
+            }
+    else
+        warn "$vm is neither a libvirt domain nor a kfire microVM — skipped"
+        return 1
+    fi
     ip="$(vm_ip "$vm")" || {
         warn "$vm has no reachable address — skipped"
         return 1
@@ -366,7 +396,13 @@ up)
     for vm in "$@"; do join_vm "$mesh" "$subnet" "$vm" && joined=$((joined + 1)); done
     # A count is not a result: say how many of what was asked for actually made it.
     log "joined ${joined}/$# VM(s)"
-    [[ "$joined" -gt 0 ]] || die "no VM joined — nothing to peer"
+    # An empty members file is a mesh with no members that the next `up`
+    # will allocate a subnet around; two meshes landed on 10.254.44 that
+    # way after a failed join (onyx 2026-09-04). Nothing joined, no file.
+    [[ "$joined" -gt 0 ]] || {
+        rm -f "$(mesh_file "$mesh")"
+        die "no VM joined — nothing to peer"
+    }
     peer_all "$mesh" "$subnet"
     verify "$mesh"
     ;;
