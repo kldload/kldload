@@ -596,93 +596,8 @@ VNETDEF
         log "BCC tools symlinked into /usr/local/bin"
     fi
 
-    # ── Install Firecracker + jailer + firectl from darksite binaries ────────────
-    local darksite_bins="/root/darksite/binaries"
-    local bin_dest="/usr/local/bin"
-
-    install_darksite_binary() {
-        local tool="$1"
-        local tool_dir
-        # Find newest version dir (sorted descending)
-        tool_dir="$(find "${darksite_bins}/${tool}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null |
-            sort -rV | head -1)"
-        if [[ -n "${tool_dir}" && -f "${tool_dir}/${tool}" ]]; then
-            install -m 0755 "${tool_dir}/${tool}" "${bin_dest}/${tool}"
-            local ver
-            ver="$(cat "${tool_dir}/VERSION" 2>/dev/null || echo unknown)"
-            log "  installed ${tool} ${ver} → ${bin_dest}/${tool}"
-        else
-            log "  WARNING: ${tool} not found in darksite — will try GitHub download"
-            # Fallback: fetch latest from GitHub if network is available
-            local gh_url
-            case "${tool}" in
-            firecracker | jailer)
-                # Baked copy first — build-iso.sh puts it in /root/darksite/bin
-                # so an air-gapped install has it. Reaching GitHub first meant
-                # an offline machine logged "no network" and silently had no
-                # microVM runtime at all.
-                if [[ -s /root/darksite/bin/firecracker.tgz ]]; then
-                    # A partial tarball leaves nothing to install and the finds
-                    # below then match nothing — the missing binary is reported
-                    # by the caller, so failing here would only lose that.
-                    tar -xzf /root/darksite/bin/firecracker.tgz -C /tmp 2>/dev/null || true
-                    # find exits non-zero when the archive layout changes and
-                    # the name does not match; the caller checks for the binary.
-                    find /tmp -name "firecracker-*-x86_64" -exec install -m 0755 {} "${bin_dest}/firecracker" \; 2>/dev/null || true
-                    # jailer is optional — firecracker runs without it.
-                    find /tmp -name "jailer-*-x86_64" -exec install -m 0755 {} "${bin_dest}/jailer" \; 2>/dev/null || true
-                    log "  ${tool}: installed from the darksite (no network needed)"
-                    return 0
-                fi
-                local fc_ver
-                fc_ver="$(curl -fsSL --connect-timeout 10 \
-                    https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest \
-                    2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"\(v[^"]*\)".*/\1/')"
-                [[ -z "${fc_ver}" ]] && {
-                    log "  SKIP: no network for ${tool}"
-                    return 0
-                }
-                local tgz="/tmp/firecracker-${fc_ver}.tgz"
-                curl -fsSL --connect-timeout 30 --max-time 300 \
-                    "https://github.com/firecracker-microvm/firecracker/releases/download/${fc_ver}/firecracker-${fc_ver}-x86_64.tgz" \
-                    -o "${tgz}" 2>/dev/null || {
-                    log "  SKIP: download failed"
-                    return 0
-                }
-                tar -xzf "${tgz}" -C /tmp 2>/dev/null || true
-                find /tmp -name "firecracker-*-x86_64" -exec install -m 0755 {} "${bin_dest}/firecracker" \; 2>/dev/null || true
-                find /tmp -name "jailer-*-x86_64" -exec install -m 0755 {} "${bin_dest}/jailer" \; 2>/dev/null || true
-                rm -f "${tgz}"
-                ;;
-            firectl)
-                # Baked copy first — same reasoning as firecracker above.
-                if [[ -s /root/darksite/bin/firectl ]]; then
-                    install -m 0755 /root/darksite/bin/firectl "${bin_dest}/firectl" &&
-                        log "  firectl: installed from the darksite (no network needed)" &&
-                        return 0
-                fi
-                local fc_ver
-                fc_ver="$(curl -fsSL --connect-timeout 10 \
-                    https://api.github.com/repos/firecracker-microvm/firectl/releases/latest \
-                    2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"\(v[^"]*\)".*/\1/')"
-                [[ -z "${fc_ver}" ]] && {
-                    log "  SKIP: no network for firectl"
-                    return 0
-                }
-                curl -fsSL --connect-timeout 30 --max-time 120 \
-                    "https://github.com/firecracker-microvm/firectl/releases/download/${fc_ver}/firectl" \
-                    -o "${bin_dest}/firectl" 2>/dev/null &&
-                    chmod +x "${bin_dest}/firectl" ||
-                    log "  SKIP: firectl download failed"
-                ;;
-            esac
-        fi
-    }
-
     log "Installing Firecracker microVM runtime..."
-    install_darksite_binary firecracker
-    install_darksite_binary jailer
-    install_darksite_binary firectl
+    _fb_install_firecracker
 
     # Create /etc/firecracker directory and containerd config stub
     mkdir -p /etc/firecracker /var/lib/firecracker/rootfs /run/firecracker
@@ -1607,6 +1522,106 @@ _darksite_reclaim() {
 #
 # `-e` is false on a dangling symlink too, so this repairs a broken link as
 # well as a missing one. Idempotent; safe to call again from anywhere.
+# ── _fb_install_darksite_binary TOOL — Firecracker, jailer, firectl ─────────
+# Baked copy from the darksite first, GitHub only as a fallback. Lived inside
+# setup_kvm, which only the PRO kvm role runs: a FREE desktop with the KVM
+# stack (onyx, 2026-09-05) had libvirt, kvm-mesh and kfire and no firecracker
+# binary at all. Shared now so both KVM-host paths install the same thing.
+_fb_install_darksite_binary() {
+    local tool="$1"
+    local darksite_bins="/root/darksite/binaries"
+    local bin_dest="/usr/local/bin"
+    local tool_dir
+    # Find newest version dir (sorted descending)
+    tool_dir="$(find "${darksite_bins}/${tool}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null |
+        sort -rV | head -1)"
+    if [[ -n "${tool_dir}" && -f "${tool_dir}/${tool}" ]]; then
+        install -m 0755 "${tool_dir}/${tool}" "${bin_dest}/${tool}"
+        local ver
+        ver="$(cat "${tool_dir}/VERSION" 2>/dev/null || echo unknown)"
+        log "  installed ${tool} ${ver} → ${bin_dest}/${tool}"
+    else
+        log "  WARNING: ${tool} not found in darksite — will try GitHub download"
+        # Fallback: fetch latest from GitHub if network is available
+        local gh_url
+        case "${tool}" in
+        firecracker | jailer)
+            # Baked copy first — build-iso.sh puts it in /root/darksite/bin
+            # so an air-gapped install has it. Reaching GitHub first meant
+            # an offline machine logged "no network" and silently had no
+            # microVM runtime at all.
+            if [[ -s /root/darksite/bin/firecracker.tgz ]]; then
+                # A partial tarball leaves nothing to install and the finds
+                # below then match nothing — the missing binary is reported
+                # by the caller, so failing here would only lose that.
+                tar -xzf /root/darksite/bin/firecracker.tgz -C /tmp 2>/dev/null || true
+                # find exits non-zero when the archive layout changes and
+                # the name does not match; the caller checks for the binary.
+                find /tmp -name "firecracker-*-x86_64" -exec install -m 0755 {} "${bin_dest}/firecracker" \; 2>/dev/null || true
+                # jailer is optional — firecracker runs without it.
+                find /tmp -name "jailer-*-x86_64" -exec install -m 0755 {} "${bin_dest}/jailer" \; 2>/dev/null || true
+                log "  ${tool}: installed from the darksite (no network needed)"
+                return 0
+            fi
+            local fc_ver
+            fc_ver="$(curl -fsSL --connect-timeout 10 \
+                https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest \
+                2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"\(v[^"]*\)".*/\1/')"
+            [[ -z "${fc_ver}" ]] && {
+                log "  SKIP: no network for ${tool}"
+                return 0
+            }
+            local tgz="/tmp/firecracker-${fc_ver}.tgz"
+            curl -fsSL --connect-timeout 30 --max-time 300 \
+                "https://github.com/firecracker-microvm/firecracker/releases/download/${fc_ver}/firecracker-${fc_ver}-x86_64.tgz" \
+                -o "${tgz}" 2>/dev/null || {
+                log "  SKIP: download failed"
+                return 0
+            }
+            tar -xzf "${tgz}" -C /tmp 2>/dev/null || true
+            find /tmp -name "firecracker-*-x86_64" -exec install -m 0755 {} "${bin_dest}/firecracker" \; 2>/dev/null || true
+            find /tmp -name "jailer-*-x86_64" -exec install -m 0755 {} "${bin_dest}/jailer" \; 2>/dev/null || true
+            rm -f "${tgz}"
+            ;;
+        firectl)
+            # Baked copy first — same reasoning as firecracker above.
+            if [[ -s /root/darksite/bin/firectl ]]; then
+                install -m 0755 /root/darksite/bin/firectl "${bin_dest}/firectl" &&
+                    log "  firectl: installed from the darksite (no network needed)" &&
+                    return 0
+            fi
+            local fc_ver
+            fc_ver="$(curl -fsSL --connect-timeout 10 \
+                https://api.github.com/repos/firecracker-microvm/firectl/releases/latest \
+                2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"\(v[^"]*\)".*/\1/')"
+            [[ -z "${fc_ver}" ]] && {
+                log "  SKIP: no network for firectl"
+                return 0
+            }
+            curl -fsSL --connect-timeout 30 --max-time 120 \
+                "https://github.com/firecracker-microvm/firectl/releases/download/${fc_ver}/firectl" \
+                -o "${bin_dest}/firectl" 2>/dev/null &&
+                chmod +x "${bin_dest}/firectl" ||
+                log "  SKIP: firectl download failed"
+            ;;
+        esac
+    fi
+}
+
+# _fb_install_firecracker — the three binaries, then the fact: is firecracker
+# on PATH. kfire refuses to run without it and says so; this is the earlier,
+# louder place to say it.
+_fb_install_firecracker() {
+    _fb_install_darksite_binary firecracker
+    _fb_install_darksite_binary jailer
+    _fb_install_darksite_binary firectl
+    if command -v firecracker >/dev/null 2>&1; then
+        ok "Firecracker $(firecracker --version 2>/dev/null | head -1 | awk '{print $2}') installed — kfire can stamp microVMs"
+    else
+        log "WARNING: firecracker is NOT installed — kfire will refuse to stamp until it is (darksite tarball missing and no network)"
+    fi
+}
+
 _fb_ensure_system_trust() {
     command -v update-ca-trust >/dev/null 2>&1 || return 0
     local _ext=/etc/pki/ca-trust/extracted
@@ -3611,6 +3626,13 @@ AIMOTD
                 fi
             else
                 log "WARNING: ksmtuned not installed — guests will not share pages (expected on Arch)"
+            fi
+
+            # ── Firecracker: the microVM runtime kfire stamps goldens with ──
+            # Same install the PRO kvm role gets; a KVM host without it can
+            # build appliances but never stamp them (onyx, 2026-09-05).
+            if ! command -v firecracker >/dev/null 2>&1; then
+                _fb_install_firecracker
             fi
 
             # ── Host bridge br0 for LAN-routable VMs ─────────────────────

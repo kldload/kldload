@@ -1,0 +1,323 @@
+.Dd September 5, 2026
+.Dt KFIRE 8
+.Os
+.Sh NAME
+.Nm kfire
+.Nd stamp Firecracker microVMs from an appliance's ZFS zvols
+.Sh SYNOPSIS
+.Nm
+.Cm golden
+.Ar vm
+.Op Fl -force
+.Nm
+.Cm goldens
+.Nm
+.Cm golden-destroy
+.Ar golden
+.Nm
+.Cm stamp
+.Ar golden
+.Op Fl n Ar count
+.Op Fl -name Ar prefix
+.Op Fl -cpu Ar n
+.Op Fl -ram Ar mb
+.Op Fl -bridge Ar br
+.Op Fl -wait
+.Nm
+.Cm list
+.Op Fl -json
+.Nm
+.Cm stop
+.Ar name | Fl -all
+.Nm
+.Cm start
+.Ar name
+.Nm
+.Cm destroy
+.Ar name | Fl -all
+.Nm
+.Cm ssh
+.Ar name
+.Op Ar command
+.Nm
+.Cm console
+.Ar name
+.Nm
+.Cm status
+.Sh DESCRIPTION
+.Nm
+turns a kldload appliance VM into a golden and stamps copies of it as
+Firecracker microVMs.
+The golden is built once, the slow way: a full libvirt first boot with
+cloud-init, the recipe, verification and enrollment, exactly as
+.Xr vmxplore 1
+does it.
+Each copy is then a ZFS clone of the golden's zvols plus a Firecracker
+process, which is a few hundred milliseconds of work and a few hundred
+megabytes of host memory per instance.
+Nothing inside the guest changes: it is the same disk, the same kernel and
+the same services, on a different virtual machine monitor.
+.Pp
+Every instance is registered in the estate database the way the appliances
+are, runs as a systemd unit named
+.Ql kfire- Ns Ar name ,
+and is removed by
+.Cm destroy
+together with its zvols, tap device, seed and database row, so the estate
+never carries a microVM that nothing can see or take away.
+.Ss Verbs
+.Bl -tag -width "golden-destroy"
+.It Cm golden Ar vm Op Fl -force
+Snapshot the shut-off VM's root zvol, and its data zvol when it has one, as
+.Ql @kfire ,
+and copy the guest's kernel and initramfs out of its root filesystem into
+.Pa /var/lib/kfire/goldens/ Ns Ar vm .
+The VM must be shut off; a golden of a running VM is crash-consistent and
+.Fl -force
+says that is acceptable.
+Firecracker releases before 1.17 boot only an uncompressed ELF kernel, so
+the bzImage is unpacked with the kernel tree's own
+.Pa scripts/extract-vmlinux
+when a kernel-devel or linux-headers tree is present, and by the same
+search done inline otherwise.
+.It Cm goldens
+List goldens with their size, root device and clone count.
+.It Cm golden-destroy Ar golden
+Drop a golden.
+ZFS refuses to destroy a snapshot with clones, and that refusal is the guard:
+.Cm destroy
+the instances first.
+.It Cm stamp Ar golden Op Ar options
+Stamp one or more instances.
+Each gets a clone of the root zvol and of the data zvol, a NoCloud seed
+carrying its instance-id and hostname, a tap on the bridge, a locally
+administered MAC derived from its name, and a Firecracker configuration;
+then the microVM starts as a transient systemd unit with its API socket in
+.Pa /run/kfire .
+.Bl -tag -width "--bridge br"
+.It Fl n , Fl -count Ar count
+How many.
+Names are numbered from 1, skipping any that exist.
+.It Fl -name Ar prefix
+Instance name prefix; the default is the golden's name without its
+.Ql app-
+prefix, so
+.Ql app-web-stack
+stamps
+.Ql web-stack-1 .
+.It Fl -cpu Ar n , Fl -ram Ar mb
+Per instance.
+The default is the golden VM's own size.
+Firecracker commits guest memory lazily, so the RAM figure is a ceiling
+rather than a reservation.
+.It Fl -bridge Ar br
+The bridge the tap joins; the default
+.Ql virbr0
+is libvirt's network, whose DHCP gives the instance an address that
+.Cm list
+can read.
+.It Fl -wait
+Stay until every stamped instance answers on the golden's port, and print
+the milliseconds each one took from the start of the run.
+Exit 1 if any does not within three minutes.
+.El
+.It Cm list Op Fl -json
+Every instance with its state, address, golden, size and tap.
+.Fl -json
+is the form
+.Xr vmxplore 1
+reads.
+.It Cm stop Ar name | Fl -all
+Shut the guest down: Ctrl-Alt-Del over the API socket, which the guest
+turns into a reboot that Firecracker exits on; SIGTERM only after sixty
+seconds of that being ignored.
+A stopped instance keeps its zvols and identity.
+.It Cm start Ar name
+Start a stopped instance again with the same zvols, seed and MAC.
+.It Cm destroy Ar name | Fl -all
+Stop, then remove the zvols, the tap, the seed, the unit and the estate
+database row.
+There is no undo.
+.It Cm ssh Ar name Op Ar command
+Root over the host's ops key, the one every kldload appliance seeds at
+build time.
+.It Cm console Ar name
+Follow the serial console log.
+.It Cm status
+Firecracker version, bridge state, counts.
+.El
+.Sh OPTIONS
+See the verbs above; every option belongs to
+.Cm stamp .
+.Sh ENVIRONMENT
+.Bl -tag -width "KFIRE_FIRECRACKER" -compact
+.It Ev KFIRE_POOL
+The dataset under which appliance zvols live; default
+.Ql rpool/vms .
+.It Ev KFIRE_BRIDGE
+Default bridge for
+.Cm stamp ;
+.Ql virbr0 .
+.It Ev KFIRE_FIRECRACKER
+The firecracker binary; default
+.Ql firecracker
+on PATH.
+.El
+.Sh FILES
+.Bl -tag -width "/var/lib/kfire/instances/<name>/" -compact
+.It Pa /var/lib/kfire/goldens/<golden>/
+.Pa vmlinux ,
+.Pa initrd.img
+and
+.Pa golden.json
+(zvols, snapshot, root device, size, port).
+.It Pa /var/lib/kfire/instances/<name>/
+.Pa config.json ,
+.Pa seed.iso ,
+.Pa instance.json
+and
+.Pa console.log .
+.It Pa /run/kfire/<name>.sock
+The instance's Firecracker API socket.
+.It Pa rpool/vms/<name> , Pa rpool/vms/<name>-data
+The instance's zvol clones, under the pool
+.Ev KFIRE_POOL
+names.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+Success.
+.It 1
+Failure: a missing binary, zvol, golden or instance; a stamp whose unit died
+at once; an instance that did not answer under
+.Fl -wait .
+.It 2
+Usage: an unknown verb or option, a missing argument.
+.El
+.Sh EXAMPLES
+Take a golden from the Web Stack appliance, which must be shut off:
+.Bd -literal -offset indent
+# kfire golden app-web-stack
+golden app-web-stack: snapshotting rpool/vms/app-web-stack@kfire and rpool/vms/app-web-stack-data@kfire
+  kernel: vmlinuz-7.1.13-200.fc44.x86_64 \(-> ELF vmlinux (73 MB)
+golden app-web-stack ready: root=/dev/vda3 rootflags=subvol=root 2 vCPU / 2048 MB + data pool
+.Ed
+.Pp
+Stamp ten and wait for them, as measured on a 24-core, 32 GB desktop:
+.Bd -literal -offset indent
+# kfire stamp app-web-stack -n 10 --wait
+web-stack-1  stamped in 195 ms  (2 vCPU / 2048 MB, aa:fc:ac:a1:b7:20 on virbr0)
+\&...
+10 stamped in 5014 ms, 0 failed
+web-stack-1          192.168.122.33   http 200  answering at  13105 ms
+\&...
+web-stack-7          192.168.122.27   http 200  answering at  33398 ms
+all 10 answering · host: 8796 MB available
+.Ed
+.Pp
+Three at a larger size, on the LAN bridge, named for a customer:
+.Bd -literal -offset indent
+# kfire stamp app-web-stack -n 3 --name acme --cpu 4 --ram 4096 --bridge br0
+.Ed
+.Pp
+See what is running and where:
+.Bd -literal -offset indent
+# kfire list
+web-stack-1          running   192.168.122.33   app-web-stack    2 vCPU /  2048 MB  fc-web-stack-1
+web-stack-2          shut off  -                app-web-stack    2 vCPU /  2048 MB  fc-web-stack-2
+.Ed
+.Pp
+Check the services inside one, stop it cleanly, start it again:
+.Bd -literal -offset indent
+# kfire ssh web-stack-1 'systemctl is-active nginx postgresql valkey; zpool list -H -o name,health'
+active
+active
+active
+tank    ONLINE
+# kfire stop web-stack-1
+web-stack-1 shut off
+# kfire start web-stack-1
+web-stack-1 started
+.Ed
+.Pp
+Watch a first boot, then remove everything:
+.Bd -literal -offset indent
+# kfire console web-stack-3
+# kfire destroy --all
+web-stack-1 destroyed
+web-stack-2 destroyed
+web-stack-3 destroyed
+.Ed
+.Pp
+The machine-readable form:
+.Bd -literal -offset indent
+# kfire list --json | jq -r '.[] | "\\(.name) \\(.state) \\(.ip)"'
+.Ed
+.Sh DIAGNOSTICS
+.Bl -tag -width Ds
+.It "firecracker not on PATH"
+A kldload KVM host installs it at firstboot from the baked tarball; a host
+built before that, or with the tarball missing and no network, has to
+install the release binary by hand.
+.It "is <state> \(em a golden is taken from a shut-off VM"
+Shut the VM down first, or pass
+.Fl -force
+for a crash-consistent golden.
+.It "could not extract an ELF vmlinux"
+No kernel-devel or linux-headers tree for
+.Pa scripts/extract-vmlinux
+and none of the inline decompressors matched.
+Install one, or Firecracker 1.17 or later, which boots the bzImage itself.
+.It "<name> FAILED to start"
+Firecracker rejected the configuration and the unit ended within
+milliseconds; the first error line from its console follows.
+The instance stays on disk for
+.Cm console
+and
+.Cm destroy .
+.It "<n> of <m> not answering on :<port>"
+Under
+.Fl -wait ,
+a guest that has not answered within three minutes.
+.Cm console
+shows its first boot.
+.It "<zvol> still exists (busy)"
+The block device was still held a few seconds after the process ended;
+destroy it by hand.
+.El
+.Sh SEE ALSO
+.Xr systemd-run 1 ,
+.Xr vmxplore 1 ,
+.Xr kexport 8 ,
+.Xr kspawn 8 ,
+.Xr kvm-mesh 8 ,
+.Xr zfs 8
+.Sh HISTORY
+Written on 2026-09-05 after the Web Stack tile, four minutes to build under
+libvirt, stamped in 250 milliseconds and served HTTP seven seconds later
+under Firecracker.
+The first attempt landed in dracut's emergency shell because Firecracker
+appends its own
+.Ql root=/dev/vda
+after the boot arguments when a drive is marked the root device, and the
+kernel takes the last one.
+.Sh CAVEATS
+Firecracker offers no PCI passthrough, no GPU, no display and no USB.
+Tiles that need a radio, a tuner, a desktop or sound stay on libvirt.
+.Pp
+Instances run as root under systemd rather than under the jailer; a jailed
+variant is the next step for anything exposed beyond the host's own
+bridges.
+.Pp
+The libvirt network's DHCP hands out addresses and
+.Xr kldload-networks 8
+does not touch these rows, so an instance's address in the estate database
+is the one
+.Cm stamp Fl -wait
+or
+.Cm start
+last recorded.
+.Pp
+Ten first boots at once contend for the host's cores: three instances
+answered in thirteen seconds and ten in thirty-three on the same machine.

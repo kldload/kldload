@@ -587,8 +587,15 @@ k_profile_optional_packages() {
     #   RPM (CentOS/Rocky/RHEL/Fedora): further split — individual driver packages
     #     must be listed explicitly because the meta-packages don't exist
     if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
+        # kfire (Firecracker stamping) and vmxplore both build a NoCloud seed
+        # with mkisofs and read their own JSON with jq. xorriso ships mkisofs
+        # on the RPM families, genisoimage on Debian/Ubuntu (already below),
+        # cdrtools on Arch; jq is in the RPM base list and nowhere else.
+        # Verified in clean containers 2026-09-05. Missing jq was silent: a
+        # tool that shells out to it died on its first line with no package
+        # ever named in a log.
         if [[ "$_distro" == "arch" ]]; then
-            out+=(qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
+            out+=(qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq sshpass cdrtools jq)
         elif [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
             # qemu-utils / cloud-image-utils / genisoimage are NOT optional here.
             # Debian splits the image tooling out of qemu-system-x86, and nothing
@@ -607,9 +614,9 @@ k_profile_optional_packages() {
             # which on screen looked like a hung installer ("no IP found").
             out+=(qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst
                 bridge-utils ovmf dnsmasq-base sshpass
-                qemu-utils cloud-image-utils genisoimage)
+                qemu-utils cloud-image-utils genisoimage jq)
         else
-            out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-driver-storage libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
+            out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-driver-storage libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq sshpass xorriso jq)
         fi
         # KSM: guests booted from the same cloud image share most of their
         # page content, and ksmtuned wakes the merger only while free memory

@@ -1,0 +1,686 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# kfire — stamp Firecracker microVMs from a sealed appliance's ZFS zvols
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# What it does, in order:
+#   1. golden  — snapshots a shut-off VM's root zvol (and its data zvol when
+#                it has one) and pulls the guest's kernel + initramfs off the
+#                root filesystem into /var/lib/kfire/goldens/<name>/, with an
+#                ELF vmlinux extracted from the bzImage where the installed
+#                Firecracker cannot boot a bzImage itself.
+#   2. stamp   — clones the zvols (milliseconds), writes a NoCloud seed with
+#                the instance's identity, creates a tap on the bridge, writes
+#                the Firecracker config and starts the microVM as a transient
+#                systemd unit with its API socket; registers it in state.db.
+#   3. list / stop / start / destroy / ssh / console — the lifecycle, the
+#                same shape as the libvirt appliances so the estate never
+#                carries a microVM that nothing can see or remove.
+#
+# Why: the Web Stack tile took 4 min to build under libvirt and 250 ms to
+# stamp from its zvols under Firecracker, then served HTTP 7 s later with
+# 300 MB of host memory per instance (onyx, 2026-09-05: ten stamped in 2.7 s,
+# all ten answering, host at 7.6 GB available). A golden is built ONCE with
+# the full libvirt + cloud-init pipeline; the copies are microVMs. Nothing in
+# the guest changes: it is the same disk, the same kernel, the same services.
+#
+# Inputs:  a shut-off libvirt VM whose disk is rpool/vms/<vm> (kldload's
+#          appliance layout); firecracker on PATH; virbr0 (or --bridge).
+# Outputs: /var/lib/kfire/goldens/<golden>/{vmlinux,initrd.img,golden.json}
+#          /var/lib/kfire/instances/<name>/{config.json,seed.iso,instance.json,console.log}
+#          rpool/vms/<name>[,-data] zvol clones; a tap per instance;
+#          systemd unit kfire-<name>; API socket /run/kfire/<name>.sock;
+#          a row in state.db (kldload-db vm-register / vm-delete).
+# Exit:    0 ok, 1 failure, 2 usage.
+#
+# Notes:
+#   - Root on the zvol's largest non-EFI partition, not on an ext4 export:
+#     a zvol clone is the whole point, and a partitioned virtio-blk disk is
+#     fine — the guest kernel finds vda1..vdaN by itself.
+#   - is_root_device stays false in the config. When it is true Firecracker
+#     appends "root=/dev/vda rw" after the boot args, the kernel takes the
+#     LAST root=, and the guest lands in dracut's emergency shell on a disk
+#     with no filesystem (onyx, 2026-09-05, first attempt).
+#   - The seed rides as a third drive labelled cidata. cloud-init's NoCloud
+#     finds it by label, takes the new instance-id, and regenerates the
+#     network config for eth0 — which is what makes a clone of a VM that
+#     knew ens3 come up on Firecracker's virtio-mmio NIC.
+#   - Guest shutdown is SendCtrlAltDel over the API socket: the guest
+#     reboots, the kernel's reboot=k makes Firecracker exit, and the unit
+#     ends. SIGTERM only after that has had its chance.
+#   - Firecracker's own memory accounting is lazy: mem_size_mib is a
+#     ceiling, and an idle Web Stack instance holds ~300 MB of the host.
+#     That is where "a hundred" comes from; the host's RAM is still finite.
+# ═══════════════════════════════════════════════════════════════════════════
+set -Eeuo pipefail
+trap 'echo "kfire: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+STATE=/var/lib/kfire
+GOLDENS=$STATE/goldens
+INSTANCES=$STATE/instances
+RUN=/run/kfire
+POOL=${KFIRE_POOL:-rpool/vms}
+SNAP=kfire
+BRIDGE=${KFIRE_BRIDGE:-virbr0}
+FC=${KFIRE_FIRECRACKER:-firecracker}
+
+log() { printf '%s\n' "$*" >&2; }
+die() {
+    log "kfire: $*"
+    exit 1
+}
+usage_die() {
+    log "kfire: $*"
+    log "try: kfire --help"
+    exit 2
+}
+ms() { echo $(($(date +%s%N) / 1000000)); }
+
+usage() {
+    cat <<'EOF'
+kfire — stamp Firecracker microVMs from an appliance's ZFS zvols
+
+Usage:
+  kfire golden <vm> [--force]            snapshot a shut-off VM as a golden
+  kfire goldens                          list goldens
+  kfire golden-destroy <golden>          drop a golden (refused while clones exist)
+  kfire stamp <golden> [options]         stamp microVMs from a golden
+      -n, --count N        how many (default 1)
+      --name PREFIX        instance names PREFIX-1.. (default: golden name minus app-, e.g. web-stack)
+      --cpu C  --ram MB    per instance (default: the golden's own size)
+      --bridge BR          tap onto this bridge (default virbr0: libvirt DHCP + leases)
+      --wait               wait until every instance answers on the golden's port, print ms
+  kfire list [--json]                    every instance: state, ip, golden, sizes
+  kfire stop <name>|--all                shut the guest down (Ctrl-Alt-Del over the API, then SIGTERM)
+  kfire start <name>                     start a stopped instance again (same zvols, same identity)
+  kfire destroy <name>|--all             stop, then remove zvols, tap, seed, unit and state.db row
+  kfire ssh <name> [cmd]                 root over the host's ops key
+  kfire console <name>                   follow the serial console log
+  kfire status                           firecracker version, bridge, counts
+
+Examples:
+  kfire golden app-web-stack             # VM must be shut off; ~5 s
+  kfire stamp app-web-stack -n 10 --wait # ten LAMPs, timed to first HTTP answer
+  kfire list
+  kfire ssh web-stack-3 'systemctl is-active nginx postgresql valkey'
+  kfire destroy --all
+
+Files:   /var/lib/kfire/goldens/<golden>/   /var/lib/kfire/instances/<name>/
+Env:     KFIRE_POOL (rpool/vms)  KFIRE_BRIDGE (virbr0)  KFIRE_FIRECRACKER (firecracker)
+Exit:    0 ok · 1 failure · 2 usage
+Needs:   root; firecracker on PATH (kldload's KVM host firstboot installs it; else
+         https://github.com/firecracker-microvm/firecracker/releases); zfs; systemd-run.
+EOF
+}
+
+need_root() { [[ $EUID -eq 0 ]] || die "needs root (zfs, tap, systemd-run) — run: sudo kfire $*"; }
+
+need_fc() {
+    command -v "$FC" >/dev/null 2>&1 ||
+        die "firecracker not on PATH — a kldload KVM host gets it at firstboot; otherwise install the release binary from https://github.com/firecracker-microvm/firecracker/releases into /usr/local/bin"
+}
+
+# fc_boots_bzimage: 1.17.0 added bzImage boot on x86_64; older releases need
+# an ELF vmlinux, which `golden` extracts. Read the version, never assume.
+fc_boots_bzimage() {
+    local v
+    v=$("$FC" --version 2>/dev/null | awk 'NR==1{print $2}' | tr -d v)
+    [[ -n $v ]] || return 1
+    [[ "$(printf '%s\n1.17.0\n' "$v" | sort -V | head -1)" == "1.17.0" ]]
+}
+
+# extract_vmlinux BZIMAGE OUT — the kernel tree's scripts/extract-vmlinux when a
+# kernel-devel / linux-headers tree is present, else the same search done
+# here: find a compression magic, decompress from there, keep the first
+# result that is an ELF. Fedora 44 kernels are zstd; Debian's are gzip/xz.
+extract_vmlinux() {
+    local img=$1 out=$2 script
+    script=$(ls /usr/src/kernels/*/scripts/extract-vmlinux /usr/src/linux-headers-*/scripts/extract-vmlinux 2>/dev/null | head -1 || true)
+    if [[ -n $script ]]; then
+        sh "$script" "$img" >"$out" 2>/dev/null && head -c 4 "$out" | grep -q ELF && return 0
+    fi
+    local tmp
+    tmp=$(mktemp)
+    local try
+    for try in $'\x1f\x8b\x08:gunzip' $'\xfd7zXZ\x00:unxz' $'(\xb5/\xfd:unzstd' 'BZh:bunzip2' $'\x02!L\x18:lz4 -d' $'\x89LZO:lzop -d'; do
+        local magic=${try%%:*} cmd=${try#*:} pos
+        command -v "${cmd%% *}" >/dev/null 2>&1 || continue
+        for pos in $(LC_ALL=C grep -abo "$magic" "$img" 2>/dev/null | head -5 | cut -d: -f1); do
+            # a false magic hit fails to decompress; that is expected, try the next
+            tail -c +$((pos + 1)) "$img" | $cmd >"$tmp" 2>/dev/null || true
+            if head -c 4 "$tmp" | grep -q ELF; then
+                mv "$tmp" "$out"
+                return 0
+            fi
+        done
+    done
+    rm -f "$tmp"
+    return 1
+}
+
+# ─── goldens ──────────────────────────────────────────────────────────────
+
+golden_json() { echo "$GOLDENS/$1/golden.json"; }
+jget() { jq -r "$2" "$1"; }
+
+# root_part ZVOL — the guest's root: the largest partition that is not the
+# EFI system partition. Prints the partition device path.
+root_part() {
+    local zv=$1 dev
+    dev=$(readlink -f "/dev/zvol/$zv")
+    lsblk -nrpo NAME,SIZE,FSTYPE,TYPE "$dev" | awk '$4=="part" && $3!="vfat"{print $2" "$1}' | sort -h | tail -1 | awk '{print $2}'
+}
+
+cmd_golden() {
+    need_root golden "$@"
+    need_fc
+    local vm=${1:-} force=0
+    [[ -n $vm ]] || usage_die "golden: which VM?"
+    shift
+    [[ ${1:-} == --force ]] && force=1
+    local root_zv="$POOL/$vm" data_zv="$POOL/$vm-data"
+    zfs list -H -o name -t volume "$root_zv" >/dev/null 2>&1 || die "no zvol $root_zv — is $vm a kldload appliance VM?"
+    zfs list -H -o name -t volume "$data_zv" >/dev/null 2>&1 || data_zv=""
+    if [[ $force -eq 0 ]] && command -v virsh >/dev/null 2>&1; then
+        local st
+        st=$(virsh -c qemu:///system domstate "$vm" 2>/dev/null | head -1 || true)
+        [[ -z $st || $st == "shut off" ]] || die "$vm is $st — a golden is taken from a shut-off VM (or --force for a crash-consistent one)"
+    fi
+    local g=$GOLDENS/$vm
+    mkdir -p "$g"
+    log "golden $vm: snapshotting $root_zv@$SNAP${data_zv:+ and $data_zv@$SNAP}"
+    zfs list -H -t snapshot "$root_zv@$SNAP" >/dev/null 2>&1 || zfs snapshot "$root_zv@$SNAP"
+    [[ -z $data_zv ]] || zfs list -H -t snapshot "$data_zv@$SNAP" >/dev/null 2>&1 || zfs snapshot "$data_zv@$SNAP"
+
+    # the guest's kernel and initramfs come off its own root filesystem
+    local part fstype pn rootflags="" mp
+    part=$(root_part "$root_zv")
+    [[ -n $part ]] || die "no root partition found on $root_zv"
+    fstype=$(lsblk -nro FSTYPE "$part")
+    pn=${part##*[!0-9]}
+    mp=$(mktemp -d)
+    # shellcheck disable=SC2064 # expand now: $mp is what to clean, whatever it becomes later
+    trap "umount '$mp' 2>/dev/null; rmdir '$mp' 2>/dev/null" RETURN
+    if [[ $fstype == btrfs ]] && mount -o ro,subvol=root "$part" "$mp" 2>/dev/null; then
+        rootflags="subvol=root"
+    else
+        mount -o ro "$part" "$mp"
+    fi
+    local kdir=$mp/boot bmp=""
+    if ! ls "$kdir"/vmlinuz-* >/dev/null 2>&1 && [[ $fstype == btrfs ]]; then
+        # Fedora keeps /boot in its own subvolume
+        bmp=$(mktemp -d)
+        mount -o ro,subvol=boot "$part" "$bmp" && kdir=$bmp
+    fi
+    local kern initrd
+    kern=$(ls "$kdir"/vmlinuz-* 2>/dev/null | sort -V | tail -1 || true)
+    initrd=$(ls "$kdir"/initramfs-*.img "$kdir"/initrd.img-* 2>/dev/null | sort -V | tail -1 || true)
+    [[ -n $kern && -n $initrd ]] || die "no kernel/initramfs under /boot of $vm (looked in $kdir)"
+    cp "$initrd" "$g/initrd.img"
+    if fc_boots_bzimage; then
+        cp "$kern" "$g/vmlinux"
+        log "  kernel: $(basename "$kern") (bzImage; this Firecracker boots it directly)"
+    else
+        extract_vmlinux "$kern" "$g/vmlinux" || die "could not extract an ELF vmlinux from $(basename "$kern") — install kernel-devel/linux-headers (for scripts/extract-vmlinux) or Firecracker ≥ 1.17"
+        log "  kernel: $(basename "$kern") → ELF vmlinux ($(($(stat -c %s "$g/vmlinux") / 1048576)) MB)"
+    fi
+    [[ -z $bmp ]] || {
+        umount "$bmp"
+        rmdir "$bmp"
+    }
+    # the VM's own size and port are the defaults its stamps inherit
+    local vcpus=2 ram=2048 port=80
+    if command -v virsh >/dev/null 2>&1; then
+        vcpus=$(virsh -c qemu:///system dominfo "$vm" 2>/dev/null | awk '/^CPU\(s\)/{print $2}' || echo 2)
+        ram=$(virsh -c qemu:///system dominfo "$vm" 2>/dev/null | awk '/^Max memory/{print int($3/1024)}' || echo 2048)
+    fi
+    if command -v kldload-db >/dev/null 2>&1; then
+        # the appliance's role names the tile; the tile's port is in vmxplore's
+        # catalog, not here — 80 unless the operator says otherwise at stamp
+        : "${port:=80}"
+    fi
+    jq -n --arg name "$vm" --arg root "$root_zv" --arg data "$data_zv" --arg snap "$SNAP" \
+        --arg rootdev "/dev/vda$pn" --arg rootflags "$rootflags" --argjson vcpus "${vcpus:-2}" \
+        --argjson ram "${ram:-2048}" --argjson port "$port" --arg created "$(date -Is)" \
+        '{name:$name, root_zvol:$root, data_zvol:$data, snapshot:$snap, root:$rootdev, rootflags:$rootflags,
+          vcpus:$vcpus, ram_mb:$ram, port:$port, created:$created}' >"$(golden_json "$vm")"
+    log "golden $vm ready: root=$(jget "$(golden_json "$vm")" .root) ${rootflags:+rootflags=$rootflags }$vcpus vCPU / $ram MB${data_zv:+ + data pool}"
+}
+
+cmd_goldens() {
+    local j
+    for j in "$GOLDENS"/*/golden.json; do
+        [[ -f $j ]] || continue
+        printf '%-20s %s vCPU / %5s MB  root %s%s  clones %s\n' "$(jget "$j" .name)" "$(jget "$j" .vcpus)" "$(jget "$j" .ram_mb)" \
+            "$(jget "$j" .root)" "$([[ $(jget "$j" .data_zvol) != "" ]] && echo ' + data' || true)" \
+            "$(zfs list -H -o name -t volume 2>/dev/null | grep -c "^$POOL/$(jget "$j" .name)-fc" || true)"
+    done
+}
+
+cmd_golden_destroy() {
+    need_root golden-destroy "$@"
+    local g=${1:-}
+    [[ -n $g && -f $(golden_json "$g") ]] || usage_die "golden-destroy: which golden? (kfire goldens)"
+    local j
+    j=$(golden_json "$g")
+    local z
+    for z in "$(jget "$j" .root_zvol)" "$(jget "$j" .data_zvol)"; do
+        [[ -n $z ]] || continue
+        # zfs refuses to destroy a snapshot with clones — that refusal is the guard
+        zfs destroy "$z@$(jget "$j" .snapshot)" || die "clones of $g still exist — kfire destroy them first"
+    done
+    rm -rf "${GOLDENS:?}/$g"
+    log "golden $g removed"
+}
+
+# ─── instances ────────────────────────────────────────────────────────────
+
+inst_json() { echo "$INSTANCES/$1/instance.json"; }
+unit_of() { echo "kfire-$1"; }
+sock_of() { echo "$RUN/$1.sock"; }
+
+# mac_of NAME — locally administered, deterministic from the name, so a
+# stopped instance keeps its lease across starts.
+mac_of() {
+    local h
+    h=$(printf '%s' "$1" | sha256sum | cut -c1-8)
+    printf 'aa:fc:%s:%s:%s:%s\n' "${h:0:2}" "${h:2:2}" "${h:4:2}" "${h:6:2}"
+}
+# tap_of NAME — the kernel caps interface names at 15; a long name gets a hash.
+tap_of() {
+    local n="fc-$1"
+    if [[ ${#n} -le 15 ]]; then
+        echo "$n"
+    else
+        echo "fc-$(printf '%s' "$1" | sha256sum | cut -c1-10)"
+    fi
+}
+
+inst_state() {
+    if systemctl is-active --quiet "$(unit_of "$1")"; then echo running; else echo "shut off"; fi
+}
+
+# inst_ip NAME — from the libvirt network's leases when the bridge is one of
+# libvirt's, else the neighbour table; empty until the guest has an address.
+inst_ip() {
+    local mac
+    mac=$(jget "$(inst_json "$1")" .mac)
+    local ip=""
+    if command -v virsh >/dev/null 2>&1; then
+        ip=$(virsh -c qemu:///system net-dhcp-leases --network default 2>/dev/null | awk -v m="$mac" 'tolower($3)==m{split($5,a,"/"); print a[1]}' | tail -1 || true)
+    fi
+    [[ -n $ip ]] || ip=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac" 'tolower($5)==m{print $1}' | head -1 || true)
+    echo "$ip"
+}
+
+# db_register NAME [IP] — the estate row, same verb the appliances use.
+db_register() {
+    command -v kldload-db >/dev/null 2>&1 || return 0
+    local j
+    j=$(inst_json "$1")
+    kldload-db vm-register --name "$1" --role "firecracker-$(jget "$j" .golden)" --status "$(inst_state "$1")" \
+        --cpu "$(jget "$j" .vcpus)" --ram-gb "$(($(jget "$j" .ram_mb) / 1024))" --golden-src "$(jget "$j" .golden)" \
+        ${2:+--ip "$2"} >/dev/null 2>&1 ||
+        log "  WARNING: state.db registration of $1 failed — the estate will not list it"
+}
+
+fc_start() {
+    local name=$1 dir=$INSTANCES/$1
+    mkdir -p "$RUN"
+    rm -f "$(sock_of "$name")"
+    systemd-run --quiet --unit "$(unit_of "$name")" --collect \
+        --property "StandardOutput=append:$dir/console.log" --property "StandardError=append:$dir/console.log" \
+        --property "Description=kfire microVM $name" \
+        "$(command -v "$FC")" --api-sock "$(sock_of "$name")" --config-file "$dir/config.json"
+}
+
+cmd_stamp() {
+    need_root stamp "$@"
+    need_fc
+    local golden=${1:-}
+    [[ -n $golden ]] || usage_die "stamp: which golden? (kfire goldens)"
+    shift
+    local gj
+    gj=$(golden_json "$golden")
+    [[ -f $gj ]] || die "no golden $golden — kfire golden $golden first"
+    local count=1 prefix="" cpu="" ram="" bridge=$BRIDGE wait=0
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+        -n | --count)
+            count=$2
+            shift 2
+            ;;
+        --name)
+            prefix=$2
+            shift 2
+            ;;
+        --cpu)
+            cpu=$2
+            shift 2
+            ;;
+        --ram)
+            ram=$2
+            shift 2
+            ;;
+        --bridge)
+            bridge=$2
+            shift 2
+            ;;
+        --wait)
+            wait=1
+            shift
+            ;;
+        *) usage_die "stamp: unknown option $1" ;;
+        esac
+    done
+    [[ $count =~ ^[0-9]+$ && $count -ge 1 ]] || usage_die "stamp: --count must be a positive number"
+    [[ -n $prefix ]] || prefix=${golden#app-}
+    [[ $prefix =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "instance prefix must be a-z 0-9 - : $prefix"
+    ip -br link show "$bridge" >/dev/null 2>&1 || die "no bridge $bridge"
+    cpu=${cpu:-$(jget "$gj" .vcpus)}
+    ram=${ram:-$(jget "$gj" .ram_mb)}
+    local root_zv data_zv snap rootdev rootflags port
+    root_zv=$(jget "$gj" .root_zvol)
+    data_zv=$(jget "$gj" .data_zvol)
+    snap=$(jget "$gj" .snapshot)
+    rootdev=$(jget "$gj" .root)
+    rootflags=$(jget "$gj" .rootflags)
+    port=$(jget "$gj" .port)
+    mkdir -p "$INSTANCES"
+
+    local made=() t0 i failed=0
+    t0=$(ms)
+    i=0
+    while [[ $((${#made[@]} + failed)) -lt $count ]]; do
+        i=$((i + 1))
+        local name="$prefix-$i"
+        [[ -d $INSTANCES/$name ]] && continue # keep numbering past what exists
+        zfs list -H -o name "$POOL/$name" >/dev/null 2>&1 && continue
+        local a b dir=$INSTANCES/$name mac tap
+        a=$(ms)
+        mkdir -p "$dir"
+        zfs clone "$root_zv@$snap" "$POOL/$name"
+        [[ -z $data_zv ]] || zfs clone "$data_zv@$snap" "$POOL/$name-data"
+        # NoCloud seed: identity only; the golden already has its users and keys
+        local sd
+        sd=$(mktemp -d)
+        printf 'instance-id: %s\nlocal-hostname: %s\n' "$name" "$name" >"$sd/meta-data"
+        printf '#cloud-config\nhostname: %s\n' "$name" >"$sd/user-data"
+        mkisofs -quiet -output "$dir/seed.iso" -volid cidata -joliet -rock "$sd" 2>/dev/null
+        rm -rf "$sd"
+        mac=$(mac_of "$name")
+        tap=$(tap_of "$name")
+        ip link show "$tap" >/dev/null 2>&1 || ip tuntap add "$tap" mode tap
+        ip link set "$tap" master "$bridge" up
+        {
+            echo '{'
+            echo '  "boot-source": {'
+            echo "    \"kernel_image_path\": \"$GOLDENS/$golden/vmlinux\","
+            echo "    \"initrd_path\": \"$GOLDENS/$golden/initrd.img\","
+            echo "    \"boot_args\": \"console=ttyS0 reboot=k panic=1 root=$rootdev${rootflags:+ rootflags=$rootflags} ro\""
+            echo '  },'
+            echo '  "drives": ['
+            echo "    {\"drive_id\": \"rootfs\", \"path_on_host\": \"/dev/zvol/$POOL/$name\", \"is_root_device\": false, \"is_read_only\": false}"
+            [[ -z $data_zv ]] || echo "    ,{\"drive_id\": \"data\", \"path_on_host\": \"/dev/zvol/$POOL/$name-data\", \"is_root_device\": false, \"is_read_only\": false}"
+            echo "    ,{\"drive_id\": \"seed\", \"path_on_host\": \"$dir/seed.iso\", \"is_root_device\": false, \"is_read_only\": true}"
+            echo '  ],'
+            echo "  \"machine-config\": {\"vcpu_count\": $cpu, \"mem_size_mib\": $ram},"
+            echo "  \"network-interfaces\": [{\"iface_id\": \"eth0\", \"guest_mac\": \"$mac\", \"host_dev_name\": \"$tap\"}]"
+            echo '}'
+        } >"$dir/config.json"
+        jq -n --arg name "$name" --arg golden "$golden" --arg mac "$mac" --arg tap "$tap" --arg bridge "$bridge" \
+            --argjson vcpus "$cpu" --argjson ram "$ram" --argjson port "$port" --arg created "$(date -Is)" \
+            --arg root "$POOL/$name" --arg data "${data_zv:+$POOL/$name-data}" \
+            '{name:$name, golden:$golden, mac:$mac, tap:$tap, bridge:$bridge, vcpus:$vcpus, ram_mb:$ram, port:$port,
+              root_zvol:$root, data_zvol:$data, created:$created}' >"$dir/instance.json"
+        # the zvol device node can lag the clone by a moment
+        local _w
+        for _w in $(seq 1 40); do
+            [[ -e /dev/zvol/$POOL/$name && (-z $data_zv || -e /dev/zvol/$POOL/$name-data) ]] && break
+            sleep 0.05
+        done
+        fc_start "$name"
+        b=$(ms)
+        # a config Firecracker rejects ends the unit within milliseconds; say
+        # so here rather than report a stamp that is already dead
+        sleep 0.2
+        if ! systemctl is-active --quiet "$(unit_of "$name")"; then
+            log "$name  FAILED to start — $(grep -m1 -oE 'Error: .*' "$dir/console.log" || echo 'see kfire console')"
+            failed=$((failed + 1))
+            db_register "$name"
+            continue
+        fi
+        db_register "$name"
+        made+=("$name")
+        log "$name  stamped in $((b - a)) ms  ($cpu vCPU / $ram MB, $mac on $bridge)"
+    done
+    log "${#made[@]} stamped in $(($(ms) - t0)) ms${failed:+, $failed failed}"
+    [[ $failed -eq 0 ]] || return 1
+    command -v kldload-db >/dev/null 2>&1 && kldload-db event --type vm --subject "$golden" \
+        --message "kfire: ${#made[@]} microVM(s) stamped: ${made[*]}" >/dev/null 2>&1 || true
+
+    [[ $wait -eq 1 ]] || {
+        log "watch: kfire list · console: kfire console ${made[0]}"
+        return 0
+    }
+    # --wait: the guest's first boot to an HTTP answer on the golden's port
+    local deadline=$((t0 + 180000)) up=0
+    declare -A done_at=()
+    while [[ $up -lt ${#made[@]} && $(ms) -lt $deadline ]]; do
+        sleep 1
+        local nme ipa code
+        for nme in "${made[@]}"; do
+            [[ -n ${done_at[$nme]:-} ]] && continue
+            ipa=$(inst_ip "$nme")
+            [[ -n $ipa ]] || continue
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "http://$ipa:$port/" 2>/dev/null || true)
+            if [[ $code =~ ^(200|301|302|401|403|404)$ ]]; then
+                done_at[$nme]=$(($(ms) - t0))
+                up=$((up + 1))
+                db_register "$nme" "$ipa"
+                printf '%-20s %-16s http %s  answering at %6d ms\n' "$nme" "$ipa" "$code" "${done_at[$nme]}" >&2
+            fi
+        done
+    done
+    if [[ $up -lt ${#made[@]} ]]; then
+        log "WARNING: $((${#made[@]} - up)) of ${#made[@]} not answering on :$port after 180 s — kfire console <name>"
+        return 1
+    fi
+    log "all ${#made[@]} answering · host: $(free -m | awk '/^Mem/{print $7}') MB available"
+}
+
+cmd_list() {
+    local json=0
+    [[ ${1:-} == --json ]] && json=1
+    local j first=1
+    [[ $json -eq 1 ]] && echo '['
+    for j in "$INSTANCES"/*/instance.json; do
+        [[ -f $j ]] || continue
+        local name st ipa
+        name=$(jget "$j" .name)
+        st=$(inst_state "$name")
+        ipa=""
+        [[ $st == running ]] && ipa=$(inst_ip "$name")
+        if [[ $json -eq 1 ]]; then
+            [[ $first -eq 1 ]] || echo ','
+            first=0
+            jq -c --arg state "$st" --arg ip "$ipa" '. + {state:$state, ip:$ip}' "$j"
+        else
+            printf '%-20s %-9s %-16s %-16s %s vCPU / %5s MB  %s\n' "$name" "$st" "${ipa:--}" "$(jget "$j" .golden)" \
+                "$(jget "$j" .vcpus)" "$(jget "$j" .ram_mb)" "$(jget "$j" .tap)"
+        fi
+    done
+    [[ $json -eq 1 ]] && echo ']'
+    return 0
+}
+
+# stop_one NAME — Ctrl-Alt-Del over the API, wait for the unit to end, then
+# SIGTERM. A guest that ignores the key for 60 s is a guest that will not
+# shut down cleanly by itself; the fallback is the same thing virsh destroy is.
+stop_one() {
+    local name=$1 unit
+    unit=$(unit_of "$name")
+    systemctl is-active --quiet "$unit" || {
+        log "$name is not running"
+        return 0
+    }
+    curl -s --unix-socket "$(sock_of "$name")" -X PUT -H 'Content-Type: application/json' \
+        -d '{"action_type":"SendCtrlAltDel"}' http://localhost/actions >/dev/null 2>&1 ||
+        log "  $name: API socket did not take Ctrl-Alt-Del — falling back to SIGTERM"
+    local _w
+    for _w in $(seq 1 60); do
+        systemctl is-active --quiet "$unit" || break
+        sleep 1
+    done
+    if systemctl is-active --quiet "$unit"; then
+        log "  $name did not shut down in 60 s — terminating"
+        systemctl stop "$unit"
+    fi
+    rm -f "$(sock_of "$name")"
+    log "$name shut off"
+    db_register "$name"
+}
+
+each_named() { # each_named VERB NAME|--all
+    local verb=$1 target=${2:-}
+    [[ -n $target ]] || usage_die "$verb: which instance? (or --all)"
+    if [[ $target == --all ]]; then
+        local j
+        for j in "$INSTANCES"/*/instance.json; do
+            [[ -f $j ]] || continue
+            "${verb}_one" "$(jget "$j" .name)"
+        done
+    else
+        [[ -f $(inst_json "$target") ]] || die "no instance $target (kfire list)"
+        "${verb}_one" "$target"
+    fi
+}
+
+cmd_stop() {
+    need_root stop "$@"
+    each_named stop "$@"
+}
+
+cmd_start() {
+    need_root start "$@"
+    local name=${1:-}
+    [[ -n $name && -f $(inst_json "$name") ]] || usage_die "start: which instance? (kfire list)"
+    [[ $(inst_state "$name") == running ]] && {
+        log "$name is already running"
+        return 0
+    }
+    local j tap bridge
+    j=$(inst_json "$name")
+    tap=$(jget "$j" .tap)
+    bridge=$(jget "$j" .bridge)
+    ip link show "$tap" >/dev/null 2>&1 || ip tuntap add "$tap" mode tap
+    ip link set "$tap" master "$bridge" up
+    fc_start "$name"
+    db_register "$name"
+    log "$name started"
+}
+
+destroy_one() {
+    local name=$1 j
+    j=$(inst_json "$name")
+    stop_one "$name" >/dev/null 2>&1 || true
+    local tap z
+    tap=$(jget "$j" .tap)
+    ip link show "$tap" >/dev/null 2>&1 && ip link del "$tap"
+    for z in "$(jget "$j" .root_zvol)" "$(jget "$j" .data_zvol)"; do
+        [[ -n $z ]] || continue
+        zfs list -H -o name "$z" >/dev/null 2>&1 || continue
+        local _try
+        for _try in 1 2 3 4 5; do
+            # qemu-style: the block device lets go a moment after the process ends
+            zfs destroy "$z" 2>/dev/null && break
+            sleep 1
+        done
+        zfs list -H -o name "$z" >/dev/null 2>&1 && log "  WARNING: $z still exists (busy) — zfs destroy $z by hand"
+    done
+    if command -v kldload-db >/dev/null 2>&1; then
+        kldload-db vm-delete --name "$name" >/dev/null 2>&1 || true
+        kldload-db event --type vm --subject "$name" --message "destroyed by kfire" >/dev/null 2>&1 || true
+    fi
+    rm -rf "${INSTANCES:?}/$name"
+    log "$name destroyed"
+}
+
+cmd_destroy() {
+    need_root destroy "$@"
+    each_named destroy "$@"
+}
+
+cmd_ssh() {
+    local name=${1:-}
+    [[ -n $name && -f $(inst_json "$name") ]] || usage_die "ssh: which instance? (kfire list)"
+    shift
+    local ipa
+    ipa=$(inst_ip "$name")
+    [[ -n $ipa ]] || die "$name has no address yet"
+    local key=""
+    for key in /root/.ssh/id_ed25519 /root/.ssh/id_kldload; do [[ -r $key ]] && break; done
+    # accept-new, not no: a fresh clone has a fresh host key by design
+    exec ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 ${key:+-i "$key"} "root@$ipa" "$@"
+}
+
+cmd_console() {
+    local name=${1:-}
+    [[ -n $name && -f $(inst_json "$name") ]] || usage_die "console: which instance? (kfire list)"
+    exec tail -n 40 -f "$INSTANCES/$name/console.log"
+}
+
+cmd_status() {
+    printf 'firecracker: %s\n' "$("$FC" --version 2>/dev/null | head -1 || echo 'not installed')"
+    printf 'bridge:      %s (%s)\n' "$BRIDGE" "$(ip -br link show "$BRIDGE" 2>/dev/null | awk '{print $2}' || echo missing)"
+    printf 'goldens:     %s\n' "$({ find "$GOLDENS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | wc -l)"
+    printf 'instances:   %s (%s running)\n' "$({ find "$INSTANCES" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | wc -l)" \
+        "$(systemctl list-units --type=service --state=active --no-legend 'kfire-*' 2>/dev/null | wc -l)"
+}
+
+case ${1:-} in
+golden)
+    shift
+    cmd_golden "$@"
+    ;;
+goldens) cmd_goldens ;;
+golden-destroy)
+    shift
+    cmd_golden_destroy "$@"
+    ;;
+stamp)
+    shift
+    cmd_stamp "$@"
+    ;;
+list)
+    shift
+    cmd_list "$@"
+    ;;
+stop)
+    shift
+    cmd_stop "$@"
+    ;;
+start)
+    shift
+    cmd_start "$@"
+    ;;
+destroy)
+    shift
+    cmd_destroy "$@"
+    ;;
+ssh)
+    shift
+    cmd_ssh "$@"
+    ;;
+console)
+    shift
+    cmd_console "$@"
+    ;;
+status) cmd_status ;;
+-h | --help | help) usage ;;
+"")
+    usage
+    exit 2
+    ;;
+*) usage_die "unknown verb: $1" ;;
+esac
