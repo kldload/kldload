@@ -310,10 +310,10 @@ if have wg; then
         # original klab failure, where a config wg setconf silently rejected
         # left five peers that never worked at all.
         _now="$(date +%s)"
-        _live="$(wg show "$_if" latest-handshakes 2>/dev/null |
-            awk -v n="$_now" '$2>0 && (n-$2)<180' | grep -c . || true)"
-        _never="$(wg show "$_if" latest-handshakes 2>/dev/null |
-            awk '$2==0' | grep -c . || true)"
+        # grep -c exits 1 on zero matches; zero live peers is the count being tested
+        _live="$(wg show "$_if" latest-handshakes 2>/dev/null | awk -v n="$_now" '$2>0 && (n-$2)<180' | grep -c . || true)"
+        # same: zero never-handshaken peers is the good answer
+        _never="$(wg show "$_if" latest-handshakes 2>/dev/null | awk '$2==0' | grep -c . || true)"
         # Three outcomes, not two. This check was written against the failure
         # where klab had five peers and zero handshakes for its entire life, so
         # `_hs > 0` was enough to catch it -- but that also means 1 of 100 scores

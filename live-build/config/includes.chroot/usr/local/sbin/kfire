@@ -140,6 +140,7 @@ fc_boots_bzimage() {
 # result that is an ELF. Fedora 44 kernels are zstd; Debian's are gzip/xz.
 extract_vmlinux() {
     local img=$1 out=$2 script
+    # no extract-vmlinux on this host is reported by the caller; an empty answer is the signal
     script=$(ls /usr/src/kernels/*/scripts/extract-vmlinux /usr/src/linux-headers-*/scripts/extract-vmlinux 2>/dev/null | head -1 || true)
     if [[ -n $script ]]; then
         sh "$script" "$img" >"$out" 2>/dev/null && head -c 4 "$out" | grep -q ELF && return 0
@@ -188,6 +189,7 @@ cmd_golden() {
     zfs list -H -o name -t volume "$data_zv" >/dev/null 2>&1 || data_zv=""
     if [[ $force -eq 0 ]] && command -v virsh >/dev/null 2>&1; then
         local st
+        # a name libvirt does not know answers empty, and empty is handled below
         st=$(virsh -c qemu:///system domstate "$vm" 2>/dev/null | head -1 || true)
         [[ -z $st || $st == "shut off" ]] || die "$vm is $st — a golden is taken from a shut-off VM (or --force for a crash-consistent one)"
     fi
@@ -218,7 +220,9 @@ cmd_golden() {
         mount -o ro,subvol=boot "$part" "$bmp" && kdir=$bmp
     fi
     local kern initrd
+    # a golden with no kernel is diagnosed right after this, from the empty answer
     kern=$(ls "$kdir"/vmlinuz-* 2>/dev/null | sort -V | tail -1 || true)
+    # same: empty initrd is the diagnosis, not a crash here
     initrd=$(ls "$kdir"/initramfs-*.img "$kdir"/initrd.img-* 2>/dev/null | sort -V | tail -1 || true)
     [[ -n $kern && -n $initrd ]] || die "no kernel/initramfs under /boot of $vm (looked in $kdir)"
     cp "$initrd" "$g/initrd.img"
@@ -264,6 +268,7 @@ cmd_goldens() {
             [[ -f $j ]] || continue
             [[ $first -eq 1 ]] || echo ','
             first=0
+            # grep -c exits 1 on zero matches, and zero clones is a valid count
             jq -c --argjson clones "$(zfs list -H -o name -t volume 2>/dev/null | grep -c "^$POOL/$(jget "$j" .name | sed 's/^app-//')-[0-9]" || true)" \
                 '. + {clones:$clones}' "$j"
         done
@@ -272,9 +277,12 @@ cmd_goldens() {
     fi
     for j in "$GOLDENS"/*/golden.json; do
         [[ -f $j ]] || continue
+        local data_tag="" nclones
+        [[ $(jget "$j" .data_zvol) != "" ]] && data_tag=' + data'
+        # grep -c exits 1 on zero matches, and zero clones is a valid count
+        nclones=$(zfs list -H -o name -t volume 2>/dev/null | grep -c "^$POOL/$(jget "$j" .name)-fc" || true)
         printf '%-20s %s vCPU / %5s MB  root %s%s  clones %s\n' "$(jget "$j" .name)" "$(jget "$j" .vcpus)" "$(jget "$j" .ram_mb)" \
-            "$(jget "$j" .root)" "$([[ $(jget "$j" .data_zvol) != "" ]] && echo ' + data' || true)" \
-            "$(zfs list -H -o name -t volume 2>/dev/null | grep -c "^$POOL/$(jget "$j" .name)-fc" || true)"
+            "$(jget "$j" .root)" "$data_tag" "$nclones"
     done
 }
 
@@ -330,6 +338,7 @@ unit_of() { echo "kfire-$1"; }
 # finds the socket the running process actually has.
 sock_of() {
     local s
+    # a record without a socket (never started, or unjailed) answers empty on purpose
     s=$(jget "$(inst_json "$1")" '.sock // ""' 2>/dev/null || true)
     [[ -n $s ]] && echo "$s" || echo "$RUN/$1.sock"
 }
@@ -403,8 +412,8 @@ inst_state() {
 LEASES=""
 leases_now() {
     if [[ -z $LEASES ]] && command -v virsh >/dev/null 2>&1; then
-        LEASES=$(virsh -c qemu:///system net-dhcp-leases --network default 2>/dev/null |
-            awk 'NR>2 && $3 ~ /:/{split($5,a,"/"); print tolower($3), a[1]}' || true)
+        # no libvirt, or no leases yet, is an empty table, not a failure
+        LEASES=$(virsh -c qemu:///system net-dhcp-leases --network default 2>/dev/null | awk 'NR>2 && $3 ~ /:/{split($5,a,"/"); print tolower($3), a[1]}') || true
         [[ -n $LEASES ]] || LEASES=" "
     fi
     printf '%s\n' "$LEASES"
@@ -416,7 +425,9 @@ inst_ip() {
     local mac
     mac=$(jget "$(inst_json "$1")" .mac)
     local ip=""
+    # no lease yet is the normal answer during the first seconds of a boot
     ip=$(leases_now | awk -v m="$mac" '$1==m{print $2}' | tail -1 || true)
+    # the neighbour table is a best-effort second source; empty is fine
     [[ -n $ip ]] || ip=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac" 'tolower($5)==m{print $1}' | head -1 || true)
     echo "$ip"
 }
@@ -490,6 +501,7 @@ fc_start() {
         # the tap belongs to the jail user: that is what lets an unprivileged
         # process attach to it
         ip link set "$tap" down 2>/dev/null || true
+        # and a tap that was never created has nothing to delete
         ip tuntap del "$tap" mode tap 2>/dev/null || true
         ip tuntap add "$tap" mode tap user "$JAIL_USER" group "$JAIL_USER"
         ip link set "$tap" master "$(jget "$j" .bridge)" up
@@ -641,8 +653,11 @@ cmd_clone() {
     done
     log "${#made[@]} cloned in $(($(ms) - t0)) ms${failed:+, $failed failed}"
     [[ $failed -eq 0 ]] || return 1
-    command -v kldload-db >/dev/null 2>&1 && kldload-db event --type vm --subject "$golden" \
-        --message "kfire: ${#made[@]} microVM(s) cloned: ${made[*]}" >/dev/null 2>&1 || true
+    if command -v kldload-db >/dev/null 2>&1; then
+        kldload-db event --type vm --subject "$golden" \
+            --message "kfire: ${#made[@]} microVM(s) cloned: ${made[*]}" >/dev/null 2>&1 ||
+            log "  estate event not recorded (kldload-db event failed) — the clones are fine"
+    fi
 
     [[ $wait -eq 1 ]] || {
         log "watch: kfire list · console: kfire console ${made[0]}"
@@ -659,6 +674,7 @@ cmd_clone() {
             [[ -n ${done_at[$nme]:-} ]] && continue
             ipa=$(inst_ip "$nme")
             [[ -n $ipa ]] || continue
+            # a refused or timed-out probe is "not yet", which the loop retries
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "http://$ipa:$port/" 2>/dev/null || true)
             if [[ $code =~ ^(200|301|302|401|403|404)$ ]]; then
                 done_at[$nme]=$(($(ms) - t0))
@@ -781,6 +797,7 @@ cmd_start() {
 destroy_one() {
     local name=$1 j
     j=$(inst_json "$name")
+    # stopping something already stopped, or never started, is the point of destroy
     stop_one "$name" >/dev/null 2>&1 || true
     local tap z left=0
     tap=$(jget "$j" .tap)
@@ -807,10 +824,13 @@ destroy_one() {
     # file, since a failed join can leave the file with no interface
     if command -v kvm-mesh >/dev/null 2>&1 && [[ -e "/var/lib/kldload/mesh/$(mesh_of "$name").members" ]]; then
         kvm-mesh down "$(mesh_of "$name")" >/dev/null 2>&1 || log "  $name: kvm-mesh down $(mesh_of "$name") failed — take it down by hand"
+        # the network sync is a courtesy for the estate view; the mesh is already down
         command -v kldload-networks >/dev/null 2>&1 && kldload-networks sync >/dev/null 2>&1 || true
     fi
     if command -v kldload-db >/dev/null 2>&1; then
+        # a record kldload-db never had (--no-enroll, or a failed clone) is not an error
         kldload-db vm-delete --name "$name" >/dev/null 2>&1 || true
+        # the event is a breadcrumb; failing to write it changes nothing on disk
         kldload-db event --type vm --subject "$name" --message "destroyed by kfire" >/dev/null 2>&1 || true
     fi
     rm -rf "${JAIL:?}/firecracker/$name" "${INSTANCES:?}/$name"
@@ -847,7 +867,9 @@ cmd_status() {
         printf 'jail:        jailer %s, uid %s, chroots under %s\n' "$(jailer --version 2>/dev/null | awk '{print $2}')" "$JAIL_USER" "$JAIL"
     else printf 'jail:        OFF — %s\n' "$([[ ${KFIRE_NO_JAIL:-0} == 1 ]] && echo KFIRE_NO_JAIL=1 || echo 'no jailer on PATH')"; fi
     printf 'bridge:      %s (%s)\n' "$BRIDGE" "$(ip -br link show "$BRIDGE" 2>/dev/null | awk '{print $2}' || echo missing)"
+    # find exits 1 when the directory does not exist yet; that is zero goldens
     printf 'goldens:     %s\n' "$({ find "$GOLDENS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | wc -l)"
+    # same for instances
     printf 'instances:   %s (%s running)\n' "$({ find "$INSTANCES" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | wc -l)" \
         "$(systemctl list-units --type=service --state=active --no-legend 'kfire-*' 2>/dev/null | wc -l)"
 }
