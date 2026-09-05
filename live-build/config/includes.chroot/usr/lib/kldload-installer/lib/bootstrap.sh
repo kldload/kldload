@@ -620,10 +620,20 @@ k_generate_mok_keys() {
         # Pre-1.1.0-dev installs reused the CA root as the MOK; that's why
         # ZBM-under-SB never actually worked, only direct kernel boot did.
         #
-        # The cert template here matches what `sbctl create-keys` produces:
-        # bare self-signed RSA-4096 with no extensions. shim accepts it
-        # via the MOK list; sign-file accepts any (key, cert) pair for
-        # module signing; mokutil's import only cares about DER format.
+        # What this command ACTUALLY produces on OpenSSL 3.x (every live ISO
+        # since F40): a self-signed RSA-4096 cert with SKI/AKI and
+        # "Basic Constraints: critical, CA:TRUE" — `req -x509` adds those by
+        # default now. That is NOT the extension-free leaf the previous
+        # version of this comment claimed (checked 2026-09-05 on onyx: its
+        # enrolled MOK carries CA:TRUE). It works anyway, and that was
+        # verified rather than assumed: zfs.ko signed with it loads under
+        # Secure Boot on onyx, and in OVMF (Fedora shim 16.1, MS db, MOK in
+        # MokList) shim loads both a re-signed grubx64.efi and the MOK-signed
+        # ZFSBootMenu — the cert shape is not what blocks ZBM on real
+        # firmware. shim verifies with X509_PURPOSE_ANY + PARTIAL_CHAIN, so a
+        # self-signed CA-flagged anchor is fine; the earlier failure was the
+        # kldload-ca ROOT (server/client-auth EKUs), not CA:TRUE itself.
+        # sign-file accepts any (key, cert) pair; mokutil only wants DER.
         k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Generating MOK code-signing leaf (separate from TLS CA)"
         # Generate per-install MOK leaf. RSA-4096 to match common SB key
         # strength (sbctl, shim's vendor_cert, MS db keys are 2048+; 4096
@@ -734,11 +744,20 @@ EOSIGN
     # Use framework.conf.d to avoid overwriting distro defaults
     mkdir -p "${target}/etc/dkms/framework.conf.d"
     cat >"${target}/etc/dkms/framework.conf.d/kldload-mok.conf" <<MOKCONF
-# kldload Secure Boot — MOK key paths for DKMS module signing
+# kldload Secure Boot — MOK key paths for DKMS module signing.
+# dkms 3.4.x (Debian trixie 3.4.1, Fedora 44 / EL10 3.4.3) reads exactly four
+# signing variables from here: sign_file, mok_signing_key, mok_certificate,
+# try_sign_modules. It finds sign-file itself (linux-kbuild on Debian,
+# /lib/modules/<kver>/build/scripts/sign-file elsewhere) and signs as
+#   sign-file sha256 <key> <cert> <module>
 mok_signing_key=/var/lib/dkms/mok.key
 mok_certificate=/var/lib/dkms/mok.pub
+# sign_tool is NOT a dkms variable — dkms ignores this line. It is kept
+# because /etc/dkms/sign_helper.sh is what kupgrade calls to re-sign after a
+# kernel change, and this is where an operator will look for that path.
 sign_tool=/etc/dkms/sign_helper.sh
-# Force signing even inside chroot (default not_in_chroot skips during install)
+# Force signing even inside chroot: without it dkms answers "Running in
+# chroot, modules won't be signed" during the install and zfs.ko ships bare.
 try_sign_modules=true
 MOKCONF
 
