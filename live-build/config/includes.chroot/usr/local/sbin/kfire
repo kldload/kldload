@@ -63,6 +63,8 @@ POOL=${KFIRE_POOL:-rpool/vms}
 SNAP=kfire
 BRIDGE=${KFIRE_BRIDGE:-virbr0}
 FC=${KFIRE_FIRECRACKER:-firecracker}
+JAIL=$STATE/jail # chroot base; same dataset as the goldens, so links are links
+JAIL_USER=kfire  # the uid Firecracker runs as inside the jail
 
 log() { printf '%s\n' "$*" >&2; }
 die() {
@@ -107,6 +109,7 @@ Examples:
 
 Files:   /var/lib/kfire/goldens/<golden>/   /var/lib/kfire/instances/<name>/
 Env:     KFIRE_POOL (rpool/vms)  KFIRE_BRIDGE (virbr0)  KFIRE_FIRECRACKER (firecracker)
+         KFIRE_NO_JAIL=1 runs firecracker as root under systemd instead of jailed as user kfire
 Exit:    0 ok · 1 failure · 2 usage
 Needs:   root; firecracker on PATH (kldload's KVM host firstboot installs it; else
          https://github.com/firecracker-microvm/firecracker/releases); zfs; systemd-run.
@@ -217,6 +220,7 @@ cmd_golden() {
     initrd=$(ls "$kdir"/initramfs-*.img "$kdir"/initrd.img-* 2>/dev/null | sort -V | tail -1 || true)
     [[ -n $kern && -n $initrd ]] || die "no kernel/initramfs under /boot of $vm (looked in $kdir)"
     cp "$initrd" "$g/initrd.img"
+    chmod 0644 "$g/initrd.img"
     if fc_boots_bzimage; then
         cp "$kern" "$g/vmlinux"
         log "  kernel: $(basename "$kern") (bzImage; this Firecracker boots it directly)"
@@ -292,7 +296,56 @@ cmd_golden_destroy() {
 
 inst_json() { echo "$INSTANCES/$1/instance.json"; }
 unit_of() { echo "kfire-$1"; }
-sock_of() { echo "$RUN/$1.sock"; }
+# sock_of — the API socket: inside the chroot when jailed, under /run else.
+# Recorded per instance at start, so a stop after a change of mode still
+# finds the socket the running process actually has.
+sock_of() {
+    local s
+    s=$(jget "$(inst_json "$1")" '.sock // ""' 2>/dev/null || true)
+    [[ -n $s ]] && echo "$s" || echo "$RUN/$1.sock"
+}
+
+# ─── the jail ─────────────────────────────────────────────────────────────
+# Firecracker runs under its jailer: a chroot under $JAIL, an unprivileged
+# uid, seccomp, a copy of the binary. Everything the microVM touches is
+# hard-linked or mknod'ed into the chroot and chowned to that uid; the
+# config's paths are chroot-relative. The tap is created owned by that uid,
+# which is what lets a non-root process attach to it. KFIRE_NO_JAIL=1 runs
+# firecracker as root under systemd instead — for a host with no jailer,
+# or to take the jail out of a diagnosis.
+
+jailed() { [[ ${KFIRE_NO_JAIL:-0} != 1 ]] && command -v jailer >/dev/null 2>&1; }
+
+# ensure_jail_user — a system account, no shell, no home of its own.
+ensure_jail_user() {
+    id -u "$JAIL_USER" >/dev/null 2>&1 && return 0
+    useradd -r -M -s /usr/sbin/nologin -d "$STATE" "$JAIL_USER" ||
+        die "could not create the $JAIL_USER account for the jail"
+    log "created system user $JAIL_USER for jailed microVMs"
+}
+
+# chroot_of NAME — the jailer's <chroot_base>/firecracker/<id>/root
+chroot_of() { echo "$JAIL/firecracker/$1/root"; }
+
+# jail_node CHROOT NAME DEV — a block device node inside the chroot for DEV,
+# owned by the jail user. mknod because a hard link cannot cross into /dev.
+jail_node() {
+    local croot=$1 name=$2 dev=$3 maj min
+    dev=$(readlink -f "$dev")
+    maj=$((16#$(stat -c %t "$dev")))
+    min=$((16#$(stat -c %T "$dev")))
+    rm -f "$croot/$name"
+    mknod -m 0660 "$croot/$name" b "$maj" "$min"
+    chown "$JAIL_USER:$JAIL_USER" "$croot/$name"
+}
+
+# jail_link CHROOT NAME SRC — hard link, copy when the link cannot be made
+jail_link() {
+    local croot=$1 name=$2 src=$3
+    rm -f "$croot/$name"
+    ln "$src" "$croot/$name" 2>/dev/null || cp "$src" "$croot/$name"
+    chmod 0644 "$croot/$name"
+}
 
 # mac_of NAME — locally administered, deterministic from the name, so a
 # stopped instance keeps its lease across starts.
@@ -350,11 +403,7 @@ db_register() {
         --cpu "$(jget "$j" .vcpus)" --ram-gb "$(($(jget "$j" .ram_mb) / 1024))" --golden-src "$(jget "$j" .golden)" \
         ${2:+--ip "$2"} >/dev/null 2>&1 ||
         log "  WARNING: state.db registration of $1 failed — the estate will not list it"
-    if [[ -n ${2:-} ]]; then
-        local tmp
-        tmp=$(mktemp)
-        jq --arg ip "$2" '. + {registered_ip:$ip}' "$j" >"$tmp" && mv "$tmp" "$j"
-    fi
+    [[ -z ${2:-} ]] || set_json "$1" registered_ip "$2"
 }
 
 # db_sync_ip NAME IP — register a lease the estate row does not have yet.
@@ -366,14 +415,70 @@ db_sync_ip() {
     db_register "$1" "$2"
 }
 
+# set_json NAME KEY VALUE — one field in instance.json, file mode kept
+# world-readable: vmxplore reads these records directly.
+set_json() {
+    local j tmp
+    j=$(inst_json "$1")
+    tmp=$(mktemp)
+    jq --arg k "$2" --arg v "$3" '. + {($k): $v}' "$j" >"$tmp" && mv "$tmp" "$j"
+    chmod 0644 "$j"
+}
+
 fc_start() {
-    local name=$1 dir=$INSTANCES/$1
+    local name=$1 dir=$INSTANCES/$1 j
+    j=$(inst_json "$name")
+    if jailed; then
+        ensure_jail_user
+        local croot uid gid tap
+        croot=$(chroot_of "$name")
+        uid=$(id -u "$JAIL_USER")
+        gid=$(id -g "$JAIL_USER")
+        tap=$(jget "$j" .tap)
+        # the jailer refuses a chroot that already exists; a restart rebuilds it
+        rm -rf "$JAIL/firecracker/$name"
+        install -d -m 0755 "$croot" "$croot/run" "$croot/dev"
+        jail_link "$croot" vmlinux "$GOLDENS/$(jget "$j" .golden)/vmlinux"
+        jail_link "$croot" initrd.img "$GOLDENS/$(jget "$j" .golden)/initrd.img"
+        jail_link "$croot" seed.iso "$dir/seed.iso"
+        jail_node "$croot" rootfs.zvol "/dev/zvol/$(jget "$j" .root_zvol)"
+        local data
+        data=$(jget "$j" .data_zvol)
+        [[ -z $data ]] || jail_node "$croot" data.zvol "/dev/zvol/$data"
+        # the same config, with the chroot's paths
+        jq --arg g "$GOLDENS/$(jget "$j" .golden)" --arg d "$dir" \
+            '(.["boot-source"].kernel_image_path) = "/vmlinux"
+             | (.["boot-source"].initrd_path) = "/initrd.img"
+             | (.drives |= map(
+                 if .drive_id == "rootfs" then .path_on_host = "/rootfs.zvol"
+                 elif .drive_id == "data" then .path_on_host = "/data.zvol"
+                 elif .drive_id == "seed" then .path_on_host = "/seed.iso"
+                 else . end))' "$dir/config.json" >"$croot/config.json"
+        chown -R "$JAIL_USER:$JAIL_USER" "$croot"
+        # the tap belongs to the jail user: that is what lets an unprivileged
+        # process attach to it
+        ip link set "$tap" down 2>/dev/null || true
+        ip tuntap del "$tap" mode tap 2>/dev/null || true
+        ip tuntap add "$tap" mode tap user "$JAIL_USER" group "$JAIL_USER"
+        ip link set "$tap" master "$(jget "$j" .bridge)" up
+        set_json "$name" sock "$croot/run/firecracker.socket"
+        set_json "$name" jailed yes
+        systemd-run --quiet --unit "$(unit_of "$name")" --collect \
+            --property "StandardOutput=append:$dir/console.log" --property "StandardError=append:$dir/console.log" \
+            --property "Description=kfire microVM $name (jailed)" \
+            "$(command -v jailer)" --id "$name" --exec-file "$(command -v "$FC")" \
+            --uid "$uid" --gid "$gid" --chroot-base-dir "$JAIL" --cgroup-version 2 \
+            -- --api-sock /run/firecracker.socket --config-file /config.json
+        return
+    fi
     mkdir -p "$RUN"
-    rm -f "$(sock_of "$name")"
+    rm -f "$RUN/$name.sock"
+    set_json "$name" sock "$RUN/$name.sock"
+    set_json "$name" jailed no
     systemd-run --quiet --unit "$(unit_of "$name")" --collect \
         --property "StandardOutput=append:$dir/console.log" --property "StandardError=append:$dir/console.log" \
         --property "Description=kfire microVM $name" \
-        "$(command -v "$FC")" --api-sock "$(sock_of "$name")" --config-file "$dir/config.json"
+        "$(command -v "$FC")" --api-sock "$RUN/$name.sock" --config-file "$dir/config.json"
 }
 
 cmd_clone() {
@@ -663,7 +768,7 @@ destroy_one() {
         kldload-db vm-delete --name "$name" >/dev/null 2>&1 || true
         kldload-db event --type vm --subject "$name" --message "destroyed by kfire" >/dev/null 2>&1 || true
     fi
-    rm -rf "${INSTANCES:?}/$name"
+    rm -rf "${JAIL:?}/firecracker/$name" "${INSTANCES:?}/$name"
     log "$name destroyed"
 }
 
@@ -693,6 +798,9 @@ cmd_console() {
 
 cmd_status() {
     printf 'firecracker: %s\n' "$("$FC" --version 2>/dev/null | head -1 || echo 'not installed')"
+    if jailed; then
+        printf 'jail:        jailer %s, uid %s, chroots under %s\n' "$(jailer --version 2>/dev/null | awk '{print $2}')" "$JAIL_USER" "$JAIL"
+    else printf 'jail:        OFF — %s\n' "$([[ ${KFIRE_NO_JAIL:-0} == 1 ]] && echo KFIRE_NO_JAIL=1 || echo 'no jailer on PATH')"; fi
     printf 'bridge:      %s (%s)\n' "$BRIDGE" "$(ip -br link show "$BRIDGE" 2>/dev/null | awk '{print $2}' || echo missing)"
     printf 'goldens:     %s\n' "$({ find "$GOLDENS" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | wc -l)"
     printf 'instances:   %s (%s running)\n' "$({ find "$INSTANCES" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | wc -l)" \

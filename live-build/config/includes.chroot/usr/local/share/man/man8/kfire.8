@@ -59,7 +59,9 @@ Nothing inside the guest changes: it is the same disk, the same kernel and
 the same services, on a different virtual machine monitor.
 .Pp
 Every instance is registered in the estate database the way the appliances
-are, runs as a systemd unit named
+are, runs under Firecracker's jailer as the unprivileged
+.Sy kfire
+user in a chroot of its own, as a systemd unit named
 .Ql kfire- Ns Ar name ,
 and is removed by
 .Cm destroy
@@ -90,9 +92,19 @@ the instances first.
 .It Cm clone Ar golden Op Ar options
 Clone one or more instances.
 Each gets a clone of the root zvol and of the data zvol, a NoCloud seed
-carrying its instance-id and hostname, a tap on the bridge, a locally
-administered MAC derived from its name, and a Firecracker configuration;
-then the microVM starts as a transient systemd unit with its API socket in
+carrying its instance-id and hostname, a tap on the bridge owned by the
+.Sy kfire
+user, a locally administered MAC derived from its name, and a Firecracker
+configuration.
+Then the jailer builds a chroot under
+.Pa /var/lib/kfire/jail
+with the kernel, initramfs and seed hard-linked in, the zvols as device
+nodes the jail user owns, and a copy of the Firecracker binary, and starts
+the microVM there as a transient systemd unit, seccomp on, API socket inside
+the jail.
+Without a jailer on PATH, or with
+.Ev KFIRE_NO_JAIL
+set, Firecracker runs as root under systemd with its socket in
 .Pa /run/kfire .
 .Bl -tag -width "--bridge br"
 .It Fl n , Fl -count Ar count
@@ -162,6 +174,11 @@ Default bridge for
 The firecracker binary; default
 .Ql firecracker
 on PATH.
+.It Ev KFIRE_NO_JAIL
+Set to
+.Ql 1 ,
+run Firecracker as root under systemd rather than jailed — for a host with
+no jailer, or to take the jail out of a diagnosis.
 .El
 .Sh FILES
 .Bl -tag -width "/var/lib/kfire/instances/<name>/" -compact
@@ -177,8 +194,13 @@ and
 .Pa instance.json
 and
 .Pa console.log .
+.It Pa /var/lib/kfire/jail/firecracker/<name>/root/
+The instance's chroot: kernel, initramfs, seed, zvol nodes, the binary,
+and
+.Pa run/firecracker.socket ,
+its API socket.
 .It Pa /run/kfire/<name>.sock
-The instance's Firecracker API socket.
+The API socket when not jailed.
 .It Pa rpool/vms/<name> , Pa rpool/vms/<name>-data
 The instance's zvol clones, under the pool
 .Ev KFIRE_POOL
@@ -306,9 +328,9 @@ kernel takes the last one.
 Firecracker offers no PCI passthrough, no GPU, no display and no USB.
 Tiles that need a radio, a tuner, a desktop or sound stay on libvirt.
 .Pp
-Instances run as root under systemd rather than under the jailer; a jailed
-variant is the next step for anything exposed beyond the host's own
-bridges.
+The jail is a chroot, an unprivileged uid and seccomp; it is not a network
+namespace, so the tap still lives in the host's namespace on the bridge the
+instance was given.
 .Pp
 The libvirt network's DHCP hands out addresses and
 .Xr kldload-networks 8
