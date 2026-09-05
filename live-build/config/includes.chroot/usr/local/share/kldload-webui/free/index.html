@@ -3829,6 +3829,17 @@ setInterval(() => {
   // until the user clicks the refresh button.
   const vms = document.getElementById('view-vms');
   if (vms && vms.classList.contains('active')) send({ action: 'list_vms' });
+  // The Ansible inventory is the estate seen through state.db, which every
+  // build and delete writes to from outside this process. It was the one
+  // estate view with no poll: after a twelve-tile Build all it still showed
+  // the estate from when the tab was opened ("doesn't seem to have a
+  // refresh", operator, 2026-09-04). Same cadence as the VM view; only the
+  // Inventory sub-tab, so the Run form and a live Output pane are left alone.
+  const ans = document.getElementById('view-ansible');
+  const ansInv = document.getElementById('ansible-sub-inventory');
+  if (ans && ans.classList.contains('active') && ansInv && ansInv.classList.contains('active')) {
+    send({ action: 'ansible_inventory' });
+  }
   const k8s = document.getElementById('view-k8s');
   if (k8s && k8s.classList.contains('active')) {
     // Skip auto-refresh if ANY user state would be lost — open drawer OR
@@ -9192,6 +9203,10 @@ function metricsGrafanaBase() {
 let _metricsDashboards = [];
 let _metricsActiveUid = null;
 
+// hideLogo=true on every kiosk URL: Grafana 12.4 draws a "Powered by
+// Grafana" logo in kiosk mode and the parameter is the only switch for it
+// (grafana/grafana#115198); the operator saw it under every embedded
+// dashboard on 2026-09-04.
 function metricsLoadDashboard(uid) {
   const ifr = document.getElementById('metrics-iframe');
   if (!ifr) return;
@@ -9203,10 +9218,6 @@ function metricsLoadDashboard(uid) {
     : `${base}/?orgId=1&kiosk=1&hideLogo=true&theme=${theme}`;
   ifr.src = url;
   // Highlight the active row using the SAME treatment as #sidebar li.active —
-// hideLogo=true on every kiosk URL: Grafana 12.4 draws a "Powered by
-// Grafana" logo in kiosk mode and the parameter is the only switch for it
-// (grafana/grafana#115198); the operator saw it under every embedded
-// dashboard on 2026-09-04.
   // accent-bg background, accent-coloured text, left rule bar in accent.
   // Keeps the eye trained on one "this is selected" affordance everywhere.
   document.querySelectorAll('#metrics-list li').forEach(li => {
