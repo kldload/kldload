@@ -2237,6 +2237,37 @@ main() {
     # existing users immediately.
     if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
         command -v dnf >/dev/null 2>&1; then
+        # No promotion and no phoning home from an embedded viewer. Stock
+        # Grafana shows the anonymous viewer a footer with a grafana.com
+        # link, feedback links, a news feed and the version, and checks
+        # grafana.com for updates on every start — an appliance's Metrics
+        # tab is not the place for any of it ("a line with an ad for
+        # grafana with a link", operator, 2026-09-04). Separate guard from
+        # the block above so hosts that already had anonymous access get
+        # this on their next firstboot too.
+        if ! grep -q '^# kldload override — no promotion' /etc/grafana/grafana.ini; then
+            log "Disabling Grafana promotion, update checks and version footer"
+            {
+                echo ''
+                echo '# kldload override — no promotion, no phoning home, in an embedded viewer'
+                echo '[analytics]'
+                echo 'reporting_enabled = false'
+                echo 'check_for_updates = false'
+                echo 'check_for_plugin_updates = false'
+                echo 'feedback_links_enabled = false'
+                echo ''
+                echo '[news]'
+                echo 'news_feed_enabled = false'
+                echo ''
+                echo '[auth.anonymous]'
+                echo 'enabled = true'
+                echo 'org_role = Viewer'
+                echo 'hide_version = true'
+            } >>/etc/grafana/grafana.ini
+            systemctl restart grafana-server >>"$LOG" 2>&1 &&
+                ok "Grafana restarted without promotion" ||
+                log "WARNING: grafana-server restart failed"
+        fi
         if ! command -v certutil >/dev/null 2>&1; then
             log "nss-tools missing — installing"
             if dnf install -y nss-tools >>"$LOG" 2>&1; then
