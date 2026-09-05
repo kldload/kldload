@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -11,16 +12,19 @@ import (
 // ever renames an interface, this is what should fail.
 func TestPlaneOfKnowsTheSubstrateConvention(t *testing.T) {
 	cases := map[string]string{
-		"wg0":         "enrollment",
-		"wg1":         "management",
-		"wg2":         "kubernetes",
-		"wg3":         "storage",
-		"wg-mgmt":     "management",
-		"wg-k8s":      "kubernetes",
-		"wg1-dc2":     "management", // suffixed sites still classify
-		"WG2":         "kubernetes", // case is not meaningful
-		"tailscale0":  "other",
-		"wg-personal": "other",
+		"wg0":             "enrollment",
+		"wg1":             "management",
+		"wg2":             "kubernetes",
+		"wg3":             "storage",
+		"wg-mgmt":         "management",
+		"wg-k8s":          "kubernetes",
+		"wg1-dc2":         "management", // suffixed sites still classify
+		"WG2":             "kubernetes", // case is not meaningful
+		"tailscale0":      "other",
+		"wg-personal":     "other",
+		"ap-app-web-stac": "apps", // kvm-mesh appliance meshes
+		"ap-st-icecast-s": "apps",
+		"AP-APP-VDI-DESK": "apps",
 	}
 	for iface, want := range cases {
 		if got := planeOf(iface).Key; got != want {
@@ -102,5 +106,17 @@ func TestRepeatedReasonsCollapse(t *testing.T) {
 	}
 	if !strings.Contains(out, "40 peer(s)") {
 		t.Errorf("the count must survive the collapse:\n%s", out)
+	}
+}
+
+// Within one host the interfaces read plane by plane — management first,
+// the appliance meshes together — not in whatever order the kernel listed
+// them. This is the sort every view relies on.
+func TestInterfacesSortByPlaneThenName(t *testing.T) {
+	names := []string{"ap-app-web-stac", "wg-k8s", "testnet", "ap-app-adguard", "wg-mgmt", "wg0"}
+	sort.Slice(names, func(i, j int) bool { return lessIface(names[i], names[j]) })
+	want := "wg-mgmt,wg-k8s,ap-app-adguard,ap-app-web-stac,wg0,testnet"
+	if got := strings.Join(names, ","); got != want {
+		t.Errorf("order = %s, want %s", got, want)
 	}
 }

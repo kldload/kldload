@@ -369,9 +369,20 @@ func CollectEstate(hosts []string) []Device {
 		if a.Host != b.Host {
 			return a.Host < b.Host
 		}
-		return a.Name < b.Name
+		return lessIface(a.Name, b.Name)
 	})
 	return all
+}
+
+// lessIface orders two interfaces of one host: by plane, in planeOrder, then
+// by name. Every view — tree, cards, TUI, text — reads them in this order,
+// so the management plane is first and the appliance meshes sit together.
+func lessIface(a, b string) bool {
+	ra, rb := planeRank(planeOf(a)), planeRank(planeOf(b))
+	if ra != rb {
+		return ra < rb
+	}
+	return a < b
 }
 
 // HostDisplay is the name a host is KNOWN by — its fqdn when it reported

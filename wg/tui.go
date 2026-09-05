@@ -69,7 +69,9 @@ func (m *model) buildRows() {
 	f := strings.ToLower(m.filter)
 	for di, d := range m.devs {
 		hostLabel := HostDisplay(d)
-		devLine := fmt.Sprintf("%s  %s", hostLabel, d.Name)
+		// host · plane · interface: devs arrive sorted plane-first, so the
+		// plane name is what makes the grouping visible in a flat list.
+		devLine := fmt.Sprintf("%s  %s · %s", hostLabel, planeOf(d.Name).Name, d.Name)
 		if d.Name == "" && d.Err == "" {
 			devLine = hostLabel + "  (no WireGuard)"
 		}

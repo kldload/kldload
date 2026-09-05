@@ -279,7 +279,8 @@ func kv(rows ...[2]string) fyne.CanvasObject {
 type nodeKind int
 
 const (
-	nHost nodeKind = iota
+	nHost  nodeKind = iota
+	nPlane          // a role folder under a host: management, kubernetes, apps …
 	nIface
 	nPeer
 )
@@ -316,12 +317,14 @@ func RunGUI() error {
 		kids    = map[string][]string{}
 		kind    = map[string]nodeKind{}
 		ref     = map[string][2]int{} // uid → {device idx, peer idx(-1)}
+		plane   = map[string]Plane{}  // plane uid → its role
 	)
 
 	reindex := func() {
 		kids = map[string][]string{}
 		kind = map[string]nodeKind{}
 		ref = map[string][2]int{}
+		plane = map[string]Plane{}
 		hostSeen := map[string]bool{}
 		for di, d := range devs {
 			h := d.Host
@@ -338,8 +341,21 @@ func RunGUI() error {
 			if d.Err != "" || d.Name == "" {
 				continue // unreachable or no-WireGuard marker: host row only
 			}
+			// Interfaces sit under a folder for their role, not straight under
+			// the host: with ten appliance meshes beside wg-mgmt and wg-k8s the
+			// flat list read as "all over the place" (operator, 2026-09-04).
+			// devs arrive sorted plane-first, so the folders appear in planeOrder
+			// and each fills before the next starts.
+			pl := planeOf(d.Name)
+			pu := "pl:" + h + ":" + pl.Key
+			if _, seen := plane[pu]; !seen {
+				plane[pu] = pl
+				kids[hu] = append(kids[hu], pu)
+				kind[pu] = nPlane
+				ref[pu] = [2]int{di, -1} // the host's dossier, via any of its devices
+			}
 			iu := fmt.Sprintf("i:%d", di)
-			kids[hu] = append(kids[hu], iu)
+			kids[pu] = append(kids[pu], iu)
 			kind[iu] = nIface
 			ref[iu] = [2]int{di, -1}
 			for pi := range d.Peers {
@@ -399,6 +415,26 @@ func RunGUI() error {
 					det.Text = hostTarget(d)
 					det.Color = palDim
 				}
+			case nPlane:
+				pl := plane[uid]
+				cnt := len(kids[uid])
+				name.Text = pl.Name
+				name.Color = palBrand
+				name.TextStyle = fyne.TextStyle{Bold: true}
+				// The folder's dot is the worst of its interfaces, so a closed
+				// folder still says whether something inside is off.
+				mark.FillColor = palAlive
+				for _, iu := range kids[uid] {
+					if c := ifaceMark(devs[ref[iu][0]]); c != palAlive {
+						mark.FillColor = c
+					}
+				}
+				unit := "interfaces"
+				if cnt == 1 {
+					unit = "interface"
+				}
+				det.Text = fmt.Sprintf("%d %s · %s", cnt, unit, pl.Carries)
+				det.Color = palDim
 			case nIface:
 				name.Text = d.Name
 				name.Color = palFg
@@ -446,7 +482,7 @@ func RunGUI() error {
 		switch kind[uid] {
 		case nPeer:
 			setDossier(guiPeerDossier(d, d.Peers[r[1]])...)
-		case nHost:
+		case nHost, nPlane:
 			setDossier(guiHostDossier(devs, d.Host)...)
 		default:
 			setDossier(guiDeviceDossier(d)...)
@@ -562,6 +598,11 @@ func RunGUI() error {
 					didOpenHosts = true
 					for _, hu := range kids[""] {
 						tree.OpenBranch(hu)
+						// and the role folders under it — a host that opens to
+						// closed folders has not shown anything yet
+						for _, pu := range kids[hu] {
+							tree.OpenBranch(pu)
+						}
 					}
 				}
 			})

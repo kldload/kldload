@@ -24,6 +24,9 @@
 //	wg3       storage replication
 //	wg-mgmt   cluster management plane (10.250.0/24)
 //	wg-k8s    cluster kubernetes plane (10.251.0/24)
+//	ap-*      appliance meshes — kvm-mesh gives every appliance VM its own
+//	          /24 to the host (10.254.x/24), named ap-<vm>; a dozen of them
+//	          on a busy host, one per tile
 //
 // Notes: an unrecognised interface is NOT an error and must not be hidden.
 // This console adopts estates it did not build — a hand-rolled wg0.conf on
@@ -51,8 +54,25 @@ var planeOrder = []Plane{
 	{"management", "management", "ssh, config management", true},
 	{"kubernetes", "kubernetes", "the cluster backend", true},
 	{"storage", "storage", "replication", true},
+	// One mesh per appliance VM, minted at enrollment. Not critical: losing
+	// one takes the host's management path to ONE appliance, not a service.
+	// Its own plane so ten of them read as one folder rather than ten rows
+	// scattered among the substrate's planes ("all over the place",
+	// operator, 2026-09-04).
+	{"apps", "apps", "the host's management link to each appliance VM", false},
 	{"enrollment", "enrollment", "joining only — no services by design", false},
 	{"other", "unclassified", "unknown to this substrate", false},
+}
+
+// planeRank is a plane's position in planeOrder: the sort key every view
+// uses so interfaces of one host read plane by plane.
+func planeRank(p Plane) int {
+	for i, q := range planeOrder {
+		if q.Key == p.Key {
+			return i
+		}
+	}
+	return len(planeOrder)
 }
 
 // planeOf maps an interface name to its role.
@@ -79,6 +99,8 @@ func planeOf(iface string) Plane {
 		return byKey("kubernetes")
 	case n == "wg3" || strings.HasPrefix(n, "wg3-"), strings.HasPrefix(n, "wg-storage"):
 		return byKey("storage")
+	case strings.HasPrefix(n, "ap-"):
+		return byKey("apps")
 	}
 	return byKey("other")
 }
