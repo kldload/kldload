@@ -405,11 +405,18 @@ for n in d.get("nodes",[]):
     # keep its address forever. Deleting is not this tool's job -- clearing the
     # address is enough to take it out of the inventory, and the row stays for
     # history.
-    local _known _dbvm
+    #
+    # Firecracker microVMs (role firecracker-*) are never libvirt domains, by
+    # design, and kfire keeps their rows itself: this pass undefined four
+    # running instances and cleared their addresses within minutes of kfire
+    # registering them ("they are all unreconciled and don't show IPs",
+    # onyx 2026-09-05). Their role is the tell; skip them.
+    local _known _dbvm _dbrole
     _known="$(virsh list --all --name 2>/dev/null | tr '\n' '|')"
-    while read -r _dbvm; do
+    while read -r _dbvm _dbrole; do
         [[ -z "$_dbvm" ]] && continue
         [[ "|${_known}" == *"|${_dbvm}|"* ]] && continue
+        [[ "$_dbrole" == firecracker-* ]] && continue
         # Swallowed: this row was read from the dump moments ago, so the only
         # way the update fails is that something else removed it first --
         # which is the outcome we wanted anyway.
@@ -421,7 +428,7 @@ for n in d.get("nodes",[]):
 try: d=json.load(sys.stdin)
 except Exception: sys.exit()
 for v in d.get("vms",[]):
-    if v.get("ip_addr"): print(v.get("name",""))' 2>/dev/null)
+    if v.get("ip_addr"): print(v.get("name",""), v.get("role",""))' 2>/dev/null)
 
     after="$(_vms_with_ip)"
     log "sync: ${seen} lease(s), ${stale} stale, VMs with an address ${before} -> ${after}"
