@@ -1531,17 +1531,28 @@ _fb_install_darksite_binary() {
     local tool="$1"
     local darksite_bins="/root/darksite/binaries"
     local bin_dest="/usr/local/bin"
-    local tool_dir
-    # Find newest version dir (sorted descending)
-    tool_dir="$(find "${darksite_bins}/${tool}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null |
-        sort -rV | head -1)"
+    local tool_dir=""
+    # Newest version dir (sorted descending) — only when the tool's directory
+    # exists at all. Under `set -Eeuo pipefail` a find on a missing directory
+    # exits 1, the pipeline fails, the assignment fails, and the ERR trap
+    # aborted the WHOLE firstboot: fiend 2026-09-05, first boot of a KVM host
+    # from ISO #4, died here on "firectl" with Grafana and Prometheus never
+    # installed. A darksite without the tool is the normal case for FREE.
+    if [[ -d "${darksite_bins}/${tool}" ]]; then
+        # sort/head exit 0 on empty input; find exits 1 only on a permission
+        # error inside the tree, which the empty result reports below anyway
+        tool_dir="$(find "${darksite_bins}/${tool}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -rV | head -1 || true)"
+    fi
     if [[ -n "${tool_dir}" && -f "${tool_dir}/${tool}" ]]; then
         install -m 0755 "${tool_dir}/${tool}" "${bin_dest}/${tool}"
         local ver
         ver="$(cat "${tool_dir}/VERSION" 2>/dev/null || echo unknown)"
         log "  installed ${tool} ${ver} → ${bin_dest}/${tool}"
     else
-        log "  WARNING: ${tool} not found in darksite — will try GitHub download"
+        # Not a warning yet: the baked tarball under /root/darksite/bin is
+        # the normal source on FREE (fiend 2026-09-05 logged this line and
+        # then installed 1.16.1 from the tarball two lines later).
+        log "  ${tool}: no unpacked copy under ${darksite_bins} — trying the baked tarball, then GitHub"
         # Fallback: fetch latest from GitHub if network is available
         local gh_url
         case "${tool}" in
@@ -1773,6 +1784,17 @@ main() {
         # First network-touching step in firstboot. The trust store has to be
         # usable BEFORE it, not 370 log lines later.
         _fb_ensure_system_trust
+        # The offline mirror is tmpfs at /run/kldload-darksite and is gone the
+        # moment the installed system boots, but its .repo file and dnf's
+        # cached metadata survive until _fb_retire_darksite_repo runs — which
+        # used to be ~2,700 lines below this point. Every dnf transaction in
+        # between that resolved even one dep to it died with "Could not read a
+        # file:// file": fiend 2026-09-05, osbuild-composer + weldr-client at
+        # 12:06:31 (via python3-dnf), gamescope at 12:06:50 (via libXres), and
+        # the heal at 12:08:51 retried against the same dead mount. Retire it
+        # before the FIRST dnf call; keep it only while the mount really exists
+        # (live session, or a LAN-mirror host that serves it).
+        [[ -d /run/kldload-darksite ]] || _fb_retire_darksite_repo
         local _retry_pkgs=(nethogs iftop iotop-c htop bcc-tools bpftrace osbuild-composer weldr-client)
         local _missing=()
         for _p in "${_retry_pkgs[@]}"; do
@@ -2500,9 +2522,21 @@ ZRAMCONF
     # rollback via grub even when ZFS BEs are the primary recovery path).
     if command -v dnf >/dev/null 2>&1; then
         log "Locking load-bearing kernel/driver/ZFS packages — userspace stays unlocked"
-        dnf install -y python3-dnf-plugin-versionlock >>"$LOG" 2>&1 ||
-            log "WARNING: versionlock plugin install failed — core packages NOT locked"
-        if command -v dnf >/dev/null 2>&1 && dnf versionlock list >/dev/null 2>&1; then
+        # The plugin is a different package per dnf generation: dnf5 (Fedora
+        # 41+) ships it in dnf5-plugins, dnf4 (EL 9/10) in
+        # python3-dnf-plugin-versionlock. Installing the dnf4 name on F44
+        # fails, logged "core packages NOT locked", and the next line locked
+        # them anyway because dnf5-plugins was already there — fiend
+        # 2026-09-05, both messages 1s apart in the same log. Probe first,
+        # install only what is actually missing, and only warn if it stays
+        # missing.
+        if ! dnf versionlock list >/dev/null 2>&1; then
+            local _vl_pkg=python3-dnf-plugin-versionlock
+            dnf --version 2>/dev/null | head -1 | grep -qE '^dnf5|^5\.' && _vl_pkg=dnf5-plugins
+            dnf install -y "$_vl_pkg" >>"$LOG" 2>&1 ||
+                log "WARNING: ${_vl_pkg} install failed — core packages NOT locked"
+        fi
+        if dnf versionlock list >/dev/null 2>&1; then
             dnf versionlock add \
                 kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra \
                 kernel-devel kernel-headers \
