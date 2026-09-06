@@ -950,6 +950,33 @@ cmd_menu() {
     command -v whiptail >/dev/null 2>&1 && ui=whiptail
     [[ -z "$ui" ]] && command -v dialog >/dev/null 2>&1 && ui=dialog
     [[ -t 0 && -n "$ui" ]] || die "menu needs a terminal and whiptail or dialog (dnf install newt · apt install whiptail)"
+    # whiptail's stock palette is the 1990s blue-and-red newt theme ("those
+    # are miserable colors", operator, 2026-09-06). newt reads NEWT_COLORS;
+    # this is a dark scheme in the site's tones: near-black ground, grey
+    # chrome, green for the thing that has focus. dialog reads DIALOGRC
+    # instead; the same scheme is written there for the fallback.
+    # One line, colon-separated: newt ignores the newline-separated form
+    # (checked under a pty on 2026-09-06 — the stock blue came back).
+    export NEWT_COLORS='root=white,black:roottext=white,black:window=white,black:border=brightblack,black:shadow=black,black:title=brightgreen,black:textbox=white,black:button=black,green:actbutton=black,brightgreen:compactbutton=white,black:checkbox=white,black:actcheckbox=black,green:listbox=white,black:actlistbox=black,green:sellistbox=brightgreen,black:actsellistbox=black,brightgreen:entry=white,brightblack:label=white,black:emptyscale=,black:fullscale=,green:helpline=brightblack,black'
+    if [[ "$ui" == "dialog" ]]; then
+        DIALOGRC="$(mktemp)"
+        export DIALOGRC
+        cat >"$DIALOGRC" <<'RC'
+use_shadow = OFF
+screen_color = (WHITE,BLACK,OFF)
+dialog_color = (WHITE,BLACK,OFF)
+title_color = (GREEN,BLACK,ON)
+border_color = (BLACK,BLACK,ON)
+button_active_color = (BLACK,GREEN,ON)
+button_inactive_color = (WHITE,BLACK,OFF)
+button_label_active_color = (BLACK,GREEN,ON)
+button_label_inactive_color = (WHITE,BLACK,OFF)
+item_selected_color = (BLACK,GREEN,ON)
+tag_selected_color = (BLACK,GREEN,ON)
+tag_key_selected_color = (BLACK,GREEN,ON)
+check_selected_color = (BLACK,GREEN,ON)
+RC
+    fi
     local profile payload picks size=3
     profile=$("$ui" --title "kldload — what to build" --radiolist \
         "Install profile (what the installer offers on the target)" 16 74 5 \

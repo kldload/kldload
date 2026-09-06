@@ -43,15 +43,28 @@ else
     exit 1
 fi
 
-# Size check — should be 8-12GB for a full free edition
+# Size check — the floor depends on what the image was told to carry, and
+# the name says that (builder/build-iso.sh): -net has no payload, -core has
+# no tools either, a single mirror (-fedora, -debian, -el) is one payload
+# piece, the plain name is the full free image. A floor per shape, not one
+# window for all of them: the old "8-12G" window flagged the 2.2 GB net
+# image as a failed build and the 14.9 GB full one as suspect (2026-09-06).
+# awk, not bc: bc is not on every host and "?G" is not a measurement.
+iso_size_floor() { # iso_size_floor NAME → minimum bytes for an image of that shape
+    case "$1" in
+    *-core.iso) echo 900000000 ;;                              # ~1.4 GB built
+    *-net.iso) echo 1500000000 ;;                              # ~2.2 GB built
+    *-fedora.iso | *-debian.iso | *-el.iso) echo 3500000000 ;; # one mirror, ~6 GB built
+    *) echo 10000000000 ;;                                     # full: ~15 GB built
+    esac
+}
 SIZE=$(stat -c%s "$ISO" 2>/dev/null || echo 0)
-SIZE_GB=$(echo "scale=1; $SIZE / 1073741824" | bc 2>/dev/null || echo "?")
-if [[ $SIZE -gt 8000000000 && $SIZE -lt 13000000000 ]]; then
-    _pass "ISO size: ${SIZE_GB}G (expected 8-12G)"
-elif [[ $SIZE -gt 5000000000 ]]; then
-    _warn "ISO size" "${SIZE_GB}G — smaller than expected (missing darksites?)"
+SIZE_GB=$(awk -v b="$SIZE" 'BEGIN{printf "%.1f", b/1073741824}')
+_floor=$(iso_size_floor "$(basename "$ISO")")
+if [[ $SIZE -ge $_floor ]]; then
+    _pass "ISO size: ${SIZE_GB}G ($(basename "$ISO"); floor $(awk -v b="$_floor" 'BEGIN{printf "%.1f", b/1073741824}')G for this shape)"
 else
-    _fail "ISO size" "${SIZE_GB}G — too small, build likely failed"
+    _fail "ISO size" "${SIZE_GB}G — under the $(awk -v b="$_floor" 'BEGIN{printf "%.1f", b/1073741824}')G floor for $(basename "$ISO"); the build likely lost a payload piece"
 fi
 
 # Timestamp — should be recent (within last hour)

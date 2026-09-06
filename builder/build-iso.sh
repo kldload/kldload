@@ -1725,7 +1725,12 @@ fi
 mkdir -p "${ROOTFS}/etc/kldload"
 echo "$EDITION" >"${ROOTFS}/etc/kldload/edition"
 # what this image carried, for the installer's summary and the webui
-echo "$PAYLOAD mirrors=${DARKSITES:-none} k8s=$K8S_IMAGES ollama=$OLLAMA" >"${ROOTFS}/etc/kldload/payload"
+if [[ "$EDITION" == "core" ]]; then
+    # core carries no payload whatever the knobs say; the file must not claim otherwise
+    echo "none (core edition)" >"${ROOTFS}/etc/kldload/payload"
+else
+    echo "$PAYLOAD mirrors=${DARKSITES:-none} k8s=$K8S_IMAGES ollama=$OLLAMA" >"${ROOTFS}/etc/kldload/payload"
+fi
 
 # Build ID generation — produces a version string like "1.0.4-b47" where:
 #   - VERSION is the release version from kldload.env (e.g., 1.0.4)
