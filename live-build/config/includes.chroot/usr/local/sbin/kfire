@@ -83,7 +83,8 @@ usage() {
 kfire — clone Firecracker microVMs from an appliance's ZFS zvols
 
 Usage:
-  kfire golden <vm> [--force]            snapshot a shut-off VM as a golden
+  kfire golden <vm> [--force] [--port N] snapshot a shut-off VM as a golden; N is the
+                                         port its clones answer on (80; 3389 for RDP)
   kfire goldens [--json]                 list goldens
   kfire golden-destroy <golden>          drop a golden (refused while clones exist)
   kfire clone <golden> [options]         clone microVMs from a golden
@@ -191,10 +192,28 @@ root_part() {
 cmd_golden() {
     need_root golden "$@"
     need_fc
-    local vm=${1:-} force=0
+    local vm=${1:-} force=0 port=80
     [[ -n $vm ]] || usage_die "golden: which VM?"
     shift
-    [[ ${1:-} == --force ]] && force=1
+    # --port is the port clones must answer on before `clone --wait` calls
+    # them up: 80 for anything that serves a page, 3389 for an RDP seat.
+    # The RDP golden was recorded as :80 and every clone of it was declared
+    # dead at 180 s while xrdp had been listening since second twenty
+    # (onyx, 2026-09-05). vmx passes the tile's own port; by hand, say it.
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+        --force)
+            force=1
+            shift
+            ;;
+        --port)
+            [[ ${2:-} =~ ^[0-9]+$ && $2 -ge 1 && $2 -le 65535 ]] || usage_die "golden: --port wants 1-65535"
+            port=$2
+            shift 2
+            ;;
+        *) usage_die "golden: unknown option $1" ;;
+        esac
+    done
     local root_zv="$POOL/$vm" data_zv="$POOL/$vm-data"
     zfs list -H -o name -t volume "$root_zv" >/dev/null 2>&1 || die "no zvol $root_zv — is $vm a kldload appliance VM?"
     zfs list -H -o name -t volume "$data_zv" >/dev/null 2>&1 || data_zv=""
@@ -250,22 +269,17 @@ cmd_golden() {
         rmdir "$bmp"
     }
     # the VM's own size and port are the defaults its clones inherit
-    local vcpus=2 ram=2048 port=80
+    local vcpus=2 ram=2048
     if command -v virsh >/dev/null 2>&1; then
         vcpus=$(virsh -c qemu:///system dominfo "$vm" 2>/dev/null | awk '/^CPU\(s\)/{print $2}' || echo 2)
         ram=$(virsh -c qemu:///system dominfo "$vm" 2>/dev/null | awk '/^Max memory/{print int($3/1024)}' || echo 2048)
-    fi
-    if command -v kldload-db >/dev/null 2>&1; then
-        # the appliance's role names the tile; the tile's port is in vmxplore's
-        # catalog, not here — 80 unless the operator says otherwise at clone
-        : "${port:=80}"
     fi
     jq -n --arg name "$vm" --arg root "$root_zv" --arg data "$data_zv" --arg snap "$SNAP" \
         --arg rootdev "/dev/vda$pn" --arg rootflags "$rootflags" --argjson vcpus "${vcpus:-2}" \
         --argjson ram "${ram:-2048}" --argjson port "$port" --arg created "$(date -Is)" \
         '{name:$name, root_zvol:$root, data_zvol:$data, snapshot:$snap, root:$rootdev, rootflags:$rootflags,
           vcpus:$vcpus, ram_mb:$ram, port:$port, created:$created}' >"$(golden_json "$vm")"
-    log "golden $vm ready: root=$(jget "$(golden_json "$vm")" .root) ${rootflags:+rootflags=$rootflags }$vcpus vCPU / $ram MB${data_zv:+ + data pool}"
+    log "golden $vm ready: root=$(jget "$(golden_json "$vm")" .root) ${rootflags:+rootflags=$rootflags }$vcpus vCPU / $ram MB${data_zv:+ + data pool} · clones answer on :$port"
 }
 
 cmd_goldens() {
@@ -703,11 +717,22 @@ cmd_clone() {
             [[ -n $ipa ]] || continue
             # a refused or timed-out probe is "not yet", which the loop retries
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "http://$ipa:$port/" 2>/dev/null || true)
-            if [[ $code =~ ^(200|301|302|401|403|404)$ ]]; then
+            # Not every port speaks HTTP: xrdp answers curl with 000. A plain
+            # TCP connect is then the readiness signal — a listener on the
+            # port is a service that is up.
+            local scheme=http
+            if [[ ! $code =~ ^(200|301|302|401|403|404)$ ]]; then
+                if timeout 1 bash -c "exec 3<>/dev/tcp/$ipa/$port" 2>/dev/null; then
+                    code=tcp
+                    scheme=tcp
+                    [[ $port -eq 3389 ]] && scheme=rdp
+                fi
+            fi
+            if [[ $code =~ ^(200|301|302|401|403|404|tcp)$ ]]; then
                 done_at[$nme]=$(($(ms) - t0))
                 up=$((up + 1))
                 db_register "$nme" "$ipa"
-                printf '%-20s http://%s:%s/  %s  answering at %6d ms\n' "$nme" "$ipa" "$port" "$code" "${done_at[$nme]}" >&2
+                printf '%-20s %s://%s:%s/  %s  answering at %6d ms\n' "$nme" "$scheme" "$ipa" "$port" "$code" "${done_at[$nme]}" >&2
                 enroll_one "$nme" "$ipa" "$golden" "$enroll"
             fi
         done
