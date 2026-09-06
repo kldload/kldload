@@ -113,6 +113,10 @@ print(json.dumps(rec))
     fi
 }
 
+# The cluster probes run under `timeout 5`: with the API server down (k8s
+# switched off, onyx 2026-09-05) a bare kubectl waited out its own connect
+# timeout three times over and the unit died at TimeoutStartSec=1min on
+# every timer tick — "Failed to start" sixty times a day for nothing.
 # Cilium kubectl-exec prefix — only useful if a cluster exists.
 K='kubectl -n kube-system exec ds/cilium -c cilium-agent --'
 
@@ -129,7 +133,7 @@ emit ebpf "bpftool -j map show" "Every BPF map (JSON)" json
 emit ebpf "bpftool -j net show" "Every BPF network attachment (JSON)" json
 
 # ─── Cilium / Hubble ─────────────────────────────────────────────────
-if kubectl get ds -n kube-system cilium >/dev/null 2>&1; then
+if timeout 5 kubectl get ds -n kube-system cilium >/dev/null 2>&1; then
     emit cilium "$K cilium status -o json" "Cilium agent status (structured)" json
     emit cilium "$K cilium bpf lb list" "Cilium in-kernel LB service→backend map"
     emit cilium "$K cilium bpf ct list global" "Cilium kernel connection tracking table"
@@ -139,7 +143,7 @@ if kubectl get ds -n kube-system cilium >/dev/null 2>&1; then
 fi
 
 # ─── Tetragon ────────────────────────────────────────────────────────
-if kubectl get ds -n kube-system tetragon >/dev/null 2>&1; then
+if timeout 5 kubectl get ds -n kube-system tetragon >/dev/null 2>&1; then
     emit tetragon "kubectl get tracingpolicies,tracingpoliciesnamespaced -A -o json" "TracingPolicies loaded" json
     # Sample 5 seconds of Tetragon event stream
     emit tetragon "timeout 5 kubectl logs -n kube-system ds/tetragon -c export-stdout --since=10s 2>&1 | head -200" \
@@ -147,7 +151,7 @@ if kubectl get ds -n kube-system tetragon >/dev/null 2>&1; then
 fi
 
 # ─── Kubernetes ──────────────────────────────────────────────────────
-if kubectl version --client >/dev/null 2>&1 && kubectl get nodes >/dev/null 2>&1; then
+if kubectl version --client >/dev/null 2>&1 && timeout 5 kubectl get nodes >/dev/null 2>&1; then
     emit k8s "kubectl get nodes -o json" "Cluster nodes (structured)" json
     emit k8s "kubectl get pods -A -o json" "Every pod cluster-wide (structured)" json
     emit k8s "kubectl get svc -A -o json" "Every Service (structured)" json

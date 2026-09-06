@@ -101,13 +101,19 @@ write_json "${TARGETS_DIR}/klab-kspawn.json" "${kspawn_json}]"
 # a ServiceMonitor, so prometheus can't discover the real pod name.)
 if command -v kubectl >/dev/null 2>&1 && [[ -r /root/.kube/config || -n "${KUBECONFIG:-}" ]]; then
     export KUBECONFIG="${KUBECONFIG:-/root/.kube/config}"
-    # Robust-to-timeout: single get-nodes call, parse locally.
-    _nodes_raw="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{","}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null)"
+    # Robust-to-timeout: single get-nodes call, parse locally. Both kubectl
+    # calls run under `timeout 5`: the API VIP is on wg-k8s, so with the
+    # cluster switched off the connect just hangs, and this unit has
+    # TimeoutStartSec=infinity — fiend 2026-09-05, k8s nodes shut down to
+    # build appliances, the 30s timer stacked one stuck bash on top of the
+    # next for an hour. A file_sd refresh that cannot see the cluster should
+    # simply emit no cluster targets and move on.
+    _nodes_raw="$(timeout 5 kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{","}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null)"
     # Resolve the single node where cilium-operator currently runs. The
     # operator is a Deployment with replicas=1; scraping all nodes on 9963
     # leaves 3 of 4 targets permanently DOWN and the Grafana dashboard
     # looks empty on every panel that aggregates across targets.
-    _operator_node="$(kubectl -n kube-system get pod -l io.cilium/app=operator -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)"
+    _operator_node="$(timeout 5 kubectl -n kube-system get pod -l io.cilium/app=operator -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)"
     cilium_agent='['
     _first_ca=1
     cilium_operator='['
