@@ -296,6 +296,7 @@ cmd_goldens() {
             # grep -c exits 1 on zero matches, and zero clones is a valid count
             local _stale=false
             golden_snapshot_ok "$j" || _stale=true
+            # grep -c exits 1 when there are no clones; zero is the answer, not an error
             jq -c --argjson clones "$(zfs list -H -o name -t volume 2>/dev/null | grep -c "^$POOL/$(jget "$j" .name | sed 's/^app-//')-[0-9]" || true)" \
                 --argjson stale "$_stale" \
                 '. + {clones:$clones, stale:$stale}' "$j"
