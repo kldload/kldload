@@ -168,6 +168,17 @@ extract_vmlinux() {
 
 golden_json() { echo "$GOLDENS/$1/golden.json"; }
 jget() { jq -r "$2" "$1"; }
+# golden_snapshot_ok JSON — 0 when the golden's snapshot(s) still exist, 1
+# when the record has outlived its zvol (see cmd_clone for how that happens).
+golden_snapshot_ok() {
+    local _j=$1 _z _snap
+    _snap=$(jget "$_j" .snapshot)
+    for _z in "$(jget "$_j" .root_zvol)" "$(jget "$_j" .data_zvol)"; do
+        [[ -n $_z ]] || continue
+        zfs list -H -o name -t snapshot "$_z@$_snap" >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
 
 # root_part ZVOL — the guest's root: the largest partition that is not the
 # EFI system partition. Prints the partition device path.
@@ -269,8 +280,11 @@ cmd_goldens() {
             [[ $first -eq 1 ]] || echo ','
             first=0
             # grep -c exits 1 on zero matches, and zero clones is a valid count
+            local _stale=false
+            golden_snapshot_ok "$j" || _stale=true
             jq -c --argjson clones "$(zfs list -H -o name -t volume 2>/dev/null | grep -c "^$POOL/$(jget "$j" .name | sed 's/^app-//')-[0-9]" || true)" \
-                '. + {clones:$clones}' "$j"
+                --argjson stale "$_stale" \
+                '. + {clones:$clones, stale:$stale}' "$j"
         done
         echo ']'
         return 0
@@ -281,8 +295,10 @@ cmd_goldens() {
         [[ $(jget "$j" .data_zvol) != "" ]] && data_tag=' + data'
         # grep -c exits 1 on zero matches, and zero clones is a valid count
         nclones=$(zfs list -H -o name -t volume 2>/dev/null | grep -c "^$POOL/$(jget "$j" .name)-fc" || true)
-        printf '%-20s %s vCPU / %5s MB  root %s%s  clones %s\n' "$(jget "$j" .name)" "$(jget "$j" .vcpus)" "$(jget "$j" .ram_mb)" \
-            "$(jget "$j" .root)" "$data_tag" "$nclones"
+        local _tag=""
+        golden_snapshot_ok "$j" || _tag="  STALE — snapshot gone, VM rebuilt; rerun: kfire golden $(jget "$j" .name)"
+        printf '%-20s %s vCPU / %5s MB  root %s%s  clones %s%s\n' "$(jget "$j" .name)" "$(jget "$j" .vcpus)" "$(jget "$j" .ram_mb)" \
+            "$(jget "$j" .root)" "$data_tag" "$nclones" "$_tag"
     done
 }
 
@@ -295,6 +311,10 @@ cmd_golden_destroy() {
     local z
     for z in "$(jget "$j" .root_zvol)" "$(jget "$j" .data_zvol)"; do
         [[ -n $z ]] || continue
+        # A stale record (VM rebuilt, snapshot gone with the old zvol) has
+        # nothing left to guard; refusing it as "clones still exist" was a
+        # lie that kept the dead record forever.
+        zfs list -H -o name -t snapshot "$z@$(jget "$j" .snapshot)" >/dev/null 2>&1 || continue
         # zfs refuses to destroy a snapshot with clones — that refusal is the guard
         zfs destroy "$z@$(jget "$j" .snapshot)" || die "clones of $g still exist — kfire destroy them first"
     done
@@ -582,6 +602,13 @@ cmd_clone() {
     rootdev=$(jget "$gj" .root)
     rootflags=$(jget "$gj" .rootflags)
     port=$(jget "$gj" .port)
+    # A golden is a record plus a snapshot, and the two can part ways: the
+    # appliance VM is rebuilt (destroy-all, Build all), `zfs destroy -r`
+    # takes @kfire with the old zvol, and the record under $GOLDENS lives
+    # on. onyx 2026-09-05: goldens made at 10:18, VMs rebuilt at 12:08 and
+    # 12:14, and the GUI's ten-clone run died at `zfs clone` with
+    # "dataset does not exist". Say what happened and what fixes it.
+    golden_snapshot_ok "$gj" || die "golden $golden is stale: $root_zv@$snap is gone — the VM was rebuilt after the golden was taken ($(zfs get -H -o value creation "$root_zv" 2>/dev/null || echo 'zvol missing too')). Shut it off and run:  kfire golden $golden"
     mkdir -p "$INSTANCES"
 
     local made=() t0 i failed=0
