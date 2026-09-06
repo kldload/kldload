@@ -47,7 +47,7 @@ Two substrates in the installer menu — **Fedora and Debian** — and two packa
 managers underneath. Both install with the network unplugged, from complete
 mirrors baked into the ISO.
 
-**Website:** [kldload.com](https://kldload.com) &middot; **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) &middot; **Release notes:** [1.4.2](https://kldload.com/releases/1.4.2.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
+**Website:** [kldload.com](https://kldload.com) &middot; **Download:** [full ISO](https://dl.kldload.com/kldload-free-latest.iso) / [net installer](https://dl.kldload.com/kldload-free-net-latest.iso) &middot; **Release notes:** [1.4.2](https://kldload.com/releases/1.4.2.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
 
 **The install, in two screens.** Boot the USB and this opens by itself — no
 terminal, no wiki. It is also reachable at `https://<host>:8443` from another
@@ -114,7 +114,7 @@ the OpenZFS test lab kept separate from it.
 | | |
 |---|---|
 | A 64-bit x86 machine | **UEFI required. Legacy BIOS boot is not supported.** |
-| A USB stick, **32 GB or larger** | The image is ~17.7 GB. |
+| A USB stick, **32 GB or larger** | The full image is ~15 GB. The 2.2 GB net installer fits a 4 GB stick. |
 | A target disk | **It will be erased.** |
 | Network | Optional — both substrates install fully offline. |
 
@@ -127,7 +127,8 @@ the full detail.
 
 ```bash
 # Download and burn (USB target)
-curl -L -o kldload.iso https://dl.kldload.com/kldload-free-latest.iso
+curl -L -o kldload.iso https://dl.kldload.com/kldload-free-latest.iso        # full: offline mirrors, ~15 GB
+curl -L -o kldload.iso https://dl.kldload.com/kldload-free-net-latest.iso    # or the net installer, ~2.2 GB
 sudo wipefs -af /dev/sdX
 sudo dd if=kldload.iso of=/dev/sdX bs=4M oflag=direct conv=fsync status=progress && sync
 
@@ -141,7 +142,7 @@ The full image carries the offline mirrors, the Kubernetes images and the
 AI stack, about 15 GB. Two smaller ways to build it:
 
 ```bash
-EDITION=net ./deploy.sh build            # tools only, ~3 GB — installs from the distros' mirrors
+EDITION=net ./deploy.sh build            # tools only, ~2.2 GB — installs from the distros' mirrors
 DARKSITES=fedora OLLAMA=no ./deploy.sh build   # one mirror, no AI stack — a Fedora-only offline desktop
 ./deploy.sh menu                         # a checklist that writes kldload.env and shows the size
 ```
