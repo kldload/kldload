@@ -33,6 +33,20 @@ trap '' PIPE
 
 PROFILE="${PROFILE:-desktop}"
 EDITION="${EDITION:-free}"
+# What the ISO carries (deploy.sh explains): full = offline payload baked in,
+# net = tools only, packages come from the distribution's mirrors at install.
+PAYLOAD="${PAYLOAD:-full}"
+# The payload piece by piece (deploy.sh sets these; defaults here are for a
+# bare invocation): which offline mirrors, the k8s images, the AI stack.
+DARKSITES="${DARKSITES:-debian fedora el}"
+K8S_IMAGES="${K8S_IMAGES:-yes}"
+OLLAMA="${OLLAMA:-yes}"
+if [[ "$PAYLOAD" == "net" ]]; then
+    DARKSITES=""
+    K8S_IMAGES=no
+    OLLAMA=no
+fi
+has_darksite() { [[ " $DARKSITES " == *" $1 "* ]]; }
 ARCH="${ARCH:-x86_64}"
 
 # Derive arch-specific names used by different upstream projects. EFI, Debian,
@@ -66,7 +80,16 @@ ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
 VERSION="${KLDLOAD_VERSION:-1.4.2}"
-ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
+# The name says what is inside: -net carries no payload, -core no tools. The
+# plain name stays the full free image the download page links to.
+_iso_suffix=""
+# one mirror alone names the image after it: kldload-1.4.2-x86_64-fedora.iso
+if [[ "$PAYLOAD" != "net" && $(echo "$DARKSITES" | wc -w) -eq 1 ]]; then
+    _iso_suffix="-${DARKSITES// /}"
+fi
+[[ "$PAYLOAD" == "net" ]] && _iso_suffix="-net"
+[[ "$EDITION" == "core" ]] && _iso_suffix="-core"
+ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}${_iso_suffix}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
 log() { printf '[%s] [build-iso] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
@@ -78,6 +101,7 @@ die() {
 log "Starting kldload ISO build."
 log "Profile:    $PROFILE"
 log "Edition:    $EDITION"
+log "Payload:    $PAYLOAD (mirrors: ${DARKSITES:-none} · k8s images: $K8S_IMAGES · ollama: $OLLAMA)"
 log "Arch:       $ARCH"
 log "Date:       $BUILD_DATE"
 
@@ -94,9 +118,10 @@ rm -f "/build/live-build/output/${ISO_NAME}" "/build/live-build/output/${ISO_NAM
 mkdir -p "$ROOTFS" "$ISO_STAGING" "/build/live-build/output"
 
 # ---------------------------------------------------------------------------
-# Build darksite RPM mirror (free edition only)
+# Build darksite RPM mirror (free edition only, and only when the ISO
+# carries a payload — PAYLOAD=net fetches at install time)
 # ---------------------------------------------------------------------------
-if [[ "$EDITION" != "core" ]]; then
+if [[ "$EDITION" != "core" && "$PAYLOAD" != "net" ]] && has_darksite el; then
     DARKSITE_SCRIPT="${BUILD_ROOT}/build/darksite/build-darksite.sh"
     if [[ -x "$DARKSITE_SCRIPT" ]]; then
         log "Building darksite RPM mirror..."
@@ -112,7 +137,7 @@ if [[ "$EDITION" != "core" ]]; then
         fi
     fi
 else
-    log "Core edition — skipping darksite RPM mirror build."
+    log "EL mirror not built (EDITION=$EDITION PAYLOAD=$PAYLOAD DARKSITES=${DARKSITES:-none})"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1699,6 +1724,8 @@ fi
 # Edition marker — lets runtime tools distinguish free vs core edition
 mkdir -p "${ROOTFS}/etc/kldload"
 echo "$EDITION" >"${ROOTFS}/etc/kldload/edition"
+# what this image carried, for the installer's summary and the webui
+echo "$PAYLOAD mirrors=${DARKSITES:-none} k8s=$K8S_IMAGES ollama=$OLLAMA" >"${ROOTFS}/etc/kldload/payload"
 
 # Build ID generation — produces a version string like "1.0.4-b47" where:
 #   - VERSION is the release version from kldload.env (e.g., 1.0.4)
@@ -3139,15 +3166,27 @@ log "darksite binaries: $(du -sh "${ROOTFS}/root/darksite/bin" 2>/dev/null | cut
 # stage (stages 2-4) and cached on the host. Here we copy them into the rootfs
 # so they end up inside the squashfs image. On the live ISO, Python HTTP servers
 # expose these as local APT/RPM/pacman mirrors (ports 3142-3146).
-if [[ "$EDITION" != "core" ]]; then
+# PAYLOAD=net: none of this — the installer sees no /root/darksite and
+# writes the distribution's own repos instead (bootstrap.sh, profiles.sh).
+if [[ "$EDITION" != "core" && "$PAYLOAD" != "net" ]]; then
     # Copy darksite RPM repo into the rootfs for offline target installs
     if [[ -d /build/live-build/config/includes.chroot/root/darksite ]]; then
         cp -r /build/live-build/config/includes.chroot/root/darksite/. "${ROOTFS}/root/darksite/"
+        # the tree carries every piece the host has cached; drop what this
+        # image was told not to carry
+        has_darksite el || {
+            rm -rf "${ROOTFS}/root/darksite/rpm"
+            log "EL mirror dropped from the image (DARKSITES=${DARKSITES:-none})"
+        }
+        [[ "$K8S_IMAGES" == "yes" ]] || {
+            rm -rf "${ROOTFS}/root/darksite/k8s-images"
+            log "Kubernetes images dropped from the image (K8S_IMAGES=no)"
+        }
         log "RPM darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite" 2>/dev/null | cut -f1)"
     fi
 
     # Copy Debian darksite APT mirror into the rootfs
-    if [[ -d /build/live-build/darksite-debian-cache/apt ]]; then
+    if has_darksite debian && [[ -d /build/live-build/darksite-debian-cache/apt ]]; then
         mkdir -p "${ROOTFS}/root/darksite/debian"
         cp -r /build/live-build/darksite-debian-cache/apt "${ROOTFS}/root/darksite/debian/" ||
             die "FATAL: copying the Debian darksite into the rootfs failed"
@@ -3205,7 +3244,7 @@ if [[ "$EDITION" != "core" ]]; then
     # space was never the issue (1.6T). I could not determine the mechanism
     # after the fact, which is the whole argument for checking the OUTCOME:
     # one assertion catches every cause, including the ones nobody names.
-    if [[ -d /build/live-build/darksite-fedora-cache/rpm ]]; then
+    if has_darksite fedora && [[ -d /build/live-build/darksite-fedora-cache/rpm ]]; then
         mkdir -p "${ROOTFS}/root/darksite/fedora"
         cp -r /build/live-build/darksite-fedora-cache/rpm "${ROOTFS}/root/darksite/fedora/" ||
             die "FATAL: copying the Fedora darksite into the rootfs failed"
@@ -3262,41 +3301,45 @@ if [[ "$EDITION" != "core" ]]; then
     # someone wants. Baking the first two and not the third keeps the ISO well
     # under the published 18.4 GB while making offline AI actually work.
     # (2026-08-18)
-    mkdir -p "${ROOTFS}/root/darksite/ollama"
+    if [[ "$OLLAMA" == "yes" ]]; then
+        mkdir -p "${ROOTFS}/root/darksite/ollama"
 
-    if [[ -f /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst ]]; then
-        mkdir -p "${ROOTFS}/root/darksite/ollama/runtime"
-        cp /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst \
-            "${ROOTFS}/root/darksite/ollama/runtime/"
-        log "Ollama runtime baked in: $(du -sh "${ROOTFS}/root/darksite/ollama/runtime" 2>/dev/null | cut -f1)"
-    else
-        log "WARNING: no Ollama runtime in the darksite cache — an OFFLINE install will have no AI engine"
-        log "         (build it with: ./deploy.sh build-ollama-darksite)"
-    fi
-
-    if [[ -s /build/live-build/darksite-ollama-cache/webui/open-webui.oci.tar ]]; then
-        mkdir -p "${ROOTFS}/root/darksite/ollama/webui"
-        cp -r /build/live-build/darksite-ollama-cache/webui/. \
-            "${ROOTFS}/root/darksite/ollama/webui/"
-        log "Open WebUI image + Whisper weights baked in: $(du -sh "${ROOTFS}/root/darksite/ollama/webui" 2>/dev/null | cut -f1)"
-    else
-        log "WARNING: no Open WebUI image in the darksite cache — an OFFLINE install gets the Ollama CLI only"
-    fi
-
-    # Weights stay opt-in. This is the only part that is genuinely a choice
-    # about someone else's model, and the only part that costs multiple GB.
-    if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]] && [[ -d /build/live-build/darksite-ollama-cache/models ]]; then
-        # Weights without a runtime cannot come up offline, and the failure
-        # would only surface at first boot on the operator's hardware.
-        if [[ ! -f "${ROOTFS}/root/darksite/ollama/runtime/ollama-linux-amd64.tar.zst" ]]; then
-            die "Ollama weights requested but the runtime tarball is missing — weights without a runtime cannot come up offline"
+        if [[ -f /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst ]]; then
+            mkdir -p "${ROOTFS}/root/darksite/ollama/runtime"
+            cp /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst \
+                "${ROOTFS}/root/darksite/ollama/runtime/"
+            log "Ollama runtime baked in: $(du -sh "${ROOTFS}/root/darksite/ollama/runtime" 2>/dev/null | cut -f1)"
+        else
+            log "WARNING: no Ollama runtime in the darksite cache — an OFFLINE install will have no AI engine"
+            log "         (build it with: ./deploy.sh build-ollama-darksite)"
         fi
-        cp -r /build/live-build/darksite-ollama-cache/models "${ROOTFS}/root/darksite/ollama/"
-        log "Ollama MODEL weights baked in (opt-in): $(du -sh "${ROOTFS}/root/darksite/ollama/models" 2>/dev/null | cut -f1)"
+
+        if [[ -s /build/live-build/darksite-ollama-cache/webui/open-webui.oci.tar ]]; then
+            mkdir -p "${ROOTFS}/root/darksite/ollama/webui"
+            cp -r /build/live-build/darksite-ollama-cache/webui/. \
+                "${ROOTFS}/root/darksite/ollama/webui/"
+            log "Open WebUI image + Whisper weights baked in: $(du -sh "${ROOTFS}/root/darksite/ollama/webui" 2>/dev/null | cut -f1)"
+        else
+            log "WARNING: no Open WebUI image in the darksite cache — an OFFLINE install gets the Ollama CLI only"
+        fi
+
+        # Weights stay opt-in. This is the only part that is genuinely a choice
+        # about someone else's model, and the only part that costs multiple GB.
+        if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]] && [[ -d /build/live-build/darksite-ollama-cache/models ]]; then
+            # Weights without a runtime cannot come up offline, and the failure
+            # would only surface at first boot on the operator's hardware.
+            if [[ ! -f "${ROOTFS}/root/darksite/ollama/runtime/ollama-linux-amd64.tar.zst" ]]; then
+                die "Ollama weights requested but the runtime tarball is missing — weights without a runtime cannot come up offline"
+            fi
+            cp -r /build/live-build/darksite-ollama-cache/models "${ROOTFS}/root/darksite/ollama/"
+            log "Ollama MODEL weights baked in (opt-in): $(du -sh "${ROOTFS}/root/darksite/ollama/models" 2>/dev/null | cut -f1)"
+        else
+            log "Ollama model weights NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1) — engine + interface ship ready, picker starts empty"
+        fi
+        log "Ollama darksite total: $(du -sh "${ROOTFS}/root/darksite/ollama" 2>/dev/null | cut -f1)"
     else
-        log "Ollama model weights NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1) — engine + interface ship ready, picker starts empty"
+        log "Ollama not carried (OLLAMA=no)"
     fi
-    log "Ollama darksite total: $(du -sh "${ROOTFS}/root/darksite/ollama" 2>/dev/null | cut -f1)"
 
     # Copy Alpine darksite apk cache into the rootfs
     if [[ -d /build/live-build/darksite-alpine-cache/apk ]]; then

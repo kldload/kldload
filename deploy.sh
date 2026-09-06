@@ -30,8 +30,52 @@ ROOT="$(dirname "$(realpath "$0")")"
 
 # ── Build configuration ──────────────────────────────────────────────────────
 # These control what gets built. Override via environment or kldload.env.
-PROFILE="${PROFILE:-desktop}"                                   # Install profile: desktop, server, kvm, ai, core
-EDITION="${EDITION:-free}"                                      # Edition: free (full) or core (ZFS-only, no tools)
+PROFILE="${PROFILE:-desktop}" # Install profile: desktop, server, kvm, ai, core
+EDITION="${EDITION:-free}"    # Edition: free (full) or core (ZFS-only, no tools)
+# PAYLOAD decides what the ISO CARRIES, EDITION what the installed system IS.
+# full: the offline mirrors, k8s images and Ollama baked in (~15 GB, installs
+# with no network). net: the same tools and installer, no payload (~3 GB,
+# installs from the distribution's own mirrors). EDITION=net is shorthand
+# for EDITION=free PAYLOAD=net, since that is the one people will type.
+PAYLOAD="${PAYLOAD:-full}" # Payload: full (offline mirrors baked in) or net (fetch at install)
+if [[ "$EDITION" == "net" ]]; then
+    EDITION=free
+    PAYLOAD=net
+fi
+case "$PAYLOAD" in full | net) ;; *)
+    echo "PAYLOAD must be full or net (got '$PAYLOAD')" >&2
+    exit 2
+    ;;
+esac
+# The payload, piece by piece — so "Fedora desktop with ZFS and NVIDIA and
+# nothing else" is a build and not a fork. DARKSITES lists the offline
+# mirrors to carry (debian ~2.8 GB, fedora ~3.6 GB, el ~1.9 GB for CentOS
+# Stream/Rocky); K8S_IMAGES the Kubernetes container images (~1.5 GB);
+# OLLAMA the engine and Open WebUI (~3.4 GB; weights stay opt-in via
+# KLDLOAD_INCLUDE_OLLAMA_DARKSITE). PAYLOAD=net switches all of it off.
+# ./deploy.sh menu writes these into kldload.env from a checklist.
+DARKSITES="${DARKSITES:-debian fedora el}" # offline mirrors to carry: any of debian fedora el
+K8S_IMAGES="${K8S_IMAGES:-yes}"            # bake the Kubernetes container images (yes/no)
+OLLAMA="${OLLAMA:-yes}"                    # bake the Ollama engine + Open WebUI (yes/no)
+if [[ "$PAYLOAD" == "net" ]]; then
+    DARKSITES=""
+    K8S_IMAGES=no
+    OLLAMA=no
+fi
+for _ds in $DARKSITES; do
+    case "$_ds" in debian | fedora | el) ;; *)
+        echo "DARKSITES: unknown mirror '$_ds' (debian, fedora, el)" >&2
+        exit 2
+        ;;
+    esac
+done
+case "$K8S_IMAGES$OLLAMA" in yesyes | yesno | noyes | nono) ;; *)
+    echo "K8S_IMAGES and OLLAMA must be yes or no" >&2
+    exit 2
+    ;;
+esac
+# has_darksite NAME — is that mirror in DARKSITES?
+has_darksite() { [[ " $DARKSITES " == *" $1 "* ]]; }
 ARCH="${ARCH:-x86_64}"                                          # Target architecture
 RELEASE="${RELEASE:-10}"                                        # EL release (CentOS Stream/Rocky/RHEL) — EL10 default
 BUILDER_IMAGE="${BUILDER_IMAGE:-kldload-live-builder:latest}"   # Builder container image tag
@@ -478,29 +522,34 @@ cmd_build() {
         BUILDER_IMAGE="${BUILDER_IMAGE%:*}:aarch64"
         ;;
     esac
-    log "Building kldload ISO (PROFILE=$PROFILE EDITION=$EDITION ARCH=$ARCH RELEASE=$RELEASE)"
+    log "Building kldload ISO (PROFILE=$PROFILE EDITION=$EDITION PAYLOAD=$PAYLOAD ARCH=$ARCH RELEASE=$RELEASE)"
 
     # ── Stage 1: APT darksites (Debian + Ubuntu) ─────────────────────────
-    # Skip for core edition (no darksites needed — stock distro only)
-    if [[ "$EDITION" != "core" ]]; then
-        local debian_darksite="$ROOT/live-build/darksite-debian-cache"
-        # Everything that decides what ends up in the mirror has to be hashed,
-        # or the cache looks current while the contents are stale. The builder
-        # itself counts: DARKSITE_BLACKLIST lives in it, and an edit there
-        # changes the pool just as surely as adding a package does.
-        local _deb_profiles="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
-        local _deb_builder="$ROOT/build/darksite-debian/build-darksite-debian.sh"
-        if [[ ! -f "$debian_darksite/apt/dists/trixie/Release" ]]; then
-            cmd_build_debian_darksite
-            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder")" \
-                >"$debian_darksite/.pkgset-sha256"
-        elif [[ "$(cat "$debian_darksite/.pkgset-sha256" 2>/dev/null)" != "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder")" ]]; then
-            log "Debian package sets changed since the darksite was built — rebuilding the mirror"
-            cmd_build_debian_darksite
-            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder")" \
-                >"$debian_darksite/.pkgset-sha256"
+    # Skip for core edition (no darksites needed — stock distro only) and for
+    # PAYLOAD=net (the installer fetches from the distro's mirrors instead)
+    if [[ "$EDITION" != "core" && "$PAYLOAD" != "net" ]]; then
+        if has_darksite debian; then
+            local debian_darksite="$ROOT/live-build/darksite-debian-cache"
+            # Everything that decides what ends up in the mirror has to be hashed,
+            # or the cache looks current while the contents are stale. The builder
+            # itself counts: DARKSITE_BLACKLIST lives in it, and an edit there
+            # changes the pool just as surely as adding a package does.
+            local _deb_profiles="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+            local _deb_builder="$ROOT/build/darksite-debian/build-darksite-debian.sh"
+            if [[ ! -f "$debian_darksite/apt/dists/trixie/Release" ]]; then
+                cmd_build_debian_darksite
+                printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder")" \
+                    >"$debian_darksite/.pkgset-sha256"
+            elif [[ "$(cat "$debian_darksite/.pkgset-sha256" 2>/dev/null)" != "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder")" ]]; then
+                log "Debian package sets changed since the darksite was built — rebuilding the mirror"
+                cmd_build_debian_darksite
+                printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder")" \
+                    >"$debian_darksite/.pkgset-sha256"
+            else
+                log "Debian darksite cached: $(du -sh "$debian_darksite" | cut -f1)"
+            fi
         else
-            log "Debian darksite cached: $(du -sh "$debian_darksite" | cut -f1)"
+            log "Debian mirror not carried (DARKSITES=$DARKSITES) — Debian installs need a network"
         fi
 
         # ── Ubuntu darksite: RETIRED 2026-08-14 ──────────────────────────
@@ -531,120 +580,128 @@ cmd_build() {
             log "Ubuntu darksite retired — Ubuntu installs require a network (KLDLOAD_INCLUDE_UBUNTU_DARKSITE=1 to restore)"
         fi
 
-        # Fedora RPM darksite — built in a fedora:<RELEASE> container, cached
-        # at live-build/darksite-fedora-cache/. Marker file is the createrepo
-        # repomd.xml — its presence means the repo was built successfully.
-        local fedora_darksite="$ROOT/live-build/darksite-fedora-cache"
-        # The marker alone is not enough: it says a repo was built, not that it
-        # was built from the CURRENT package list. Stamp the cache with a hash
-        # of the package sets and rebuild when they diverge.
-        #
-        # HISTORY: 2026-08-13. 22 font packages were added to
-        # target-fedora-extras.txt on 08-12; the cache had been built on 07-24
-        # and repomd.xml existed, so the build reported "Fedora darksite
-        # cached: 2.7G" and mirrored none of them. The install then ran dnf
-        # with --skip-unavailable against that mirror, dropped every font
-        # without a word, and shipped a desktop with ZERO emoji fonts — the
-        # tofu boxes the fonts were declared to fix. Declaring a package has to
-        # be enough; remembering to hand-rebuild a mirror is not a contract.
-        local _fed_stamp="$fedora_darksite/.pkgset-sha256"
-        local _fed_hash
-        # The builder is hashed for the same reason as Debian's: it decides what
-        # ends up in the pool, so an edit there must invalidate the cache.
-        _fed_hash="$(_pkgset_hash "$ROOT/build/darksite-fedora/config/package-sets" \
-            "$ROOT/build/darksite-fedora/build-darksite-fedora.sh")"
-        if [[ ! -f "$fedora_darksite/rpm/repodata/repomd.xml" ]]; then
-            cmd_build_fedora_darksite
-            printf '%s\n' "$_fed_hash" >"$_fed_stamp"
-        elif [[ "$(cat "$_fed_stamp" 2>/dev/null)" != "$_fed_hash" ]]; then
-            log "Fedora package sets changed since the darksite was built — rebuilding the mirror"
-            cmd_build_fedora_darksite
-            printf '%s\n' "$_fed_hash" >"$_fed_stamp"
+        if has_darksite fedora; then
+            # Fedora RPM darksite — built in a fedora:<RELEASE> container, cached
+            # at live-build/darksite-fedora-cache/. Marker file is the createrepo
+            # repomd.xml — its presence means the repo was built successfully.
+            local fedora_darksite="$ROOT/live-build/darksite-fedora-cache"
+            # The marker alone is not enough: it says a repo was built, not that it
+            # was built from the CURRENT package list. Stamp the cache with a hash
+            # of the package sets and rebuild when they diverge.
+            #
+            # HISTORY: 2026-08-13. 22 font packages were added to
+            # target-fedora-extras.txt on 08-12; the cache had been built on 07-24
+            # and repomd.xml existed, so the build reported "Fedora darksite
+            # cached: 2.7G" and mirrored none of them. The install then ran dnf
+            # with --skip-unavailable against that mirror, dropped every font
+            # without a word, and shipped a desktop with ZERO emoji fonts — the
+            # tofu boxes the fonts were declared to fix. Declaring a package has to
+            # be enough; remembering to hand-rebuild a mirror is not a contract.
+            local _fed_stamp="$fedora_darksite/.pkgset-sha256"
+            local _fed_hash
+            # The builder is hashed for the same reason as Debian's: it decides what
+            # ends up in the pool, so an edit there must invalidate the cache.
+            _fed_hash="$(_pkgset_hash "$ROOT/build/darksite-fedora/config/package-sets" \
+                "$ROOT/build/darksite-fedora/build-darksite-fedora.sh")"
+            if [[ ! -f "$fedora_darksite/rpm/repodata/repomd.xml" ]]; then
+                cmd_build_fedora_darksite
+                printf '%s\n' "$_fed_hash" >"$_fed_stamp"
+            elif [[ "$(cat "$_fed_stamp" 2>/dev/null)" != "$_fed_hash" ]]; then
+                log "Fedora package sets changed since the darksite was built — rebuilding the mirror"
+                cmd_build_fedora_darksite
+                printf '%s\n' "$_fed_hash" >"$_fed_stamp"
+            else
+                log "Fedora darksite cached: $(du -sh "$fedora_darksite" | cut -f1)"
+            fi
         else
-            log "Fedora darksite cached: $(du -sh "$fedora_darksite" | cut -f1)"
+            log "Fedora mirror not carried (DARKSITES=$DARKSITES) — Fedora installs need a network"
         fi
 
-        # Ollama model darksite — OPT-IN. No model weights ship by default.
-        #
-        # THE SHAPE OF THE DECISION (operator, 2026-08-15):
-        #   default build   → Ollama + Open WebUI installed, set up and running,
-        #                     with an EMPTY model list. The operator pulls the
-        #                     model they want: `ollama pull <name>`, or straight
-        #                     from the model picker in the Open WebUI window.
-        #   =1 at build time → the model is downloaded during the ISO build,
-        #                     baked into the image, and installs offline. This
-        #                     is the air-gapped path and it costs ISO size.
-        #
-        # WHY THIS IS THE RIGHT DEFAULT: the interface needs no model to work.
-        # Open WebUI is a frontend — it starts with zero models and offers a
-        # picker. So "everything set up and ready to go" is fully delivered
-        # without shipping weights, and shipping weights only pre-answers a
-        # question (WHICH model) that the operator is better placed to answer.
-        # Most people are not air-gapped and would rather have the smaller ISO
-        # and their own choice of model.
-        #
-        # WARN: with this at 0 an AIR-GAPPED install gets the interface and no
-        # model, and no way to fetch one. Air-gapped builds must set
-        # KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1. That is the whole point of the flag.
-        #
-        # kldload-autodeploy sets Ollama and Open WebUI up BEFORE it looks at
-        # models or VRAM, precisely so this default cannot produce a machine
-        # with no interface.
-        #
-        # BYOM (Bring Your Own Models) after install — drop the Ollama model
-        # tree into /root/darksite/ollama/models/ on the installed target
-        # (rsync from a box that already pulled it, or copy from a
-        # pre-populated USB). On next boot kldload-firstboot detects the
-        # directory and rsyncs it into /srv/ollama/models/ before starting
-        # Ollama — same offline behaviour, no rebuild.
-        if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]]; then
-            local ollama_darksite="$ROOT/live-build/darksite-ollama-cache"
-            # Verify the REQUESTED models are present, not merely that the
-            # cache holds something. The old test (`library/*/*`) passed on any
-            # model at all, so after the default changed the build happily
-            # shipped the previous model while the runtime asked for the new
-            # one — the same presence-vs-correctness trap that shipped a broken
-            # Debian mirror on 2026-08-14.
-            _ol_want="${OLLAMA_MODELS:-llama3.2:3b nomic-embed-text}"
-            _ol_missing=0
-            for _m in $_ol_want; do
-                _mn="${_m%%:*}"
-                _mt="${_m##*:}"
-                [[ "$_mt" == "$_mn" ]] && _mt=latest
-                [[ -f "$ollama_darksite/models/manifests/registry.ollama.ai/library/${_mn}/${_mt}" ]] ||
-                    _ol_missing=1
-            done
-            if ((_ol_missing == 1)); then
-                log "Ollama darksite missing one of: ${_ol_want} — rebuilding"
-                cmd_build_ollama_darksite
+        if [[ "$OLLAMA" == "yes" ]]; then
+            # Ollama model darksite — OPT-IN. No model weights ship by default.
+            #
+            # THE SHAPE OF THE DECISION (operator, 2026-08-15):
+            #   default build   → Ollama + Open WebUI installed, set up and running,
+            #                     with an EMPTY model list. The operator pulls the
+            #                     model they want: `ollama pull <name>`, or straight
+            #                     from the model picker in the Open WebUI window.
+            #   =1 at build time → the model is downloaded during the ISO build,
+            #                     baked into the image, and installs offline. This
+            #                     is the air-gapped path and it costs ISO size.
+            #
+            # WHY THIS IS THE RIGHT DEFAULT: the interface needs no model to work.
+            # Open WebUI is a frontend — it starts with zero models and offers a
+            # picker. So "everything set up and ready to go" is fully delivered
+            # without shipping weights, and shipping weights only pre-answers a
+            # question (WHICH model) that the operator is better placed to answer.
+            # Most people are not air-gapped and would rather have the smaller ISO
+            # and their own choice of model.
+            #
+            # WARN: with this at 0 an AIR-GAPPED install gets the interface and no
+            # model, and no way to fetch one. Air-gapped builds must set
+            # KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1. That is the whole point of the flag.
+            #
+            # kldload-autodeploy sets Ollama and Open WebUI up BEFORE it looks at
+            # models or VRAM, precisely so this default cannot produce a machine
+            # with no interface.
+            #
+            # BYOM (Bring Your Own Models) after install — drop the Ollama model
+            # tree into /root/darksite/ollama/models/ on the installed target
+            # (rsync from a box that already pulled it, or copy from a
+            # pre-populated USB). On next boot kldload-firstboot detects the
+            # directory and rsyncs it into /srv/ollama/models/ before starting
+            # Ollama — same offline behaviour, no rebuild.
+            if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]]; then
+                local ollama_darksite="$ROOT/live-build/darksite-ollama-cache"
+                # Verify the REQUESTED models are present, not merely that the
+                # cache holds something. The old test (`library/*/*`) passed on any
+                # model at all, so after the default changed the build happily
+                # shipped the previous model while the runtime asked for the new
+                # one — the same presence-vs-correctness trap that shipped a broken
+                # Debian mirror on 2026-08-14.
+                _ol_want="${OLLAMA_MODELS:-llama3.2:3b nomic-embed-text}"
+                _ol_missing=0
+                for _m in $_ol_want; do
+                    _mn="${_m%%:*}"
+                    _mt="${_m##*:}"
+                    [[ "$_mt" == "$_mn" ]] && _mt=latest
+                    [[ -f "$ollama_darksite/models/manifests/registry.ollama.ai/library/${_mn}/${_mt}" ]] ||
+                        _ol_missing=1
+                done
+                if ((_ol_missing == 1)); then
+                    log "Ollama darksite missing one of: ${_ol_want} — rebuilding"
+                    cmd_build_ollama_darksite
+                else
+                    log "Ollama darksite cached: $(du -sh "$ollama_darksite" | cut -f1)"
+                fi
             else
-                log "Ollama darksite cached: $(du -sh "$ollama_darksite" | cut -f1)"
+                # The ENGINE and INTERFACE ship even when the weights do not, so an
+                # offline install lands a working Ollama + Open WebUI with an empty
+                # model picker rather than no AI at all. Only the model tree is
+                # opt-in — it is the multi-GB part and the only part that is an
+                # opinion about which model someone wants.
+                #
+                # Building the cache here also pulls the weights; they simply are
+                # not copied into the ISO. The cache lives on the build host, the
+                # size that matters is the ISO's.
+                local ollama_darksite="$ROOT/live-build/darksite-ollama-cache"
+                if [[ ! -f "$ollama_darksite/runtime/ollama-linux-amd64.tar.zst" ]] ||
+                    [[ ! -s "$ollama_darksite/webui/open-webui.oci.tar" ]]; then
+                    log "Ollama engine/interface not cached — building them (weights cached but NOT baked into the ISO)"
+                    cmd_build_ollama_darksite
+                else
+                    log "Ollama engine + interface cached: runtime $(du -sh "$ollama_darksite/runtime" 2>/dev/null | cut -f1), webui $(du -sh "$ollama_darksite/webui" 2>/dev/null | cut -f1)"
+                fi
+                log "Ollama model weights NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1) — picker starts empty"
             fi
         else
-            # The ENGINE and INTERFACE ship even when the weights do not, so an
-            # offline install lands a working Ollama + Open WebUI with an empty
-            # model picker rather than no AI at all. Only the model tree is
-            # opt-in — it is the multi-GB part and the only part that is an
-            # opinion about which model someone wants.
-            #
-            # Building the cache here also pulls the weights; they simply are
-            # not copied into the ISO. The cache lives on the build host, the
-            # size that matters is the ISO's.
-            local ollama_darksite="$ROOT/live-build/darksite-ollama-cache"
-            if [[ ! -f "$ollama_darksite/runtime/ollama-linux-amd64.tar.zst" ]] ||
-                [[ ! -s "$ollama_darksite/webui/open-webui.oci.tar" ]]; then
-                log "Ollama engine/interface not cached — building them (weights cached but NOT baked into the ISO)"
-                cmd_build_ollama_darksite
-            else
-                log "Ollama engine + interface cached: runtime $(du -sh "$ollama_darksite/runtime" 2>/dev/null | cut -f1), webui $(du -sh "$ollama_darksite/webui" 2>/dev/null | cut -f1)"
-            fi
-            log "Ollama model weights NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1) — picker starts empty"
+            log "Ollama not carried (OLLAMA=no) — the AI stack installs from the network or not at all"
         fi
 
         # Arch has no darksite — rolling release, not worth caching.
         log "Note: Arch installs require internet (rolling release, no darksite)"
     else
-        log "Core edition — skipping darksites."
+        log "No payload carried (EDITION=$EDITION PAYLOAD=$PAYLOAD) — installs fetch from the distributions' own mirrors."
     fi
 
     # ── Stage 2: Kubernetes container images (offline K8s deployment) ─────
@@ -652,7 +709,7 @@ cmd_build() {
     # so kube-cluster bootstrap works without internet.
     local k8s_images_dir="$ROOT/live-build/config/includes.chroot/root/darksite/k8s-images"
     local k8s_images_list="$ROOT/build/darksite/k8s-images.txt"
-    if [[ -f "$k8s_images_list" ]] && [[ "$EDITION" != "core" ]]; then
+    if [[ -f "$k8s_images_list" ]] && [[ "$EDITION" != "core" && "$PAYLOAD" != "net" && "$K8S_IMAGES" == "yes" ]]; then
         # Always run the puller. It skips images it already has, one at a
         # time, so this is cheap on a warm cache and — unlike the old
         # "directory is non-empty, therefore done" test — it actually notices
@@ -808,6 +865,10 @@ cmd_build() {
         -v "$ROOT:/build:z" \
         -e PROFILE="$PROFILE" \
         -e EDITION="$EDITION" \
+        -e PAYLOAD="$PAYLOAD" \
+        -e DARKSITES="$DARKSITES" \
+        -e K8S_IMAGES="$K8S_IMAGES" \
+        -e OLLAMA="$OLLAMA" \
         -e ARCH="$ARCH" \
         -e RELEASE="$RELEASE" \
         -e ISO_NAME_OVERRIDE="${ISO_NAME_OVERRIDE:-}" \
@@ -876,6 +937,106 @@ cmd_clean() {
 # Write the latest ISO to a USB drive.
 # If USB_DEVICE is not set, auto-detects removable drives.
 # Refuses to auto-detect if multiple removable drives are found.
+# ─── menu — pick what the ISO carries, write kldload.env, offer to build ─────
+# The knobs above are the interface; this is the same interface with the
+# sizes written next to the choices, for the person who knows they want "a
+# Fedora desktop with ZFS and NVIDIA" and does not want to learn six variable
+# names first. Sizes are from the 2026-09-06 desktop ISO: ~3 GB of live
+# system, tools and consoles, and the payload pieces on top. Writes
+# kldload.env (backing up the old one) so the choice sticks for every later
+# ./deploy.sh build, and prints the equivalent one-line command.
+cmd_menu() {
+    local ui=""
+    command -v whiptail >/dev/null 2>&1 && ui=whiptail
+    [[ -z "$ui" ]] && command -v dialog >/dev/null 2>&1 && ui=dialog
+    [[ -t 0 && -n "$ui" ]] || die "menu needs a terminal and whiptail or dialog (dnf install newt · apt install whiptail)"
+    local profile payload picks size=3
+    profile=$("$ui" --title "kldload — what to build" --radiolist \
+        "Install profile (what the installer offers on the target)" 16 74 5 \
+        desktop "GNOME desktop, every console, KVM, the appliance catalog" ON \
+        server "headless: ZFS, KVM, mesh, consoles over the web UI" OFF \
+        kvm "hypervisor: KVM + Kubernetes lab" OFF \
+        ai "desktop plus the local AI stack on first boot" OFF \
+        core "ZFS on root and the boot menu, nothing else (EDITION=core)" OFF \
+        3>&1 1>&2 2>&3) || return 1
+    payload=$("$ui" --title "kldload — what the ISO carries" --radiolist \
+        "Full installs with no network at all. Net is the same tools and installer,\npackages fetched from the distributions' mirrors at install time." 14 74 3 \
+        full "everything baked in — about 15 GB" ON \
+        net "tools only — about 3 GB, needs a network to install" OFF \
+        custom "pick the pieces" OFF \
+        3>&1 1>&2 2>&3) || return 1
+    local darksites="debian fedora el" k8s=yes ollama=yes weights=0
+    case "$payload" in
+    net)
+        darksites=""
+        k8s=no
+        ollama=no
+        ;;
+    custom)
+        picks=$("$ui" --title "kldload — payload" --checklist \
+            "Space toggles. NVIDIA is always built and signed; the installer offers it per machine." 18 78 6 \
+            debian "Debian 13 offline mirror (~2.8 GB)" ON \
+            fedora "Fedora 44 offline mirror (~3.6 GB)" ON \
+            el "EL10 mirror for CentOS Stream / Rocky (~1.9 GB)" ON \
+            k8s "Kubernetes container images (~1.5 GB)" ON \
+            ollama "Ollama engine + Open WebUI (~3.4 GB)" ON \
+            weights "Ollama model weights, air-gapped AI (~9 GB)" OFF \
+            3>&1 1>&2 2>&3) || return 1
+        picks=${picks//\"/}
+        darksites=""
+        k8s=no
+        ollama=no
+        for _p in $picks; do
+            case "$_p" in
+            debian | fedora | el) darksites="${darksites:+$darksites }$_p" ;;
+            k8s) k8s=yes ;;
+            ollama) ollama=yes ;;
+            weights) weights=1 ;;
+            esac
+        done
+        ;;
+    esac
+    local edition=free
+    [[ "$profile" == "core" ]] && edition=core
+    # the estimate: base plus what is ticked (a core image drops the tools too)
+    [[ "$edition" == "core" ]] && size=1.5
+    for _p in $darksites; do
+        case "$_p" in
+        debian) size=$(awk "BEGIN{print $size+2.8}") ;;
+        fedora) size=$(awk "BEGIN{print $size+3.6}") ;;
+        el) size=$(awk "BEGIN{print $size+1.9}") ;;
+        esac
+    done
+    [[ "$k8s" == "yes" ]] && size=$(awk "BEGIN{print $size+1.5}")
+    [[ "$ollama" == "yes" ]] && size=$(awk "BEGIN{print $size+3.4}")
+    [[ "$weights" == "1" ]] && size=$(awk "BEGIN{print $size+9}")
+    local pay=full
+    [[ -z "$darksites" && "$k8s" == "no" && "$ollama" == "no" ]] && pay=net
+    local envf="$ROOT/kldload.env"
+    [[ -f "$envf" ]] && cp -f "$envf" "$envf.bak"
+    {
+        echo "# written by ./deploy.sh menu on $(date -Is) — edit freely, or run the menu again"
+        echo "PROFILE=$profile"
+        echo "EDITION=$edition"
+        echo "PAYLOAD=$pay"
+        echo "DARKSITES=\"$darksites\""
+        echo "K8S_IMAGES=$k8s"
+        echo "OLLAMA=$ollama"
+        [[ "$weights" == "1" ]] && echo "KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1"
+    } >"$envf"
+    local cmd="PROFILE=$profile EDITION=$edition PAYLOAD=$pay DARKSITES=\"$darksites\" K8S_IMAGES=$k8s OLLAMA=$ollama"
+    [[ "$weights" == "1" ]] && cmd="$cmd KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1"
+    cmd="$cmd ./deploy.sh build"
+    "$ui" --title "kldload — ready" --msgbox \
+        "Written to kldload.env, so a plain ./deploy.sh build now means this.\n\nEstimated ISO: about ${size} GB\n\nThe same as one line:\n$cmd" 16 78
+    if "$ui" --title "kldload" --yesno "Build it now? (30–60 min with cached mirrors; the first darksite build is longer)" 9 70; then
+        PROFILE=$profile EDITION=$edition PAYLOAD=$pay DARKSITES=$darksites K8S_IMAGES=$k8s OLLAMA=$ollama \
+            KLDLOAD_INCLUDE_OLLAMA_DARKSITE=$weights cmd_build
+    else
+        log "Not building. Later: ./deploy.sh build   (reads kldload.env)"
+    fi
+}
+
 cmd_burn() {
     local iso requested="" assume_yes="${BURN_ASSUME_YES:-no}"
     # --yes travels as an ARGUMENT, not an environment variable, because
@@ -1248,6 +1409,7 @@ cmd_deploy_all() {
 
 case "${1:-help}" in
 build) cmd_build ;;
+menu) cmd_menu ;;
 build-ai-appliance) cmd_build_ai_appliance ;;
 build-debian-darksite) cmd_build_debian_darksite ;;
 build-ubuntu-darksite) cmd_build_ubuntu_darksite ;;
@@ -1351,7 +1513,17 @@ Test:
 
 Environment (override via env vars or kldload.env):
   PROFILE         Install profile: desktop, server, kvm, ai, core (default: desktop)
-  EDITION         Edition: free (full) or core (ZFS-only) (default: free)
+  EDITION         Edition: free (full) or core (ZFS-only) (default: free);
+                  net = shorthand for EDITION=free PAYLOAD=net
+  PAYLOAD         full = offline mirrors, k8s images and Ollama baked in
+                  (~15 GB, installs with no network); net = the same tools and
+                  installer with no payload (~3 GB, installs from the distro's
+                  own mirrors). The ISO name carries -net. (default: full)
+  DARKSITES       which offline mirrors to carry, any of: debian fedora el
+                  (default: all three; one alone names the ISO, e.g. -fedora)
+  K8S_IMAGES      yes/no — bake the Kubernetes container images (~1.5 GB)
+  OLLAMA          yes/no — bake the Ollama engine + Open WebUI (~3.4 GB)
+                  ./deploy.sh menu picks all of these from a checklist.
   ARCH            Target architecture (default: x86_64)
   RELEASE         EL release version for CentOS/Rocky/RHEL targets (default: 10)
   KLDLOAD_ZFS_GIT Build OpenZFS from git instead of the release repo

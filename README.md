@@ -137,6 +137,19 @@ PROFILE=desktop ./deploy.sh build
 sudo ./deploy.sh burn /dev/sdX      # names the device, shows it, asks before writing
 ```
 
+The full image carries the offline mirrors, the Kubernetes images and the
+AI stack, about 15 GB. Two smaller ways to build it:
+
+```bash
+EDITION=net ./deploy.sh build            # tools only, ~3 GB — installs from the distros' mirrors
+DARKSITES=fedora OLLAMA=no ./deploy.sh build   # one mirror, no AI stack — a Fedora-only offline desktop
+./deploy.sh menu                         # a checklist that writes kldload.env and shows the size
+```
+
+`PAYLOAD`, `DARKSITES` (debian, fedora, el), `K8S_IMAGES` and `OLLAMA` are
+the knobs; `./deploy.sh help` lists them with sizes. The ISO name says what
+it carries: `-net`, or `-fedora` for a single mirror.
+
 Boot the USB &rarr; the web UI opens over TLS at `https://<host>:8443` &rarr; pick distro + profile + disk &rarr; install.
 
 Building saturates every core by default. To keep the machine usable while it
