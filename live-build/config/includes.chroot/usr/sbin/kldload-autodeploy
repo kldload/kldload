@@ -421,6 +421,10 @@ if [[ "${WANT[klab]}" == "1" ]] &&
         [[ "${KLDLOAD_BUILD_ZTEST_GOLDENS:-0}" == "1" ]]; }; then
     _plan+=(klab-ztest-goldens)
 fi
+# The appliance catalog, and its Firecracker goldens, are part of "Build all
+# images" too — planned only where vmx exists to build them.
+[[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && command -v vmx >/dev/null 2>&1 &&
+    _plan+=(appliance-goldens)
 _plan+=(ready)
 phase_plan "${_plan[@]}"
 
@@ -1492,6 +1496,33 @@ _reclaim_ai_darksite() {
     return 0
 }
 _reclaim_ai_darksite
+
+# ── Phase 4: appliance goldens — the catalog built once, kept as Firecracker
+#    goldens ─────────────────────────────────────────────────────────────────
+# "Build all images" used to mean the klab and k8s lineages only. The
+# thirteen appliance tiles were a button in vmxplore, and the Firecracker
+# golden of each was a right-click after that: fiend 2026-09-05, Build Images
+# ticked at install, thirteen app VMs built by hand at 13:14, `kfire goldens`
+# empty, /var/lib/kfire absent. vmx --build-all builds the catalog one tile
+# at a time with the host's spare cores (~4 min each), powers each one off
+# and snapshots it as a golden itself; tiles that already exist are skipped,
+# so a second boot resumes rather than rebuilds. Last, because it is the one
+# phase nothing else waits on, and non-fatal for the same reason the desktop
+# goldens are.
+if [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && command -v vmx >/dev/null 2>&1; then
+    phase "appliance-goldens"
+    if [[ -f "${STATE_DIR}/appliances-ready" ]]; then
+        log "[apps] appliance goldens already marked ready — skipping"
+    else
+        log "[apps] building the appliance catalog: vmx --build-all (~4 min per tile, one at a time); each finished tile is shut off and kept as a Firecracker golden"
+        if vmx --build-all >>"$LOG_FILE" 2>&1; then
+            touch "${STATE_DIR}/appliances-ready"
+            log "[apps] appliance goldens ready — list: kfire goldens · clone: kfire clone <golden>"
+        else
+            log "[apps] WARNING: appliance build incomplete — see $LOG_FILE; rerun with: vmx --build-all (built tiles are skipped)"
+        fi
+    fi
+fi
 
 if [[ $_all_ok -eq 1 ]]; then
     mark "all"
