@@ -141,8 +141,22 @@ fi
 #
 # Only runs when nvidia was actually healed THIS pass and no module exists
 # yet, so a normal steam retry never pays for a dracut run.
-if rpm -q akmod-nvidia >/dev/null 2>&1 &&
-    ! compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko*" >/dev/null 2>&1; then
+#
+# Three module layouts, same as kldload-firstboot's _fb_nvidia_ko_present:
+# akmods on F44 writes extra/nvidia/nvidia.ko.xz (a SUBDIR), kmod RPMs write
+# extra/nvidia.ko*, DKMS writes updates/dkms/. This probe knew only the flat
+# one, so on fiend 2026-09-05 — driver 610.57.04 loaded, nvidia-smi fine — every
+# heal pass logged "nvidia.ko is not built", spent 30s rebuilding akmods,
+# regenerated every initramfs and told the operator to reboot. Twice.
+_nvidia_ko_present() {
+    local kver
+    kver="$(uname -r)"
+    compgen -G "/lib/modules/${kver}/extra/nvidia.ko"* >/dev/null 2>&1 && return 0
+    compgen -G "/lib/modules/${kver}/extra/nvidia/nvidia.ko"* >/dev/null 2>&1 && return 0
+    compgen -G "/lib/modules/${kver}/updates/dkms/nvidia.ko"* >/dev/null 2>&1 && return 0
+    return 1
+}
+if rpm -q akmod-nvidia >/dev/null 2>&1 && ! _nvidia_ko_present; then
     _log "akmod-nvidia present but nvidia.ko is not built — building"
     if command -v akmods >/dev/null 2>&1 &&
         akmods --force --kernels "$(uname -r)" >>"$LOG" 2>&1; then
