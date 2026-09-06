@@ -164,6 +164,10 @@ k_zfs_cleanup_old() {
     zpool export rpool 2>/dev/null || true
     zpool destroy -f rpool 2>/dev/null || true
 
+    # Pools on OTHER disks are deliberately left alone above — but one that
+    # carries OUR name makes the install unbootable, so that one is refused.
+    k_zfs_refuse_duplicate_pool rpool
+
     # ── Clear the TARGET boot disk — this MUST succeed ───────────────────────
     # Everything above is best-effort teardown of OTHER pools/VGs/mdraid (|| true
     # so a clean box breezes through). Clearing the disk we're about to install
@@ -204,6 +208,52 @@ k_zfs_cleanup_old() {
     done
 
     sleep 2
+}
+
+# k_zfs_refuse_duplicate_pool NAME — die when a pool called NAME is still
+# importable from disks other than the target, after the target's own pools
+# were destroyed above.
+#
+# HISTORY fiend 2026-09-05: eight second-hand disks arrived carrying two old
+# installs' rpools (sda2, sdc2) plus fireball/tiger/rpool-OLD. The install
+# onto nvme0n1 succeeded, ZFSBootMenu came up, and the initramfs imported
+# "rpool" by name — one of the OLD ones, with an older kernel and no matching
+# zfs.ko — and died. `zpool import` on the live USB showed three pools named
+# rpool. Nothing in the installer looked, because the other disks are not
+# ours to destroy. They still are not: this refuses, names the disks, and
+# prints the exact commands, so the operator wipes on purpose instead of
+# booting into the wrong pool by accident.
+#
+# Args:    $1 the pool name about to be created.
+# Returns: 0 when no other importable pool has that name; otherwise k_die,
+#          unless KLDLOAD_ALLOW_DUPLICATE_POOL_NAME=1 turns it into a loud
+#          warning (a lab that imports by GUID on purpose).
+k_zfs_refuse_duplicate_pool() {
+    local _name="${1:?pool name}" _scan _dups
+    command -v zpool >/dev/null 2>&1 || return 0
+    # A scan with nothing to import exits 1 with "no pools available" — the
+    # normal case on a blank target, and exactly what this guard hopes to see.
+    _scan=$(zpool import 2>/dev/null || true)
+    # `zpool import` prints one block per pool: "pool: NAME", "id: N", then the
+    # config with device names. Collect the ids and the devices of every block
+    # whose name is ours.
+    _dups=$(printf '%s\n' "$_scan" | awk -v want="$_name" '
+        /^ *pool: / { p = ($2 == want); id = ""; next }
+        p && /^ *id: / { id = $2; next }
+        p && id != "" && $1 != want && $1 !~ /^(config|state|status|action|see|errors):?$/ && NF >= 2 { print id " " $1 }
+    ')
+    [[ -n "$_dups" ]] || return 0
+    k_zfs_log "FATAL: another pool named ${_name} is importable from disks that are not ${KLDLOAD_DISK}:"
+    printf '%s\n' "$_dups" | while read -r _id _dev; do
+        k_zfs_log "  pool id ${_id} on ${_dev}"
+    done
+    k_zfs_log "  The initramfs imports ${_name} BY NAME; with two of them the boot picks one at random."
+    k_zfs_log "  Wipe the old pool on purpose, then rerun:  zpool labelclear -f /dev/<part>  (and wipefs -a, sgdisk --zap-all on the disk)"
+    if [[ "${KLDLOAD_ALLOW_DUPLICATE_POOL_NAME:-0}" == "1" ]]; then
+        k_zfs_log "  KLDLOAD_ALLOW_DUPLICATE_POOL_NAME=1 — continuing anyway; the boot will need import-by-GUID"
+        return 0
+    fi
+    k_die "Refusing to install: a second pool named ${_name} exists on another disk (see ${KLDLOAD_ZFS_LOG}); wipe it first, or set KLDLOAD_ALLOW_DUPLICATE_POOL_NAME=1"
 }
 
 k_zfs_partition_disk() {
