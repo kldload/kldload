@@ -36,13 +36,17 @@ max="$prev"
 #   timestamp    message
 #   1779849663   spa_history.c:297:spa_history_log_sync(): txg 17368 ...
 # First line is the header. Data rows start with a 10-digit unix ts.
-while IFS= read -r line; do
-    ts="${line%% *}"
-    [[ "$ts" =~ ^[0-9]+$ ]] || continue
-    if ((ts > prev)); then
-        printf "%s\n" "$line" >>"$OUT"
-        ((ts > max)) && max="$ts"
-    fi
-done <"$SRC"
-
+# awk, not a bash `while read`: the kstat is ~7 MB / 50k lines, and the bash
+# loop cost 89 s of CPU per run on a 10-second timer — the unit never left
+# "activating" and ate a core around the clock (onyx, 2026-09-05). awk does
+# the same pass in well under a second. Exactly ten digits for the
+# timestamp: a continuation line whose first token was another integer
+# ("20600870358960 rpool/vms/mesh-3") once became the watermark and every
+# real timestamp was "older" from then on — 22 hours of silence.
+max=$(awk -v prev="$prev" -v out="$OUT" '
+    $1 ~ /^[0-9]{10}$/ && ($1 + 0) > (prev + 0) {
+        print >> out
+        if (($1 + 0) > (max + 0)) max = $1 + 0
+    }
+    END { print (max ? max : prev) }' "$SRC")
 echo "$max" >"$LAST"
