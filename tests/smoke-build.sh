@@ -565,6 +565,114 @@ else
     fi
 fi
 
+# ── systemd enablement symlinks ────────────────────────────────────────────
+#
+# A unit is enabled by a symlink in <target>.wants pointing at the unit file.
+# If that symlink points at a name which does not exist, systemd starts
+# nothing and says nothing: the unit file ships, `ls` shows the symlink, and
+# the service simply never runs. Same class as §2c -- installed is not enabled.
+#
+# Found 2026-09-07: both live-ISO enablement symlinks still pointed at debz-*
+# names from the project's earlier identity, so kldload-autoinstall.service had
+# never once started. The entire unattended-install path was dead on arrival,
+# which is why deploy.sh seed-disk was documented and never written.
+_section "systemd enablement symlinks"
+
+_wants_bad=0
+_wants_n=0
+while read -r _l; do
+    [[ -n "$_l" ]] || continue
+    _wants_n=$((_wants_n + 1))
+    _tgt="$(readlink "$_l")"
+    if ! git -C "$ROOT" ls-files | grep -qF "/$(basename "$_tgt")"; then
+        _fail "enablement symlink ${_l#"$ROOT"/}" "points at $_tgt, which is not in the tree — the unit will never start"
+        _wants_bad=$((_wants_bad + 1))
+    fi
+done < <(find "$ROOT/live-build/config/includes.chroot" -path '*.target.wants/*' -type l 2>/dev/null)
+
+if [[ $_wants_bad -eq 0 ]]; then
+    _pass "all ${_wants_n} enablement symlinks resolve to units in the tree"
+fi
+
+# ── GNOME shell extensions ─────────────────────────────────────────────────
+#
+# The keymap is written in two halves that must agree. 00-kldload-desktop
+# ENABLES an extension by UUID and binds keys under its settings path; the
+# extension's own files and compiled schema supply the other half. Nothing
+# connects the two at build time, so a UUID typo, a renamed key or a whole
+# missing extension all present identically at runtime: the key does nothing,
+# no error anywhere.
+#
+# That is not hypothetical. Until 2026-09-07 the installer never copied
+# /usr/share/gnome-shell/extensions to the target at all, so every installed
+# desktop ran with the extension enabled and absent, and Super+Arrow had been
+# a dead key since it shipped. Found on fiend by hand. These gates make the
+# next instance loud instead.
+_section "GNOME shell extensions"
+
+_gse_dconf="$ROOT/live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop"
+_gse_dir="$ROOT/live-build/config/includes.chroot/usr/share/gnome-shell/extensions"
+if [[ ! -f "$_gse_dconf" ]]; then
+    _pass "gnome extensions: no desktop keymap shipped, nothing to check"
+else
+    # Every UUID the keymap enables must exist as a real extension.
+    _gse_uuids=$(sed -n "s/^enabled-extensions=\[\(.*\)\]$/\1/p" "$_gse_dconf" |
+        tr -d "'\"" | tr ',' ' ')
+    _gse_n=0
+    for _u in $_gse_uuids; do
+        _gse_n=$((_gse_n + 1))
+        if [[ -f "$_gse_dir/$_u/extension.js" ]]; then
+            _pass "gnome extension $_u present"
+        else
+            _fail "gnome extension $_u" "enabled-extensions lists it but $_gse_dir/$_u/extension.js is missing — every key bound to it is a dead key"
+        fi
+
+        # Each key bound under the extension's dconf path must exist in its
+        # COMPILED schema. A key the schema does not carry is silently ignored
+        # by the extension's GSettings, which is the same dead key by a
+        # different route.
+        _gse_schema="$_gse_dir/$_u/schemas"
+        if [[ -f "$_gse_schema/gschemas.compiled" ]] && command -v gsettings >/dev/null 2>&1; then
+            _gse_id=$(sed -n 's/.*"settings-schema": *"\([^"]*\)".*/\1/p' "$_gse_dir/$_u/metadata.json")
+            if [[ -n "$_gse_id" ]]; then
+                _gse_have=$(gsettings --schemadir "$_gse_schema" list-keys "$_gse_id" 2>/dev/null | tr '\n' ' ')
+                # Keys bound in the dconf file under this extension's path.
+                _gse_want=$(awk -v path="[org/gnome/shell/extensions/${_u%%@*}]" '
+                    $0 ~ /^\[org\/gnome\/shell\/extensions\// { inblk = ($0 == path) ; next }
+                    /^\[/ { inblk = 0; next }
+                    inblk && /^[a-z0-9-]+=/ { sub(/=.*/, ""); print }' "$_gse_dconf")
+                _gse_bad=0
+                for _k in $_gse_want; do
+                    [[ " $_gse_have " == *" $_k "* ]] ||
+                        {
+                            _fail "gnome extension $_u key $_k" "bound in 00-kldload-desktop but absent from the compiled schema — recompile with glib-compile-schemas $_gse_schema"
+                            _gse_bad=1
+                        }
+                done
+                [[ $_gse_bad -eq 0 && -n "$_gse_want" ]] &&
+                    _pass "gnome extension $_u: every bound key exists in its compiled schema"
+            fi
+        else
+            _warn "gnome extension $_u schema" "no compiled schema or no gsettings — the bound-key gate DID NOT RUN"
+        fi
+    done
+    [[ $_gse_n -gt 0 ]] || _pass "gnome extensions: none enabled by the keymap"
+
+    # The grid geometry runs standalone under gjs, so run it.
+    _gse_test="$ROOT/tests/gnome-grid-layout.test.js"
+    if [[ -f "$_gse_test" ]]; then
+        if command -v gjs >/dev/null 2>&1; then
+            if gjs -m "$_gse_test" >/dev/null 2>&1; then
+                _pass "gnome grid layout: geometry assertions pass"
+            else
+                _fail "gnome grid layout" "run: gjs -m tests/gnome-grid-layout.test.js"
+            fi
+        else
+            _warn "gnome grid layout" "gjs not installed — the tiling geometry is UNGATED (this check DID NOT RUN; dnf install gjs)"
+        fi
+    fi
+fi
+
 # ── environment.d ──────────────────────────────────────────────────────────
 #
 # Same two-leg trip as the systemd drop-ins, and it fails the same silent way:
@@ -1799,6 +1907,41 @@ else
         _pass "silent-failure ratchet: ${_sf_now} unexplained '|| true' (was ${_sf_baseline} — lower the baseline)"
     else
         _pass "silent-failure ratchet: ${_sf_now} unexplained '|| true' (at baseline, not rising)"
+    fi
+fi
+
+# ── Strict-mode ratchet ──────────────────────────────────────────────────────
+# Every script is supposed to open with `set -Eeuo pipefail`. On 2026-09-06
+# 84 of 234 did not, and the same day the installer's whole storage phase
+# turned out to have run with errexit OFF since June (a `&& { } ||` idiom):
+# a failed `zpool destroy`, a failed `zpool create` and every failed dataset
+# step were ignored and the run printed "Installation complete!" over an
+# empty ESP. A script that does not fail on error hides the bug that would
+# have been fixed. The operator's words: "why not fail on errors, so they
+# can be fixed instead of uncovered". This counts the scripts without that
+# line; the count may fall, never rise. Baseline: tests/strict-mode-baseline.txt.
+_section "Strict-mode ratchet"
+
+_sm_baseline_file="$ROOT/tests/strict-mode-baseline.txt"
+if [[ ${#SHELL_SCRIPTS[@]} -eq 0 || ! -f "$_sm_baseline_file" ]]; then
+    _warn "strict-mode ratchet" "no baseline or no scripts — gate did not run"
+else
+    _sm_baseline="$(tr -cd '0-9' <"$_sm_baseline_file")"
+    _sm_now=0
+    _sm_list=()
+    for f in "${SHELL_SCRIPTS[@]}"; do
+        if ! grep -qE '^[[:space:]]*set -E?euo pipefail' "$ROOT/$f"; then
+            _sm_now=$((_sm_now + 1))
+            _sm_list+=("$f")
+        fi
+    done
+    if [[ "$_sm_now" -gt "$_sm_baseline" ]]; then
+        _fail "strict-mode ratchet" \
+            "${_sm_now} scripts without 'set -Eeuo pipefail', baseline ${_sm_baseline} — add it to the new one: $(printf '%s ' "${_sm_list[@]}" | cut -c1-400)"
+    elif [[ "$_sm_now" -lt "$_sm_baseline" ]]; then
+        _pass "strict-mode ratchet: ${_sm_now} scripts without strict mode (was ${_sm_baseline} — lower the baseline)"
+    else
+        _pass "strict-mode ratchet: ${_sm_now} scripts without strict mode (at baseline, not rising)"
     fi
 fi
 
