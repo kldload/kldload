@@ -41,15 +41,25 @@
       },
       "targets": [
         {
-          "expr": "count(libvirt_domain_info_state) or vector(0)",
+          "expr": "(count(libvirt_domain_info_state{job=\"libvirt-vms\"}) or vector(0)) + (sum(kldload_firecracker_instances) or vector(0))",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         }
-      }
+      },
+      "description": "libvirt domains plus Firecracker microVMs. A microVM is not a libvirt domain, so the libvirt count alone misses every clone kfire makes \u2014 kfire-exporter supplies the second term."
     },
     {
       "id": 11,
@@ -63,7 +73,7 @@
       },
       "targets": [
         {
-          "expr": "count(libvirt_domain_info_state == 1) or vector(0)",
+          "expr": "(count(libvirt_domain_info_state{job=\"libvirt-vms\"} == 1) or vector(0)) + (sum(kldload_firecracker_running) or vector(0))",
           "refId": "A"
         }
       ],
@@ -85,7 +95,8 @@
       },
       "options": {
         "colorMode": "background"
-      }
+      },
+      "description": "libvirt domains plus Firecracker microVMs. A microVM is not a libvirt domain, so the libvirt count alone misses every clone kfire makes \u2014 kfire-exporter supplies the second term."
     },
     {
       "id": 12,
@@ -251,7 +262,7 @@
     {
       "id": 20,
       "type": "row",
-      "title": "Every VM (click name → metrics for that VM)",
+      "title": "Every VM (click name \u2192 metrics for that VM)",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -263,8 +274,8 @@
     {
       "id": 30,
       "type": "table",
-      "title": "VM Estate — auto-discovered, click to drill down",
-      "description": "Every libvirt domain on the host — templates AND running VMs. Filter by Type column to focus. Click a VM name → opens that VM's metrics dashboard.",
+      "title": "VM Estate \u2014 auto-discovered, click to drill down",
+      "description": "Every libvirt domain on the host \u2014 templates AND running VMs. Filter by Type column to focus. Click a VM name \u2192 opens that VM's metrics dashboard.",
       "gridPos": {
         "h": 14,
         "w": 24,
@@ -363,7 +374,7 @@
                 "id": "links",
                 "value": [
                   {
-                    "title": "Drill down — $__value.text metrics",
+                    "title": "Drill down \u2014 $__value.text metrics",
                     "url": "/grafana/d/klab-vm-estate/?var-vm=${__value.text}"
                   }
                 ]
@@ -412,7 +423,7 @@
                     "options": {
                       "pattern": ".*-golden.*",
                       "result": {
-                        "text": "📋 Template",
+                        "text": "\ud83d\udccb Template",
                         "color": "orange"
                       }
                     }
@@ -422,7 +433,7 @@
                     "options": {
                       "match": "null+nan",
                       "result": {
-                        "text": "🖧 VM",
+                        "text": "\ud83d\udda7 VM",
                         "color": "blue"
                       }
                     }
@@ -446,7 +457,126 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "### Drill in\n\n- **[Host Full](/grafana/d/rYdddlPWk/node-exporter-full)** — every CPU/RAM/disk/network metric the kernel exposes\n- **[Storage / ZFS Pool Health](/grafana/d/zfs-pool-health)** + scrub + compression\n- **[Per-VM — VM Estate](/grafana/d/klab-vm-estate)** — pick a VM, see its baseline\n- **[ZFS Test Lab — Run Matrix](/grafana/d/klab-test-matrix)** — every test run + pass/fail by distro\n- **[ZFS Test Lab — VM Debug](/grafana/d/klab-test-debug)** — drill into one test VM during a failed run\n- **[Kubernetes — Cilium Hubble](/grafana/d/5HftnJAWz/cilium-v1-12-hubble-metrics)** — L4-L7 network flow\n- **[Kubernetes — Tetragon Security](/grafana/d/tetragon-ebpf)** — eBPF security events"
+        "content": "### Drill in\n\n- **[Host Full](/grafana/d/rYdddlPWk/node-exporter-full)** \u2014 every CPU/RAM/disk/network metric the kernel exposes\n- **[Storage / ZFS Pool Health](/grafana/d/zfs-pool-health)** + scrub + compression\n- **[Per-VM \u2014 VM Estate](/grafana/d/klab-vm-estate)** \u2014 pick a VM, see its baseline\n- **[ZFS Test Lab \u2014 Run Matrix](/grafana/d/klab-test-matrix)** \u2014 every test run + pass/fail by distro\n- **[ZFS Test Lab \u2014 VM Debug](/grafana/d/klab-test-debug)** \u2014 drill into one test VM during a failed run\n- **[Kubernetes \u2014 Cilium Hubble](/grafana/d/5HftnJAWz/cilium-v1-12-hubble-metrics)** \u2014 L4-L7 network flow\n- **[Kubernetes \u2014 Tetragon Security](/grafana/d/tetragon-ebpf)** \u2014 eBPF security events"
+      }
+    },
+    {
+      "id": 101,
+      "type": "table",
+      "title": "Firecracker microVMs \u2014 cloned from a golden, not defined in libvirt",
+      "description": "The other half of the estate. A microVM is a ZFS clone plus a Firecracker process, so it never appears in libvirt and the table above cannot see it. kfire-exporter emits one series per instance; this lists them beside the domains so the whole estate is one page. State is 1 while its unit is active.",
+      "datasource": null,
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "targets": [
+        {
+          "expr": "kldload_firecracker_instance",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "name": "Machine",
+              "golden": "Golden",
+              "ip": "Address",
+              "vcpus": "vCPU",
+              "ram_mb": "RAM (MB)",
+              "Value": "Running"
+            },
+            "indexByName": {
+              "name": 0,
+              "golden": 1,
+              "ip": 2,
+              "vcpus": 3,
+              "ram_mb": 4,
+              "Value": 5
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "Machine"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Running"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "stopped",
+                        "color": "text",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "running",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": true,
+          "reducer": [
+            "count"
+          ],
+          "fields": [
+            "Machine"
+          ]
+        }
       }
     }
   ]
