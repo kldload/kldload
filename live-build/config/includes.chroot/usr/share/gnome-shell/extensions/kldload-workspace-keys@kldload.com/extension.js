@@ -46,6 +46,8 @@ import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
+import {gridCells} from './layout.js';
+
 const WORKSPACES = 4;
 
 export default class KldloadWorkspaceKeys extends Extension {
@@ -66,6 +68,19 @@ export default class KldloadWorkspaceKeys extends Extension {
                 () => this._moveAndFollow(i - 1));
             this._bound.push(key);
         }
+
+        // Super+G. Stock GNOME tiles a window to a HALF and stops there —
+        // toggle-tiled-left/right are the only tiling actions mutter exposes,
+        // and there is no binding, in any version, that arranges more than one
+        // window. Four windows at a quarter each is a thing an operator asks
+        // for constantly and has to do by hand every time.
+        Main.wm.addKeybinding(
+            'tile-grid',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL,
+            () => this._tileGrid());
+        this._bound.push('tile-grid');
     }
 
     disable() {
@@ -98,5 +113,56 @@ export default class KldloadWorkspaceKeys extends Extension {
         } else {
             workspace.activate(time);
         }
+    }
+
+    /* Lay every ordinary window on the active workspace and current monitor
+     * into an even grid — four windows become four exact quarters.
+     *
+     * Args:    none. Operates on the focused monitor's work area, so the top
+     *          bar and any dock are already excluded.
+     * Returns: nothing. A workspace with no eligible windows is a no-op.
+     *
+     * Failure modes a caller should know about: windows that refuse resizing
+     * (a modal dialog, a splash) are left out of the count entirely rather
+     * than assigned a cell they will not occupy — otherwise the grid reserves
+     * a hole for a window that never moves into it.
+     */
+    _tileGrid() {
+        const display = global.display;
+        const workspace = global.workspace_manager.get_active_workspace();
+        const monitor = display.get_current_monitor();
+        const area = workspace.get_work_area_for_monitor(monitor);
+
+        const windows = workspace.list_windows().filter(w =>
+            w.get_monitor() === monitor &&
+            w.get_window_type() === Meta.WindowType.NORMAL &&
+            !w.is_skip_taskbar() &&
+            !w.minimized &&
+            w.allows_resize());
+
+        if (windows.length === 0)
+            return;
+
+        // Stacking order, so the arrangement matches what the operator sees
+        // rather than the order mutter happens to hold the list in.
+        const ordered = display.sort_windows_by_stacking(windows);
+        const cells = gridCells(ordered.length, area);
+
+        ordered.forEach((win, i) => {
+            // Read the two GObject properties rather than call a maximize
+            // getter: mutter 18 (GNOME 50) has is_maximized() and no
+            // get_maximized(), the reverse of older releases, so any getter I
+            // pick breaks half the 45-to-50 range this extension claims.
+            // maximized_horizontally/vertically have been present throughout.
+            // Introspected on fiend against mutter-18, 2026-09-07 — the first
+            // spelling I reached for did not exist.
+            if (win.maximized_horizontally || win.maximized_vertically)
+                win.unmaximize(Meta.MaximizeFlags.BOTH);
+            if (win.is_fullscreen())
+                win.unmake_fullscreen();
+
+            const cell = cells[i];
+            win.move_resize_frame(true, cell.x, cell.y, cell.width, cell.height);
+        });
     }
 }
