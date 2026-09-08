@@ -216,6 +216,17 @@ cmd_golden() {
     done
     local root_zv="$POOL/$vm" data_zv="$POOL/$vm-data"
     zfs list -H -o name -t volume "$root_zv" >/dev/null 2>&1 || die "no zvol $root_zv — is $vm a kldload appliance VM?"
+    # The data disk is wherever libvirt says it is, not necessarily beside the
+    # root: vmxplore puts it on the dataset named in /etc/vmxplore/data-parent
+    # (fiend 2026-09-06: roots on the NVMe rpool, data on the 21.8 TB fireball).
+    # Fall back to the beside-the-root convention for VMs libvirt does not know.
+    local _dd _blk
+    # virsh fails for a VM libvirt has never heard of — a plain zvol golden, or
+    # a host where libvirtd is not running. That is not an error here: it just
+    # means fall back to the beside-the-root convention below.
+    _blk=$(virsh -c qemu:///system domblklist "$vm" --details 2>/dev/null) || _blk=""
+    _dd=$(awk '$1=="block" && $2=="disk" && $4 ~ /^\/dev\/zvol\/.*-data$/ {print $4; exit}' <<<"$_blk")
+    [[ -n $_dd ]] && data_zv=${_dd#/dev/zvol/}
     zfs list -H -o name -t volume "$data_zv" >/dev/null 2>&1 || data_zv=""
     if [[ $force -eq 0 ]] && command -v virsh >/dev/null 2>&1; then
         local st
@@ -638,7 +649,11 @@ cmd_clone() {
         a=$(ms)
         mkdir -p "$dir"
         zfs clone "$root_zv@$snap" "$POOL/$name"
-        [[ -z $data_zv ]] || zfs clone "$data_zv@$snap" "$POOL/$name-data"
+        # A clone lives in its snapshot's pool, so the data clone goes beside
+        # the data golden — which may be another pool than the root's.
+        local data_clone=""
+        [[ -z $data_zv ]] || data_clone="${data_zv%/*}/$name-data"
+        [[ -z $data_zv ]] || zfs clone "$data_zv@$snap" "$data_clone"
         # NoCloud seed: identity only; the golden already has its users and keys
         local sd
         sd=$(mktemp -d)
@@ -659,7 +674,7 @@ cmd_clone() {
             echo '  },'
             echo '  "drives": ['
             echo "    {\"drive_id\": \"rootfs\", \"path_on_host\": \"/dev/zvol/$POOL/$name\", \"is_root_device\": false, \"is_read_only\": false}"
-            [[ -z $data_zv ]] || echo "    ,{\"drive_id\": \"data\", \"path_on_host\": \"/dev/zvol/$POOL/$name-data\", \"is_root_device\": false, \"is_read_only\": false}"
+            [[ -z $data_zv ]] || echo "    ,{\"drive_id\": \"data\", \"path_on_host\": \"/dev/zvol/$data_clone\", \"is_root_device\": false, \"is_read_only\": false}"
             echo "    ,{\"drive_id\": \"seed\", \"path_on_host\": \"$dir/seed.iso\", \"is_root_device\": false, \"is_read_only\": true}"
             echo '  ],'
             echo "  \"machine-config\": {\"vcpu_count\": $cpu, \"mem_size_mib\": $ram},"
@@ -669,13 +684,13 @@ cmd_clone() {
         } >"$dir/config.json"
         jq -n --arg name "$name" --arg golden "$golden" --arg mac "$mac" --arg tap "$tap" --arg bridge "$bridge" \
             --argjson vcpus "$cpu" --argjson ram "$ram" --argjson port "$port" --arg created "$(date -Is)" \
-            --arg root "$POOL/$name" --arg data "${data_zv:+$POOL/$name-data}" \
+            --arg root "$POOL/$name" --arg data "$data_clone" \
             '{name:$name, golden:$golden, mac:$mac, tap:$tap, bridge:$bridge, vcpus:$vcpus, ram_mb:$ram, port:$port,
               root_zvol:$root, data_zvol:$data, created:$created}' >"$dir/instance.json"
         # the zvol device node can lag the clone by a moment
         local _w
         for _w in $(seq 1 40); do
-            [[ -e /dev/zvol/$POOL/$name && (-z $data_zv || -e /dev/zvol/$POOL/$name-data) ]] && break
+            [[ -e /dev/zvol/$POOL/$name && (-z $data_zv || -e /dev/zvol/$data_clone) ]] && break
             sleep 0.05
         done
         fc_start "$name"
@@ -734,7 +749,20 @@ cmd_clone() {
                 up=$((up + 1))
                 db_register "$nme" "$ipa"
                 printf '%-20s %s://%s:%s/  %s  answering at %6d ms\n' "$nme" "$scheme" "$ipa" "$port" "$code" "${done_at[$nme]}" >&2
-                enroll_one "$nme" "$ipa" "$golden" "$enroll"
+                # Enroll in the BACKGROUND. enroll_one is ssh into the guest,
+                # a mesh, a certificate and an inventory row — six to ten
+                # seconds each — and it used to run inline in this poll loop,
+                # so a batch enrolled one machine at a time while the rest sat
+                # answering. Four per lane hid it; fifteen does not (fiend,
+                # 2026-09-06: the wait was almost entirely enrollment).
+                #
+                # Bounded, because each one ssh's into a guest and may install
+                # a package there: KFIRE_ENROLL_JOBS at a time, 8 by default.
+                # Safe in parallel since vmx --enroll takes a FILE lock around
+                # the two host-side steps that cannot overlap (subnet
+                # allocation and the CA's serial index).
+                while [[ $(jobs -rp | wc -l) -ge ${KFIRE_ENROLL_JOBS:-8} ]]; do sleep 0.2; done
+                enroll_one "$nme" "$ipa" "$golden" "$enroll" &
             fi
         done
     done
@@ -742,6 +770,10 @@ cmd_clone() {
         log "WARNING: $((${#made[@]} - up)) of ${#made[@]} not answering on :$port after 180 s — kfire console <name>"
         return 1
     fi
+    # Every backgrounded enrollment finishes before the batch calls itself
+    # done: "cloned and enrolled" is the claim, and returning while half of
+    # them are still joining the mesh would make it false.
+    wait
     log "all ${#made[@]} answering · host: $(free -m | awk '/^Mem/{print $7}') MB available"
 }
 
@@ -776,8 +808,13 @@ cmd_list() {
 # stop_one NAME — Ctrl-Alt-Del over the API, wait for the unit to end, then
 # SIGTERM. A guest that ignores the key for 60 s is a guest that will not
 # shut down cleanly by itself; the fallback is the same thing virsh destroy is.
+# stop_one NAME [GRACE] — Ctrl-Alt-Del through the API, then wait up to GRACE
+# seconds (default 60) for the guest to power off before SIGTERM. destroy
+# passes 15: its disk is about to be deleted, so a clean guest shutdown is a
+# courtesy, not a requirement, and an RDP desktop takes ~14 s to oblige
+# (onyx, 2026-09-06: five seats, 75 s of waiting before the first zvol went).
 stop_one() {
-    local name=$1 unit
+    local name=$1 grace=${2:-60} unit
     unit=$(unit_of "$name")
     systemctl is-active --quiet "$unit" || {
         log "$name is not running"
@@ -787,12 +824,12 @@ stop_one() {
         -d '{"action_type":"SendCtrlAltDel"}' http://localhost/actions >/dev/null 2>&1 ||
         log "  $name: API socket did not take Ctrl-Alt-Del — falling back to SIGTERM"
     local _w
-    for _w in $(seq 1 60); do
+    for _w in $(seq 1 "$grace"); do
         systemctl is-active --quiet "$unit" || break
         sleep 1
     done
     if systemctl is-active --quiet "$unit"; then
-        log "  $name did not shut down in 60 s — terminating"
+        log "  $name did not shut down in $grace s — terminating"
         systemctl stop "$unit"
     fi
     rm -f "$(sock_of "$name")"
@@ -804,10 +841,28 @@ each_named() { # each_named VERB NAME|--all
     local verb=$1 target=${2:-}
     [[ -n $target ]] || usage_die "$verb: which instance? (or --all)"
     if [[ $target == --all ]]; then
-        local j failed=0
+        # All instances at once, not one after another: each stop waits for
+        # its guest to power off, and ten desktops served in series is ten
+        # waits in a row — `kfire destroy --all` of five RDP seats took 75 s
+        # before the first zvol was touched (onyx, 2026-09-06). The per-
+        # instance work is independent: its own unit, tap, zvols and record.
+        # Log lines interleave, each carries its name. Failures are counted
+        # per instance, so one bad teardown never hides the others.
+        local j failed=0 n
+        local -a pids=() names=()
         for j in "$INSTANCES"/*/instance.json; do
             [[ -f $j ]] || continue
-            "${verb}_one" "$(jget "$j" .name)" || failed=$((failed + 1))
+            n=$(jget "$j" .name)
+            "${verb}_one" "$n" &
+            pids+=("$!")
+            names+=("$n")
+        done
+        local i
+        for i in "${!pids[@]}"; do
+            wait "${pids[$i]}" || {
+                failed=$((failed + 1))
+                log "$verb --all: ${names[$i]} failed"
+            }
         done
         [[ $failed -eq 0 ]] || die "$verb --all: $failed instance(s) failed (see above)"
     else
@@ -851,7 +906,7 @@ destroy_one() {
     local name=$1 j
     j=$(inst_json "$name")
     # stopping something already stopped, or never started, is the point of destroy
-    stop_one "$name" >/dev/null 2>&1 || true
+    stop_one "$name" 15 >/dev/null 2>&1 || true
     local tap z left=0
     tap=$(jget "$j" .tap)
     ip link show "$tap" >/dev/null 2>&1 && ip link del "$tap"

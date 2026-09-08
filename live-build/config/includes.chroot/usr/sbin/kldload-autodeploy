@@ -1514,8 +1514,18 @@ if [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && command -v vmx >/dev/null 2>&1; 
     if [[ -f "${STATE_DIR}/appliances-ready" ]]; then
         log "[apps] appliance goldens already marked ready — skipping"
     else
-        log "[apps] building the appliance catalog: vmx --build-all (~4 min per tile, one at a time); each finished tile is shut off and kept as a Firecracker golden"
-        if vmx --build-all >>"$LOG_FILE" 2>&1; then
+        log "[apps] building the appliance catalog: vmx --build-all (~4 min per tile, several at a time where RAM allows); each finished tile is shut off and kept as a Firecracker golden"
+        # In parallel where the RAM allows: vmxplore builds one tile at a time
+        # unless told otherwise (five at once thrashed a 32 GB desktop, its own
+        # HISTORY), and this host has just booted with nothing else running.
+        # A parallel tile is built at catalog size, ~3 GB with overhead; keep
+        # 6 GB for the host and the ARC, clamp to 1..4. fiend (62 GB): four
+        # at a time; a 16 GB box: one, as before.
+        _vmx_jobs=$((($(awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo) - 6144) / 3072))
+        ((_vmx_jobs < 1)) && _vmx_jobs=1
+        ((_vmx_jobs > 4)) && _vmx_jobs=4
+        log "[apps] VMX_BUILD_JOBS=${_vmx_jobs} (from MemAvailable)"
+        if VMX_BUILD_JOBS="$_vmx_jobs" vmx --build-all >>"$LOG_FILE" 2>&1; then
             touch "${STATE_DIR}/appliances-ready"
             log "[apps] appliance goldens ready — list: kfire goldens · clone: kfire clone <golden>"
         else

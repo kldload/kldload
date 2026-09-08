@@ -1292,10 +1292,8 @@ setup_vm_golden() {
     #
     # KLAB_DESKTOP_ZFS=1 puts it back, for a desktop meant to demo zxplore
     # against real pools.
-    local want_zfs=1
-    if [[ "${KLAB_DESKTOP:-0}" == "1" && "${KLAB_DESKTOP_ZFS:-0}" != "1" ]]; then
-        want_zfs=0
-    fi
+    local want_zfs
+    want_zfs=$(golden_wants_zfs)
 
     # RHEL: register subscription before installing packages
     if [[ "$distro" == "rhel" && -n "$RHEL_USERNAME" && -n "$RHEL_PASSWORD" ]]; then
@@ -1606,6 +1604,15 @@ fi
 # and dkms went looking for /usr/src/zfs-package zfs-dkms is not installed.
 # Both dkms errors were then eaten by `|| true`. Ask whether the package is
 # installed; never infer it from a version string.
+#
+# And only when ZFS was wanted. The desktop lineage sets WANT_ZFS=0 on purpose
+# (see above), and this block ran anyway: every desktop golden logged two
+# FATAL lines and validated as "ZFS module: NOT LOADED / Result: FAIL" for a
+# module it was built without, which reads as a broken build and makes the
+# next run rebuild it (fiend, 2026-09-06, centos and rocky desktops).
+if [ "$WANT_ZFS" != "1" ]; then
+  echo "klab: ZFS skipped by design (WANT_ZFS=0 — the desktop lineage boots xfs on a zvol; KLAB_DESKTOP_ZFS=1 puts it back)"
+else
 modprobe zfs || {
   if ! rpm -q zfs-dkms >/dev/null 2>&1; then
     echo "FATAL: zfs-dkms is not installed -- the ZFS repo step did not run or failed" >&2
@@ -1629,6 +1636,7 @@ modprobe zfs || {
     echo "FATAL: ZFS module NOT loaded after dkms -- this golden has no ZFS" >&2
   fi
 }
+fi
 
 # node_exporter for observability
 if ! command -v node_exporter >/dev/null 2>&1; then
@@ -2159,6 +2167,67 @@ BUILDZFS
 
 # ── Section 5: Golden Image Build ────────────────────────────────────────
 
+# golden_wants_zfs — "1" when the golden being built should carry ZFS, "0"
+# for the desktop lineage (KLAB_DESKTOP=1 without KLAB_DESKTOP_ZFS=1): those
+# guests boot xfs on a zvol and never mount a ZFS filesystem. One function
+# because two places must agree — the guest setup that installs it and the
+# host verdict that judges its absence. They did not (2026-09-06): the verdict
+# read a variable local to the setup function and saw nothing.
+golden_wants_zfs() {
+    if [[ "${KLAB_DESKTOP:-0}" == "1" && "${KLAB_DESKTOP_ZFS:-0}" != "1" ]]; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+
+# golden_jobs — how many goldens build at once. KLAB_GOLDEN_JOBS=N is taken as
+# given; "auto" (the default) sizes from MemAvailable: each build is a $RAM MB
+# guest plus its dkms compile and page cache, call it 6 GB, over 6 GB of host
+# headroom, clamped to 1..4. Parallel builds contend for RAM, not disk or
+# network — five at once thrashed a 32 GB desktop (onyx, 2026-09-04) — so the
+# clamp is deliberate. Five desktop goldens in series took 28 min on fiend
+# (2026-09-06); that is the wait this exists to cut.
+golden_jobs() {
+    local want=${KLAB_GOLDEN_JOBS:-auto} n
+    if [[ $want =~ ^[0-9]+$ ]]; then
+        n=$want
+    else
+        local avail
+        avail=$(awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
+        n=$(((avail - 6144) / (${RAM:-4096} + 2048)))
+    fi
+    ((n < 1)) && n=1
+    ((n > 4)) && n=4
+    echo "$n"
+}
+
+# run_goldens LABEL DISTRO... — build_golden_single for each distro, up to
+# golden_jobs at a time, each in its own subshell so a `die` inside one never
+# takes the others down. Every failure is named; the count is returned.
+run_goldens() {
+    local label=$1
+    shift
+    local _max
+    _max=$(golden_jobs)
+    ((_max > 1)) && log "Building ${#} ${label} golden(s), ${_max} at a time (KLAB_GOLDEN_JOBS=${KLAB_GOLDEN_JOBS:-auto})"
+    local -a pids=() names=()
+    local d i failed=0
+    for d in "$@"; do
+        while (($(jobs -rp | wc -l) >= _max)); do sleep 2; done
+        (build_golden_single "$d") &
+        pids+=("$!")
+        names+=("$d")
+    done
+    for i in "${!pids[@]}"; do
+        wait "${pids[$i]}" || {
+            failed=$((failed + 1))
+            warn "Failed to build ${label} golden for ${names[$i]} (continuing)"
+        }
+    done
+    return "$failed"
+}
+
 build_golden_single() {
     local distro="$1"
     validate_distro "$distro"
@@ -2637,14 +2706,34 @@ VALIDATE
     [[ -z "$_v_kernel" ]] && _v_kernel="unknown"
     [[ -z "$_v_mod" ]] && _v_mod="0"
 
+    # The verdict is computed HERE, not inside the report's brace group: that
+    # group feeds `tee`, so it runs in a subshell and a variable set inside it
+    # is gone by the time the seal below could read it. Which is how the report
+    # said "Result: FAIL" while the very next lines snapshotted and registered
+    # the golden anyway (fiend 2026-08-31 and again 2026-09-06).
+    #
+    # A golden that did not WANT ZFS (want_zfs=0, the desktop lineage) is judged
+    # on nothing ZFS-related; one that wanted it and has no module is a FAIL
+    # and is not sealed.
+    local _result="PASS" _zfs_line_mod _zfs_line_bin
+    if [[ "$(golden_wants_zfs)" == "1" ]]; then
+        _zfs_line_bin="${_v_zfs}"
+        _zfs_line_mod="$([[ $_v_mod -ge 1 ]] && echo "LOADED" || echo "NOT LOADED")"
+        [[ "$_v_tests" != "OK" ]] && _result="PARTIAL (no tests)"
+        [[ "$_v_zfs" != "OK" || "$_v_mod" -lt 1 ]] && _result="FAIL (ZFS wanted, module not loaded)"
+    else
+        _zfs_line_bin="not wanted (desktop lineage — xfs on a zvol; KLAB_DESKTOP_ZFS=1 puts it back)"
+        _zfs_line_mod="not wanted"
+    fi
+
     {
         echo ""
         echo "═══════════════════════════════════════════════════════════"
         echo "  Golden Validation Report: ${distro}"
         echo "═══════════════════════════════════════════════════════════"
         echo "  Kernel:         ${_v_kernel}"
-        echo "  ZFS binary:     ${_v_zfs}"
-        echo "  ZFS module:     $([[ $_v_mod -ge 1 ]] && echo "LOADED" || echo "NOT LOADED")"
+        echo "  ZFS binary:     ${_zfs_line_bin}"
+        echo "  ZFS module:     ${_zfs_line_mod}"
         echo "  ZFS version:    ${_v_ver}"
         echo "  DKMS status:    ${_v_dkms}"
         echo "  zfs-tests.sh:   ${_v_tests}"
@@ -2652,16 +2741,13 @@ VALIDATE
         echo "  ksh:            ${_v_ksh}"
         echo "  ZFS source:     ${ZFS_SOURCE}"
         echo "  NVIDIA:         $([[ $NVIDIA_DETECTED -eq 1 ]] && echo "installed" || echo "n/a")"
-        local _result="PASS"
-        [[ "$_v_zfs" != "OK" || "$_v_mod" -lt 1 ]] && _result="FAIL"
-        [[ "$_v_tests" != "OK" ]] && _result="PARTIAL (no tests)"
         echo "  Result:         ${_result}"
         echo "═══════════════════════════════════════════════════════════"
         echo ""
     } | tee -a "$golden_log"
 
-    log "    ZFS binary:     ${_v_zfs}"
-    log "    ZFS module:     $([[ $_v_mod -ge 1 ]] && echo "loaded" || echo "NOT LOADED")"
+    log "    ZFS binary:     ${_zfs_line_bin}"
+    log "    ZFS module:     ${_zfs_line_mod}"
     log "    ZFS version:    ${_v_ver}"
     log "    Kernel:         ${_v_kernel}"
     log "    DKMS:           ${_v_dkms}"
@@ -2676,6 +2762,16 @@ VALIDATE
     done
     virsh detach-disk "$name" "$ci_iso" --config 2>/dev/null || true
     rm -f "$ci_iso"
+
+    # No @golden snapshot and no registration for a FAIL: a sealed golden with
+    # no ZFS is cloned into every blue/green VM and every appliance that asks
+    # for it, and "klab verify" is the first thing that notices. The VM stays
+    # defined and shut off so the operator can `virsh start` it and look.
+    if [[ "$_result" == FAIL* ]]; then
+        ln -sfn "$golden_log" "${golden_log_dir}/${distro}-latest.log"
+        warn "Golden ${name} FAILED validation: ${_result} — NOT sealed, NOT registered. VM left shut off for inspection (virsh start ${name}); log: ${golden_log}"
+        return 1
+    fi
     zfs snapshot "${zpath}@golden"
 
     local elapsed
@@ -2710,9 +2806,7 @@ cmd_golden() {
     # Before this change, a single failed distro #2 left distros 3..N
     # un-attempted because the script exited mid-loop — `|| warn` never
     # got the chance to neutralize it.
-    for distro in "${_distros[@]}"; do
-        (build_golden_single "$distro") || warn "Failed to build golden for ${distro} (continuing)"
-    done
+    run_goldens "" "${_distros[@]}" || true # each failure was already named
 }
 
 cmd_build_all() {
@@ -2795,9 +2889,7 @@ cmd_golden_ztest() {
     # adds 30+ minutes per distro of additional surface for a transient
     # network hiccup, kernel-headers mismatch, or SSH timeout to fire `die`
     # and tear down the rest of the run.
-    for distro in "${_distros[@]}"; do
-        (build_golden_single "$distro") || warn "Failed to build ZTEST golden for ${distro} (continuing)"
-    done
+    run_goldens "ZTEST" "${_distros[@]}" || true # each failure was already named
     log "ZFS test goldens ready. Names: klab-ztest-<distro>"
 }
 
@@ -2856,9 +2948,12 @@ cmd_golden_db() {
         fi
     done
     log "Building DATABASE goldens (target=$*, scale=${KLAB_DB_SCALE:-200}) — clone them for instant writable copies."
-    for distro in "${_distros[@]}"; do
-        (build_golden_single "$distro") || warn "Failed to build DB golden for ${distro} (continuing)"
-    done
+    # The harmless case: run_goldens already logged, per distro, which builds
+    # failed and returns non-zero when ANY did. Swallowing here keeps one bad
+    # distro from aborting the remaining builds, which is the whole point of
+    # asking for several. The verdict the operator acts on is the per-distro
+    # log line, not this exit status.
+    run_goldens "DB" "${_distros[@]}" || true
     log "Database goldens ready. Names: klab-db-<distro> — kvm-clone one per developer."
 }
 
@@ -2881,9 +2976,7 @@ cmd_golden_desktop() {
     done
     log "Building GNOME desktop goldens (target=$*) — separate from blue-green and ztest goldens."
     # Subshell-isolated: see cmd_golden for the why.
-    for distro in "${_distros[@]}"; do
-        (build_golden_single "$distro") || warn "Failed to build DESKTOP golden for ${distro} (continuing)"
-    done
+    run_goldens "DESKTOP" "${_distros[@]}" || true # each failure was already named
     log "Desktop goldens ready. Names: klab-desktop-<distro> — clone them for instant desktops."
 }
 

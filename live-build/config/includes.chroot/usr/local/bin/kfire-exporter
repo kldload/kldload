@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# kfire-exporter — Firecracker microVMs → Prometheus textfile.
+#
+# WHY THIS EXISTS: the estate's VM counters are built on
+# libvirt_domain_info_state, and a Firecracker microVM is not a libvirt
+# domain. Forty-five clones could come up and the Grafana "VMs" tile would
+# not move, which is exactly what an operator saw while demonstrating the
+# fleet (fiend, 2026-09-06: 39 before, 39 after). The dashboards add this
+# gauge to the libvirt count so the number on screen is the number of
+# machines that exist.
+#
+# What it emits:
+#   kldload_firecracker_instances   every instance kfire has a record for
+#   kldload_firecracker_running     those whose unit is active right now
+#   kldload_firecracker_by_golden{golden="app-vdi-deskto"}  per template
+#
+# Inputs:  /var/lib/kfire/instances/*/instance.json, systemd unit state.
+# Outputs: the .prom below, replaced atomically so a scrape never reads a
+#          half-written file.
+# Exit:    always 0 — a metrics exporter that fails a timer is noise, and an
+#          absent file already means "no data" to Prometheus.
+set -uo pipefail
+
+OUT=/var/lib/node_exporter/textfile_collector/kfire.prom
+INSTANCES=/var/lib/kfire/instances
+
+# The directory belongs to node_exporter; if it is not there, nothing scrapes
+# this host and there is nothing useful to do.
+[[ -d "${OUT%/*}" ]] || exit 0
+
+# esc — a Prometheus label value. Backslash and quote are the only two
+# characters that can break a whole scrape, and a stray one would take every
+# metric in this file with it, not just its own line.
+esc() {
+    local v=${1//\\/\\\\}
+    printf '%s' "${v//\"/\\\"}"
+}
+
+total=0
+running=0
+declare -A by_golden=()
+# Per-instance series, so the estate dashboard can list microVMs as ROWS
+# beside the libvirt domains rather than only counting them. One line per
+# machine, carrying the labels a table wants: name, golden, address.
+rows=""
+
+if [[ -d $INSTANCES ]]; then
+    for d in "$INSTANCES"/*/; do
+        [[ -f "${d}instance.json" ]] || continue
+        name=$(basename "$d")
+        total=$((total + 1))
+        # jq is the parser everywhere else in kfire; sed is the fallback so a
+        # host without it still counts, just without the per-golden label.
+        if command -v jq >/dev/null 2>&1; then
+            g=$(jq -r '.golden // "unknown"' "${d}instance.json" 2>/dev/null || echo unknown)
+        else
+            g=$(sed -n 's/.*"golden"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${d}instance.json" | head -1)
+        fi
+        [[ -n ${g:-} ]] || g=unknown
+        by_golden[$g]=$((${by_golden[$g]:-0} + 1))
+        _up=0
+        if systemctl is-active --quiet "kfire-${name}.service" 2>/dev/null; then
+            running=$((running + 1))
+            _up=1
+        fi
+        if command -v jq >/dev/null 2>&1; then
+            ip=$(jq -r '.registered_ip // .ip // ""' "${d}instance.json" 2>/dev/null || echo "")
+            cpu=$(jq -r '.vcpus // 0' "${d}instance.json" 2>/dev/null || echo 0)
+            ram=$(jq -r '.ram_mb // 0' "${d}instance.json" 2>/dev/null || echo 0)
+        else
+            ip="" cpu=0 ram=0
+        fi
+        rows+="kldload_firecracker_instance{name=\"$(esc "$name")\",golden=\"$(esc "$g")\",ip=\"$(esc "${ip:-}")\",vcpus=\"${cpu:-0}\",ram_mb=\"${ram:-0}\"} ${_up}"$'\n'
+    done
+fi
+
+tmp=$(mktemp "${OUT}.XXXXXX") || exit 0
+trap 'rm -f "$tmp"' EXIT
+{
+    echo "# HELP kldload_firecracker_instances Firecracker microVMs kfire has a record for."
+    echo "# TYPE kldload_firecracker_instances gauge"
+    echo "kldload_firecracker_instances ${total}"
+    echo "# HELP kldload_firecracker_running Firecracker microVMs whose unit is active."
+    echo "# TYPE kldload_firecracker_running gauge"
+    echo "kldload_firecracker_running ${running}"
+    echo "# HELP kldload_firecracker_by_golden Firecracker microVMs per golden template."
+    echo "# TYPE kldload_firecracker_by_golden gauge"
+    for g in "${!by_golden[@]}"; do
+        echo "kldload_firecracker_by_golden{golden=\"$(esc "$g")\"} ${by_golden[$g]}"
+    done
+    echo "# HELP kldload_firecracker_instance One line per microVM; 1 when its unit is active."
+    echo "# TYPE kldload_firecracker_instance gauge"
+    printf '%s' "$rows"
+} >"$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" "$OUT"
+trap - EXIT
+exit 0

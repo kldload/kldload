@@ -411,12 +411,30 @@ for n in d.get("nodes",[]):
     # running instances and cleared their addresses within minutes of kfire
     # registering them ("they are all unreconciled and don't show IPs",
     # onyx 2026-09-05). Their role is the tell; skip them.
-    local _known _dbvm _dbrole
+    #
+    # UPDATE 2026-09-06: skipping them outright meant nothing ever retired a
+    # microVM row. kfire deletes the row itself on destroy, but a clone that
+    # enrolls and THEN fails leaves one behind — a failed deploy left 24 dead
+    # hosts in the Ansible inventory on fiend, which is a demo pinging
+    # machines that do not exist. So judge them by their own authority:
+    # libvirt for domains, kfire's instance records for microVMs. Only when
+    # that directory exists — a host without kfire has no opinion about them
+    # and must not purge them.
+    local _known _dbvm _dbrole _fc_known _fc_authority=0
     _known="$(virsh list --all --name 2>/dev/null | tr '\n' '|')"
+    if [[ -d /var/lib/kfire/instances ]]; then
+        _fc_authority=1
+        _fc_known="|$(ls -1 /var/lib/kfire/instances 2>/dev/null | tr '\n' '|')"
+    fi
     while read -r _dbvm _dbrole; do
         [[ -z "$_dbvm" ]] && continue
-        [[ "|${_known}" == *"|${_dbvm}|"* ]] && continue
-        [[ "$_dbrole" == firecracker-* ]] && continue
+        if [[ "$_dbrole" == firecracker-* ]]; then
+            # No kfire on this host: not ours to judge.
+            [[ "$_fc_authority" -eq 1 ]] || continue
+            [[ "${_fc_known}" == *"|${_dbvm}|"* ]] && continue
+        else
+            [[ "|${_known}" == *"|${_dbvm}|"* ]] && continue
+        fi
         # Swallowed: this row was read from the dump moments ago, so the only
         # way the update fails is that something else removed it first --
         # which is the outcome we wanted anyway.
