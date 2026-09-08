@@ -9572,7 +9572,17 @@ function renderAnsibleInventory(msg) {
   const sel = document.getElementById('ansible-target-select');
   if (sel) {
     const cur = sel.value;
-    let html = '<option value="localhost">localhost (this host)</option>';
+    // "all" FIRST, and never filtered out. It was excluded from this list,
+    // so the one target an operator reaches for most — every host in the
+    // estate — could only be reached by typing it into the custom box, and
+    // the picker sat on localhost meanwhile. An operator selected forty-five
+    // hosts in the Inventory table, pressed ping, and got a single success:
+    // localhost answering itself (fiend, 2026-09-06).
+    const allG = groups.find(g => g.name === 'all' && g.count);
+    let html = allG
+      ? '<option value="all">all (' + allG.count + ' hosts)</option>'
+      : '';
+    html += '<option value="localhost">localhost (this host)</option>';
     const named = groups.filter(g => g.name !== 'all' && g.name !== 'ungrouped' && g.count);
     if (named.length) html += '<optgroup label="Groups">' +
       named.map(g => '<option value="' + esc(g.name) + '">' + esc(g.name) + ' (' + g.count + ')</option>').join('') + '</optgroup>';
@@ -9631,6 +9641,10 @@ function ansibleAdhoc(forceModule) {
   const log = document.getElementById('ansible-log');
   if (log) log.textContent = '';
   ansibleSubTab('log');
+  // Say the target BEFORE the output arrives. "1 success" reads as a pass
+  // until you notice it was one host and you meant forty-five.
+  if (log) log.textContent = '$ ansible ' + target + ' -m ' + mod +
+      (args ? " -a '" + args + "'" : '') + ' -u ' + user + '\n';
   send({ action: 'ansible_adhoc', target: target, module: mod, user: user,
          args: args,
          become: document.getElementById('ansible-become')?.checked || false });

@@ -63,11 +63,14 @@ trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 R2_BUCKET="${R2_BUCKET:-kldload-releases}"
 R2_PUBLIC_BASE="${R2_PUBLIC_BASE:-https://dl.kldload.com}"
+# The "latest" key the website links. --latest-key overrides it so a second
+# edition can have its own stable URL (the net installer publishes as
+# kldload-free-net-latest.iso, 2026-09-06) without touching the full image's.
 LATEST_KEY="kldload-free-latest.iso"
 
 usage() {
     cat <<'EOF'
-Usage: r2-publish.sh [--prune] [--prune-dry-run] [--versioned] <path-to-iso>
+Usage: r2-publish.sh [--prune] [--prune-dry-run] [--versioned] [--latest-key KEY] <path-to-iso>
 
 Publishes a release ISO and its .sha256 sidecar to the kldload R2 bucket,
 under both its versioned key and the kldload-free-latest.iso key that the
@@ -86,6 +89,9 @@ Options:
   --versioned       Also publish under kldload-<version>-x86_64.iso, giving the
                     release a permanent URL. Off by default: it doubles the
                     bucket for one release.
+  --latest-key KEY  Publish under KEY instead of kldload-free-latest.iso. Every
+                    key ending in -latest.iso survives --prune, so the full
+                    image and the net installer can each hold a stable URL.
 
 Environment (required):
   R2_ACCOUNT_ID           Cloudflare account id.
@@ -113,6 +119,11 @@ Examples:
 
   # Publish to a staging bucket instead.
   R2_BUCKET=kldload-staging tools/r2-publish.sh out/kldload-1.4.0-x86_64.iso
+
+  # Publish the net installer under its own stable URL, keeping the full
+  # image's kldload-free-latest.iso untouched.
+  tools/r2-publish.sh --versioned --latest-key kldload-free-net-latest.iso \
+      live-build/output/kldload-1.4.2-x86_64-net.iso
 EOF
 }
 
@@ -133,6 +144,14 @@ while (($#)); do
     # keep-list) but had no arm here, so it fell through to the unknown-option
     # catch-all and exited 1. Caught publishing 1.4.2 on 2026-08-28.
     --versioned) versioned=1 ;;
+    --latest-key)
+        [[ $# -ge 2 && -n "${2:-}" ]] || {
+            echo "r2-publish: --latest-key needs a value" >&2
+            exit 1
+        }
+        LATEST_KEY="$2"
+        shift
+        ;;
     --prune-dry-run)
         prune=1
         prune_dry=1
@@ -342,6 +361,10 @@ if ((prune)); then
         for k in "${keep[@]}"; do
             [[ "$key" == "$k" ]] && continue 2
         done
+        # Any edition's stable URL is kept, not only the one being published:
+        # pruning after the net installer must not delete the full image's
+        # kldload-free-latest.iso, and vice versa.
+        [[ "$key" =~ -latest\.iso(\.sha256)?$ ]] && continue
         doomed+=("$key")
     done < <(rclone lsf ":s3:${R2_BUCKET}" "${remote[@]}" 2>/dev/null)
 

@@ -105,6 +105,7 @@ k_profile_packages() {
           adwaita-icon-theme cantarell-fonts noto-fonts-emoji gvfs gvfs-mtp gvfs-smb \
           gnome-keyring \
           webkitgtk6.0 gtk4 python3-gobject \
+          freerdp \
           pulseaudio-utils \
           speech-dispatcher espeak-ng \
           tmux python python-websockets python-yaml htop net-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide podman fastfetch"
@@ -162,6 +163,15 @@ k_profile_packages() {
         # every tile opened with a certificate warning.
         # HISTORY: 2026-08-14, fiend rc3 — "worked, just wasn't trusted".
         local _nsstools="libnss3-tools"
+        # An RDP client, because this image SHIPS an RDP desktop appliance and
+        # shipped nothing to connect to it with: fiend, 2026-09-06, had no
+        # xfreerdp, no remmina and no wlfreerdp, so the estate's four RDP seats
+        # were unreachable from the machine that built them. Package names
+        # differ by family and by release — Debian 13 carries freerdp3-x11,
+        # Ubuntu 24.04 still freerdp2-x11, RPM families just "freerdp" — so it
+        # is a variable like the browser above rather than one name that
+        # silently no-ops on three quarters of the matrix.
+        local _rdp="freerdp3-x11"
         local _viewer="loupe"
         local _terminal="gnome-terminal"
         local _nm="network-manager"
@@ -262,6 +272,9 @@ k_profile_packages() {
         if [[ "$_distro" == "ubuntu" ]]; then
             _browser="epiphany-browser"
             _viewer="eog"
+            # 24.04 LTS has no freerdp3 package; the 2.x client is the one
+            # in main and connects to xrdp identically for this purpose.
+            _rdp="freerdp2-x11"
             # Ubuntu keeps the monolithic linux-firmware package (main).
             _fw="linux-firmware"
             # Ubuntu 24.04 LTS ships GDM 46, not affected by the GDM 48
@@ -300,6 +313,7 @@ k_profile_packages() {
             # dnf transaction here didn't land it.
             _browser="google-chrome-stable"
             _viewer="eog loupe"
+            _rdp="freerdp"
             _terminal="gnome-terminal ptyxis"
             _nm="NetworkManager NetworkManager-wifi NetworkManager-tui"
             # EL keeps monolithic linux-firmware; F43+ split the blobs into
@@ -396,7 +410,7 @@ k_profile_packages() {
         gnome-keyring ${_pam_extras} ${_portal_extras} ${_dbus_extras} \
         gnome-tweaks \
         ${_xsrv} ${_netools_extra} \
-        ${_browser} ${_nsstools} \
+        ${_browser} ${_nsstools} ${_rdp} \
         gir1.2-webkit-6.0 libgtk-4-1 python3-gi \
         gstreamer1.0-libav libavcodec-extra gstreamer1.0-tools \
         mesa-va-drivers va-driver-all intel-media-va-driver \
@@ -1928,6 +1942,50 @@ OSREL
     done
     [[ -f /etc/dconf/profile/user ]] && cp /etc/dconf/profile/user "${target}/etc/dconf/profile/user"
 
+    # ── GNOME shell extensions — the CODE half of the keymap ─────────────────
+    # 00-kldload-desktop, copied just above, both enables
+    # kldload-workspace-keys and binds five keys to it. dconf carries the
+    # SETTINGS and nothing else: the extension's own files live under
+    # /usr/share/gnome-shell/extensions on the live rootfs, are not owned by
+    # any package, and so the chroot dnf that populates the target never sees
+    # them. Same class as the gtk settings.ini carry-over above.
+    #
+    # Until 2026-09-07 that meant every installed desktop listed the extension
+    # in enabled-extensions with nothing on disk behind it. Found on fiend
+    # (1.4.2, installed 2026-09-06) while looking for a way to tile four
+    # windows: /usr/share/gnome-shell/extensions was EMPTY, `gnome-extensions
+    # info` said "doesn't exist", and Super+Arrow had been a dead key on every
+    # installed system since the extension shipped. Enabled-but-absent is the
+    # quietest failure there is — nothing errors, the keys simply do nothing.
+    local _extsrc="/usr/share/gnome-shell/extensions"
+    local _extdst="${target}/usr/share/gnome-shell/extensions"
+    local _extcount=0
+    if compgen -G "${_extsrc}/*@*" >/dev/null 2>&1; then
+        mkdir -p "${_extdst}"
+        cp -a "${_extsrc}"/*@* "${_extdst}/"
+        # Outcome per extension, not the exit code of one cp: name each one and
+        # assert its entry point is on the target. A partial copy here is a
+        # dead keybinding, which is exactly what nobody notices.
+        local _ext _uuid
+        for _ext in "${_extsrc}"/*@*; do
+            _uuid="$(basename "${_ext}")"
+            if [[ -f "${_extdst}/${_uuid}/extension.js" ]]; then
+                _extcount=$((_extcount + 1))
+                k_log "carried GNOME extension ${_uuid} → target"
+            else
+                k_log "WARN: GNOME extension ${_uuid} did NOT land on the target — its keybindings will be dead keys"
+            fi
+        done
+    fi
+    # The invariant, checked rather than assumed: anything the shipped dconf
+    # ENABLES must be present on disk. Warn, don't die — a desktop with an
+    # inert keybinding is worth reporting but is not worth failing an install
+    # that is otherwise sound.
+    if grep -q "^enabled-extensions=\[.*@" "${target}/etc/dconf/db/local.d/00-kldload-desktop" 2>/dev/null &&
+        ((_extcount == 0)); then
+        k_log "WARN: 00-kldload-desktop enables GNOME extensions but none were carried to the target — the workspace and tiling keys will do nothing"
+    fi
+
     # ── /etc files that live in includes.chroot but profiles.sh has to
     #    explicitly carry through to /target (build-iso.sh puts them in the
     #    LIVE rootfs; the install-time chroot dnf doesn't copy /etc/* from
@@ -2022,6 +2080,33 @@ OSREL
         # Filtering here rather than shipping per-distro lists keeps one file to
         # maintain, and it is checked against the target's OWN applications
         # directories so it stays correct however the profile was assembled.
+        # ── Firefox: no first-run interruptions ───────────────────────────
+        #
+        # vmxplore opens Firefox to show a wall of desktops or a rack of web
+        # servers, and a first-run privacy notice, an onboarding tab or a
+        # "make me your default browser" bar lands on top of exactly the thing
+        # the operator meant to look at (fiend, 2026-09-06, mid-demo).
+        #
+        # The enterprise policy file is the supported way to turn those off —
+        # no poking at a user profile, no prefs.js that an update rewrites, and
+        # it applies to every account on the box. Both paths are written
+        # because the package name decides which one Firefox reads:
+        # /etc/firefox on Fedora and on Debian's `firefox`, /etc/firefox-esr on
+        # Debian's ESR build. Writing a policy for a browser that is not
+        # installed costs one small file and nothing else.
+        local _ff_pol="/build/live-build/config/includes.chroot/etc/firefox/policies/policies.json"
+        [[ -f "$_ff_pol" ]] || _ff_pol="/etc/firefox/policies/policies.json"
+        if [[ -f "$_ff_pol" ]]; then
+            local _ff_dir
+            for _ff_dir in firefox firefox-esr; do
+                install -d -m 0755 "${target}/etc/${_ff_dir}/policies"
+                install -m 0644 "$_ff_pol" "${target}/etc/${_ff_dir}/policies/policies.json"
+            done
+            k_log "Firefox policies installed (no first-run page, no onboarding, no default-browser prompt)"
+        else
+            k_log "WARNING: no Firefox policy file found — first-run notices will interrupt a demo"
+        fi
+
         local _fav_file="${target}/etc/dconf/db/local.d/50-kldload-installed-favorites"
         local _fav_line _kept=""
         _fav_line="$(sed -n 's/^favorite-apps=\[\(.*\)\]$/\1/p' "$_fav_file" | head -1)"
