@@ -153,14 +153,46 @@ if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
     _live="$(_live_disk)"
     _seed="$(_whole_disk "${SEED_DEV:-}")"
     log "Excluded from auto-pick: live=${_live:-none} seed=${_seed:-none}"
+    # _pool_on <disk> — echo the name of any ZFS pool with a member on this
+    # disk, imported or not. Empty when the disk carries no pool.
+    _pool_on() {
+        local d="$1" p
+        for p in "$d"?* "$d"p?*; do
+            [[ -b "$p" ]] || continue
+            if [[ "$(blkid -o value -s TYPE "$p" 2>/dev/null)" == zfs_member ]]; then
+                blkid -o value -s LABEL "$p" 2>/dev/null
+                return 0
+            fi
+        done
+    }
+
+    # Two passes, and the order is the whole point. A disk carrying somebody
+    # else's pool must NEVER be auto-picked -- on a storage host /dev/sda is
+    # very often a vdev member, and this loop reaches it before the NVMe the
+    # OS actually lives on. fiend, 2026-09-07: /dev/sda is a fireball member
+    # and /dev/nvme0n1 is rpool, so an empty KLDLOAD_DISK would have wiped a
+    # mirror leg and installed Fedora onto an 8 TB spinner.
+    #
+    # A disk carrying rpool IS a legitimate target -- that is a reinstall of
+    # this machine -- so it is the second choice rather than excluded.
     DETECTED=""
+    _fallback=""
     for dev in /dev/sda /dev/vda /dev/xvda /dev/nvme0n1 /dev/mmcblk0; do
         [[ -b "$dev" ]] || continue
         [[ "$dev" == "$_live" ]] && continue
         [[ -n "$_seed" && "$dev" == "$_seed" ]] && continue
-        DETECTED="$dev"
-        break
+        _pool="$(_pool_on "$dev")"
+        if [[ -z "$_pool" ]]; then
+            DETECTED="$dev"
+            break
+        elif [[ "$_pool" == rpool && -z "$_fallback" ]]; then
+            _fallback="$dev"
+            log "  $dev carries rpool — a reinstall target, held as second choice"
+        else
+            log "  SKIPPING $dev — carries pool '${_pool}', which is not ours to wipe"
+        fi
     done
+    [[ -n "$DETECTED" ]] || DETECTED="$_fallback"
     if [[ -n "$DETECTED" ]]; then
         log "Auto-detected install disk: $DETECTED"
         # Append or replace KLDLOAD_DISK
