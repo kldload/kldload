@@ -45,12 +45,61 @@ _live_disk() {
 
 # ── Find seed disk ────────────────────────────────────────────────────────────
 
-log "Scanning for KLDLOAD-SEED disk..."
+# ── Seed from the kernel cmdline (netboot) ───────────────────────────────────
+# kldload.seed=http://deploy.example/answers/aa-bb-cc-dd-ee-ff.env
+#
+# WHY: the seed DISK is a physical opt-in -- somebody walked over and plugged
+# it in, and that consent is what makes an unattended installer safe to enable
+# unconditionally. Over PXE there is no stick to plug, so the equivalent
+# instruction arrives on the kernel cmdline, which only the netboot server that
+# armed this machine can set. That server is the opt-in.
+#
+# It is checked BEFORE the seed disk on purpose: a cmdline is per-boot intent,
+# a forgotten USB stick in the front panel is not.
+#
+# SAFETY: a fetch that fails does NOT fall through to the seed disk or to the
+# baked-in answers. A machine told to install from a specific URL must never
+# quietly install something else instead -- and a 404 is the normal, expected
+# answer for a machine that is simply not armed.
+ANSWERS_TMP=""
+# (^|.*space), not just (space): an iPXE-built cmdline can put kldload.seed
+# first with nothing before it. Caught by the parser test, not by reading it.
+SEED_URL="$(sed -nE 's/(^|.*[[:space:]])kldload\.seed=([^[:space:]]*).*/\2/p' /proc/cmdline 2>/dev/null || true)"
+if [[ -n "$SEED_URL" ]]; then
+    case "$SEED_URL" in
+    http://* | https://*) ;;
+    *)
+        log "REFUSING: kldload.seed must be http(s) — got: ${SEED_URL}"
+        exit 0
+        ;;
+    esac
+    log "Seed URL on cmdline: ${SEED_URL}"
+    _tmp="$(mktemp /tmp/kldload-answers.XXXXXX.env)"
+    # --retry covers a NIC that is up but whose switch port is still learning;
+    # -f makes a 404 an error rather than a file full of HTML.
+    if curl -fsS --retry 4 --retry-delay 2 --max-time 60 -o "$_tmp" "$SEED_URL"; then
+        ANSWERS_TMP="$_tmp"
+        log "Answers fetched from ${SEED_URL}"
+    else
+        rm -f "$_tmp"
+        log "Seed URL did not answer (not armed, or unreachable) — NOT installing"
+        exit 0
+    fi
+fi
+
+[[ -n "$ANSWERS_TMP" ]] || log "Scanning for KLDLOAD-SEED disk..."
 
 SEED_DEV=""
 
 # Try /dev/disk/by-label first (udev symlink)
-for candidate in /dev/disk/by-label/KLDLOAD-SEED /dev/disk/by-label/kldload-seed; do
+# KLDLOADSEED, not KLDLOAD-SEED: a FAT label is 11 characters and the
+# hyphenated form is 12, so mkfs.vfat refuses to create it. This script
+# searched for a label that could not exist on the filesystem a seed disk
+# uses -- found 2026-09-07, the first time anyone tried to make one. The
+# longer spellings stay in the list because they are achievable on ext4
+# and cost nothing to check.
+for candidate in /dev/disk/by-label/KLDLOADSEED /dev/disk/by-label/kldloadseed \
+    /dev/disk/by-label/KLDLOAD-SEED /dev/disk/by-label/kldload-seed; do
     if [[ -b "$candidate" ]]; then
         SEED_DEV="$(readlink -f "$candidate")"
         break
@@ -59,12 +108,11 @@ done
 
 # Fallback: blkid scan
 if [[ -z "$SEED_DEV" ]]; then
-    SEED_DEV="$(blkid -o device -t LABEL=KLDLOAD-SEED 2>/dev/null | head -1 || true)"
+    SEED_DEV="$(blkid -o device -t LABEL=KLDLOADSEED 2>/dev/null | head -1 ||
+        blkid -o device -t LABEL=KLDLOAD-SEED 2>/dev/null | head -1 || true)"
 fi
 
-ANSWERS_TMP=""
-
-if [[ -n "$SEED_DEV" ]]; then
+if [[ -z "$ANSWERS_TMP" && -n "$SEED_DEV" ]]; then
     log "Found seed disk: $SEED_DEV"
 
     # ── Mount and read answers from seed disk ────────────────────────────────
