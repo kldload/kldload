@@ -1929,7 +1929,44 @@ DRACUT
         k_log "MOK enrollment skipped — Secure Boot not requested (modules load unsigned)"
     fi
 
+    # ── Outcome check: the ESP must actually carry a loader ──────────────────
+    # Everything above logs a WARNING and carries on, which is right for the
+    # optional pieces (MOK, boot order) and wrong for the one thing the
+    # firmware needs. fiend 2026-09-06: the run printed "Installation
+    # complete!" over a freshly formatted, completely EMPTY ESP — the firmware
+    # had nothing to list and the report was "nothing in the boot menu to boot
+    # from". Check the files on the mounted ESP, not the variables that named
+    # them.
+    k_bootloader_assert_esp "${target}"
+
     k_log "Bootloader EFI + initramfs + efibootmgr complete (ZFSBootMenu)"
+}
+
+# k_bootloader_assert_esp TARGET — die unless the ESP mounted at
+# TARGET/boot/efi holds the fallback loader and ZFSBootMenu, both non-empty.
+# The NVRAM entry is checked too but only warns: VM firmware and some boards
+# have no writable NVRAM, and the fallback path boots there regardless;
+# kldload-boot-assert repeats the registration on first boot.
+#
+# Returns: 0 with both files present; otherwise k_die.
+k_bootloader_assert_esp() {
+    local _t="${1:?target}" _f _missing=()
+    mountpoint -q "${_t}/boot/efi" ||
+        k_die "ESP is not mounted at ${_t}/boot/efi — the loader files went to the root dataset, not to the partition the firmware reads"
+    for _f in EFI/BOOT/BOOTX64.EFI EFI/zbm/BOOTX64.EFI; do
+        [[ -s "${_t}/boot/efi/${_f}" ]] || _missing+=("${_f}")
+    done
+    if ((${#_missing[@]})); then
+        k_die "Bootloader did not land on the ESP — missing: ${_missing[*]} (files present: $(find "${_t}/boot/efi" -type f 2>/dev/null | head -20 | paste -sd' ')). Refusing to report success; see ${KLDLOAD_LOG_DIR}/bootloader.log"
+    fi
+    k_log "ESP verified: EFI/BOOT/BOOTX64.EFI and EFI/zbm/BOOTX64.EFI present on ${_t}/boot/efi"
+    if command -v efibootmgr >/dev/null 2>&1 && [[ -d /sys/firmware/efi/efivars ]]; then
+        if efibootmgr 2>/dev/null | grep -qiE '^Boot[0-9A-F]{4}\*? kldload'; then
+            k_log "NVRAM verified: a 'kldload' boot entry exists"
+        else
+            k_log "WARNING: no 'kldload' entry in NVRAM — the firmware has to find \\EFI\\BOOT\\BOOTX64.EFI on its own (most boards do); kldload-boot-assert retries the registration on first boot"
+        fi
+    fi
 }
 
 # k_finalize_bootloader — unbind chroot, export pools. Call AFTER image export.

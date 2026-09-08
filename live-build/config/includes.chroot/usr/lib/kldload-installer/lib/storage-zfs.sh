@@ -104,8 +104,13 @@ k_zfs_cleanup_old() {
 
     # 2. Deactivate any LVM volume groups that include a PV on this disk.
     if command -v pvs >/dev/null 2>&1; then
-        pvs --noheadings -o pv_name,vg_name 2>/dev/null |
-            grep -wE "(${_disk_devs})" | awk '{print $2}' | sort -u |
+        local _pvs_here
+        # grep exits 1 when no PV sits on this disk — the normal case. Under
+        # pipefail that 1 was the whole pipeline's status, and with errexit
+        # restored to this phase (2026-09-06) it killed the install at this
+        # line on a disk that had no LVM at all.
+        _pvs_here="$(pvs --noheadings -o pv_name,vg_name 2>/dev/null | grep -wE "(${_disk_devs})" || true)"
+        printf '%s\n' "${_pvs_here}" | awk 'NF==2 {print $2}' | sort -u |
             while read -r _vg; do
                 [[ -n "${_vg}" ]] && {
                     vgchange -a n "${_vg}" 2>/dev/null || true
@@ -140,24 +145,38 @@ k_zfs_cleanup_old() {
     # 5. Destroy any ZFS pool (not just 'rpool') that has a vdev on this disk.
     #    zpool import with no args lists importable pools; running pools show in
     #    `zpool status`. Destroy imported first, then try to import + destroy.
+    #
+    # HISTORY fiend 2026-09-06: the destroy here used to run in the same
+    # instant as the import, while udev was still creating the 199 zvol nodes
+    # of the old install's VMs, and failed with "cannot destroy 'rpool': pool
+    # is busy". Its stderr went to /dev/null and its status to `|| true`, so
+    # the old pool stayed imported, `zpool create` failed on "pool already
+    # exists", and the run carried on to "Installation complete!" over an
+    # empty ESP. Reproduced on the live USB: destroy straight after import
+    # fails, destroy after `udevadm settle` succeeds. The destroy is now
+    # settled, retried and VERIFIED in k_zfs_destroy_pool_verified — a pool
+    # on the target disk that survives this step ends the install here, not
+    # at the firmware boot menu.
     if command -v zpool >/dev/null 2>&1; then
-        zpool status 2>/dev/null | awk '/pool:/ {print $2}' |
-            while read -r _pool; do
-                if zpool status -LP "${_pool}" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
-                    zpool destroy -f "${_pool}" 2>/dev/null || true
-                    k_zfs_log "  Destroyed imported ZFS pool on this disk: ${_pool}"
-                fi
-            done
-        zpool import 2>/dev/null | awk '/pool:/ {print $2}' |
-            while read -r _pool; do
-                zpool import -f -N "${_pool}" 2>/dev/null || continue
-                if zpool status -LP "${_pool}" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
-                    zpool destroy -f "${_pool}" 2>/dev/null || true
-                    k_zfs_log "  Destroyed exported-then-imported pool: ${_pool}"
-                else
-                    zpool export "${_pool}" 2>/dev/null || true
-                fi
-            done
+        local _pool
+        while read -r _pool; do
+            [[ -n "${_pool}" ]] || continue
+            if zpool status -LP "${_pool}" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
+                k_zfs_destroy_pool_verified "${_pool}" "imported"
+            fi
+        done < <(zpool status 2>/dev/null | awk '/pool:/ {print $2}')
+        while read -r _pool; do
+            [[ -n "${_pool}" ]] || continue
+            # </dev/null: an import of an encrypted pool can prompt for a key on
+            # the loop's stdin; a pool that will not import is simply skipped.
+            zpool import -f -N "${_pool}" </dev/null >>"${KLDLOAD_ZFS_LOG}" 2>&1 || continue
+            if zpool status -LP "${_pool}" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
+                k_zfs_destroy_pool_verified "${_pool}" "exported-then-imported"
+            else
+                zpool export "${_pool}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 ||
+                    k_zfs_log "  WARNING: could not export ${_pool} (not on the target disk; left imported)"
+            fi
+        done < <(zpool import 2>/dev/null | awk '/pool:/ {print $2}')
     fi
 
     # Legacy rpool-specific cleanup (redundant with #5 but kept for belt-and-suspenders)
@@ -177,8 +196,20 @@ k_zfs_cleanup_old() {
     # brick" failure this repo exists to prevent. So: retry a few times (a disk
     # can be transiently held right after teardown), VERIFY no signatures remain,
     # and abort loudly if it's still dirty instead of building on a dirty disk.
-    local _wipe_ok=0 _try
+    local _wipe_ok=0 _try _part
     for _try in 1 2 3; do
+        # Partitions first, then the disk. `wipefs` on the whole disk sees only
+        # the partition table; a ZFS label inside the old rpool partition
+        # survives a table zap and comes straight back once the same layout is
+        # written again — the installer then finds "rpool" importable from its
+        # own target and the boot picks the old one (fiend 2026-09-06).
+        while read -r _part; do
+            [[ -b "${_part}" ]] || continue
+            # A partition with no ZFS label makes labelclear complain; harmless.
+            zpool labelclear -f "${_part}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+            # Same for wipefs on a partition that carries no signature.
+            wipefs -a -f "${_part}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+        done < <(lsblk -lnpo NAME "${KLDLOAD_DISK}" 2>/dev/null | tail -n +2)
         wipefs -a -f "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
         sgdisk --zap-all "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
         zpool labelclear -f "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
@@ -196,6 +227,18 @@ k_zfs_cleanup_old() {
     if [[ "${_wipe_ok}" -ne 1 ]]; then
         k_die "Refusing to install: could not clear ${KLDLOAD_DISK} — it still holds partition/filesystem/ZFS signatures after 3 attempts. Something is holding the disk (check 'lsblk', 'zpool status', 'dmsetup ls') or the disk is failing. Aborting rather than building on a dirty disk."
     fi
+    # Second witness, independent of wipefs: nothing importable may still
+    # reference this disk. A pool that is still IMPORTED does not show here,
+    # which is why k_zfs_destroy_pool_verified above dies on its own.
+    local _stale
+    # The scan exits 1 with "no pools available" when nothing is importable —
+    # the clean case this check hopes for.
+    _stale="$(zpool import 2>/dev/null | grep -wE "(${_disk_devs})" || true)"
+    if [[ -n "${_stale}" ]]; then
+        k_zfs_log "FATAL: a pool is still importable from ${KLDLOAD_DISK} after the wipe:"
+        k_zfs_log "${_stale}"
+        k_die "Refusing to install: ${KLDLOAD_DISK} still carries an importable ZFS pool after wiping (see ${KLDLOAD_ZFS_LOG}). Run 'zpool labelclear -f' on each partition of it by hand and rerun."
+    fi
     rm -rf "${KLDLOAD_TARGET_MNT:?}/"* 2>/dev/null || true
 
     # For multi-disk topologies, also wipe data and special vdev disks
@@ -208,6 +251,36 @@ k_zfs_cleanup_old() {
     done
 
     sleep 2
+}
+
+# k_zfs_destroy_pool_verified POOL HOW — destroy an imported pool that has a
+# vdev on the target disk, and prove it is gone. HOW is only for the log.
+#
+# `zpool destroy` straight after `zpool import` races udev: every zvol in the
+# pool gets a /dev/zd* node, udev, blkid and systemd-homed open each one, and
+# the destroy reports "pool is busy" (fiend 2026-09-06, 199 zvols; reproduced
+# by hand, and a destroy after `udevadm settle` succeeded first time). So:
+# settle, retry with a pause, and die if the pool is still imported. Building
+# a new pool on a disk whose old pool is still imported is how a box ends up
+# with an "Installation complete!" banner and nothing to boot.
+#
+# Returns: 0 with the pool gone; otherwise k_die.
+k_zfs_destroy_pool_verified() {
+    local _pool="${1:?pool name}" _how="${2:-imported}" _try
+    for _try in 1 2 3 4 5; do
+        # settle only fails where there is no udev (a container); the retry
+        # loop below covers that case.
+        udevadm settle --timeout=30 2>/dev/null || true
+        if zpool destroy -f "${_pool}" >>"${KLDLOAD_ZFS_LOG}" 2>&1; then
+            k_zfs_log "  Destroyed ${_how} ZFS pool on this disk: ${_pool} (attempt ${_try})"
+            break
+        fi
+        k_zfs_log "  zpool destroy ${_pool} failed on attempt ${_try}/5 (see ${KLDLOAD_ZFS_LOG}); waiting for udev"
+        sleep 2
+    done
+    if zpool list -H -o name "${_pool}" >/dev/null 2>&1; then
+        k_die "Refusing to install: pool ${_pool} on ${KLDLOAD_DISK} could not be destroyed after 5 attempts (last error in ${KLDLOAD_ZFS_LOG}). Something holds it open — check 'zpool status ${_pool}' and 'fuser -v /dev/zd*', then 'zpool destroy -f ${_pool}' by hand and rerun."
+    fi
 }
 
 # k_zfs_refuse_duplicate_pool NAME — die when a pool called NAME is still
@@ -498,6 +571,13 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
         -R "${KLDLOAD_TARGET_MNT}"
         rpool "${rpool_vdevs[@]}"
     )
+    # A pool named rpool that is still imported here means k_zfs_cleanup_old
+    # did not do its job; `zpool create -f` fails with "pool already exists",
+    # and on 2026-09-06 that failure was silently ignored. Check by name before
+    # creating, and check the create itself rather than trusting errexit.
+    if zpool list -H -o name rpool >/dev/null 2>&1; then
+        k_die "Refusing to install: a pool named rpool is still imported ($(zpool status -LP rpool 2>/dev/null | awk '/\/dev\// {print $1}' | paste -sd,)) — cleanup failed, see ${KLDLOAD_ZFS_LOG}"
+    fi
     if [[ "${KLDLOAD_ZFS_ENCRYPT}" == "1" ]]; then
         # keylocation=prompt reads the key from stdin when stdin is not a
         # TTY — feed the recorded passphrase. Without this pipe the create
@@ -505,10 +585,13 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
         # a pool key that differs from the recorded answer) and got EOF on
         # webui/autoinstall runs. Mirrors backend/storage-zfs.sh
         # create_rpool_*. printf, not echo: passphrase may start with '-'.
-        printf '%s\n' "${KLDLOAD_ZFS_PASSPHRASE}" | zpool create -f "${_zpool_create_args[@]}"
+        printf '%s\n' "${KLDLOAD_ZFS_PASSPHRASE}" | zpool create -f "${_zpool_create_args[@]}" ||
+            k_die "zpool create rpool failed on ${rpool_vdevs[*]} — see the messages above and ${KLDLOAD_ZFS_LOG}"
     else
-        zpool create -f "${_zpool_create_args[@]}"
+        zpool create -f "${_zpool_create_args[@]}" ||
+            k_die "zpool create rpool failed on ${rpool_vdevs[*]} — see the messages above and ${KLDLOAD_ZFS_LOG}"
     fi
+    zpool list -H -o name rpool >/dev/null 2>&1 || k_die "zpool create returned 0 but no pool named rpool is imported"
 
     # Root dataset hierarchy
     zfs create -o canmount=off -o mountpoint=none rpool/ROOT

@@ -391,12 +391,16 @@ fi
 
 if ! k_have_func k_install_zfs_storage; then
     k_install_zfs_storage() {
-        k_have_func k_storage_zfs_install &&
-            {
-                k_log "Invoking ZFS installer"
-                k_storage_zfs_install
-            } ||
+        # Not `k_have_func … && { … } || k_die`: a function run inside an
+        # && / || list has errexit switched off for its whole body, so every
+        # failing zpool/zfs command in the storage phase was ignored and the
+        # run reached "Installation complete!" with no new pool and no
+        # bootloader (fiend 2026-09-06). A plain if keeps -e in force.
+        if ! k_have_func k_storage_zfs_install; then
             k_die "ZFS installer entrypoint not found"
+        fi
+        k_log "Invoking ZFS installer"
+        k_storage_zfs_install
     }
 fi
 
