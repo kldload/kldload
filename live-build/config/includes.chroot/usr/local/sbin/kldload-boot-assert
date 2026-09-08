@@ -47,6 +47,39 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null || :
 # swallow: likewise, an unwritable log must never abort the run under set -e.
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null || :; }
 
+# _boot_order_fix ORDER OURS OTHERS — echo a corrected BootOrder, or nothing.
+#
+# ORDER  comma-separated BootOrder exactly as the firmware reports it
+# OURS   4-hex boot number of the kldload entry
+# OTHERS space-separated boot numbers of OTHER on-disk loaders
+#
+# Returns nothing when the order is already fine, so the caller can treat any
+# output as "a repair is needed". Network and removable entries are left in
+# front deliberately: PXE-first is a legitimate operator choice for netboot
+# deployment and this must not fight it on every single boot. Only other DISK
+# loaders get jumped.
+_boot_order_fix() {
+    local order="$1" ours="$2" others="$3"
+    local -a cur=() out=()
+    IFS=, read -r -a cur <<<"$order"
+    local n first_other=-1 ours_at=-1 i=0
+    for n in "${cur[@]}"; do
+        [[ "$n" == "$ours" ]] && ours_at=$i
+        if [[ $first_other -lt 0 && " $others " == *" $n "* ]]; then first_other=$i; fi
+        i=$((i + 1))
+    done
+    [[ $ours_at -ge 0 && $first_other -ge 0 && $ours_at -gt $first_other ]] || return 0
+    for ((i = 0; i < ${#cur[@]}; i++)); do
+        [[ "${cur[i]}" == "$ours" ]] && continue
+        [[ $i -eq $first_other ]] && out+=("$ours")
+        out+=("${cur[i]}")
+    done
+    (
+        IFS=,
+        echo "${out[*]}"
+    )
+}
+
 # Overridable so the repair paths can be exercised against a fake ESP rather
 # than only ever tested on a machine that is already correct. Nothing in the
 # shipped units sets it; it defaults to the real mount point.
@@ -153,6 +186,34 @@ if command -v efibootmgr >/dev/null 2>&1 && [[ -d /sys/firmware/efi ]]; then
             else
                 log "WARN: no kldload entry in NVRAM and it could not be recreated"
                 log "  the disk still boots via the fallback \\EFI\\BOOT\\BOOTX64.EFI, which was verified above"
+            fi
+        fi
+    fi
+fi
+
+# ── 4. Our entry must sit ahead of every OTHER on-disk loader ────────────────
+# This step has been in the header since the file was written and was never
+# implemented. fiend, 2026-09-07: enabling the BIOS network stack inserted a
+# PXE entry at the head of BootOrder and pushed \EFI\zbm\BOOTX64.EFI to LAST,
+# so the box booted Fedora's shim into grub's direct menuentry instead.
+# Nothing looked wrong -- the cmdline still read root=zfs: -- and boot-from-
+# snapshot was simply gone. A distro shim/grub package update demotes us the
+# same way, which is exactly what the WHY block above predicts.
+if command -v efibootmgr >/dev/null 2>&1 && [[ -d /sys/firmware/efi ]]; then
+    # swallow: the same read-only/absent efivarfs case as section 3 -- an empty
+    # read means "cannot assert", and the -n guards below skip the repair.
+    _nv="$(efibootmgr -v 2>/dev/null || true)"
+    _order="$(sed -n 's/^BootOrder: //p' <<<"$_nv" | tr -d ' \r')"
+    _ours="$(awk -F'\t' '$1 ~ /^Boot[0-9A-Fa-f]{4}\*? +kldload$/ {print substr($1, 5, 4); exit}' <<<"$_nv")"
+    _others="$(awk -F'\t' '$1 ~ /^Boot[0-9A-Fa-f]{4}/ && $1 !~ / kldload$/ && $2 ~ /HD\(/ {printf "%s ", substr($1, 5, 4)}' <<<"$_nv")"
+    if [[ -n "$_order" && -n "$_ours" ]]; then
+        _want="$(_boot_order_fix "$_order" "$_ours" "$_others")"
+        if [[ -n "$_want" ]]; then
+            if efibootmgr -o "$_want" >/dev/null 2>&1; then
+                log "REPAIRED: BootOrder was ${_order} — kldload sat behind another on-disk loader; now ${_want}"
+                repaired=1
+            else
+                log "WARN: kldload is behind another on-disk loader in BootOrder ${_order} and it could not be reordered"
             fi
         fi
     fi
