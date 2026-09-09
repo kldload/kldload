@@ -153,7 +153,14 @@ PKGS=(
     systemd systemd-pam systemd-udev dbus-broker
     # kernel* intentionally absent — koji-pinned to the last zfs-compatible
     # NVR, see KOJI_KERNEL_URLS at the bootstrap dnf below
-    dracut dracut-live dracut-squash
+    # dracut-network for the livenet module: without it the initramfs can only
+    # find live media on a LOCAL device (root=live:CDLABEL=...), so the image
+    # cannot netboot at all. livenet and network live in dracut-network, NOT in
+    # base dracut, and dracut silently omits a module whose dependencies are
+    # missing — the ISO builds fine and then powers a netbooting machine off a
+    # few seconds in with "dracut: FATAL: Don't know how to handle
+    # root=live:http://..." (found netbooting fiend, 2026-09-09).
+    dracut dracut-live dracut-squash dracut-network
     grub2-efi-${ARCH_EFI} grub2-tools shim-${ARCH_EFI} efibootmgr mokutil pesign sbsigntools
     NetworkManager NetworkManager-wifi wpa_supplicant openssh-server openssh-clients sudo
     vim-enhanced tmux curl wget rsync jq less tar gzip
@@ -3405,7 +3412,12 @@ done
 [[ ${#DRACUT_INSTALL[@]} -gt 0 ]] &&
     log "Force-installing dracut-108-dropped helpers: ${DRACUT_INSTALL[*]}"
 
-chroot "$ROOTFS" dracut --force --add "dmsquash-live" \
+# livenet alongside dmsquash-live: dmsquash-live finds live media on a local
+# disk, livenet fetches it over HTTP. Both, so one image boots from USB by
+# CDLABEL and over the network by URL — the netboot path the installer already
+# expects, since kldload-autoinstall reads kldload.seed= from the cmdline
+# before it looks for a seed disk.
+chroot "$ROOTFS" dracut --force --add "dmsquash-live livenet" \
     --no-hostonly \
     "${DRACUT_INSTALL[@]}" \
     --force-drivers "xhci_pci xhci_hcd ehci_pci ehci_hcd ohci_pci ohci_hcd uhci_hcd usb_storage uas usbhid hid_generic cdc_ether usbnet r8152 ax88179_178a thunderbolt typec_ucsi ucsi_acpi nvme nvme_core ahci virtio_blk virtio_scsi virtio_net virtio_pci sdhci sdhci_pci mmc_block" \
