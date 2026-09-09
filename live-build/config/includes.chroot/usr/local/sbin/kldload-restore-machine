@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-restore-machine — rebuild a machine from a replicated ZFS archive.
+#
+# This is the other half of Auto Sync. Auto Sync pulls a machine's pool onto a
+# backup host; this puts it back onto bare metal, from the netbooted live
+# environment, and leaves it bootable.
+#
+# What it does, in order:
+#   1. Validates: the disk exists and carries no imported pool, the archive
+#      host is reachable, and the archive actually holds snapshots.
+#   2. Partitions the disk: an ESP, then the rest for ZFS.
+#   3. Creates the pool and receives the archived datasets into it.
+#   4. Sets mountpoints and bootfs so the tree looks like a machine again.
+#   5. Repairs the two things a receive alone cannot, both measured on onyx
+#      2026-09-09 by restoring fiend and booting it (see tests/dr-drill.sh):
+#        a. The initramfs imports pools BY CACHE FILE, and a cache records the
+#           vdev device paths of the machine that wrote it. Recovered hardware
+#           always has different paths, so a cache import fails and the boot
+#           lands in emergency with "no such pool available". Restores switch
+#           to scan-based import and rebuild the initramfs.
+#        b. The ESP is NOT in ZFS, so the restored /etc/fstab names an ESP
+#           UUID that no longer exists. local-fs.target then fails and the
+#           machine stops before multi-user — the pool was fine and the box
+#           still would not come up. fstab is repointed at the ESP made here.
+#   6. Installs a bootloader into the new ESP.
+#   7. Verifies the OUTCOME: kernel on the pool, bootfs set, ESP populated,
+#      fstab agreeing with the ESP that exists.
+#
+# Why not simply zfs recv and reboot: because of 5a and 5b. A receive that
+# reports success and leaves an unbootable machine is the worst outcome
+# available here — worse than a failed restore, which at least tells you.
+#
+# Inputs : flags below. Reads nothing else.
+# Outputs: a bootable pool on --disk; progress on stderr.
+# Exit   : 0 restored and verified · 1 a step failed · 2 usage/validation.
+#
+# Notes:
+#   - DESTRUCTIVE. --disk is repartitioned. Requires --yes.
+#   - The archive host does the sending, so an encrypted archive is sent
+#     DECRYPTED (its key is loaded there) and the new pool applies its own
+#     policy. Sending raw would make the restored dataset its own encryption
+#     root and the rebuilt machine could not mount its own filesystem without
+#     the backup server's passphrase.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+ARCHIVE_HOST=""
+ARCHIVE=""
+DISK=""
+POOL="rpool"
+POOL_EXPLICIT=0
+NEW_HOSTNAME=""
+ESP_SIZE="1GiB"
+SSH_IDENTITY=""
+ASSUME_YES=0
+DRY_RUN=0
+MANIFEST=""
+ESP_ARCHIVE=""
+
+say() { printf '%s\n' "$*" >&2; }
+# die MESSAGE [EXIT] — $1 only, never $*: with "$*" the exit code is joined
+# into the message and every fatal error ends in a stray number.
+die() {
+    printf 'FATAL: %s\n' "$1" >&2
+    exit "${2:-1}"
+}
+
+usage() {
+    cat >&2 <<EOF
+usage: kldload-restore-machine --archive-host HOST --archive DATASET --disk DEV --yes
+                               [--pool NAME] [--hostname NAME] [--esp-size SIZE]
+                               [--ssh-key PATH] [--dry-run]
+
+  --archive-host HOST   the backup host holding the replica (it does the send).
+                        Use "local" when running ON the backup host itself.
+  --archive DATASET     the archived tree, e.g. rpool/backup/fiend
+  --disk DEV            target disk. REPARTITIONED. e.g. /dev/nvme0n1
+  --pool NAME           pool to create (default: rpool)
+  --hostname NAME       hostname to write into the restored system
+  --esp-size SIZE       EFI system partition size (default: 1GiB)
+  --ssh-key PATH        identity for reaching the archive host
+  --esp-archive FILE    tar of the original ESP, from kldload-boot-manifest
+                        --esp-archive. Unpacked into the new ESP, which is how
+                        the machine gets a bootloader without a network
+  --manifest FILE       boot manifest from kldload-boot-manifest. Supplies the
+                        pool name, ESP size and the ORIGINAL hostid, so the
+                        rebuild matches the machine instead of guessing
+  --yes                 required: confirms --disk may be destroyed
+  --dry-run             print what would happen, touch nothing
+
+EXIT STATUS
+  0  restored and verified   1  a step failed   2  usage or validation
+EOF
+    exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --archive-host)
+        ARCHIVE_HOST="${2:?}"
+        shift 2
+        ;;
+    --archive)
+        ARCHIVE="${2:?}"
+        shift 2
+        ;;
+    --disk)
+        DISK="${2:?}"
+        shift 2
+        ;;
+    --pool)
+        POOL="${2:?}"
+        POOL_EXPLICIT=1
+        shift 2
+        ;;
+    --hostname)
+        NEW_HOSTNAME="${2:?}"
+        shift 2
+        ;;
+    --esp-size)
+        ESP_SIZE="${2:?}"
+        shift 2
+        ;;
+    --ssh-key)
+        SSH_IDENTITY="${2:?}"
+        shift 2
+        ;;
+    --manifest)
+        MANIFEST="${2:?}"
+        shift 2
+        ;;
+    --esp-archive)
+        ESP_ARCHIVE="${2:?}"
+        shift 2
+        ;;
+    --yes)
+        ASSUME_YES=1
+        shift
+        ;;
+    --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+    -h | --help) usage ;;
+    *) die "unknown argument: $1" 2 ;;
+    esac
+done
+
+[[ -n "$ARCHIVE_HOST" && -n "$ARCHIVE" && -n "$DISK" ]] || usage
+((ASSUME_YES || DRY_RUN)) || die "--yes is required: $DISK will be repartitioned" 2
+
+# ─── manifest ────────────────────────────────────────────────────────────────
+# What a ZFS archive cannot carry. Optional, but without it the pool name, the
+# ESP size and the hostid are assumptions, and a wrong hostid means every
+# import of the restored pool warns that it was last used by another system.
+MANIFEST_HOSTID=""
+if [[ -n "$MANIFEST" ]]; then
+    [[ -r "$MANIFEST" ]] || die "cannot read manifest: $MANIFEST" 2
+    mget() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$MANIFEST" | head -1; }
+    m_pool="$(mget pool)"
+    m_esp="$(mget esp_size | tr -d ' ')"
+    MANIFEST_HOSTID="$(mget hostid)"
+    [[ -z "$ESP_ARCHIVE" ]] && ESP_ARCHIVE="$(mget esp_archive)"
+    m_host="$(mget hostname)"
+    # Explicit beats derived: a --pool on the command line is the operator
+    # saying "not what the manifest says", usually because they are restoring
+    # beside an existing pool of that name.
+    ((POOL_EXPLICIT)) || [[ -z "$m_pool" ]] || POOL="$m_pool"
+    [[ -n "$m_esp" && "$m_esp" != "null" ]] && ESP_SIZE="${m_esp}iB"
+    [[ -z "$NEW_HOSTNAME" && -n "$m_host" ]] && NEW_HOSTNAME="$m_host"
+    say "manifest: ${m_host:-?} pool=${POOL} esp=${ESP_SIZE} hostid=${MANIFEST_HOSTID:-unset}"
+    sb="$(mget secure_boot)"
+    [[ "$sb" == *enabled* ]] &&
+        say "WARNING: this machine had Secure Boot ENABLED. MOK enrolment needs a human at the console; the restore cannot do it."
+fi
+
+run() {
+    if ((DRY_RUN)); then
+        printf '  would run: %s\n' "$*" >&2
+        return 0
+    fi
+    "$@"
+}
+
+# "local" means the archive is on THIS machine — restoring on the backup host
+# itself, which is how you bring a machine up as a VM beside its own archive
+# without needing the replacement hardware yet. Everywhere else this is an ssh
+# prefix, so the rest of the script does not care which it is.
+if [[ "$ARCHIVE_HOST" == "local" || "$ARCHIVE_HOST" == "-" ]]; then
+    ARCHIVE_IS_LOCAL=1
+    archive_sh() { sh -c "$1"; }
+else
+    ARCHIVE_IS_LOCAL=0
+    ssh_c=(ssh -o BatchMode=yes -o ConnectTimeout=10)
+    [[ -n "$SSH_IDENTITY" ]] && ssh_c+=(-i "$SSH_IDENTITY")
+    ssh_c+=("$ARCHIVE_HOST")
+    archive_sh() { "${ssh_c[@]}" "$1"; }
+fi
+
+# ─── 1. validate ─────────────────────────────────────────────────────────────
+# A name that reaches sgdisk and zpool create gets checked before use, not
+# after: a mistake here is unrecoverable.
+[[ "$DISK" == /dev/* && -b "$DISK" ]] || die "not a block device: $DISK" 2
+[[ "$POOL" =~ ^[A-Za-z][A-Za-z0-9_.:-]*$ ]] || die "implausible pool name: $POOL" 2
+zpool list -H -o name 2>/dev/null | grep -qx "$POOL" &&
+    die "a pool named $POOL is already imported here" 2
+
+((ARCHIVE_IS_LOCAL)) || "${ssh_c[@]}" true 2>/dev/null ||
+    die "cannot reach archive host $ARCHIVE_HOST" 2
+src_count="$(archive_sh "zfs list -H -o name -r '$ARCHIVE' 2>/dev/null | wc -l")"
+((src_count > 0)) || die "$ARCHIVE_HOST:$ARCHIVE holds no datasets" 2
+say "archive: ${ARCHIVE_HOST}:${ARCHIVE} — ${src_count} datasets"
+
+# ─── 2. partition ────────────────────────────────────────────────────────────
+# ESP first so its partition number is stable, and because the pool takes
+# "the rest" — sized relative to whatever disk the replacement machine has.
+say "partitioning $DISK (ESP ${ESP_SIZE}, remainder ZFS)"
+run sgdisk --zap-all "$DISK"
+run sgdisk -n1:0:+"$ESP_SIZE" -t1:EF00 -c1:"EFI System" "$DISK"
+run sgdisk -n2:0:0 -t2:BF00 -c2:"$POOL" "$DISK"
+run partprobe "$DISK" 2>/dev/null || true
+run udevadm settle 2>/dev/null || true
+
+# part N -> the Nth partition of $DISK. Three naming schemes in the wild and
+# getting it wrong points mkfs at a device that does not exist:
+#   /dev/sda        -> /dev/sda1
+#   /dev/nvme0n1    -> /dev/nvme0n1p1   (trailing digit takes a "p")
+#   /dev/zvol/...   -> /dev/zvol/...-part1  (used when restoring into a VM)
+part() {
+    case "$DISK" in
+    /dev/zvol/*) printf '%s-part%s' "$DISK" "$1" ;;
+    *[0-9]) printf '%sp%s' "$DISK" "$1" ;;
+    *) printf '%s%s' "$DISK" "$1" ;;
+    esac
+}
+ESP="$(part 1)"
+ZPART="$(part 2)"
+
+run mkfs.vfat -F32 -n EFI "$ESP"
+
+# ─── 3. pool + receive ───────────────────────────────────────────────────────
+# altroot so nothing mounts over the live environment's own filesystems.
+ALTROOT="/mnt/restore"
+run mkdir -p "$ALTROOT"
+say "creating pool $POOL on $ZPART"
+run zpool create -f -o ashift=12 -O compression=lz4 -O mountpoint=none \
+    -R "$ALTROOT" "$POOL" "$ZPART"
+
+say "receiving from ${ARCHIVE_HOST}:${ARCHIVE}"
+# syncoid, not a single `zfs send -R`, and for a reason that is not obvious:
+#
+#   * -R implies properties, and ZFS refuses properties on an encrypted send
+#     unless it is also raw. An archive is usually encrypted because the BACKUP
+#     pool is, so -R is refused outright.
+#   * Adding -w to satisfy that is worse than failing: a raw send preserves the
+#     dataset's own wrapping key, so every restored dataset becomes its own
+#     encryption root and the rebuilt machine cannot mount its own filesystem
+#     without the backup server's passphrase.
+#   * -R also needs a snapshot of the TOP dataset, which an archive root often
+#     does not have — only its children are snapshotted.
+#
+# syncoid walks the tree dataset by dataset, so each is sent plainly, decrypted
+# by the archive host that holds the key, and the NEW pool applies its own
+# encryption policy. --skip-parent because the pool root already exists here.
+# (All three measured on onyx, 2026-09-09.)
+SYNCOID="$(command -v syncoid || echo /usr/local/sbin/syncoid)"
+[[ -x "$SYNCOID" ]] || die "syncoid not found — it is how the tree is received" 2
+if ((DRY_RUN)); then
+    say "  would run: $SYNCOID --recursive --skip-parent --no-sync-snap <archive> $POOL"
+else
+    syncoid_args=(--recursive --skip-parent --no-sync-snap
+        --recvoptions="u x readonly x canmount")
+    [[ -n "$SSH_IDENTITY" ]] && syncoid_args+=(--sshkey "$SSH_IDENTITY")
+    if ((ARCHIVE_IS_LOCAL)); then
+        src="$ARCHIVE"
+    else
+        src="${ARCHIVE_HOST}:${ARCHIVE}"
+    fi
+    "$SYNCOID" "${syncoid_args[@]}" "$src" "$POOL" ||
+        say "WARNING: syncoid exited non-zero; the verification below decides"
+    got="$(zfs list -H -o name -r "$POOL" | wc -l)"
+    ((got > 1)) || die "nothing was received into $POOL"
+    say "  received: ${got} datasets"
+fi
+
+# ─── 4. make the tree look like a machine ────────────────────────────────────
+BE="$(zfs list -H -o name -r "$POOL" 2>/dev/null | grep -m1 '/ROOT/' || true)"
+if ((DRY_RUN)); then BE="$POOL/ROOT/example"; fi
+[[ -n "$BE" ]] || die "no boot environment (a */ROOT/* dataset) in the received tree"
+say "boot environment: $BE"
+run zfs set mountpoint=/ "$BE"
+run zfs set canmount=noauto "$BE"
+run zpool set bootfs="$BE" "$POOL"
+run zfs mount "$BE" 2>/dev/null || true
+run zfs mount -a 2>/dev/null || true
+
+((DRY_RUN)) && {
+    say "dry run complete"
+    exit 0
+}
+
+R="$ALTROOT"
+[[ -d "$R/etc" && -d "$R/boot" ]] || die "the received root has no /etc or /boot — wrong dataset?"
+
+# ─── 5a. import by SCAN, and rebuild the initramfs ───────────────────────────
+# See the header. This is the step whose absence puts the machine in
+# emergency mode with a perfectly good pool underneath it.
+# The hostid goes in BEFORE dracut, because the initramfs embeds /etc/hostid
+# and ZFS compares it when importing. Restoring with a fresh hostid makes every
+# import complain that the pool was last accessed by another system.
+if [[ -n "$MANIFEST_HOSTID" ]]; then
+    say "restoring the original hostid ($MANIFEST_HOSTID)"
+    chroot_hostid="$R/etc/hostid"
+    if command -v zgenhostid >/dev/null 2>&1; then
+        rm -f "$chroot_hostid"
+        zgenhostid -f -o "$chroot_hostid" "$MANIFEST_HOSTID" ||
+            say "WARNING: could not write the original hostid; imports will warn"
+    else
+        say "WARNING: no zgenhostid; the restored system keeps a fresh hostid"
+    fi
+fi
+
+say "switching to scan-based pool import and rebuilding the initramfs"
+mkdir -p "$R/etc/zfs"
+: >"$R/etc/zfs/zpool.cache" # dracut insists the file exists; empty = scan
+for d in dev proc sys; do mount --bind "/$d" "$R/$d"; done
+cleanup_binds() { for d in sys proc dev; do umount "$R/$d" 2>/dev/null || true; done; }
+trap 'cleanup_binds' EXIT
+
+chroot "$R" systemctl disable zfs-import-cache.service >/dev/null 2>&1 || true
+chroot "$R" systemctl enable zfs-import-scan.service >/dev/null 2>&1 ||
+    say "WARNING: could not enable zfs-import-scan — the pool may not import on first boot"
+
+kver="$(cd "$R/lib/modules" 2>/dev/null && ls -1 | sort -V | tail -1 || true)"
+[[ -n "$kver" ]] || die "no kernel modules in the restored root — nothing to build an initramfs for"
+say "  kernel: $kver"
+chroot "$R" dracut --force --kver "$kver" "/boot/initramfs-${kver}.img" 2>&1 |
+    grep -viE "dev/log" >&2 || true
+[[ -s "$R/boot/initramfs-${kver}.img" ]] ||
+    die "initramfs was not produced — the machine would not boot"
+
+# ─── 5b. point fstab at the ESP that exists NOW ──────────────────────────────
+# The restored fstab names the OLD machine's ESP UUID. Left alone,
+# local-fs.target fails and the boot stops before multi-user.
+esp_uuid="$(blkid -s UUID -o value "$ESP")"
+[[ -n "$esp_uuid" ]] || die "could not read the new ESP's UUID"
+say "repointing /boot/efi at the new ESP ($esp_uuid)"
+if grep -q '/boot/efi' "$R/etc/fstab" 2>/dev/null; then
+    cp -a "$R/etc/fstab" "$R/etc/fstab.pre-restore"
+    # Rewrite the whole line: the old UUID is meaningless on this hardware.
+    awk -v u="$esp_uuid" '
+        $2 == "/boot/efi" { print "UUID=" u " /boot/efi vfat umask=0077,nofail 0 1"; next }
+        { print }' "$R/etc/fstab.pre-restore" >"$R/etc/fstab"
+else
+    printf 'UUID=%s /boot/efi vfat umask=0077,nofail 0 1\n' "$esp_uuid" >>"$R/etc/fstab"
+fi
+grep -q "$esp_uuid" "$R/etc/fstab" || die "fstab was not updated with the new ESP UUID"
+
+# ─── 5c. unpin the network from the OLD hardware ─────────────────────────────
+# A machine restored onto a replacement box has different NICs. Any connection
+# pinned to the dead machine's MAC will never activate, and the restored system
+# boots perfectly with no network — which on a headless node is
+# indistinguishable from dead, and is the failure that makes "any node can
+# replace any node" untrue.
+#
+# fiend pins mac-address=F0:2F:74:CD:27:50 on its bridge slave (measured
+# 2026-09-09), so this is not hypothetical.
+#
+# MAC pins are removed outright: the address is certainly wrong on new
+# hardware. interface-name pins are only WARNED about, because renaming them
+# blind can attach a connection to the wrong NIC on a multi-NIC box, and a
+# wrong network is worse than an absent one.
+NMDIR="$R/etc/NetworkManager/system-connections"
+if [[ -d "$NMDIR" ]]; then
+    pinned=0
+    while IFS= read -r conn; do
+        if grep -qiE '^mac-address=' "$conn" 2>/dev/null; then
+            cp -a "$conn" "${conn}.pre-restore"
+            sed -i -E '/^mac-address=/d' "$conn"
+            say "  unpinned MAC in $(basename "$conn")"
+            pinned=$((pinned + 1))
+        fi
+        if grep -qiE '^interface-name=e' "$conn" 2>/dev/null; then
+            say "  WARNING: $(basename "$conn") pins $(grep -m1 -iE '^interface-name=' "$conn") — check it matches a NIC on this machine"
+        fi
+    done < <(find "$NMDIR" -type f -name '*.nmconnection' 2>/dev/null)
+    ((pinned)) && say "  removed $pinned MAC pin(s); originals kept as *.pre-restore"
+fi
+
+# ─── 6. bootloader ───────────────────────────────────────────────────────────
+mkdir -p "$R/boot/efi"
+mount "$ESP" "$R/boot/efi"
+trap 'umount "$R/boot/efi" 2>/dev/null || true; cleanup_binds' EXIT
+# Restoring the ESP beats rebuilding it. Fedora does not populate an ESP with
+# grub2-install — the EFI binaries come from the RPM payload, so grub2-install
+# on a fresh ESP fails with "modinfo.sh doesn't exist" even though grub2-efi
+# and shim are installed. Rebuilding from packages would also need a working
+# network mid-recovery. Unpacking the machine's own ESP needs neither, and
+# reproduces the boot path exactly, ZFSBootMenu included.
+# (measured 2026-09-09 restoring fiend)
+if [[ -n "$ESP_ARCHIVE" && -r "$ESP_ARCHIVE" ]]; then
+    say "unpacking the archived ESP from $ESP_ARCHIVE"
+    tar -C "$R/boot/efi" -xf "$ESP_ARCHIVE" ||
+        say "WARNING: unpacking the ESP archive reported a problem"
+elif chroot "$R" command -v grub2-install >/dev/null 2>&1; then
+    say "no ESP archive; trying grub2-install (often fails on Fedora — see above)"
+    chroot "$R" grub2-install --target=x86_64-efi --efi-directory=/boot/efi \
+        --bootloader-id=kldload --removable >/dev/null 2>&1 ||
+        say "WARNING: grub2-install failed; the ESP will be empty and the machine will not boot"
+else
+    say "WARNING: no ESP archive and no grub2-install — the ESP will be empty"
+fi
+
+# ─── 7. verify the OUTCOME ───────────────────────────────────────────────────
+fail=0
+check() {
+    if eval "$2" >/dev/null 2>&1; then
+        say "  ok    $1"
+    else
+        say "  FAIL  $1"
+        fail=1
+    fi
+}
+say "verifying:"
+check "kernel present on the pool" "ls '$R'/boot/vmlinuz-*"
+check "initramfs present" "test -s '$R/boot/initramfs-${kver}.img'"
+check "bootfs set to $BE" "test \"\$(zpool get -H -o value bootfs '$POOL')\" = '$BE'"
+check "fstab names this ESP" "grep -q '$esp_uuid' '$R/etc/fstab'"
+check "ESP has an EFI binary" "find '$R/boot/efi' -iname '*.efi' | grep -q ."
+check "scan import enabled" "test -e '$R/etc/systemd/system/zfs-import.target.wants/zfs-import-scan.service'"
+[[ -n "$MANIFEST_HOSTID" ]] &&
+    check "hostid matches the original" "test -s '$R/etc/hostid'"
+
+if [[ -n "$NEW_HOSTNAME" ]]; then
+    printf '%s\n' "$NEW_HOSTNAME" >"$R/etc/hostname"
+    say "  hostname set to $NEW_HOSTNAME"
+fi
+
+umount "$R/boot/efi" 2>/dev/null || true
+cleanup_binds
+trap - EXIT
+zpool export "$POOL" 2>/dev/null || true
+
+((fail == 0)) || die "restore completed but verification FAILED above — do not reboot into this yet"
+say "OK: $POOL restored from ${ARCHIVE_HOST}:${ARCHIVE} and verified. Reboot into it."

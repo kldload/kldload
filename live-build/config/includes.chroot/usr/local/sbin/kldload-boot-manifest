@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-boot-manifest — record everything about a node that a RESTORE needs
+# and a ZFS archive does not contain.
+#
+# Why this exists: replicating a pool captures the data and nothing else. When
+# fiend was restored on 2026-09-09 the pool was perfect and the machine still
+# would not boot, because the facts needed to rebuild AROUND the pool were
+# never recorded and had to be rediscovered by inspection:
+#
+#   * which dataset is the boot environment, and what bootfs pointed at
+#   * which kernel version is on the pool, to rebuild an initramfs for it
+#   * the ESP: it is NOT in ZFS, so its size, UUID and contents are lost, and
+#     the restored /etc/fstab names a UUID that no longer exists — which stops
+#     local-fs.target and the machine never reaches multi-user
+#   * /etc/hostid — ZFS records pool ownership against it; a mismatch gives
+#     "pool was last accessed by another system" and needs a forced import
+#   * the pool's vdev topology, so a replacement is built the same shape
+#   * the NIC MAC, which is how a netboot arms the right machine
+#   * Secure Boot state and enrolled MOKs, which no restore can recreate
+#     unattended because enrolment needs a human at the console
+#
+# Run it on the MASTER against a client, or on the client itself.
+#
+# Inputs : --host (omit for local), --ssh-key, --pool, --esp-archive
+# Outputs: the manifest as JSON on stdout. stdout is DATA — every diagnostic
+#          goes to stderr so `kldload-boot-manifest | jq` never breaks.
+# Exit   : 0 captured · 2 the host could not be read
+#
+# Notes: captures facts, never secrets. No keys, no passphrases, no MOK
+#        private material — only what is needed to rebuild a boot path.
+#
+#        --esp-archive also KEEPS the ESP, as a tar. Recording that a machine
+#        had shimx64.efi is not the same as being able to put it back: the ESP
+#        is outside ZFS, so replication never carries it, and a restore with an
+#        empty ESP produces a pool that is perfect and a machine that does not
+#        boot. Rebuilding it from packages needs a working network and the
+#        right repo, which is exactly what you do not have during a recovery.
+#        A few megabytes of tar removes that dependency.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+HOST=""
+SSH_IDENTITY=""
+POOL="rpool"
+ESP_ARCHIVE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --host)
+        HOST="${2:?}"
+        shift 2
+        ;;
+    --ssh-key)
+        SSH_IDENTITY="${2:?}"
+        shift 2
+        ;;
+    --pool)
+        POOL="${2:?}"
+        shift 2
+        ;;
+    --esp-archive)
+        ESP_ARCHIVE="${2:?}"
+        shift 2
+        ;;
+    -h | --help)
+        sed -n '2,30p' "$0" >&2
+        exit 2
+        ;;
+    *)
+        echo "unknown argument: $1" >&2
+        exit 2
+        ;;
+    esac
+done
+
+if [[ -n "$HOST" ]]; then
+    ssh_c=(ssh -o BatchMode=yes -o ConnectTimeout=10)
+    [[ -n "$SSH_IDENTITY" ]] && ssh_c+=(-i "$SSH_IDENTITY")
+    ssh_c+=("$HOST")
+    on() { "${ssh_c[@]}" "$1" 2>/dev/null || true; }
+    "${ssh_c[@]}" true 2>/dev/null || {
+        echo "FATAL: cannot reach $HOST" >&2
+        exit 2
+    }
+else
+    on() { sh -c "$1" 2>/dev/null || true; }
+fi
+
+# j KEY VALUE — one JSON string field, with the value escaped. Hand-rolled
+# because the client may be a minimal image with no jq.
+j() { printf '  "%s": "%s",\n' "$1" "$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n')"; }
+# jlist KEY LINES — a JSON array from newline-separated input.
+jlist() {
+    printf '  "%s": [' "$1"
+    local first=1 line
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        ((first)) || printf ', '
+        printf '"%s"' "$(printf '%s' "$line" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        first=0
+    done
+    printf '],\n'
+}
+
+hostname_="$(on 'cat /etc/hostname || hostname')"
+echo "capturing boot manifest for ${hostname_:-$HOST}" >&2
+
+# The boot environment and what the pool boots. Without these a restore has to
+# guess which of several datasets is the root.
+bootfs="$(on "zpool get -H -o value bootfs '$POOL'")"
+be="$(on "zfs list -H -o name -r '$POOL' | grep -m1 '/ROOT/'")"
+
+# The ESP. None of this is in the pool, and all of it is needed.
+esp_dev="$(on 'findmnt -no SOURCE /boot/efi')"
+esp_uuid="$(on 'findmnt -no SOURCE /boot/efi | xargs -r blkid -s UUID -o value')"
+esp_size="$(on 'findmnt -no SIZE /boot/efi')"
+esp_files="$(on 'find /boot/efi -iname "*.efi" -printf "%P\n" 2>/dev/null | sort')"
+
+# fstab lines naming a device rather than a dataset: exactly the ones that
+# break after a restore, because the device is gone.
+fstab_dev="$(on "grep -vE '^[[:space:]]*#' /etc/fstab 2>/dev/null | grep -E '^(UUID=|/dev/|LABEL=)' | tr -s ' \t' ' '")"
+
+# Keep the ESP itself, not just its inventory.
+if [[ -n "$ESP_ARCHIVE" ]]; then
+    espmnt="$(on 'findmnt -no TARGET /boot/efi')"
+    if [[ -z "$espmnt" ]]; then
+        echo "WARNING: no ESP mounted; --esp-archive skipped" >&2
+    else
+        mkdir -p "$(dirname "$ESP_ARCHIVE")"
+        if [[ -n "$HOST" ]]; then
+            "${ssh_c[@]}" "tar -C '$espmnt' -cf - ." >"$ESP_ARCHIVE" ||
+                echo "WARNING: could not archive the ESP" >&2
+        else
+            tar -C "$espmnt" -cf - . >"$ESP_ARCHIVE" ||
+                echo "WARNING: could not archive the ESP" >&2
+        fi
+        if [[ -s "$ESP_ARCHIVE" ]]; then
+            echo "ESP archived: $ESP_ARCHIVE ($(du -h "$ESP_ARCHIVE" | cut -f1))" >&2
+        else
+            echo "WARNING: ESP archive came out empty" >&2
+        fi
+    fi
+fi
+
+printf '{\n'
+j hostname "$hostname_"
+j captured_at "$(date -Is)"
+j captured_from "${HOST:-local}"
+j pool "$POOL"
+j bootfs "$bootfs"
+j boot_environment "$be"
+j hostid "$(on 'hostid')"
+j machine_id "$(on 'cat /etc/machine-id')"
+j os "$(on '. /etc/os-release 2>/dev/null && printf "%s" "$PRETTY_NAME"')"
+j kernel_running "$(on 'uname -r')"
+j zfs_version "$(on 'cat /sys/module/zfs/version 2>/dev/null || zfs --version 2>/dev/null | head -1')"
+j secure_boot "$(on 'mokutil --sb-state 2>/dev/null | head -1')"
+j mok_enrolled "$(on 'mokutil --list-enrolled 2>/dev/null | grep -c Subject:')"
+j esp_device "$esp_dev"
+j esp_uuid "$esp_uuid"
+j esp_size "$esp_size"
+j esp_archive "$ESP_ARCHIVE"
+printf '%s' "$(printf '%s\n' "$esp_files" | jlist esp_files)"
+# Kernels ON the pool, not just the running one: a restore rebuilds an
+# initramfs for what is there, which may differ from what was booted.
+printf '%s' "$(on 'ls -1 /lib/modules 2>/dev/null | sort -V' | jlist kernels_installed)"
+printf '%s' "$(on "zpool status -P '$POOL' 2>/dev/null | awk '/\\/dev\\//{print \$1}'" | jlist pool_vdevs)"
+printf '%s' "$(on 'for i in /sys/class/net/e*; do [ -e "$i/address" ] && printf "%s=%s\n" "$(basename "$i")" "$(cat "$i/address")"; done' | jlist nics)"
+printf '%s' "$(printf '%s\n' "$fstab_dev" | jlist fstab_device_mounts)"
+j pool_layout "$(on "zpool list -H -o name,size,ashift '$POOL'" | tr '\t' ' ')"
+printf '  "schema": 1\n}\n'
