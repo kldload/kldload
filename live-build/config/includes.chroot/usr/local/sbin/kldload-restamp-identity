@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-restamp-identity — strip the previous machine's identity from a boot
+# environment that arrived by replication, so it can be booted here.
+#
+# WHY THIS EXISTS. A boot environment carries /etc wholesale. Replicate one BE
+# to twenty nodes and every one of them wakes up with the same machine-id, the
+# same SSH host keys and the same NetworkManager connections. Nothing errors.
+# They boot, and then collide: journald and dbus key off machine-id, every SSH
+# client that ever trusted one of them now trusts all of them, and connections
+# pinned to the source's MAC never come up at all. kldload has already fought
+# this with VM clones — unique machine-id per clone, DHCP client-id from MAC
+# rather than DUID — and a BE update is the same problem arriving by a
+# different route.
+#
+# HOW IT DIFFERS FROM kldload-seal. seal prepares a GOLDEN for unknown
+# hardware, so it removes /etc/hostid and lets the new machine generate one.
+# That is exactly wrong here: this BE is going to boot on a machine that
+# ALREADY OWNS ITS POOL, and ZFS checks the hostid. Strip it and every import
+# announces the pool was last accessed by another system. So the hostid is
+# PRESERVED by default, and --new-hostid is opt-in for the case where the BE
+# really is going to different hardware.
+#
+# What it clears, and what regenerates it on first boot:
+#   /etc/machine-id            systemd-machine-id-setup
+#   /var/lib/dbus/machine-id   dbus
+#   /etc/ssh/ssh_host_*        sshd-keygen.service
+#   journal + wtmp/btmp        nothing; they are the old machine's history
+#   NM mac-address= pins       removed; the MAC is certainly wrong here
+#
+# Inputs : --dataset DS (mounted temporarily) or --root DIR (already mounted)
+# Outputs: progress on stderr; the BE is modified in place
+# Exit   : 0 restamped and verified · 1 a step failed · 2 usage/refusal
+#
+# Notes: REFUSES to touch the running boot environment. Clearing the identity
+#        of the system you are running is not a recoverable mistake.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+DATASET=""
+ROOT=""
+NEW_HOSTNAME=""
+NEW_HOSTID=0
+
+say() { printf '%s\n' "$*" >&2; }
+die() {
+    printf 'FATAL: %s\n' "$1" >&2
+    exit "${2:-1}"
+}
+
+usage() {
+    cat >&2 <<EOF
+usage: kldload-restamp-identity (--dataset DS | --root DIR) [--hostname NAME] [--new-hostid]
+
+  --dataset DS    a boot environment to mount and restamp, e.g. rpool/ROOT/new
+  --root DIR      an already-mounted boot environment
+  --hostname NAME write this hostname into the BE
+  --new-hostid    ALSO clear /etc/hostid. Only for a BE going to DIFFERENT
+                  hardware — on this machine it makes ZFS complain that the
+                  pool was last accessed by another system.
+
+EXIT STATUS
+  0 restamped and verified   1 a step failed   2 usage, or refused
+EOF
+    exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --dataset)
+        DATASET="${2:?}"
+        shift 2
+        ;;
+    --root)
+        ROOT="${2:?}"
+        shift 2
+        ;;
+    --hostname)
+        NEW_HOSTNAME="${2:?}"
+        shift 2
+        ;;
+    --new-hostid)
+        NEW_HOSTID=1
+        shift
+        ;;
+    -h | --help) usage ;;
+    *) die "unknown argument: $1" 2 ;;
+    esac
+done
+
+[[ -n "$DATASET" || -n "$ROOT" ]] || usage
+[[ -z "$DATASET" || -z "$ROOT" ]] || die "--dataset and --root are mutually exclusive" 2
+[[ $EUID -eq 0 ]] || die "must run as root" 2
+
+# ─── refuse the running BE ───────────────────────────────────────────────────
+# Clearing the identity of the system you are running is not recoverable: the
+# machine keeps working until it reboots, then comes up with no SSH host keys
+# and a fresh machine-id, and you find out remotely.
+running="$(findmnt -no SOURCE -t zfs / 2>/dev/null || true)"
+if [[ -n "$DATASET" && -n "$running" && "$DATASET" == "$running" ]]; then
+    die "$DATASET is the RUNNING boot environment — refusing" 2
+fi
+if [[ -n "$ROOT" ]]; then
+    [[ "$(realpath "$ROOT")" != "/" ]] || die "--root / is the running system — refusing" 2
+fi
+
+# ─── mount if needed ─────────────────────────────────────────────────────────
+CLEANUP=""
+cleanup() { [[ -n "$CLEANUP" ]] && umount "$CLEANUP" 2>/dev/null || true; }
+trap cleanup EXIT
+
+if [[ -n "$DATASET" ]]; then
+    zfs list -H "$DATASET" >/dev/null 2>&1 || die "no such dataset: $DATASET" 2
+    ROOT="$(mktemp -d /tmp/restamp.XXXXXX)"
+    # -o zfsutil so ZFS mounts it where WE say rather than at its own
+    # mountpoint property, which for a BE is / and would be catastrophic.
+    mount -t zfs -o zfsutil "$DATASET" "$ROOT" || die "could not mount $DATASET at $ROOT"
+    CLEANUP="$ROOT"
+    say "mounted $DATASET at $ROOT"
+fi
+
+[[ -d "$ROOT/etc" ]] || die "$ROOT has no /etc — is that a system root?" 2
+
+# ─── strip ───────────────────────────────────────────────────────────────────
+say "restamping identity in $ROOT"
+
+: >"$ROOT/etc/machine-id"
+say "  cleared /etc/machine-id (systemd-machine-id-setup regenerates it)"
+
+rm -f "$ROOT/var/lib/dbus/machine-id"
+say "  removed /var/lib/dbus/machine-id"
+
+rm -f "$ROOT"/etc/ssh/ssh_host_*key*
+say "  removed SSH host keys (sshd-keygen regenerates them)"
+
+if ((NEW_HOSTID)); then
+    rm -f "$ROOT/etc/hostid"
+    say "  removed /etc/hostid — this BE is going to DIFFERENT hardware"
+else
+    if [[ -f "$ROOT/etc/hostid" ]]; then
+        say "  KEPT /etc/hostid: this machine owns its pool, and ZFS checks it"
+    else
+        say "  WARNING: no /etc/hostid in this BE — ZFS may warn that the pool was last accessed by another system"
+    fi
+fi
+
+# The old machine's history is not this machine's history, and it is confusing
+# to inherit. Not fatal if absent.
+rm -rf "$ROOT/var/log/journal/"* 2>/dev/null || true
+: >"$ROOT/var/log/wtmp" 2>/dev/null || true
+: >"$ROOT/var/log/btmp" 2>/dev/null || true
+say "  cleared journal and login records"
+
+# NetworkManager connections pinned to the source machine's MAC never activate
+# here. Removing the pin is safe; renaming an interface-name pin is not, so
+# that is only reported. Same rule as kldload-restore-machine.
+NMDIR="$ROOT/etc/NetworkManager/system-connections"
+if [[ -d "$NMDIR" ]]; then
+    pinned=0
+    while IFS= read -r conn; do
+        if grep -qiE '^mac-address=' "$conn" 2>/dev/null; then
+            sed -i -E '/^mac-address=/d' "$conn"
+            pinned=$((pinned + 1))
+        fi
+        if grep -qiE '^interface-name=e' "$conn" 2>/dev/null; then
+            say "  WARNING: $(basename "$conn") pins $(grep -m1 -iE '^interface-name=' "$conn") — check it matches a NIC here"
+        fi
+    done < <(find "$NMDIR" -type f -name '*.nmconnection' 2>/dev/null)
+    ((pinned)) && say "  removed $pinned MAC pin(s) from NetworkManager connections"
+fi
+
+if [[ -n "$NEW_HOSTNAME" ]]; then
+    printf '%s\n' "$NEW_HOSTNAME" >"$ROOT/etc/hostname"
+    say "  hostname set to $NEW_HOSTNAME"
+fi
+
+install -d -m 0755 "$ROOT/etc/kldload"
+printf 'restamped=%s\nfrom=%s\n' "$(date -Is)" "$(hostname)" >"$ROOT/etc/kldload/restamp.info"
+
+# ─── verify the OUTCOME ──────────────────────────────────────────────────────
+fail=0
+check() {
+    if eval "$2" >/dev/null 2>&1; then
+        say "  ok    $1"
+    else
+        say "  FAIL  $1"
+        fail=1
+    fi
+}
+say "verifying:"
+check "machine-id is empty" "test ! -s '$ROOT/etc/machine-id'"
+check "no SSH host keys remain" "! ls '$ROOT'/etc/ssh/ssh_host_*key* 2>/dev/null | grep -q ."
+check "no dbus machine-id" "test ! -e '$ROOT/var/lib/dbus/machine-id'"
+if ((NEW_HOSTID)); then
+    check "hostid cleared" "test ! -e '$ROOT/etc/hostid'"
+else
+    check "hostid preserved" "test -e '$ROOT/etc/hostid'"
+fi
+[[ -n "$NEW_HOSTNAME" ]] &&
+    check "hostname is $NEW_HOSTNAME" "grep -qx '$NEW_HOSTNAME' '$ROOT/etc/hostname'"
+
+((fail == 0)) || die "restamp completed but verification FAILED above"
+say "OK: identity restamped. First boot regenerates machine-id and SSH host keys."
