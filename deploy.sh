@@ -1138,6 +1138,30 @@ cmd_pxe_serve() {
         log "  $(printf '%-12s %s' "$f" "$(numfmt --to=iec "$(stat -c%s "$root/kldload/$f")")")"
     done
 
+    # Can this initrd actually netboot? The generated cmdline says
+    # root=live:http://..., which only the dracut "livenet" module understands.
+    # kldload ISOs boot themselves with root=live:CDLABEL=KLDLOAD and ship
+    # dmsquash-live WITHOUT livenet, so the machine loads the kernel and initrd,
+    # then dies with "dracut: FATAL: Don't know how to handle
+    # 'root=live:http://...'" and powers off about six seconds in. It looks like
+    # a hardware fault and is not one (fiend, 2026-09-09).
+    #
+    # Refuse loudly rather than hand back a config that bricks a boot: a netboot
+    # that cannot work must not look identical to one that can.
+    if command -v lsinitrd >/dev/null 2>&1; then
+        if ! lsinitrd "$root/kldload/initrd.img" 2>/dev/null | grep -q 'livenet'; then
+            log "  FATAL: this initrd has no dracut 'livenet' module, so it cannot fetch"
+            log "         root=live:http://... . It would load, then refuse to continue and"
+            log "         power the machine off a few seconds in."
+            log "         Fix: rebuild the ISO's initramfs with --add livenet, or chainload"
+            log "         the ISO itself with iPXE sanboot so it boots by CDLABEL as designed."
+            die "pxe-serve: initrd cannot netboot (no livenet)"
+        fi
+        log "  initrd has livenet: it can fetch the rootfs over HTTP"
+    else
+        log "  WARN: no lsinitrd, so the initrd's netboot capability WAS NOT CHECKED"
+    fi
+
     # iPXE binary, if the distro ships one. Not fatal: an operator may already
     # have one on their TFTP server.
     local _ipxe
@@ -1154,15 +1178,27 @@ cmd_pxe_serve() {
 set base ${base}
 set seedfile \${net0/mac:hexhyp}.env
 
+# ip=dhcp rd.neednet=1: root=live:http://... is fetched by dracut from INSIDE
+# the initramfs, which has no network unless asked. Without these the kernel
+# and initrd load fine, the screen goes blank, and nothing is ever requested —
+# the server sees the kernel fetched and then silence (fiend, 2026-09-09).
+#
 # Ask for this machine's answers FIRST. A 404 means it is not armed, and we
 # must neither download the rootfs nor let the installer near its disk. iPXE
 # treats a failed imgfetch as an error, so || sends us to :notarmed and the
 # firmware moves on to the next boot device.
-imgfetch \${base}/answers/\${seedfile} armed || goto notarmed
+# --name, not a trailing word: "imgfetch URL armed" passes "armed" as an
+# ARGUMENT to the fetched image rather than naming it, so the image ends up
+# named after the URL and the imgfree below fails on a name that does not
+# exist. iPXE aborts the script there, which reads as "could not boot image"
+# on the console and drops the machine back to its local disk — after
+# successfully fetching the answers file, so the logs look like it worked.
+# (fiend, 2026-09-09)
+imgfetch --name armed \${base}/answers/\${seedfile} || goto notarmed
 imgfree armed
 
 echo kldload: \${net0/mac:hexhyp} is armed — installing
-kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img rd.live.image kldload.seed=\${base}/answers/\${seedfile} console=tty0
+kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img rd.live.image ip=dhcp rd.neednet=1 kldload.seed=\${base}/answers/\${seedfile} console=tty0
 initrd \${base}/kldload/initrd.img
 boot
 
@@ -1170,6 +1206,16 @@ boot
 echo kldload: \${net0/mac:hexhyp} is not armed — continuing boot order
 exit
 IPXE
+
+    # Which interface carries the address clients will fetch from.
+    local _pxe_ip _pxe_iface
+    _pxe_ip="$(sed -n 's|http://\([0-9.]*\):.*|\1|p' <<<"$base")"
+    _pxe_iface="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$_pxe_ip" '$4 ~ "^"ip"/" {print $2; exit}')"
+    if [[ -z "$_pxe_iface" ]]; then
+        _pxe_iface="$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+        log "  WARN: could not match $_pxe_ip to an interface; using ${_pxe_iface:-none}"
+    fi
+    log "  dnsmasq will bind interface $_pxe_iface"
 
     cat >"$root/dnsmasq.conf" <<DNS
 # kldload netboot — proxyDHCP, so this answers PXE alongside the network's
@@ -1180,18 +1226,40 @@ IPXE
 #
 port=0
 log-dhcp
+# Bind to the ONE interface that serves this subnet, not to every address.
+# A kldload host runs libvirt, whose own dnsmasq already holds :67 on virbr0,
+# so an unbound instance dies with "failed to bind DHCP server socket: Address
+# already in use" and the netboot silently never answers (onyx, 2026-09-09).
+interface=${_pxe_iface}
+bind-interfaces
 enable-tftp
 tftp-root=$root/ipxe
 # Chain: firmware loads ipxe.efi over TFTP, iPXE then loads boot.ipxe over
 # HTTP. The tag test stops iPXE chainloading itself in a loop.
 dhcp-range=$(sed -n 's|http://\([0-9.]*\):.*|\1|p' <<<"$base"),proxy
 dhcp-match=set:ipxe,175
-dhcp-boot=tag:!ipxe,ipxe-x86_64.efi
+# proxyDHCP advertises boot options with pxe-service, NOT dhcp-boot alone.
+# With only dhcp-boot a proxy sees the client's PXEClient vendor class, logs
+# it, and offers nothing back — the machine retries forever and never fetches
+# anything. Measured against fiend's UEFI client (Arch:00007) on 2026-09-09.
+# Both architectures are advertised: 00000 is legacy BIOS, 00007/00009 are
+# x64 UEFI.
+pxe-service=tag:!ipxe,x86PC,"kldload netboot (BIOS)",undionly.kpxe
+pxe-service=tag:!ipxe,x86-64_EFI,"kldload netboot (UEFI)",ipxe-x86_64.efi
+pxe-service=tag:!ipxe,BC_EFI,"kldload netboot (UEFI)",ipxe-x86_64.efi
+# Once iPXE itself is running it identifies as option 175 and is handed the
+# script over HTTP instead of another chainload, which is what stops a loop.
 dhcp-boot=tag:ipxe,$base/boot.ipxe
 DNS
 
     log "pxe-serve: tree ready"
-    printf '\n  Serve it:      cd %s && python3 -m http.server 8080\n' "$root" >&2
+    # The port comes from $base, not a literal: pxe-serve regenerates
+    # boot.ipxe and dnsmasq.conf for whatever --url says, and printing 8080
+    # here sent the operator to start the server on a port nothing referenced.
+    local _port
+    _port="$(sed -n 's|.*:\([0-9]\{1,5\}\)$|\1|p' <<<"$base")"
+    [[ -n "$_port" ]] || _port=80
+    printf '\n  Serve it:      cd %s && python3 -m http.server --bind 0.0.0.0 %s\n' "$root" "$_port" >&2
     printf '  PXE/DHCP:      sudo dnsmasq --conf-file=%s/dnsmasq.conf --no-daemon\n' "$root" >&2
     printf '  Arm a machine: ./deploy.sh pxe-arm <mac> --answers <file>\n\n' >&2
 }
