@@ -284,16 +284,61 @@ bootenv_list() {
 # Args: name (snapshot name without @)
 # ---------------------------------------------------------------------------
 
+# bootenv_create NAME — make a real, separately bootable boot environment.
+#
+# A snapshot alone is NOT a boot environment. It used to be all this did, and
+# the consequence was that bootenv_activate could not work: activate sets
+# bootfs to the DATASET part of its argument, so activating a snapshot of the
+# running BE just set bootfs to the dataset that was already booting — a no-op
+# wearing the name of a safety net. The only verb that actually recovered
+# anything was rollback, which is `zfs rollback -r`: it destroys every snapshot
+# newer than the target and cannot be undone. That is the wrong thing to reach
+# for at 3am on a machine you are already unsure about (2026-09-09).
+#
+# So: snapshot AND clone. The clone is a sibling dataset under the same parent,
+# which is what ZFSBootMenu enumerates, so both environments appear at boot and
+# picking the old one is a menu choice rather than a destructive operation. It
+# costs nothing until the two diverge.
+#
+# The snapshot keeps its old name (<active>@NAME), so anything that depended on
+# the previous behaviour still finds what it expects.
 bootenv_create() {
     local name="$1"
-    [[ -n "$name" ]] || die "bootenv_create: snapshot name required"
+    [[ -n "$name" ]] || die "bootenv_create: name required"
+    # The name becomes a dataset path component; reject anything that would
+    # escape it or collide with the snapshot separator.
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+        die "bootenv_create: implausible name '$name' (letters, digits, . _ - only)"
 
-    local ds snap
+    local ds parent snap clone
     ds="$(_bootenv_active_dataset)"
+    parent="${ds%/*}"
     snap="${ds}@${name}"
-    log "Creating boot environment: $snap"
+    clone="${parent}/${name}"
+
+    zfs list -H "$clone" >/dev/null 2>&1 &&
+        die "bootenv_create: $clone already exists"
+
+    log "Creating boot environment: $clone (from $snap)"
     run zfs snapshot "$snap"
-    log "Boot environment created: $snap"
+    # canmount=noauto and mountpoint=/ so it is bootable but does not mount
+    # itself over the running root. Both are taken from the ACTIVE BE rather
+    # than assumed, because a layout that differs here does not boot.
+    run zfs clone \
+        -o canmount=noauto \
+        -o "mountpoint=$(zfs get -H -o value mountpoint "$ds" 2>/dev/null || echo /)" \
+        "$snap" "$clone"
+
+    # Verify the OUTCOME: a create that reports success and leaves nothing
+    # bootable is the failure this whole change exists to prevent.
+    zfs list -H "$clone" >/dev/null 2>&1 ||
+        die "bootenv_create: $clone was not created"
+    local cm
+    cm="$(zfs get -H -o value canmount "$clone" 2>/dev/null)"
+    [[ "$cm" == "noauto" ]] ||
+        log "WARNING: $clone has canmount=$cm — it may mount over the running root"
+    log "Boot environment created: $clone"
+    log "  activate it with: kbe activate $clone   (then reboot; the current one stays selectable)"
 }
 
 # ---------------------------------------------------------------------------
@@ -301,15 +346,42 @@ bootenv_create() {
 # Args: snapshot or dataset name (e.g. rpool/ROOT/default@name)
 # ---------------------------------------------------------------------------
 
+# bootenv_activate TARGET — point the pool at a boot environment for next boot.
+#
+# TARGET may be a dataset or a snapshot; the dataset part is what bootfs takes.
+# Passing a snapshot of the RUNNING environment is accepted but changes nothing,
+# and says so, because silently doing nothing is how this was mistaken for a
+# working rollback.
 bootenv_activate() {
-    local snapshot="$1"
-    [[ -n "$snapshot" ]] || die "bootenv_activate: snapshot required"
+    local target="$1"
+    [[ -n "$target" ]] || die "bootenv_activate: a boot environment is required"
 
-    # Extract the dataset portion (before @)
-    local dataset="${snapshot%%@*}"
-    log "Activating boot environment: dataset=$dataset (from $snapshot)"
+    local dataset="${target%%@*}"
+    zfs list -H "$dataset" >/dev/null 2>&1 ||
+        die "bootenv_activate: no such boot environment: $dataset"
+
+    local mp
+    mp="$(zfs get -H -o value mountpoint "$dataset" 2>/dev/null)"
+    [[ "$mp" == "/" ]] ||
+        die "bootenv_activate: $dataset has mountpoint=$mp, not / — it would not boot"
+
+    local current
+    current="$(_bootenv_active_dataset)"
+    if [[ "$dataset" == "$current" ]]; then
+        log "NOTE: $dataset is already the running boot environment — nothing to change."
+        log "      To fall back to an earlier one, activate a DIFFERENT dataset"
+        log "      (kbe list), or create one first with: kbe create <name>"
+    fi
+
+    log "Activating boot environment: $dataset"
     run zpool set "bootfs=${dataset}" rpool
-    log "Boot environment activated: $dataset"
+
+    # Outcome, not exit code.
+    local now
+    now="$(zpool get -H -o value bootfs rpool 2>/dev/null)"
+    [[ "$now" == "$dataset" ]] ||
+        die "bootenv_activate: bootfs is '$now', not '$dataset' — the change did not stick"
+    log "Boot environment activated: $dataset (takes effect on reboot)"
 }
 
 # ---------------------------------------------------------------------------
