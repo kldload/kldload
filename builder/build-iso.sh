@@ -108,6 +108,29 @@ log "Date:       $BUILD_DATE"
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 LOG_FILE="$LOG_DIR/build-${PROFILE}-${ARCH}-${BUILD_DATE}.log"
 
+# git refuses to touch a repository owned by a different UID — "fatal: detected
+# dubious ownership" — and exits 128, killing the build. Every source cache
+# under live-build/ lives on the HOST and is owned by the operator, while git
+# in here runs as root, so this fires for each one in turn: it killed a build
+# on zxplore-cache after 1169 packages had installed, and the next build on
+# vmxplore-cache after that (2026-09-09). Declaring it once covers the caches
+# that exist and the ones added later.
+#
+# Safe here specifically because this is a THROWAWAY build container over the
+# operator's own trees — not a blanket exception on a real machine.
+git config --global --add safe.directory '*' || true # non-fatal: the git calls below report the real problem
+
+# Go stamps VCS metadata by shelling out to git, and that git call happens
+# INSIDE the chroot where the safe.directory above does not exist — root's
+# gitconfig lives on the builder, not in $ROOTFS. So the ownership check fires
+# again and go dies with "error obtaining VCS status: exit status 128", after
+# every dependency has been downloaded (2026-09-09, on the vmxplore build).
+#
+# Turned off rather than worked around: every binary here already stamps its
+# own identity with -ldflags -X main.buildNum=<commit>, so VCS stamping adds
+# nothing and only introduces a git dependency into a Go build.
+export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
+
 # ---------------------------------------------------------------------------
 # Clean previous state — delete the old ISO FIRST so that if this build fails
 # partway through, no stale ISO remains that could be mistaken for a successful
