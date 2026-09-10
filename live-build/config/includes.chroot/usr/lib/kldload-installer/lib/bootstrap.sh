@@ -2354,10 +2354,32 @@ CUSTOMREPO
         # defined, so the same code works online (all present) and offline (only
         # [fedora] + [kldload-darksite] present -> we just disable [fedora]).
         _fed_has_repo() { grep -rqsE "^\[${1}\]" "${target}/etc/yum.repos.d/" 2>/dev/null; }
-        if _fed_has_repo updates; then
-            _fed_repo_flags+=(--setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' --setopt='updates.enabled=0')
+        # Disabling the ONLINE Fedora repos only makes sense when a LOCAL
+        # mirror has replaced them. That is true for a darksite payload, where
+        # [kldload-darksite] carries everything. It is NOT true for
+        # PAYLOAD=net, which ships no mirror at all — and disabling [fedora]
+        # and [updates] there leaves only [zfs], so dnf reports "nothing
+        # provides make / diffutils / sysstat / libunwind.so.8" and pass 3
+        # dies with "target will not boot". Every Fedora net install failed
+        # this way (netbooting fiend, 2026-09-09).
+        #
+        # skip_if_unavailable=True makes it worse by hiding the cause: a repo
+        # that cannot load is dropped silently, so the symptom appears as
+        # missing packages rather than missing repositories.
+        if _fed_has_repo kldload-darksite; then
+            k_log_to "$log" "Local darksite mirror present — disabling the online Fedora repos"
+            if _fed_has_repo updates; then
+                _fed_repo_flags+=(--setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' --setopt='updates.enabled=0')
+            fi
+            if _fed_has_repo fedora; then _fed_repo_flags+=(--setopt='fedora.enabled=0'); fi
+        else
+            k_log_to "$log" "No local darksite mirror — the online Fedora repos stay ENABLED (this is a net install)"
+            # Still exclude the packages that break a ZFS-root install, but do
+            # not take the repo away.
+            if _fed_has_repo updates; then
+                _fed_repo_flags+=(--setopt='updates.excludepkgs=selinux-policy*,policycoreutils*')
+            fi
         fi
-        if _fed_has_repo fedora; then _fed_repo_flags+=(--setopt='fedora.enabled=0'); fi
         if _fed_has_repo fedora-cisco-openh264; then _fed_repo_flags+=(--setopt='fedora-cisco-openh264.enabled=0'); fi
         if _fed_has_repo updates-testing; then _fed_repo_flags+=(--setopt='updates-testing.enabled=0'); fi
         if _fed_has_repo updates-debuginfo; then _fed_repo_flags+=(--setopt='updates-debuginfo.enabled=0'); fi
