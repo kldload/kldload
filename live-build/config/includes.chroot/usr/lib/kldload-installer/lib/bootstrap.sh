@@ -2194,8 +2194,46 @@ CUSTOMREPO
         if [[ "$_zfsrel_ok" == "1" && "$_zfsrel_actual" != "${_fedora_rel}" ]]; then
             local _zfs_repo="${target}/etc/yum.repos.d/zfs.repo"
             if [[ -f "$_zfs_repo" ]]; then
-                sed -i "s|fedora/\\\$releasever|fedora/${_zfsrel_actual}|g" "$_zfs_repo"
+                # TWO substitutions, not one. The baseurl is
+                # ".../fedora/$releasever/..." — a SLASH — but the gpgkey is
+                # ".../RPM-GPG-KEY-openzfs-fedora-$releasever" — a HYPHEN.
+                # Pinning only the slash form fixed the download and left the
+                # key expanding to 44, and the target only ships keys through
+                # 43. dnf then downloads all 450 packages and dies at the very
+                # end with "cannot open file: (2) - No such file or directory
+                # [/etc/pki/rpm-gpg/RPM-GPG-KEY-openzfs-fedora-44]", so pass 3
+                # fails and the install aborts with "target will not boot".
+                # Found netbooting fiend, 2026-09-09.
+                sed -i -e "s|fedora/\\\$releasever|fedora/${_zfsrel_actual}|g" \
+                    -e "s|fedora-\\\$releasever|fedora-${_zfsrel_actual}|g" "$_zfs_repo"
                 k_log_to "$log" "Hardcoded zfs.repo to fedora/${_zfsrel_actual} (target releasever ${_fedora_rel} has no zfsonlinux build)"
+
+                # Verify the key the repo now names actually exists, rather
+                # than discovering it 450 packages later.
+                local _zfs_key="${target}/etc/pki/rpm-gpg/RPM-GPG-KEY-openzfs-fedora-${_zfsrel_actual}"
+                if [[ ! -f "$_zfs_key" ]]; then
+                    k_log_to "$log" "WARNING: zfs.repo names a gpgkey that is not on the target: ${_zfs_key#"$target"}"
+                    k_log_to "$log" "         pass 3 will fail at the end of the transaction unless this exists."
+                fi
+
+                # dnf --installroot resolves a file:// gpgkey against the HOST,
+                # not the installroot. zfs-release installs its keys INTO the
+                # target, and the live ISO carries none of them, so dnf
+                # downloads all 450 packages, starts the transaction, and dies
+                # with "cannot open file: (2) - No such file or directory
+                # [/etc/pki/rpm-gpg/RPM-GPG-KEY-openzfs-fedora-NN]". The
+                # install then aborts with "target will not boot", which reads
+                # like a ZFS build failure and is really a missing file on the
+                # wrong filesystem. Copying the keys across is the whole fix —
+                # verified by re-running pass 3 by hand on fiend, which then
+                # completed (2026-09-09).
+                if compgen -G "${target}/etc/pki/rpm-gpg/RPM-GPG-KEY-openzfs*" >/dev/null; then
+                    install -d -m 0755 /etc/pki/rpm-gpg
+                    cp -n "${target}"/etc/pki/rpm-gpg/RPM-GPG-KEY-openzfs* /etc/pki/rpm-gpg/ 2>/dev/null || true
+                    k_log_to "$log" "Copied $(ls /etc/pki/rpm-gpg/ | grep -c openzfs) openzfs gpg key(s) onto the live filesystem (dnf resolves file:// keys on the HOST)"
+                else
+                    k_log_to "$log" "WARNING: no openzfs gpg keys on the target to copy — pass 3 will fail at transaction time"
+                fi
             fi
         fi
     fi
