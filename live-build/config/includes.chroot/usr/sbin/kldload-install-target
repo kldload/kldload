@@ -1441,7 +1441,22 @@ EOF
             _iso_sha="$(sha256sum "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null |
                 awk '{print $1}' 2>/dev/null || true)"
         fi
-        _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
+        # ${_iso_path:-}, not ${_iso_path}. This line sits OUTSIDE the guard
+        # that protects the sha256 above, and _iso_path is only ever assigned
+        # when a mounted ISO is found. A NETBOOT has no mounted ISO: livenet
+        # fetches the squashfs over HTTP and none of the probed mount points
+        # exist. So this dereferenced an unset variable, set -u killed the
+        # installer, and it died at "Finalising system..." with a complete root
+        # and NO BOOTLOADER -- the worst place available to fail.
+        #
+        # fiend, 2026-09-11, the first netboot install that ever got this far.
+        # Every prior install came off USB, where the ISO is always mounted and
+        # _iso_path is always set, which is why this survived until now.
+        if [[ -n "${_iso_path:-}" ]]; then
+            _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
+        else
+            _iso_build="$(date -Iseconds)"
+        fi
         cat >"${target}/etc/kldload/install.attest" <<ATTEST
 
 [install_attestation]
