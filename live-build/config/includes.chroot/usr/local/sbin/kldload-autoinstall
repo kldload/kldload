@@ -8,8 +8,8 @@
 # To create a seed disk (32 MB FAT32, label KLDLOADSEED, contains answers.env):
 # No hyphen: a FAT label is 11 characters and KLDLOAD-SEED is 12, so
 # mkfs.vfat refuses to create it. This header told operators to make a
-# label that cannot exist. The lookup below keeps the longer spellings in
-# its candidate list because they are achievable on ext4 and cost nothing.
+# label that cannot exist until 2026-09-11; the lookup below has the
+# longer form in its candidate list anyway, so nothing breaks either way.
 #   ./deploy.sh seed-disk --answers /etc/kldload/answers/zfs-single-disk.env
 #
 # Exits 0 silently if no seed disk is found (safe to enable unconditionally).
@@ -142,9 +142,196 @@ if [[ -z "$ANSWERS_TMP" && -f /etc/kldload/autoinstall.env ]]; then
     log "Answers loaded from baked-in /etc/kldload/autoinstall.env"
 fi
 
+# ── Answers from the kernel command line ─────────────────────────────────────
+# kldload.distro=fedora kldload.profile=desktop kldload.timezone=America/Denver
+#
+# WHY: the PXE boot menu has to get the operator's choices to the installer, and
+# a cascading iPXE menu can compose a cmdline but cannot write a file on the
+# server. This is the same channel kldload.seed= already travels on, extended to
+# carry the rest of the answers, so a netboot install needs no per-MAC file at
+# all when the choices come from a menu.
+#
+# These keys OVERRIDE a seed file when both are present -- a cmdline is this
+# boot's intent, a seed is standing configuration -- and on their own they are
+# enough to drive a whole install.
+#
+# SECURITY: /proc/cmdline is world-readable on the installed system, forever, by
+# every user. A password or a pool passphrase placed there is published, not
+# configured. Those two keys are REFUSED here rather than ignored, because
+# silently dropping a password the operator believed they had set is how you get
+# a machine with a default login and nobody aware of it.
+#
+# Values are validated against a per-key pattern, not merely quoted: this file
+# is sourced by kldload-install-target under `set -a`, so an unvalidated value
+# is code execution as root during a disk wipe.
+_cmdline_raw="$(cat /proc/cmdline 2>/dev/null || true)"
+
+# Refuse secrets LOUDLY. Checked before anything else so the message is the
+# first thing in the log rather than buried under accepted keys.
+for _secret in password passphrase zfs_passphrase pw; do
+    if [[ " $_cmdline_raw " == *" kldload.${_secret}="* ]]; then
+        log "REFUSING: kldload.${_secret}= on the kernel cmdline."
+        log "  /proc/cmdline is world-readable on the installed system, permanently."
+        log "  Put secrets in the per-MAC seed file (mode 0600) instead, or set them"
+        log "  after first boot. NOT installing."
+        exit 1
+    fi
+done
+
+# ── Action dispatch: install (default), deploy, rollback ─────────────────────
+# The netboot menu offers more than "install". A machine that will not boot
+# needs its previous boot environment back; a machine being provisioned from a
+# golden wants a ZFS receive, not a package install. Both reuse this same
+# cmdline channel, and both run in the SAME live environment the installer uses.
+#
+# WHY a receive rather than an install: it is one verified artefact instead of N
+# package transactions, there is no upstream to fail, and there is no per-machine
+# DKMS build -- the slowest and most fragile part of every install. It does NOT
+# remove the package path, which is what builds the golden in the first place.
+_kld_action="$(sed -nE 's/(^|.*[[:space:]])kldload\.action=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
+_kld_source="$(sed -nE 's/(^|.*[[:space:]])kldload\.source=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
+_kld_be="$(sed -nE 's/(^|.*[[:space:]])kldload\.be=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
+_kld_pool="$(sed -nE 's/(^|.*[[:space:]])kldload\.pool=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
+_kld_disk="$(sed -nE 's/(^|.*[[:space:]])kldload\.disk=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
+_kld_host="$(sed -nE 's/(^|.*[[:space:]])kldload\.hostname=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
+: "${_kld_pool:=rpool}"
+
+if [[ -n "$_kld_action" ]]; then
+    case "$_kld_action" in
+    install) ;; # fall through to the normal path below
+    deploy)
+        # kldload.action=deploy kldload.source=host:dataset kldload.disk=/dev/X
+        [[ "$_kld_source" =~ ^[a-zA-Z0-9._-]+:[a-zA-Z0-9._/-]+$ ]] ||
+            {
+                log "REFUSING: kldload.source must be host:dataset — got '${_kld_source}'"
+                exit 1
+            }
+        [[ "$_kld_disk" =~ ^/dev/[a-zA-Z0-9/_-]{1,64}$ ]] ||
+            {
+                log "REFUSING: deploy needs kldload.disk=/dev/... (it REPARTITIONS that disk)"
+                exit 1
+            }
+        [[ -b "$_kld_disk" ]] ||
+            {
+                log "REFUSING: ${_kld_disk} is not a block device on this machine"
+                exit 1
+            }
+        [[ -x /usr/local/sbin/kldload-restore-machine ]] ||
+            {
+                log "FATAL: kldload-restore-machine is not in this image"
+                exit 1
+            }
+        _dep_host="${_kld_source%%:*}"
+        _dep_ds="${_kld_source#*:}"
+        log "DEPLOY: receiving ${_dep_ds} from ${_dep_host} onto ${_kld_disk}"
+        log "  This REPARTITIONS ${_kld_disk}. Pool: ${_kld_pool}"
+        exec /usr/local/sbin/kldload-restore-machine \
+            --archive-host "$_dep_host" --archive "$_dep_ds" \
+            --disk "$_kld_disk" --pool "$_kld_pool" \
+            ${_kld_host:+--hostname "$_kld_host"} --yes
+        ;;
+    rollback)
+        # Deliberately NOT automatic. A netboot server cannot know this
+        # machine's boot environments, and picking one blind is how you roll a
+        # machine back past the change you were trying to keep. Without an
+        # explicit kldload.be= this LISTS and stops.
+        log "ROLLBACK: importing ${_kld_pool} to inspect its boot environments"
+        if ! zpool import -N -f "$_kld_pool" 2>/dev/null && ! zpool list "$_kld_pool" >/dev/null 2>&1; then
+            log "FATAL: could not import pool '${_kld_pool}' — nothing to roll back"
+            exit 1
+        fi
+        log "  bootfs is currently: $(zpool get -H -o value bootfs "$_kld_pool" 2>/dev/null)"
+        log "  available boot environments:"
+        zfs list -H -o name -r "${_kld_pool}/ROOT" 2>/dev/null | sed 's/^/    /'
+        if [[ -z "$_kld_be" ]]; then
+            log ""
+            log "  No kldload.be= given, so NOTHING was changed."
+            log "  Re-netboot with kldload.action=rollback kldload.be=<one of the above>"
+            log "  or work here directly: the pool is imported and zfs/zpool are present."
+            exit 0
+        fi
+        zfs list -H -o name "$_kld_be" >/dev/null 2>&1 ||
+            {
+                log "REFUSING: '${_kld_be}' is not a dataset in this pool"
+                exit 1
+            }
+        log "  setting bootfs=${_kld_be}"
+        zpool set "bootfs=${_kld_be}" "$_kld_pool" ||
+            {
+                log "FATAL: could not set bootfs"
+                exit 1
+            }
+        # Outcome, not exit code.
+        [[ "$(zpool get -H -o value bootfs "$_kld_pool")" == "$_kld_be" ]] ||
+            {
+                log "FATAL: bootfs did not change"
+                exit 1
+            }
+        log "ROLLBACK complete: ${_kld_pool} will boot ${_kld_be}. Reboot when ready."
+        exit 0
+        ;;
+    *)
+        log "REFUSING: unknown kldload.action='${_kld_action}' (install|deploy|rollback)"
+        exit 1
+        ;;
+    esac
+fi
+
+# key:VARNAME:validation-regex. Anything not listed here is ignored, so a typo
+# is inert rather than surprising, and adding a key is one line.
+_cmdline_applied=0
+for _spec in \
+    "distro:KLDLOAD_DISTRO:^(arch|centos|debian|fedora|rhel|rocky|ubuntu)$" \
+    "profile:KLDLOAD_PROFILE:^[a-z][a-z0-9-]{0,31}$" \
+    "hostname:KLDLOAD_HOSTNAME:^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$" \
+    "disk:KLDLOAD_DISK:^/dev/[a-zA-Z0-9/_-]{1,64}$" \
+    "username:KLDLOAD_USERNAME:^[a-z_][a-z0-9_-]{0,31}$" \
+    "timezone:KLDLOAD_TIMEZONE:^[A-Za-z0-9+_-]{1,24}(/[A-Za-z0-9+_-]{1,24}){0,2}$" \
+    "locale:KLDLOAD_LOCALE:^[a-z]{2,3}_[A-Z]{2}\.(UTF-8|utf8)$" \
+    "keyboard:KLDLOAD_KEYBOARD_LAYOUT:^[a-z0-9-]{1,16}$" \
+    "suite:KLDLOAD_SUITE:^[a-z0-9._-]{1,32}$" \
+    "zfs:KLDLOAD_ENABLE_ZFS:^[01]$" \
+    "encrypt:KLDLOAD_ZFS_ENCRYPT:^[01]$" \
+    "topology:KLDLOAD_ZFS_TOPOLOGY:^[a-z0-9]{1,16}$" \
+    "secureboot:KLDLOAD_ENABLE_SECURE_BOOT:^[01]$" \
+    "buildimages:KLDLOAD_BUILD_IMAGES:^[01]$"; do
+    _k="${_spec%%:*}"
+    _rest="${_spec#*:}"
+    _var="${_rest%%:*}"
+    _re="${_rest#*:}"
+    # (^|.*space) so a key sitting first on the line is still matched -- the
+    # same shape kldload.seed= needed, and the same bug it had.
+    _val="$(sed -nE "s/(^|.*[[:space:]])kldload\.${_k}=([^[:space:]]*).*/\2/p" <<<"$_cmdline_raw" || true)"
+    [[ -n "$_val" ]] || continue
+    if ! [[ "$_val" =~ $_re ]]; then
+        log "REFUSING: kldload.${_k}=${_val} does not match ${_re}"
+        log "  An answers file is sourced as shell during a disk wipe. NOT installing."
+        exit 1
+    fi
+    if [[ -z "$ANSWERS_TMP" ]]; then
+        ANSWERS_TMP="$(mktemp /tmp/kldload-answers.XXXXXX.env)"
+        log "Building answers from the kernel cmdline (no seed file present)"
+    fi
+    if grep -q "^${_var}=" "$ANSWERS_TMP"; then
+        sed -i "s|^${_var}=.*|${_var}=${_val}|" "$ANSWERS_TMP"
+    else
+        printf '%s=%s\n' "$_var" "$_val" >>"$ANSWERS_TMP"
+    fi
+    log "  cmdline: ${_var}=${_val}"
+    _cmdline_applied=$((_cmdline_applied + 1))
+done
+((_cmdline_applied == 0)) || log "Applied ${_cmdline_applied} answer(s) from the kernel cmdline"
+
 if [[ -z "$ANSWERS_TMP" ]]; then
-    log "No answers file found (no seed disk, no /etc/kldload/autoinstall.env) — skipping autoinstall"
+    log "No answers file found (no seed disk, no cmdline keys, no /etc/kldload/autoinstall.env) — skipping autoinstall"
     exit 0
+fi
+
+# A cmdline-only install still has to name a distro: everything downstream keys
+# off it, and an answers file without one installs nothing while looking fine.
+if ! grep -q '^KLDLOAD_DISTRO=.' "$ANSWERS_TMP"; then
+    log "REFUSING: no KLDLOAD_DISTRO in the answers — nothing to install."
+    exit 1
 fi
 
 # ── Auto-detect disk if not set ───────────────────────────────────────────────
