@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# kldload-autoinstall — unattended installer triggered by a KLDLOAD-SEED disk.
+# kldload-autoinstall — unattended installer triggered by a KLDLOADSEED disk.
 #
 # Called by kldload-autoinstall.service on live ISO boot.
-# Scans for a FAT32 volume labelled KLDLOAD-SEED, reads answers.env from it,
+# Scans for a FAT32 volume labelled KLDLOADSEED, reads answers.env from it,
 # and runs kldload-install-target --config <answers>.
 #
-# To create a seed disk (32 MB FAT32, label KLDLOAD-SEED, contains answers.env):
+# To create a seed disk (32 MB FAT32, label KLDLOADSEED, contains answers.env):
+# No hyphen: a FAT label is 11 characters and KLDLOAD-SEED is 12, so
+# mkfs.vfat refuses to create it. This header told operators to make a
+# label that cannot exist. The lookup below keeps the longer spellings in
+# its candidate list because they are achievable on ext4 and cost nothing.
 #   ./deploy.sh seed-disk --answers /etc/kldload/answers/zfs-single-disk.env
 #
 # Exits 0 silently if no seed disk is found (safe to enable unconditionally).
@@ -87,7 +91,7 @@ if [[ -n "$SEED_URL" ]]; then
     fi
 fi
 
-[[ -n "$ANSWERS_TMP" ]] || log "Scanning for KLDLOAD-SEED disk..."
+[[ -n "$ANSWERS_TMP" ]] || log "Scanning for KLDLOADSEED disk..."
 
 SEED_DEV=""
 
@@ -148,7 +152,7 @@ fi
 if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
     grep -q "^KLDLOAD_DISK=$" "$ANSWERS_TMP"; then
     # Exclude the disks we must never wipe: the live boot medium and the
-    # KLDLOAD-SEED disk (if it's a separate USB). Picking either would brick
+    # KLDLOADSEED disk (if it's a separate USB). Picking either would brick
     # the box or destroy the very answers file that drove this install.
     _live="$(_live_disk)"
     _seed="$(_whole_disk "${SEED_DEV:-}")"
