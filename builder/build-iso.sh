@@ -3089,8 +3089,35 @@ cp "${_ic}/usr/local/sbin/kldload-autoinstall" "${ROOTFS}/usr/local/sbin/" 2>/de
 # Baked-in answers file (AI appliance builds only)
 cp "${_ic}/etc/kldload/autoinstall.env" "${ROOTFS}/etc/kldload/autoinstall.env" 2>/dev/null &&
     log "Baked-in autoinstall.env — this ISO will auto-install on boot" || true
-# Answers templates
+# debz compatibility tree. NOT the answers templates -- this comment said
+# "Answers templates" over this line for two years while the actual templates
+# shipped nowhere, which is most of why nobody spotted they were missing.
 cp -r "${_ic}/etc/kldload/debz" "${ROOTFS}/etc/kldload/" 2>/dev/null || true
+
+# Answers templates. This is what an operator on the live ISO feeds to
+# `deploy.sh seed-disk --answers ...`, and BOTH kldload-autoinstall's header
+# and seed-disk's own error message name /etc/kldload/answers/ as the place to
+# find them.
+#
+# includes.chroot is copied file by file here, not wholesale, so a file added
+# to the repo does not ship until a line names it. These four were added
+# 2026-09-07 and had never once landed in an image -- verified by mounting the
+# built squashfs on 2026-09-11, where /etc/kldload/answers did not exist at
+# all. Exactly the shape of the kfire bug, where sbin was an allow-list and the
+# tool shipped its man page but not itself.
+if [[ -d "${_ic}/etc/kldload/answers" ]]; then
+    install -d -m 0755 "${ROOTFS}/etc/kldload/answers"
+    # A glob, not a list, so the next template added to the repo ships without
+    # anyone remembering to come back here.
+    cp "${_ic}"/etc/kldload/answers/* "${ROOTFS}/etc/kldload/answers/"
+    chmod 0644 "${ROOTFS}"/etc/kldload/answers/*
+    # Outcome, not exit code: name a file that must be there and check for it.
+    [[ -f "${ROOTFS}/etc/kldload/answers/zfs-single-disk.env" ]] ||
+        die "FATAL: answers templates did not land in /etc/kldload/answers"
+    log "Answers templates installed ($(find "${ROOTFS}/etc/kldload/answers" -type f | wc -l) files)"
+else
+    die "FATAL: ${_ic}/etc/kldload/answers missing from the source tree"
+fi
 
 # Copy ALL modules-load.d configs (virtio for VM guests, uinput for Steam
 # controllers, wireguard, etc.) — wildcard so additions ship instead of
