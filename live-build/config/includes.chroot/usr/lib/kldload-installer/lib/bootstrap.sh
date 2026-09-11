@@ -2385,6 +2385,54 @@ CUSTOMREPO
         if _fed_has_repo updates-debuginfo; then _fed_repo_flags+=(--setopt='updates-debuginfo.enabled=0'); fi
     fi
 
+    # ── Repo pre-flight ──────────────────────────────────────────────────────
+    # Prove every repo this install depends on actually LOADS, before running a
+    # transaction that will silently do without it.
+    #
+    # fiend, 2026-09-11, twice in one morning with identical results: pass 1
+    # loaded only [zfs] and [fedora-updates]. The [fedora] BASE repo never
+    # loaded, and *.skip_if_unavailable=True dropped it without a word. dnf then
+    # reported "No match for argument" for grep, sed, gawk, findutils and two
+    # hundred more -- every package that lives in the base repo and not in
+    # updates -- and --skip-unavailable turned that into a clean exit. 52 of 284
+    # packages landed and pass 1 called itself successful. The first loud error
+    # came from pass 3 asking for kernel-devel, and it read as a ZFS problem.
+    #
+    # skip_if_unavailable is right for a mirror flapping mid-download. It is
+    # wrong for a repo that never loaded, because then it is not resilience, it
+    # is data loss. This check separates the two: load with it OFF, so a repo
+    # that cannot load says so here, by name, before anything is installed.
+    k_log_to "$log" "Pre-flight: loading repo metadata with skip_if_unavailable OFF..."
+    if ! dnf --installroot="${target}" --releasever="${release}" \
+        --setopt=cachedir="${target}/var/cache/dnf" \
+        --setopt='*.skip_if_unavailable=False' \
+        --disableplugin=subscription-manager --disableplugin=product-id \
+        --nogpgcheck -q makecache >>"$log" 2>&1; then
+        k_log_to "$log" "FATAL: at least one enabled repository could not be loaded."
+        k_log_to "$log" "       Installing now would silently skip every package it carries."
+        k_log_to "$log" "       The repo that failed is named in the dnf output just above."
+        return 1
+    fi
+
+    # A canary that only exists in the BASE repo. makecache passing is not
+    # enough on its own: a repo can load its metadata and still be the wrong
+    # one, and "updates loaded, base did not" is precisely the shape of the
+    # failure above. grep is in base, is not a weak dependency of anything here,
+    # and has not been rebuilt in a release cycle, so it is never in updates.
+    if [[ "${distro}" == "fedora" ]]; then
+        if ! dnf --installroot="${target}" --releasever="${release}" \
+            --setopt=cachedir="${target}/var/cache/dnf" \
+            --disableplugin=subscription-manager --disableplugin=product-id \
+            --nogpgcheck -q list --available grep >/dev/null 2>&1; then
+            k_log_to "$log" "FATAL: the Fedora BASE repo is not serving packages."
+            k_log_to "$log" "       'grep' is not visible, which means [fedora] did not load while"
+            k_log_to "$log" "       [fedora-updates] did. Installing now yields a system with no"
+            k_log_to "$log" "       grep, no sed and no kernel, and nothing would report it."
+            return 1
+        fi
+        k_log_to "$log" "Pre-flight OK: the base repo is serving (canary 'grep' resolves)"
+    fi
+
     k_log_to "$log" "Running dnf --installroot pass 1 (main, ${#_dnf_pkgs[@]} packages, profile=${_profile})..."
     # Mirror-resilience: skip_if_unavailable=True so one broken upstream mirror
     # (e.g. iweb.com returning 404/corrupt repodata, observed 2026-05-16 on .111)
@@ -2412,6 +2460,33 @@ CUSTOMREPO
             return 1
         }
 
+    # Outcome, not exit code. Pass 1 runs with --skip-broken, --skip-unavailable
+    # AND *.skip_if_unavailable=True. Together those turn any upstream hiccup
+    # into a silent partial install: a repo that will not load is dropped, every
+    # package that needed it is skipped, and dnf still exits 0.
+    #
+    # fiend, 2026-09-11: the fedora base repo had a transient mirror failure and
+    # 52 of 284 packages landed, reported as success. The target had no grep and
+    # no kmod, so systemd-udev would not resolve, so the kernel would not
+    # resolve, so pass 2 skipped everything and ALSO reported success. The first
+    # loud error came out of pass 3, two silent failures downstream of the cause,
+    # and read as a ZFS problem. It was not one.
+    #
+    # These four are the floor. Nothing else resolves without them, and their
+    # absence is exactly what made the real failure unreadable.
+    local _p1_missing=() _p1_probe
+    for _p1_probe in usr/bin/grep usr/bin/kmod usr/bin/sh usr/lib/systemd/systemd; do
+        [[ -e "${target}/${_p1_probe}" ]] || _p1_missing+=("/${_p1_probe}")
+    done
+    if ((${#_p1_missing[@]})); then
+        k_log_to "$log" "FATAL: pass 1 exited 0 but the base system is incomplete."
+        k_log_to "$log" "       Missing: ${_p1_missing[*]}"
+        k_log_to "$log" "       That is a repository which did not load, not a missing package."
+        k_log_to "$log" "       Search the log above for 'Skipping packages with broken dependencies'."
+        return 1
+    fi
+    k_log_to "$log" "pass 1 outcome verified: grep, kmod, sh and systemd are on the target"
+
     k_log_to "$log" "Running dnf --installroot pass 2 (grub2/shim/kernel, scripts skipped)..."
     local _boot_pkgs=(grub2-common grub2-tools grub2-tools-minimal grub2-pc-modules
         grub2-efi-x64 grub2-efi-x64-modules shim-x64
@@ -2431,7 +2506,43 @@ CUSTOMREPO
         "${_f44_kernel_lockout[@]}" \
         "${_boot_pkgs[@]}" \
         >>"$log" 2>&1 ||
-        k_log_to "$log" "dnf pass 2 had issues (continuing)"
+        k_log_to "$log" "dnf pass 2 had issues (continuing — the outcome check below decides)"
+
+    # Outcome, not exit code -- and note that the line above does not even check
+    # the exit code, it logs "had issues" and carries on. This is the
+    # transaction that carries the KERNEL. Continuing past it produces a pool
+    # that imports, a root that mounts, and a machine with nothing to boot,
+    # which is worse than a failed install because a failed install tells you.
+    #
+    # fiend, 2026-09-11: dnf printed "Skipping packages with broken
+    # dependencies" for kernel, kernel-core, grub2 and shim, then "Nothing to
+    # do", then exited 0. Nothing noticed until zfs-dkms asked for kernel-devel
+    # and there was no kernel to build against.
+    # Check for the kernel WHERE IT ACTUALLY LANDS AT THIS POINT, which is
+    # /lib/modules/<ver>/vmlinuz and NOT /boot/vmlinuz-<ver>.
+    #
+    # Modern Fedora ships the kernel image inside the modules directory. The
+    # /boot copy is made by kernel-install, run from the kernel's %post, and
+    # pass 2 deliberately runs with tsflags=noscripts, so /boot is legitimately
+    # empty here and gets populated later in finalization.
+    #
+    # The first version of this check looked for /boot/vmlinuz-* and aborted a
+    # perfectly good install on fiend, 2026-09-11, with all seven kernel RPMs
+    # present and a 19 MB vmlinuz sitting in the modules directory. It had been
+    # "verified" against a target with no kernel at all, where both halves were
+    # false together, and against a running root, where both were true. Neither
+    # exercised the state this installer actually produces between the two.
+    # A gate with a false positive is worse than no gate.
+    local _p2_kver=""
+    _p2_kver="$(find "${target}/lib/modules" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | head -1)"
+    if [[ -z "$_p2_kver" ]] || [[ ! -s "${target}/lib/modules/${_p2_kver}/vmlinuz" ]]; then
+        k_log_to "$log" "FATAL: pass 2 installed no kernel — this target would not boot."
+        k_log_to "$log" "       /lib/modules/*:          ${_p2_kver:-ABSENT}"
+        k_log_to "$log" "       .../${_p2_kver:-?}/vmlinuz: $([[ -s "${target}/lib/modules/${_p2_kver}/vmlinuz" ]] && echo present || echo ABSENT)"
+        k_log_to "$log" "       Almost always an upstream repo that did not load; see pass 1 above."
+        return 1
+    fi
+    k_log_to "$log" "pass 2 outcome verified: kernel ${_p2_kver} on the target ($(du -h "${target}/lib/modules/${_p2_kver}/vmlinuz" 2>/dev/null | cut -f1) vmlinuz)"
 
     # Pass 3 — zfs + zfs-dkms with scripts ON now that pass 2 has
     # installed a kernel. zfs-dkms's posttrans does the DKMS autoinstall
