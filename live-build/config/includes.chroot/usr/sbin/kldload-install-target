@@ -1767,11 +1767,49 @@ _bar() {
 }
 
 # Section header — bright blue bar + bold white title
+# ── progress publishing ─────────────────────────────────────────────
+# The installer talked only to a console nobody watches during a seeded
+# install. The web UI has a progress panel and no source to poll, so an
+# unattended install showed an empty window and looked hung -- "the gui is
+# really not doing anything" (fiend, 2026-09-12, watching a netboot install
+# that was working perfectly).
+#
+# _hdr and _ok are the two choke points: 8 phases and 58 completed steps
+# between them, so publishing here covers the whole install without touching
+# a single call site.
+#
+# /run, not /var: tmpfs, so this never writes to the disk being partitioned
+# and cannot survive to confuse the installed system.
+K_PROGRESS_DIR="${K_PROGRESS_DIR:-/run/kldload}"
+
+# k_progress_publish <kind> <text...> — never fatal. A progress file that
+# cannot be written must not take an install with it, so failures here are
+# swallowed DELIBERATELY; the install log is the real record.
+k_progress_publish() {
+    local kind="$1"
+    shift
+    mkdir -p "$K_PROGRESS_DIR" 2>/dev/null || return 0
+    case "$kind" in
+    phase) printf '%s\n' "$*" >"$K_PROGRESS_DIR/install-phase" 2>/dev/null || true ;;
+    step)
+        # Tab-separated so the UI can style the label apart from the detail.
+        local _rec
+        _rec="$(
+            IFS=$'\t'
+            printf '%s' "$*"
+        )"
+        printf '%s\t%s\n' "$(date +%s)" "$_rec" >>"$K_PROGRESS_DIR/install-steps" 2>/dev/null || true
+        ;;
+    esac
+    return 0
+}
+
 _hdr() {
     _bar
     printf '\e[1;37m  %s\e[0m\n' "$*"
     _bar
     echo
+    k_progress_publish phase "$*"
 }
 
 # Question prompt — bold white arrow + label, bright green default, white colon
@@ -1810,7 +1848,10 @@ _eg() { printf '  \e[0;37m  e.g. \e[1;36m%s\e[0m\n' "$*"; }
 _warn() { printf '\n  \e[1;33m⚠   %s\e[0m\n' "$*"; }
 
 # Confirmed value — bright green tick
-_ok() { printf '  \e[1;32m✔   %-12s\e[0;37m %s\e[0m\n' "$1" "$2"; }
+_ok() {
+    printf '  \e[1;32m✔   %-12s\e[0;37m %s\e[0m\n' "$1" "$2"
+    k_progress_publish step "$1" "$2"
+}
 
 # Error — bright red
 _err() { printf '\n  \e[1;31m✖   %s\e[0m\n' "$*"; }
