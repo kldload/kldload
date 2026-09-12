@@ -1540,31 +1540,68 @@ ATTEST
         # The artefacts are copied verbatim from the medium. No rebuild and no
         # re-extraction: what this machine booted is exactly what it serves on.
         if [[ "${KLDLOAD_KEEP_NETBOOT:-0}" == "1" ]]; then
-            if [[ -z "${_iso_path:-}" ]]; then
-                k_log "KLDLOAD_KEEP_NETBOOT=1 but no live medium is mounted — nothing to retain."
-                k_log "  A netboot install fetches the rootfs over HTTP and never lands it on disk."
+            # Two sources, one outcome check.
+            #
+            # A USB install has the medium mounted: copy from it. A NETBOOT
+            # install has no medium at all -- livenet streams the rootfs over
+            # HTTP and never lands it on disk -- but it KNOWS where it came
+            # from: root=live:http://server/kldload/squashfs.img is on the
+            # kernel cmdline, and vmlinuz and initrd.img sit beside it in the
+            # same directory of the served tree. So fetch them from there.
+            #
+            # WHY this matters more than it looks: without it only a
+            # USB-installed machine can ever serve, so a rack is a star --
+            # forty-five sequential transfers from one box. With it, every
+            # machine that finishes becomes a server for the next, and the
+            # star becomes a tree of about six rounds. The first version of
+            # this block gave up on a netboot with a polite message (fiend,
+            # 2026-09-11) and that is exactly the topology it locked in.
+            local _nb="${target}/var/lib/kldload/netboot" _nb_src="" _nb_url="" _nb_ok=1 _name
+            if [[ -n "${_iso_path:-}" ]]; then
+                _nb_src="medium"
             else
-                local _nb="${target}/var/lib/kldload/netboot" _src _dst _nb_ok=1
+                _nb_url="$(sed -nE 's/(^|.*[[:space:]])root=live:(https?:\/\/[^[:space:]]+)\/[^[:space:]\/]+.*/\2/p' /proc/cmdline 2>/dev/null)"
+                [[ -n "${_nb_url}" ]] && _nb_src="url"
+            fi
+            if [[ -z "${_nb_src}" ]]; then
+                k_log "KLDLOAD_KEEP_NETBOOT=1 but there is no live medium and no root=live:http URL"
+                k_log "  on the cmdline, so there is nothing to retain from."
+            else
                 install -d -m 0755 "${_nb}"
-                for _src in images/pxeboot/vmlinuz images/pxeboot/initrd.img LiveOS/squashfs.img; do
-                    _dst="${_nb}/$(basename "${_src}")"
-                    if [[ -f "${_iso_path}/${_src}" ]]; then
-                        cp -f "${_iso_path}/${_src}" "${_dst}" && chmod 0644 "${_dst}" || _nb_ok=0
+                for _name in vmlinuz initrd.img squashfs.img; do
+                    if [[ "${_nb_src}" == medium ]]; then
+                        case "${_name}" in
+                        squashfs.img) _from="${_iso_path}/LiveOS/${_name}" ;;
+                        *) _from="${_iso_path}/images/pxeboot/${_name}" ;;
+                        esac
+                        if [[ -f "${_from}" ]]; then
+                            cp -f "${_from}" "${_nb}/${_name}" || _nb_ok=0
+                        else
+                            k_log "  netboot payload: ${_name} is not on this medium"
+                            _nb_ok=0
+                        fi
                     else
-                        k_log "  netboot payload: ${_src} is not on this medium"
-                        _nb_ok=0
+                        # -f: a 404 is an error, not an HTML file named squashfs.img.
+                        k_log "  fetching ${_name} from ${_nb_url}/"
+                        curl -fsSL --retry 3 --retry-delay 2 -o "${_nb}/${_name}" \
+                            "${_nb_url}/${_name}" || _nb_ok=0
                     fi
+                    chmod 0644 "${_nb}/${_name}" 2>/dev/null || true
                 done
                 # Outcome, not exit code. A truncated squashfs netboots another
                 # machine into a kernel panic halfway across the room, and the
-                # copy that produced it exited 0.
+                # copy that produced it exited 0. The magic check catches the
+                # other classic: a proxy or captive portal answering 200 with
+                # a page of HTML where a filesystem should be.
                 if ((_nb_ok == 1)) &&
-                    [[ -s "${_nb}/vmlinuz" && -s "${_nb}/initrd.img" && -s "${_nb}/squashfs.img" ]]; then
+                    [[ -s "${_nb}/vmlinuz" && -s "${_nb}/initrd.img" && -s "${_nb}/squashfs.img" ]] &&
+                    [[ "$(head -c 4 "${_nb}/squashfs.img" 2>/dev/null)" == "hsqs" ]]; then
                     printf '%s\n' "${_iso_ver:-unknown}" >"${_nb}/VERSION"
-                    k_log "Netboot payload retained ($(du -sh "${_nb}" 2>/dev/null | cut -f1)) in /var/lib/kldload/netboot"
+                    printf '%s\n' "${_nb_src}${_nb_url:+ ${_nb_url}}" >"${_nb}/SOURCE"
+                    k_log "Netboot payload retained ($(du -sh "${_nb}" 2>/dev/null | cut -f1)) from ${_nb_src} in /var/lib/kldload/netboot"
                     k_log "  this machine can serve the same image to others over PXE"
                 else
-                    k_log "WARNING: could not retain the netboot payload — this machine cannot serve PXE."
+                    k_log "WARNING: could not retain the netboot payload from ${_nb_src} — this machine cannot serve PXE."
                     rm -rf "${_nb}"
                 fi
             fi
