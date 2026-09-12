@@ -71,7 +71,16 @@ LOG_FILES  = {
     "firstboot": "/var/log/kldload/firstboot.log",
     "autoboot":  "/var/log/kldload/autobootstrap.log",
     "audit":     "/var/log/kldload/audit.log",
+    "autoinstall": "/var/log/installer/autoinstall.log",
 }
+
+# The log a SEEDED install writes. A netboot or answers-file install is driven
+# by kldload-autoinstall, a unit this webui never spawns, so nothing attaches a
+# _stream_proc to it and the install panel has no source of log lines. Tailing
+# this is what gives the operator progress on an install they did not start
+# from the UI. Offsets are per-connection so a reconnect replays from the top.
+SEEDED_INSTALL_LOG = "/var/log/installer/autoinstall.log"
+_SEEDED_LOG_OFFSET: dict = {}
 
 # ── State database ─────────────────────────────────────────────────────────────
 
@@ -2110,6 +2119,46 @@ async def ws_handler(websocket):
                             state["rc"] = None
                     except Exception:
                         pass
+                    # A seeded install is running but this webui never spawned
+                    # it, so the panel had nothing to draw: the UI correctly
+                    # knew an install was in flight and rendered an empty box,
+                    # which reads exactly like a stall. fiend, 2026-09-11 --
+                    # operator watched a healthy install and reported "the gui
+                    # came up with install process but all blank", twice, then
+                    # "installer seems hung" on a machine that had already
+                    # finished. Tail the installer's own log and emit it in the
+                    # same shape _stream_proc uses, so the existing renderer
+                    # displays it with no change to the UI.
+                    if state.get("running"):
+                        try:
+                            _p = Path(SEEDED_INSTALL_LOG)
+                            if _p.exists():
+                                _key = id(websocket)
+                                _off = _SEEDED_LOG_OFFSET.get(_key, 0)
+                                _sz = _p.stat().st_size
+                                # Truncated or rotated: start over rather than
+                                # seek past the end and go permanently silent.
+                                if _sz < _off:
+                                    _off = 0
+                                if _sz > _off:
+                                    with _p.open("r", errors="replace") as _f:
+                                        _f.seek(_off)
+                                        _chunk = _f.read(65536)
+                                        _SEEDED_LOG_OFFSET[_key] = _f.tell()
+                                    for _ln in _chunk.splitlines():
+                                        if _ln.strip():
+                                            await websocket.send(json.dumps({
+                                                "type": "log_line",
+                                                "target": "install",
+                                                "line": _ln,
+                                            }))
+                        except Exception:
+                            # An unreadable installer log must not break the
+                            # state reply the UI polls for; the panel simply
+                            # stays empty, which is the status quo, not worse.
+                            pass
+                    else:
+                        _SEEDED_LOG_OFFSET.pop(id(websocket), None)
                     await websocket.send(json.dumps({"type": "install_state", **state}))
                 # 'rhel_creds_prefill' action removed in build #49+ — no
                 # Dashboard panel storing RHEL creds anymore. The Install-
