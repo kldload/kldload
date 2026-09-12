@@ -216,10 +216,23 @@ cmd_serve() {
     log "      next-server/bootfile, disable those there or the target gets two answers."
 
     install -d -m 0755 "$ROOT/kldload" "$ROOT/answers" "$ROOT/armed" "$ROOT/golden" "$ROOT/ipxe" "$ROOT/tmp"
-    local f
+    local f _mode
     for f in vmlinuz initrd.img squashfs.img; do
         ln -f "$PAYLOAD/$f" "$ROOT/kldload/$f" 2>/dev/null ||
             ln -sf "$PAYLOAD/$f" "$ROOT/kldload/$f"
+        # nginx runs UNPRIVILEGED. A payload file root can read and the worker
+        # cannot is an HTTP 403, and iPXE prints that as "Operation not
+        # permitted" with no mention of permissions -- which reads exactly like
+        # a network fault and sends you hunting NIC drivers.
+        #
+        # onyx, 2026-09-12: a payload taken off the ISO arrived with vmlinuz
+        # 0755 and initrd.img 0600, so the kernel loaded and the initrd 403'd.
+        # The installer happens to write 0644, which is why this never showed
+        # up serving a retained payload.
+        chmod a+r "$PAYLOAD/$f" 2>/dev/null || true # read-only source is fine if it is already a+r
+        _mode="$(stat -Lc%a "$ROOT/kldload/$f" 2>/dev/null || echo 000)"
+        (((8#$_mode & 8#004) != 0)) ||
+            die "$ROOT/kldload/$f is mode $_mode — the web server runs unprivileged and cannot read it; iPXE would report the 403 as 'Operation not permitted'"
     done
 
     _stage_ipxe
