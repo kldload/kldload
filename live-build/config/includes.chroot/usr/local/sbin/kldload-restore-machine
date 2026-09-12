@@ -48,6 +48,7 @@ trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 ARCHIVE_HOST=""
 ARCHIVE=""
+ARCHIVE_URL=""
 DISK=""
 POOL="rpool"
 POOL_EXPLICIT=0
@@ -70,12 +71,17 @@ die() {
 usage() {
     cat >&2 <<EOF
 usage: kldload-restore-machine --archive-host HOST --archive DATASET --disk DEV --yes
+       kldload-restore-machine --archive-url URL --disk DEV --yes
                                [--pool NAME] [--hostname NAME] [--esp-size SIZE]
                                [--ssh-key PATH] [--dry-run]
 
   --archive-host HOST   the backup host holding the replica (it does the send).
                         Use "local" when running ON the backup host itself.
   --archive DATASET     the archived tree, e.g. rpool/backup/fiend
+  --archive-url URL     INSTEAD of host+dataset: a zfs send stream served over
+                        HTTP, e.g. http://server:8080/golden/srv.zfs as written
+                        by kldload-netboot-server golden. No ssh, no keys: this
+                        is how a netbooted machine clones a golden onto itself.
   --disk DEV            target disk. REPARTITIONED. e.g. /dev/nvme0n1
   --pool NAME           pool to create (default: rpool)
   --hostname NAME       hostname to write into the restored system
@@ -104,6 +110,10 @@ while [[ $# -gt 0 ]]; do
         ;;
     --archive)
         ARCHIVE="${2:?}"
+        shift 2
+        ;;
+    --archive-url)
+        ARCHIVE_URL="${2:?}"
         shift 2
         ;;
     --disk)
@@ -148,7 +158,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -n "$ARCHIVE_HOST" && -n "$ARCHIVE" && -n "$DISK" ]] || usage
+if [[ -n "$ARCHIVE_URL" ]]; then
+    [[ -z "$ARCHIVE_HOST" && -z "$ARCHIVE" ]] ||
+        die "--archive-url replaces --archive-host/--archive; give one or the other" 2
+    [[ "$ARCHIVE_URL" =~ ^https?://[A-Za-z0-9._:/-]+$ ]] ||
+        die "implausible --archive-url: $ARCHIVE_URL" 2
+    [[ -n "$DISK" ]] || usage
+else
+    [[ -n "$ARCHIVE_HOST" && -n "$ARCHIVE" && -n "$DISK" ]] || usage
+fi
+# One label for every "from where" message below, whichever transport.
+ARCHIVE_DESC="${ARCHIVE_URL:-${ARCHIVE_HOST}:${ARCHIVE}}"
 ((ASSUME_YES || DRY_RUN)) || die "--yes is required: $DISK will be repartitioned" 2
 
 # ─── manifest ────────────────────────────────────────────────────────────────
@@ -188,7 +208,15 @@ run() {
 # itself, which is how you bring a machine up as a VM beside its own archive
 # without needing the replacement hardware yet. Everywhere else this is an ssh
 # prefix, so the rest of the script does not care which it is.
-if [[ "$ARCHIVE_HOST" == "local" || "$ARCHIVE_HOST" == "-" ]]; then
+ARCHIVE_IS_URL=0
+if [[ -n "$ARCHIVE_URL" ]]; then
+    # An HTTP stream has no shell on the far side, and nothing below may
+    # assume one: archive_sh dying loudly is the guard against a future edit
+    # that forgets this transport exists.
+    ARCHIVE_IS_URL=1
+    ARCHIVE_IS_LOCAL=0
+    archive_sh() { die "internal: archive_sh called on an HTTP archive ($1)" 1; }
+elif [[ "$ARCHIVE_HOST" == "local" || "$ARCHIVE_HOST" == "-" ]]; then
     ARCHIVE_IS_LOCAL=1
     archive_sh() { sh -c "$1"; }
 else
@@ -207,11 +235,22 @@ fi
 zpool list -H -o name 2>/dev/null | grep -qx "$POOL" &&
     die "a pool named $POOL is already imported here" 2
 
-((ARCHIVE_IS_LOCAL)) || "${ssh_c[@]}" true 2>/dev/null ||
-    die "cannot reach archive host $ARCHIVE_HOST" 2
-src_count="$(archive_sh "zfs list -H -o name -r '$ARCHIVE' 2>/dev/null | wc -l")"
-((src_count > 0)) || die "$ARCHIVE_HOST:$ARCHIVE holds no datasets" 2
-say "archive: ${ARCHIVE_HOST}:${ARCHIVE} — ${src_count} datasets"
+if ((ARCHIVE_IS_URL)); then
+    # HEAD first: a 404 or a refused connection is a two-second answer, not a
+    # repartitioned disk followed by an empty receive. Content-Length is the
+    # only size hint an HTTP stream offers, so it is what gets reported.
+    url_len="$(curl -fsSI --connect-timeout 10 "$ARCHIVE_URL" 2>/dev/null |
+        awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r' | tail -1)"
+    [[ -n "$url_len" ]] || die "archive URL does not answer: $ARCHIVE_URL" 2
+    ((url_len > 0)) || die "archive URL is empty: $ARCHIVE_URL" 2
+    say "archive: ${ARCHIVE_URL} — $(numfmt --to=iec "$url_len") stream"
+else
+    ((ARCHIVE_IS_LOCAL)) || "${ssh_c[@]}" true 2>/dev/null ||
+        die "cannot reach archive host $ARCHIVE_HOST" 2
+    src_count="$(archive_sh "zfs list -H -o name -r '$ARCHIVE' 2>/dev/null | wc -l")"
+    ((src_count > 0)) || die "$ARCHIVE_HOST:$ARCHIVE holds no datasets" 2
+    say "archive: ${ARCHIVE_HOST}:${ARCHIVE} — ${src_count} datasets"
+fi
 
 # ─── 2. partition ────────────────────────────────────────────────────────────
 # ESP first so its partition number is stable, and because the pool takes
@@ -248,7 +287,7 @@ say "creating pool $POOL on $ZPART"
 run zpool create -f -o ashift=12 -O compression=lz4 -O mountpoint=none \
     -R "$ALTROOT" "$POOL" "$ZPART"
 
-say "receiving from ${ARCHIVE_HOST}:${ARCHIVE}"
+say "receiving from ${ARCHIVE_DESC}"
 # syncoid, not a single `zfs send -R`, and for a reason that is not obvious:
 #
 #   * -R implies properties, and ZFS refuses properties on an encrypted send
@@ -265,24 +304,47 @@ say "receiving from ${ARCHIVE_HOST}:${ARCHIVE}"
 # by the archive host that holds the key, and the NEW pool applies its own
 # encryption policy. --skip-parent because the pool root already exists here.
 # (All three measured on onyx, 2026-09-09.)
-SYNCOID="$(command -v syncoid || echo /usr/local/sbin/syncoid)"
-[[ -x "$SYNCOID" ]] || die "syncoid not found — it is how the tree is received" 2
-if ((DRY_RUN)); then
-    say "  would run: $SYNCOID --recursive --skip-parent --no-sync-snap <archive> $POOL"
-else
-    syncoid_args=(--recursive --skip-parent --no-sync-snap
-        --recvoptions="u x readonly x canmount")
-    [[ -n "$SSH_IDENTITY" ]] && syncoid_args+=(--sshkey "$SSH_IDENTITY")
-    if ((ARCHIVE_IS_LOCAL)); then
-        src="$ARCHIVE"
+# The HTTP transport is different in kind: the stream was made with
+# `zfs send -R` on the SERVER (kldload-netboot-server golden), which is fine
+# there because a golden is sealed and unencrypted -- the encrypted-archive
+# objections above do not apply. -d strips the source pool name so a stream
+# of goldpool/ROOT/x lands as $POOL/ROOT/x; -u leaves everything unmounted
+# under the altroot; -F because the freshly created pool root already exists
+# and the stream's top dataset must land on it. All three verified on onyx
+# with two loop pools, 2026-09-11. The stall guard aborts a server that
+# accepts and then stops sending; a hard --max-time would be wrong for a
+# multi-GB golden on a slow link.
+if ((ARCHIVE_IS_URL)); then
+    if ((DRY_RUN)); then
+        say "  would run: curl $ARCHIVE_URL | zfs receive -F -d -u $POOL"
     else
-        src="${ARCHIVE_HOST}:${ARCHIVE}"
+        curl -fsSL --retry 3 --retry-delay 2 --speed-time 60 --speed-limit 102400 "$ARCHIVE_URL" |
+            zfs receive -F -d -u "$POOL" ||
+            say "WARNING: receive pipeline exited non-zero; the verification below decides"
+        got="$(zfs list -H -o name -r "$POOL" | wc -l)"
+        ((got > 1)) || die "nothing was received into $POOL from $ARCHIVE_URL"
+        say "  received: ${got} datasets"
     fi
-    "$SYNCOID" "${syncoid_args[@]}" "$src" "$POOL" ||
-        say "WARNING: syncoid exited non-zero; the verification below decides"
-    got="$(zfs list -H -o name -r "$POOL" | wc -l)"
-    ((got > 1)) || die "nothing was received into $POOL"
-    say "  received: ${got} datasets"
+else
+    SYNCOID="$(command -v syncoid || echo /usr/local/sbin/syncoid)"
+    [[ -x "$SYNCOID" ]] || die "syncoid not found — it is how the tree is received" 2
+    if ((DRY_RUN)); then
+        say "  would run: $SYNCOID --recursive --skip-parent --no-sync-snap <archive> $POOL"
+    else
+        syncoid_args=(--recursive --skip-parent --no-sync-snap
+            --recvoptions="u x readonly x canmount")
+        [[ -n "$SSH_IDENTITY" ]] && syncoid_args+=(--sshkey "$SSH_IDENTITY")
+        if ((ARCHIVE_IS_LOCAL)); then
+            src="$ARCHIVE"
+        else
+            src="${ARCHIVE_HOST}:${ARCHIVE}"
+        fi
+        "$SYNCOID" "${syncoid_args[@]}" "$src" "$POOL" ||
+            say "WARNING: syncoid exited non-zero; the verification below decides"
+        got="$(zfs list -H -o name -r "$POOL" | wc -l)"
+        ((got > 1)) || die "nothing was received into $POOL"
+        say "  received: ${got} datasets"
+    fi
 fi
 
 # ─── 4. make the tree look like a machine ────────────────────────────────────
@@ -444,4 +506,4 @@ trap - EXIT
 zpool export "$POOL" 2>/dev/null || true
 
 ((fail == 0)) || die "restore completed but verification FAILED above — do not reboot into this yet"
-say "OK: $POOL restored from ${ARCHIVE_HOST}:${ARCHIVE} and verified. Reboot into it."
+say "OK: $POOL restored from ${ARCHIVE_DESC} and verified. Reboot into it."

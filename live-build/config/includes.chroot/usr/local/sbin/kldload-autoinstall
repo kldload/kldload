@@ -194,18 +194,36 @@ _kld_be="$(sed -nE 's/(^|.*[[:space:]])kldload\.be=([^[:space:]]*).*/\2/p' <<<"$
 _kld_pool="$(sed -nE 's/(^|.*[[:space:]])kldload\.pool=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
 _kld_disk="$(sed -nE 's/(^|.*[[:space:]])kldload\.disk=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
 _kld_host="$(sed -nE 's/(^|.*[[:space:]])kldload\.hostname=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
+_kld_url="$(sed -nE 's/(^|.*[[:space:]])kldload\.archive-url=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
 : "${_kld_pool:=rpool}"
 
 if [[ -n "$_kld_action" ]]; then
     case "$_kld_action" in
     install) ;; # fall through to the normal path below
     deploy)
-        # kldload.action=deploy kldload.source=host:dataset kldload.disk=/dev/X
-        [[ "$_kld_source" =~ ^[a-zA-Z0-9._-]+:[a-zA-Z0-9._/-]+$ ]] ||
-            {
-                log "REFUSING: kldload.source must be host:dataset — got '${_kld_source}'"
-                exit 1
-            }
+        # kldload.action=deploy kldload.disk=/dev/X and ONE of:
+        #   kldload.source=host:dataset   (ssh; the archive host sends)
+        #   kldload.archive-url=http://…  (a golden stream over HTTP; no keys --
+        #                                  what kldload-netboot-server arm-deploy
+        #                                  writes, so a rack clones without ssh)
+        if [[ -n "$_kld_url" ]]; then
+            [[ -z "$_kld_source" ]] ||
+                {
+                    log "REFUSING: give kldload.source OR kldload.archive-url, not both"
+                    exit 1
+                }
+            [[ "$_kld_url" =~ ^https?://[A-Za-z0-9._:/-]+$ ]] ||
+                {
+                    log "REFUSING: kldload.archive-url is not a plain http(s) URL — got '${_kld_url}'"
+                    exit 1
+                }
+        else
+            [[ "$_kld_source" =~ ^[a-zA-Z0-9._-]+:[a-zA-Z0-9._/-]+$ ]] ||
+                {
+                    log "REFUSING: kldload.source must be host:dataset — got '${_kld_source}'"
+                    exit 1
+                }
+        fi
         [[ "$_kld_disk" =~ ^/dev/[a-zA-Z0-9/_-]{1,64}$ ]] ||
             {
                 log "REFUSING: deploy needs kldload.disk=/dev/... (it REPARTITIONS that disk)"
@@ -233,6 +251,14 @@ if [[ -n "$_kld_action" ]]; then
         # exec replaces this shell: anything we would have cleaned up must go
         # now. A seed file fetched earlier can hold KLDLOAD_PASSWORD.
         [[ -n "${ANSWERS_TMP:-}" && -f "$ANSWERS_TMP" ]] && rm -f "$ANSWERS_TMP"
+        if [[ -n "$_kld_url" ]]; then
+            log "DEPLOY: receiving golden ${_kld_url} onto ${_kld_disk}"
+            log "  This REPARTITIONS ${_kld_disk}. Pool: ${_kld_pool}"
+            exec /usr/local/sbin/kldload-restore-machine \
+                --archive-url "$_kld_url" \
+                --disk "$_kld_disk" --pool "$_kld_pool" \
+                ${_kld_host:+--hostname "$_kld_host"} --yes
+        fi
         _dep_host="${_kld_source%%:*}"
         _dep_ds="${_kld_source#*:}"
         log "DEPLOY: receiving ${_dep_ds} from ${_dep_host} onto ${_kld_disk}"
