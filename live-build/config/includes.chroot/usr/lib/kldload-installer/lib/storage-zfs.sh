@@ -739,7 +739,27 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
         k_zfs_log "Created user home dataset: rpool/home/${KLDLOAD_USERNAME}"
     fi
     zfs create -o mountpoint=/srv rpool/srv
-    zfs create -o mountpoint=/opt rpool/opt
+
+    # /opt STAYS IN THE BOOT ENVIRONMENT, and this is why there is no
+    # rpool/opt here any more.
+    #
+    # /opt on this tree is not operator data, it is PACKAGED software. I
+    # measured it rather than assuming: on fiend, 2026-09-12, /opt held 255
+    # files and rpm owned all 255 of them (google-chrome-stable, which is the
+    # browser kldload-webview drives). /srv by contrast held 4 files and rpm
+    # owned none, so /srv keeps its own dataset.
+    #
+    # With /opt outside the BE, the package database rolls back and /opt does
+    # not, which is the .137 failure (see /var/lib below) pointing the other
+    # way: rpm says Chrome 152, disk has 153. The operator-visible half is
+    # worse than the bookkeeping -- roll back to undo a Chrome upgrade that
+    # broke the webview and the broken Chrome is still there, because the
+    # rollback never covered the files. Snapshots are CoW, so carrying /opt
+    # inside the BE costs nothing until the two versions actually diverge.
+    #
+    # It was here because the OpenZFS root-on-ZFS HOWTO creates rpool/opt in
+    # its data-dataset block. That guide also puts /var/lib outside the BE,
+    # which is the bug this tree already had to fix.
 
     zfs create -o canmount=off -o mountpoint=/usr rpool/usr
     zfs create -o mountpoint=/usr/local rpool/usr/local

@@ -1988,6 +1988,61 @@ if [[ -d "$_di_src" ]]; then
     fi
 fi
 
+# ── Boot-environment coverage ───────────────────────────────────────────────
+# Which directories a rollback actually reverts is decided by one property in
+# the installer, and getting it wrong is silent in both directions.
+#
+# .137, 2026-08-26: /var/lib was its own dataset, so a rollback removed seven
+# binaries from /usr (inside the BE) and left the package database outside it.
+# dpkg reported 1128 packages instead of 1117 and listed all seven as
+# installed. `apt-get check` passed, because it validates dependencies and not
+# file presence.
+#
+# fiend, 2026-09-12: the same mistake pointing the other way. /opt was its own
+# dataset and every one of its 255 files belonged to google-chrome-stable --
+# the browser kldload-webview drives. Proven in a file-backed pool: roll the BE
+# back and /opt keeps the NEW Chrome while the database says the old one, so a
+# rollback meant to undo a Chrome upgrade leaves the broken Chrome in place.
+#
+# So: anything holding packaged files stays in the BE, and this asserts it from
+# the source rather than from an installed machine.
+_section "Boot-environment coverage"
+
+_be_src="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/storage-zfs.sh"
+if [[ ! -r "$_be_src" ]]; then
+    _fail "BE coverage" "cannot read storage-zfs.sh — this check DID NOT RUN"
+else
+    _be_bad=()
+    while IFS= read -r _be_line; do
+        _be_mp="${_be_line#*mountpoint=}"
+        _be_mp="${_be_mp%% *}"
+        _be_mp="${_be_mp%\"}"
+        _be_mp="${_be_mp#\"}"
+        case "$_be_mp" in
+        /opt | /opt/*)
+            _be_bad+=("/opt must stay inside the BE (packaged software): ${_be_line#"${_be_line%%[![:space:]]*}"}")
+            ;;
+        /usr | /var/lib)
+            [[ "$_be_line" == *canmount=off* ]] ||
+                _be_bad+=("$_be_mp needs canmount=off or it shadows the BE: ${_be_line#"${_be_line%%[![:space:]]*}"}")
+            ;;
+        esac
+    done < <(grep -E '^[[:space:]]*zfs create .*mountpoint=' "$_be_src")
+
+    # The invariant has a second half: those two containers must still EXIST,
+    # because deleting the lines entirely would also pass the loop above.
+    for _be_need in "mountpoint=/usr rpool/usr" "mountpoint=/var/lib rpool/var/lib"; do
+        grep -q "canmount=off .*$_be_need" "$_be_src" ||
+            _be_bad+=("missing container: zfs create -o canmount=off -o $_be_need")
+    done
+
+    if ((${#_be_bad[@]} == 0)); then
+        _pass "BE coverage: no dataset shadows a packaged path inside the boot environment"
+    else
+        _fail "BE coverage" "$(printf '%s\n' "${_be_bad[@]}")"
+    fi
+fi
+
 # ── Behavioural units (installer/security fixes the ISO checks can't reach) ──
 _section "Behavioural Units"
 if bash "$ROOT/tests/smoke-unit.sh"; then
