@@ -1034,18 +1034,36 @@ build_golden() {
     # Create a sparse (-s) ZFS zvol — only consumes space for written blocks.
     # 64k volblocksize matches the qcow2 cluster size for efficient raw import.
     # lz4 compression is nearly free on modern CPUs and saves ~40% on OS images.
+    # -p creates ${POOL}/vms when it is missing. Without it this failed with
+    # "parent does not exist" on any host that never built images before --
+    # and because the error was sent to /dev/null and the failure swallowed by
+    # `|| true`, the script carried on and died ten seconds later claiming the
+    # zvol DEVICE was not found. That pointed every reader at udev. fiend,
+    # 2026-09-11: a fresh install had no rpool/vms, the k8s phase reported
+    # "ZFS zvol device not found", and the real message -- one line, exact --
+    # had been discarded on the previous statement.
     log "Creating ZFS zvol (${DISK}G)..."
-    zfs create -V "${DISK}G" -s -o volblocksize=64k \
-        -o compression=lz4 "${POOL}/vms/${GOLDEN}" 2>/dev/null || true
+    local _zerr
+    if ! _zerr="$(zfs create -p -V "${DISK}G" -s -o volblocksize=64k \
+        -o compression=lz4 "${POOL}/vms/${GOLDEN}" 2>&1)"; then
+        # An existing zvol is the one harmless failure: this is re-runnable by
+        # design, and the block check below decides whether it is usable.
+        if [[ "$_zerr" == *"dataset already exists"* ]]; then
+            log "zvol ${POOL}/vms/${GOLDEN} already exists — reusing it"
+        else
+            die "could not create zvol ${POOL}/vms/${GOLDEN}: ${_zerr}"
+        fi
+    fi
 
-    # ZFS creates the zvol asynchronously — the /dev/zvol symlink may not
-    # appear immediately. Wait up to 10s for udev to create the block device.
+    # ZFS creates the device node asynchronously — the /dev/zvol symlink may
+    # not appear immediately. Wait up to 10s for udev.
     local zvol="/dev/zvol/${POOL}/vms/${GOLDEN}"
     for _ in $(seq 1 10); do
         [[ -b "$zvol" ]] && break
         sleep 1
     done
-    [[ -b "$zvol" ]] || die "ZFS zvol device not found: ${zvol}"
+    [[ -b "$zvol" ]] ||
+        die "zvol ${POOL}/vms/${GOLDEN} exists but its device node never appeared at ${zvol} (udev)"
 
     # Convert qcow2 to raw and write directly to the zvol block device.
     # This is the only full-copy in the workflow — all subsequent nodes are
