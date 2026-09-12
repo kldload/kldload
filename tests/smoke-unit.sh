@@ -158,11 +158,19 @@ _nb_unit="${CHROOT}/usr/lib/systemd/system/kldload-netboot.service"
 if [[ ! -r "$_nb_tool" || ! -r "$_nb_unit" ]]; then
     _fail "netboot unit/tool agreement" "tool or unit missing — this check DID NOT RUN"
 else
-    _nb_payload="$(sed -n 's/^PAYLOAD=//p' "$_nb_tool" | head -1)"
+    # PAYLOAD is overridable now, so it reads PAYLOAD="${NETBOOT_PAYLOAD:-/path}".
+    # Take the DEFAULT out of the parameter expansion; that is the path the unit
+    # has to agree with, since the unit's condition cannot see an env override.
+    _nb_payload="$(sed -n 's/^PAYLOAD=//p' "$_nb_tool" | head -1 |
+        sed -e 's/^"//' -e 's/"$//' -e 's/^\${[A-Z_]*:-//' -e 's/}$//')"
     _nb_cond="$(sed -n 's/^ConditionPathExists=//p' "$_nb_unit" | head -1)"
     _nb_exec="$(sed -n 's/^ExecStart=//p' "$_nb_unit" | head -1 | awk '{print $1}')"
-    if [[ -z "$_nb_payload" || -z "$_nb_cond" ]]; then
-        _fail "netboot unit/tool agreement" "could not read PAYLOAD ('${_nb_payload}') or ConditionPathExists ('${_nb_cond}')"
+    if [[ -z "$_nb_payload" ]]; then
+        _fail "netboot unit/tool agreement" "could not read PAYLOAD from the tool"
+    elif [[ -z "$_nb_cond" ]]; then
+        # No static condition is the CORRECT state: PAYLOAD is overridable, so
+        # only the tool can check it, and it dies loudly when it is missing.
+        _pass "netboot: unit carries no static payload condition (the tool checks, and can fail loudly)"
     elif [[ "${_nb_cond}" != "${_nb_payload}"/* ]]; then
         _fail "netboot unit/tool agreement" \
             "unit waits on ${_nb_cond} but the tool serves ${_nb_payload} — the unit will be SKIPPED silently"
@@ -181,6 +189,31 @@ else
         _pass "netboot: build-iso carries the unit into the image"
     else
         _fail "netboot unit" "build-iso.sh never copies kldload-netboot.service — it would not reach the ISO"
+    fi
+
+    # The LIVE image needs dnsmasq and the iPXE images too, or the key boots
+    # carrying a netboot server it cannot run: serve dies staging the images.
+    # That was the state until 2026-09-12 — the deps were on the TARGET list
+    # only, so "burn one USB, provision the rack" needed a machine installed
+    # first, which is the step nobody wants.
+    if grep -qE 'dnf install -y dnsmasq ipxe-bootimgs-x86' "${ROOT}/builder/build-iso.sh"; then
+        _pass "netboot: the Fedora live image installs dnsmasq + iPXE images"
+    else
+        _fail "netboot live deps (fedora)" "build-iso.sh does not install dnsmasq/ipxe-bootimgs-x86 — a booted key cannot serve PXE"
+    fi
+    # ...and in their OWN transaction, because the package set that carries the
+    # kernel is all-or-nothing (steam-installer took linux-image with it,
+    # fiend 2026-08-15).
+    if grep -nE '^\s*(dnsmasq|ipxe-bootimgs-x86)\s*$' "${ROOT}/builder/build-iso.sh" >/dev/null 2>&1; then
+        _fail "netboot live deps (fedora)" "dnsmasq/ipxe are in the PKGS array, which installs with the kernel — one unavailable package would abort the kernel too"
+    else
+        _pass "netboot: live deps stay out of the kernel's transaction"
+    fi
+    _nb_deb="${ROOT}/live-build/config/package-lists/live-base.list.chroot"
+    if grep -qx 'dnsmasq' "$_nb_deb" && grep -qx 'ipxe' "$_nb_deb"; then
+        _pass "netboot: the Debian live image lists dnsmasq + ipxe"
+    else
+        _fail "netboot live deps (debian)" "live-base.list.chroot is missing dnsmasq and/or ipxe"
     fi
 fi
 

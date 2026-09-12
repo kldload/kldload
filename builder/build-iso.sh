@@ -2054,6 +2054,29 @@ HELMCHARTS
     chroot "${ROOTFS}" dnf install -y smartmontools >>"$LOG_FILE" 2>&1 ||
         log "  WARNING smartmontools install failed"
 
+    # Netboot serving, ON THE LIVE IMAGE — dnsmasq for proxyDHCP+TFTP and the
+    # iPXE boot images it hands out. kldload-netboot-server already ships in
+    # includes.chroot, but these two were on the TARGET's package list only, so
+    # booting the USB gave you the tool and no way to run it: serve died
+    # staging the iPXE images. With them here, the key itself provisions a
+    # rack — "burn one USB, provision the rack" without installing a machine
+    # first (2026-09-12). ~4.6 MB, and the service is off by default.
+    #
+    # Its OWN transaction, never the kernel's. `dnf install a b c` is
+    # all-or-nothing: steam-installer in the Debian base array once took
+    # linux-image, linux-headers, shim-signed and grub with it, and two
+    # machines installed "cleanly" with no kernel to load (fiend, 2026-08-15).
+    # A netboot server that cannot install must cost only itself.
+    chroot "${ROOTFS}" dnf install -y dnsmasq ipxe-bootimgs-x86 >>"$LOG_FILE" 2>&1 ||
+        log "  WARNING netboot deps install failed — this key will not be able to serve PXE"
+    # Outcome, not exit code, and the PATH rather than the package name: the
+    # package is split by arch on Fedora and named plain 'ipxe' on Debian, but
+    # _stage_ipxe looks for these exact files.
+    for _nb_need in /usr/share/ipxe/ipxe-x86_64.efi /usr/share/ipxe/undionly.kpxe /usr/sbin/dnsmasq; do
+        [[ -e "${ROOTFS}${_nb_need}" ]] ||
+            log "  WARNING netboot: ${_nb_need} is missing from the live rootfs — serve will die there"
+    done
+
     # ebpf_exporter (Cloudflare) — per-device block I/O latency histograms.
     # BPF programs + yaml configs ship via includes.chroot/etc/ebpf_exporter.
     _ebpf_tmp="$(mktemp -d)"

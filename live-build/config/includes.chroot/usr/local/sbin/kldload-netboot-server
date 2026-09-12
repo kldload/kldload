@@ -50,11 +50,18 @@
 set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-# /var/lib/kldload-netboot, NOT /var/lib/kldload/netboot: rpool/kldload/state
-# mounts at /var/lib/kldload and would shadow the payload written during the
-# install (fiend, 2026-09-11 -- 5.1G written, invisible after reboot).
-PAYLOAD=/var/lib/kldload-netboot
-ROOT=/var/lib/kldload/netboot-serve
+# PAYLOAD is where the kernel, initrd and squashfs this box was installed FROM
+# were retained. Overridable because the BUILD host has the same three files
+# already, sitting in its own output tree, and the long-term provisioning server
+# is more likely to be the always-on machine that builds the ISOs than a test
+# box that is meant to be reinstalled repeatedly. One tool, one code path, two
+# sources.
+#
+# NOT /var/lib/kldload/netboot: rpool/kldload/state mounts at /var/lib/kldload
+# and would shadow the payload written during the install (fiend, 2026-09-11 --
+# 5.1G written, invisible after reboot).
+PAYLOAD="${NETBOOT_PAYLOAD:-/var/lib/kldload-netboot}"
+ROOT="${NETBOOT_ROOT:-/var/lib/kldload/netboot-serve}"
 
 # Overridable, because the defaults encode a guess about somebody else's
 # network. The unit reads /etc/kldload/netboot.env, so these persist without
@@ -70,6 +77,26 @@ ROOT=/var/lib/kldload/netboot-serve
 #                  production side instead and answer PXE where nobody asked.
 PORT="${NETBOOT_PORT:-8080}"
 IFACE="${NETBOOT_IFACE:-}"
+
+#   NETBOOT_DHCP   proxy (default) or standalone.
+#
+#     proxy      answers PXE beside an existing DHCP server and hands out NO
+#                addresses. Right on an office LAN where pfSense or similar
+#                already owns addressing.
+#     standalone BE the DHCP server: hand out addresses AND boot options, so a
+#                kldload box provisions a rack with nothing else on the wire.
+#                This is the air-gapped case the whole darksite payload exists
+#                for -- a proxy that needs somebody else's DHCP is not
+#                self-contained, it is a plugin for their network.
+#
+#   NETBOOT_DHCP_RANGE  dnsmasq dhcp-range for standalone, e.g.
+#                       10.99.0.100,10.99.0.200,255.255.255.0,12h. Derived from
+#                       the interface's own /24 when unset; any other prefix
+#                       must be stated, because guessing a pool on somebody's
+#                       network is how you hand an address to a machine that
+#                       already had one.
+DHCP_MODE="${NETBOOT_DHCP:-proxy}"
+DHCP_RANGE="${NETBOOT_DHCP_RANGE:-}"
 
 # Kernel args every entry shares — the ISO's own hard-won line (selinux=0 or
 # the live system dies with "Failed to allocate manager object", plus the USB
@@ -113,6 +140,25 @@ _mac_norm() {
     printf '%s' "$m"
 }
 
+# _derive_range <ip> <iface> — a pool in the interface's own subnet, upper half
+# so a statically addressed server or gateway at the bottom is never handed out.
+# /24 ONLY. Anything else returns empty and the caller demands an explicit
+# range: a wrong pool on a live network is worse than a refusal to start.
+_derive_range() {
+    local ip="$1" iface="$2" prefix
+    prefix="$(ip -o -4 addr show dev "$iface" scope global 2>/dev/null |
+        awk '{split($4, a, "/"); print a[2]; exit}')"
+    [[ "$prefix" == "24" ]] || return 0
+    printf '%s.100,%s.200,255.255.255.0,12h' "${ip%.*}" "${ip%.*}"
+}
+
+# _has_default_route <iface> — is this the production side? Standing up a DHCP
+# server on the interface that carries the default route is how a lab takes an
+# office offline, so standalone refuses it unless it is forced.
+_has_default_route() {
+    ip -4 route show default 2>/dev/null | grep -qw "dev $1"
+}
+
 # ── serve ────────────────────────────────────────────────────────────────────
 cmd_serve() {
     [[ -s "$PAYLOAD/vmlinuz" && -s "$PAYLOAD/initrd.img" && -s "$PAYLOAD/squashfs.img" ]] ||
@@ -132,10 +178,32 @@ cmd_serve() {
     [[ -n "$ip" ]] || die "could not determine an address to serve on${IFACE:+ for NETBOOT_IFACE=$IFACE}"
     iface="$(_lan_iface)"
     [[ -n "$iface" ]] || die "could not match $ip to an interface"
+
+    case "$DHCP_MODE" in
+    proxy) ;;
+    standalone)
+        # Never guessed. In standalone the server decides who gets an address,
+        # and picking that interface by default route is exactly wrong.
+        [[ -n "$IFACE" ]] ||
+            die "NETBOOT_DHCP=standalone requires NETBOOT_IFACE — it hands out addresses, so it will not guess which wire"
+        if _has_default_route "$iface" && [[ "${NETBOOT_DHCP_FORCE:-0}" != 1 ]]; then
+            die "refusing to run a DHCP server on $iface: it carries the default route, so it is almost certainly the site LAN. Use a provisioning NIC, or set NETBOOT_DHCP_FORCE=1 if you mean it"
+        fi
+        [[ -n "$DHCP_RANGE" ]] || DHCP_RANGE="$(_derive_range "$ip" "$iface")"
+        [[ -n "$DHCP_RANGE" ]] ||
+            die "could not derive a pool for $ip on $iface (only a /24 is derived) — set NETBOOT_DHCP_RANGE"
+        ;;
+    *) die "NETBOOT_DHCP must be proxy or standalone, not '$DHCP_MODE'" ;;
+    esac
     local base="http://${ip}:${PORT}"
 
     log "payload  $PAYLOAD ($(numfmt --to=iec "$(stat -c%s "$PAYLOAD/squashfs.img")") rootfs, version $(cat "$PAYLOAD/VERSION" 2>/dev/null || echo '?'))"
     log "serving  $base on $iface${IFACE:+ (NETBOOT_IFACE)}"
+    if [[ "$DHCP_MODE" == standalone ]]; then
+        log "dhcp     STANDALONE — this server hands out addresses: $DHCP_RANGE"
+    else
+        log "dhcp     proxy — hands out no addresses; the site DHCP server still does that"
+    fi
     # Said every time, because the failure it causes looks like a dead network:
     # the target gets an address, fetches nothing, and reports a security
     # violation or just falls through to the next boot device.
@@ -260,16 +328,27 @@ NGINX
 }
 
 _write_dnsmasq() {
-    local iface="$1" ip="$2" base="$3"
+    local iface="$1" ip="$2" base="$3" range_line
+    if [[ "$DHCP_MODE" == standalone ]]; then
+        # A real pool. No router and no DNS option on purpose: a provisioning
+        # segment has no gateway, the installer needs nothing but this server,
+        # and advertising a route that does not exist is how an install hangs
+        # reaching for a mirror it was never going to find.
+        range_line="dhcp-range=${DHCP_RANGE}
+dhcp-authoritative"
+    else
+        range_line="dhcp-range=${ip},proxy"
+    fi
     cat >"$ROOT/dnsmasq.conf" <<DNS
-# kldload netboot — proxyDHCP. Hands out NO addresses.
+# kldload netboot — ${DHCP_MODE}. proxy hands out NO addresses; standalone IS
+# the DHCP server for this wire.
 port=0
 log-facility=$ROOT/dnsmasq.log
 interface=${iface}
 bind-interfaces
 enable-tftp
 tftp-root=$ROOT/ipxe
-dhcp-range=${ip},proxy
+${range_line}
 dhcp-match=set:ipxe,175
 pxe-service=tag:!ipxe,x86PC,"kldload netboot (BIOS)",undionly.kpxe
 pxe-service=tag:!ipxe,x86-64_EFI,"kldload netboot (UEFI)",ipxe.efi
