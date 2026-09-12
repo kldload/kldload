@@ -97,6 +97,35 @@ html.kld-app #content{margin-left:0!important;padding-left:0!important;}
    so it isn't duplicated in each. Full webui (non-app) keeps the drawer. */
 html.kld-app #term-launcher,
 html.kld-app #term-drawer{display:none!important;}
+
+#install-show{position:fixed;inset:0;z-index:9000;background:var(--bg,#0b0e13);
+  display:flex;flex-direction:column;justify-content:center;align-items:center;
+  overflow:hidden}
+/* Each slide stacks in the same place and cross-fades; only .on is visible. */
+#ishow-slides{position:relative;flex:1;width:100%;display:flex;
+  align-items:center;justify-content:center}
+.ishow-slide{position:absolute;max-width:52rem;padding:0 3rem;text-align:center;
+  opacity:0;transform:translateY(14px);transition:opacity .9s ease,transform .9s ease;
+  pointer-events:none}
+.ishow-slide.on{opacity:1;transform:none}
+.ishow-kicker{font-size:.8rem;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--accent,#4da6ff);margin-bottom:1.1rem}
+.ishow-title{font-size:2.6rem;line-height:1.15;font-weight:700;
+  color:var(--text,#e8eef6);margin-bottom:1.1rem}
+.ishow-body{font-size:1.05rem;line-height:1.65;color:var(--muted,#9aa7b8)}
+/* The strip is deliberately quiet: the show is the subject, progress is the
+   reassurance. A spinner says "wait"; a named step says "this is happening". */
+#ishow-strip{width:100%;padding:1.2rem 2.4rem 1.8rem;border-top:1px solid var(--border,#1e2734);
+  background:rgba(0,0,0,.25)}
+#ishow-phase{font-size:.95rem;color:var(--text,#e8eef6);margin-bottom:.5rem}
+#ishow-phase::before{content:"◈ ";color:var(--accent,#4da6ff)}
+#ishow-steps{display:flex;gap:1.6rem;flex-wrap:wrap;font-size:.78rem;
+  color:var(--muted,#9aa7b8);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ishow-step b{color:var(--good,#3dff88);font-weight:600}
+#ishow-brand{position:absolute;top:1.6rem;left:2.4rem;font-size:.8rem;
+  letter-spacing:.3em;text-transform:uppercase;color:var(--subtle,#6b7a8d)}
+@media (max-width:700px){.ishow-title{font-size:1.7rem}.ishow-slide{padding:0 1.4rem}}
+
 </style>
 <script>try{if(new URLSearchParams(location.search).has('app'))document.documentElement.classList.add('kld-app');}catch(e){}</script>
 </head>
@@ -11764,5 +11793,93 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
   if (el) el.textContent = 'System overview';
 });
 </script>
+<!-- ── Install show ─────────────────────────────────────────────────────────
+     A full-screen show for a SEEDED install. kldload-autoinstall is a unit the
+     webui never spawns, so the install panel had no source of log lines and an
+     unattended install sat on an empty window looking hung while it worked
+     perfectly (fiend, 2026-09-12). The installer publishes phase and steps to
+     /run/kldload now; this reads them through /api/install-progress.
+
+     It only takes over when an install is running that THIS page did not
+     start — an operator driving the installer by hand keeps the panel they
+     were using. Self-contained on purpose: no framework, no dependency, and
+     nothing it touches outside its own ids. ───────────────────────────────── -->
+<div id="install-show" style="display:none">
+  <div id="ishow-slides"></div>
+  <div id="ishow-strip">
+    <div id="ishow-phase">Starting…</div>
+    <div id="ishow-steps"></div>
+  </div>
+  <div id="ishow-brand">kldload</div>
+</div>
+
+<script>
+(function () {
+  // Content lives here rather than in the installer so a copy change is a
+  // page edit, not a rebuild of a 14GB ISO.
+  var SLIDES = [
+    ["The substrate", "ZFS from the first block",
+     "Not a filesystem you add afterwards. The pool is created before the first package lands, so boot environments, snapshots and rollback are properties of the machine rather than features bolted on."],
+    ["Undo", "A bad upgrade is a reboot away",
+     "Every system change happens inside a boot environment. If an update breaks the machine, roll back to the one that worked and reboot. No rescue USB, no reinstall."],
+    ["zxplore", "The universal ZFS console",
+     "Pools, datasets, snapshots and replication in one window, on this machine or over ssh to any other. It shows the commands it runs, so you learn the tool it is driving."],
+    ["vmxplore", "VMs that are zvols, not disk images",
+     "No qcow2, no vmdk, no image conversion. Seal a machine into a golden and clone it in milliseconds, because a clone is metadata and the blocks are shared until they diverge."],
+    ["Firecracker", "MicroVMs from the same goldens",
+     "The same golden that boots as a full VM clones into a Firecracker microVM in about two hundred milliseconds, with the isolation of a virtual machine and the start time of a container."],
+    ["klab", "A cluster out of nothing",
+     "Control planes and workers conjured as instant clones on their own encrypted backplane. Forty-five machines, each on the mesh and holding a certificate, in under four minutes."],
+    ["Darksite", "Installs with the internet unplugged",
+     "Every package, image and artefact this install needs was downloaded when the image was built and carried on the media. Nothing is fetched from a mirror that may not be there."],
+    ["Netboot", "One machine provisions the rack",
+     "The machine being installed keeps the payload it installed from, so it can serve the next one. Burn one key, and every box after it arrives over the network."]
+  ];
+
+  var wrap = document.getElementById('ishow-slides');
+  SLIDES.forEach(function (s, i) {
+    var d = document.createElement('div');
+    d.className = 'ishow-slide' + (i === 0 ? ' on' : '');
+    d.innerHTML = '<div class="ishow-kicker"></div><div class="ishow-title"></div><div class="ishow-body"></div>';
+    d.children[0].textContent = s[0];
+    d.children[1].textContent = s[1];
+    d.children[2].textContent = s[2];
+    wrap.appendChild(d);
+  });
+
+  var cur = 0, slides = wrap.children;
+  setInterval(function () {
+    if (document.getElementById('install-show').style.display === 'none') return;
+    slides[cur].classList.remove('on');
+    cur = (cur + 1) % slides.length;
+    slides[cur].classList.add('on');
+  }, 7000);
+
+  // Poll the progress the installer publishes. A seeded install is one this
+  // page did not start, so window._installStartedHere stays false and the show
+  // takes over; an operator installing by hand keeps their panel.
+  function poll() {
+    fetch('/api/install-progress', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (p) {
+        if (!p) return;
+        var show = document.getElementById('install-show');
+        if (p.running && !window._installStartedHere) show.style.display = 'flex';
+        if (!p.running) show.style.display = 'none';
+        if (p.phase) document.getElementById('ishow-phase').textContent = p.phase;
+        var last = (p.steps || []).slice(-4);
+        document.getElementById('ishow-steps').innerHTML = last.map(function (s) {
+          var b = document.createElement('b'), d = document.createElement('span');
+          b.textContent = s.label; d.textContent = ' ' + s.detail;
+          return '<span class="ishow-step">' + b.outerHTML + d.outerHTML + '</span>';
+        }).join('');
+      })
+      .catch(function () { /* the route is absent on older images; stay hidden */ });
+  }
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>
+
 </body>
 </html>
