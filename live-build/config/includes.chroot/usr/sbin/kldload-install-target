@@ -1579,7 +1579,16 @@ ATTEST
             # star becomes a tree of about six rounds. The first version of
             # this block gave up on a netboot with a polite message (fiend,
             # 2026-09-11) and that is exactly the topology it locked in.
-            local _nb="${target}/var/lib/kldload/netboot" _nb_src="" _nb_url="" _nb_ok=1 _name _from
+            # NOT /var/lib/kldload/netboot. rpool/kldload/state mounts AT
+            # /var/lib/kldload, and a dataset mounts at its own mountpoint
+            # whether or not its parent is mounted -- so anything written to
+            # that directory during the install is SHADOWED the instant the
+            # machine boots. fiend, 2026-09-11: 5.1G of payload written, the
+            # log said "retained", and the installed system had an empty
+            # directory. The files were still in the BE, invisible, and the
+            # machine could not serve. A sibling path under /var/lib is in the
+            # BE (rpool/var/lib is canmount=off) and nothing mounts over it.
+            local _nb="${target}/var/lib/kldload-netboot" _nb_src="" _nb_url="" _nb_ok=1 _name _from
             if [[ -n "${_iso_path:-}" ]]; then
                 _nb_src="medium"
             else
@@ -1627,7 +1636,16 @@ ATTEST
                     [[ "$(head -c 4 "${_nb}/squashfs.img" 2>/dev/null)" == "hsqs" ]]; then
                     printf '%s\n' "${_iso_ver:-unknown}" >"${_nb}/VERSION"
                     printf '%s\n' "${_nb_src}${_nb_url:+ ${_nb_url}}" >"${_nb}/SOURCE"
-                    k_log "Netboot payload retained ($(du -sh "${_nb}" 2>/dev/null | cut -f1)) from ${_nb_src} in /var/lib/kldload/netboot"
+                    # Outcome check for the shadowing bug itself: if any
+                    # dataset claims this path as a mountpoint, the files are
+                    # about to become invisible and "retained" would be a lie.
+                    if zfs list -H -o mountpoint 2>/dev/null | grep -qx "/var/lib/kldload-netboot"; then
+                        k_log "WARNING: a dataset mounts at /var/lib/kldload-netboot — the payload would be shadowed at boot."
+                        k_log "  Not claiming retention. This machine will not be able to serve PXE."
+                        rm -rf "${_nb}"
+                        return 0
+                    fi
+                    k_log "Netboot payload retained ($(du -sh "${_nb}" 2>/dev/null | cut -f1)) from ${_nb_src} in /var/lib/kldload-netboot"
                     k_log "  this machine can serve the same image to others over PXE"
                 else
                     k_log "WARNING: could not retain the netboot payload from ${_nb_src} — this machine cannot serve PXE."

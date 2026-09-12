@@ -4,7 +4,7 @@
 # server for the rest of a rack, entirely offline. Installs AND clones.
 #
 # WHAT IT DOES (subcommand `serve`, run by kldload-netboot.service):
-#   1. finds the retained payload in /var/lib/kldload/netboot — the kernel,
+#   1. finds the retained payload in /var/lib/kldload-netboot — the kernel,
 #      initrd and squashfs this machine was installed FROM, kept there by
 #      KLDLOAD_KEEP_NETBOOT=1 at install time;
 #   2. lays out an HTTP tree (armed/, answers/, golden/, ipxe/, boot.ipxe);
@@ -34,7 +34,7 @@
 #              --disk D [--hostname H] | golden <dataset> [as <name>]
 #              | disarm <mac> | status
 #
-# Inputs : /var/lib/kldload/netboot/{vmlinuz,initrd.img,squashfs.img}
+# Inputs : /var/lib/kldload-netboot/{vmlinuz,initrd.img,squashfs.img}
 #          iPXE images: /usr/share/ipxe (Fedora, ipxe-bootimgs-x86) or
 #          /usr/lib/ipxe (Debian/Ubuntu, ipxe) — staged as ipxe.efi/undionly.kpxe
 # Outputs: an HTTP+TFTP+proxyDHCP service on the LAN interface. proxyDHCP, so it
@@ -50,7 +50,10 @@
 set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-PAYLOAD=/var/lib/kldload/netboot
+# /var/lib/kldload-netboot, NOT /var/lib/kldload/netboot: rpool/kldload/state
+# mounts at /var/lib/kldload and would shadow the payload written during the
+# install (fiend, 2026-09-11 -- 5.1G written, invisible after reboot).
+PAYLOAD=/var/lib/kldload-netboot
 ROOT=/var/lib/kldload/netboot-serve
 PORT=8080
 
