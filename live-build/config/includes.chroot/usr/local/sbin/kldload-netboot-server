@@ -166,6 +166,37 @@ cmd_serve() {
     [[ "$(head -c 4 "$PAYLOAD/squashfs.img")" == "hsqs" ]] ||
         die "$PAYLOAD/squashfs.img is not a squashfs (bad magic) — refusing to serve a brick"
 
+    # Can this initrd actually netboot? The snippets say root=live:http://...,
+    # which only dracut's "livenet" module understands. An initrd without it
+    # loads, has no way to fetch a rootfs, brings up no network, and sits there
+    # -- so nothing reaches this server and the target is indistinguishable
+    # from one that never booted.
+    #
+    # deploy.sh's pxe-serve has refused this since 2026-09-09. THIS server did
+    # not, because they were two implementations of one idea, and the lesson
+    # only landed in one of them. onyx, 2026-09-12: a payload lifted off a USB
+    # key built six days before the livenet fix was staged here and fiend hung
+    # on it twice while three different theories about the Realtek NIC got
+    # chased. The check is one grep.
+    #
+    # grep -c, not grep -q, and the count captured rather than tested inside the
+    # pipeline: grep -q exits on first match, lsinitrd dies of SIGPIPE with 141,
+    # and under pipefail the pipeline reports THAT -- which rejected an initrd
+    # that genuinely had livenet. A gate with a false positive is worse than no
+    # gate, because it blocks the good case and teaches you to bypass it.
+    # command -v, not a have() helper: this tool has never defined one. I
+    # borrowed it from kldload-hba, where it exists, and the check silently took
+    # the else branch (2026-09-12).
+    if command -v lsinitrd >/dev/null 2>&1; then
+        local _livenet
+        _livenet="$(lsinitrd "$PAYLOAD/initrd.img" 2>/dev/null | grep -c 'livenet' || true)"
+        [[ "${_livenet:-0}" -gt 0 ]] ||
+            die "$PAYLOAD/initrd.img has no dracut 'livenet' module, so it CANNOT fetch root=live:http://... . A target would load the kernel and then hang with no network and no message. Rebuild the ISO, or point NETBOOT_PAYLOAD at an initrd that has it."
+        log "initrd   livenet present (${_livenet} entries): it can fetch the rootfs over HTTP"
+    else
+        log "WARN: lsinitrd is missing, so this initrd's netboot capability WAS NOT CHECKED"
+    fi
+
     local ip iface
     # A named interface that does not exist is an operator typo, and the
     # failure it causes further down (nginx binding nothing, dnsmasq silent) is
