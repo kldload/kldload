@@ -1,47 +1,51 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # kldload-netboot-server — turn an installed kldload machine into the netboot
-# server for the rest of a rack, entirely offline.
+# server for the rest of a rack, entirely offline. Installs AND clones.
 #
-# WHAT IT DOES, IN ORDER (subcommand `serve`, run by kldload-netboot.service):
+# WHAT IT DOES (subcommand `serve`, run by kldload-netboot.service):
 #   1. finds the retained payload in /var/lib/kldload/netboot — the kernel,
 #      initrd and squashfs this machine was installed FROM, kept there by
 #      KLDLOAD_KEEP_NETBOOT=1 at install time;
-#   2. lays out an HTTP tree around it (answers/, ipxe/, boot.ipxe);
-#   3. writes an nginx config (byte ranges on, directory listing OFF) and a
-#      dnsmasq proxyDHCP + TFTP config bound to the LAN interface;
-#   4. runs nginx and dnsmasq in the foreground under one process group so
-#      systemd owns the lifetime.
+#   2. lays out an HTTP tree (armed/, answers/, golden/, ipxe/, boot.ipxe);
+#   3. writes an nginx config (byte ranges on, listing OFF) and a dnsmasq
+#      proxyDHCP+TFTP config bound to the LAN interface;
+#   4. runs nginx and dnsmasq under systemd.
 #
-# WHY THIS EXISTS SEPARATELY FROM `deploy.sh pxe-serve`: pxe-serve extracts a
-# payload from an ISO on a build host and is 500 lines of xorriso, livenet
-# probing and cmdline derivation. None of that applies here — the payload is
-# already extracted, already validated (the installer checked the squashfs
-# magic before keeping it), and already the exact image this machine booted.
-# So this tool is only the generation-and-run half, and it means netboot no
-# longer depends on a git checkout: burn one USB, install it, and that machine
-# provisions every other box on the segment with the SAME image, no internet.
+# TWO WAYS TO ARM A TARGET, both writing armed/<mac>.ipxe (the consent token):
+#   arm-install <mac> <answers>            — netboot INSTALLS from the mirror.
+#   arm-deploy  <mac> --golden <name> --disk D — netboot RECEIVES a golden
+#                                            ("clone into existence") over HTTP.
 #
-# CONSENT MODEL (unchanged from pxe-serve): a machine installs only when
-# answers/<mac>.env exists. An unarmed box that netboots by accident fetches a
-# few hundred bytes, gets a 404, and carries on down its boot order. Arming is
-# `kldload-netboot-server arm <mac> <answers>`; disarming is `disarm <mac>`.
+# THE ARMING MECHANISM: boot.ipxe probes net0..net3 and CHAINS the first
+# armed/<mac>.ipxe it finds. That per-MAC snippet is where install and deploy
+# diverge — install carries kldload.seed=, deploy carries kldload.action=deploy
+# + kldload.archive-url=. Snippets use ${base}, which boot.ipxe sets, so arming
+# does not need to know the serve-time IP. An unarmed NIC 404s and the chain
+# falls through to the next, then to the local boot order. That 404 IS the
+# consent model: no token, no touch.
 #
-# SUBCOMMANDS: serve | arm <mac> <answers> | disarm <mac> | status
+# HTTP ALL THE WAY, NO KEYS: a clone pulls its golden as a `zfs send` stream
+# over the same nginx (kldload-restore-machine --archive-url), so a netbooted
+# target needs no ssh identity and the server needs no delegation. That is the
+# whole reason the golden transport is HTTP and not ssh.
+#
+# SUBCOMMANDS: serve | arm-install <mac> <answers> | arm-deploy <mac> --golden N
+#              --disk D [--hostname H] | golden <dataset> [as <name>]
+#              | disarm <mac> | status
 #
 # Inputs : /var/lib/kldload/netboot/{vmlinuz,initrd.img,squashfs.img}
-#          /usr/share/ipxe/*.efi + undionly.kpxe (ipxe-bootimgs package)
-# Outputs: an HTTP+TFTP+proxyDHCP service on the LAN interface; nothing else on
-#          the network hands out addresses, so it is safe beside an existing
-#          DHCP server.
+#          iPXE images: /usr/share/ipxe (Fedora, ipxe-bootimgs-x86) or
+#          /usr/lib/ipxe (Debian/Ubuntu, ipxe) — staged as ipxe.efi/undionly.kpxe
+# Outputs: an HTTP+TFTP+proxyDHCP service on the LAN interface. proxyDHCP, so it
+#          answers PXE beside the network's DHCP and never hands out addresses.
 # Exit   : 0 ok · 1 a step failed · 2 usage.
 #
 # Notes:
-#   - proxyDHCP, never a DHCP range. This must NOT replace the network's DHCP.
 #   - The NIC that netboots is not always net0 (fiend, 2026-09-11): boot.ipxe
-#     probes every interface for an armed seed rather than assuming net0.
-#   - Answers files carry KLDLOAD_PASSWORD in clear and are served unauth to the
-#     LAN. autoindex is off so the directory cannot be listed, and `arm` warns.
+#     probes every interface rather than assuming net0.
+#   - answers/ holds KLDLOAD_PASSWORD in clear and is served unauth to the LAN;
+#     autoindex is off so it cannot be listed, and arm-install warns.
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
@@ -50,16 +54,17 @@ PAYLOAD=/var/lib/kldload/netboot
 ROOT=/var/lib/kldload/netboot-serve
 PORT=8080
 
+# Kernel args every entry shares — the ISO's own hard-won line (selinux=0 or
+# the live system dies with "Failed to allocate manager object", plus the USB
+# blacklists and overlay size), followed by the netboot additions.
+ISO_ARGS='rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1 ip=dhcp rd.neednet=1 console=tty0'
+
 log() { printf '[kldload-netboot] %s\n' "$*" >&2; }
 die() {
     printf '[kldload-netboot] FATAL: %s\n' "$*" >&2
     exit 1
 }
 
-# _lan_iface — the interface carrying this host's default-route source address.
-# dnsmasq must bind ONE interface, not every address: a kldload host runs
-# libvirt, whose own dnsmasq already holds :67 on virbr0, and an unbound
-# instance dies with "Address already in use" (onyx, 2026-09-09).
 _lan_ip() { ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1; }
 _lan_iface() {
     local ip
@@ -67,17 +72,16 @@ _lan_iface() {
     ip -o -4 addr show 2>/dev/null | awk -v i="$ip" '$4 ~ "^"i"/" {print $2; exit}'
 }
 
-# _mac_file <mac> — normalise to the aa-bb-… form iPXE emits, no directory.
-_mac_file() {
+# _mac_norm <mac> — the aa-bb-… form iPXE emits with ${mac:hexhyp}, no suffix.
+_mac_norm() {
     local m="${1//:/-}"
     m="${m,,}"
     [[ "$m" =~ ^([0-9a-f]{2}-){5}[0-9a-f]{2}$ ]] || die "not a MAC address: $1"
-    printf '%s.env\n' "$m"
+    printf '%s' "$m"
 }
 
 # ── serve ────────────────────────────────────────────────────────────────────
 cmd_serve() {
-    # Outcome checks first: refuse to advertise a boot that cannot work.
     [[ -s "$PAYLOAD/vmlinuz" && -s "$PAYLOAD/initrd.img" && -s "$PAYLOAD/squashfs.img" ]] ||
         die "no retained payload in $PAYLOAD — install with KLDLOAD_KEEP_NETBOOT=1 first"
     [[ "$(head -c 4 "$PAYLOAD/squashfs.img")" == "hsqs" ]] ||
@@ -93,58 +97,67 @@ cmd_serve() {
     log "payload  $PAYLOAD ($(numfmt --to=iec "$(stat -c%s "$PAYLOAD/squashfs.img")") rootfs, version $(cat "$PAYLOAD/VERSION" 2>/dev/null || echo '?'))"
     log "serving  $base on $iface"
 
-    install -d -m 0755 "$ROOT/kldload" "$ROOT/answers" "$ROOT/ipxe" "$ROOT/tmp"
-    # Hardlink the payload into the tree so nginx serves it without a copy;
-    # fall back to a symlink across filesystems.
+    install -d -m 0755 "$ROOT/kldload" "$ROOT/answers" "$ROOT/armed" "$ROOT/golden" "$ROOT/ipxe" "$ROOT/tmp"
     local f
     for f in vmlinuz initrd.img squashfs.img; do
         ln -f "$PAYLOAD/$f" "$ROOT/kldload/$f" 2>/dev/null ||
             ln -sf "$PAYLOAD/$f" "$ROOT/kldload/$f"
     done
 
-    # iPXE binaries from the ipxe-bootimgs package. Fatal if absent: without
-    # them nothing can chainload, and a darksite install must have mirrored it.
-    local got=0 b
-    for b in /usr/share/ipxe/ipxe-x86_64.efi /usr/share/ipxe/ipxe.efi \
-        /usr/lib/ipxe/ipxe.efi /usr/share/ipxe/undionly.kpxe; do
-        [[ -f "$b" ]] && { cp -f "$b" "$ROOT/ipxe/" && got=1; }
-    done
-    ((got)) || die "no iPXE binaries in /usr/share/ipxe — install ipxe-bootimgs"
+    _stage_ipxe
 
     _write_boot_ipxe "$base"
     _write_nginx "$ip"
     _write_dnsmasq "$iface" "$ip" "$base"
 
-    log "starting nginx + dnsmasq (Ctrl-C or stop the unit to end)"
+    log "starting nginx + dnsmasq"
     nginx -c "$ROOT/nginx.conf"
-    # dnsmasq in the foreground is the process systemd tracks; nginx is already
-    # daemonised above and torn down by the trap.
     trap 'nginx -c "$ROOT/nginx.conf" -s quit 2>/dev/null || true' EXIT
     exec dnsmasq --conf-file="$ROOT/dnsmasq.conf" --no-daemon
 }
 
-# The per-MAC boot script. Probes net0..net3 for an armed seed rather than
-# assuming net0 is the interface that netbooted (verified in qemu 2026-09-11:
-# net0 boots, only net1 armed, and it correctly selects net1). imgfetch runs
-# over whatever interface already has a route; only the filename's MAC varies.
+# _stage_ipxe — put the iPXE boot images the TFTP root hands out under
+# $ROOT/ipxe with FIXED names, whatever the distro called them. Fedora ships
+# ipxe-x86_64.efi under /usr/share/ipxe (ipxe-bootimgs-x86); Debian ships
+# ipxe.efi under /usr/lib/ipxe (ipxe). dnsmasq.conf below names ipxe.efi and
+# undionly.kpxe, so the copy normalises rather than the config guessing.
+# UEFI is mandatory (every board on the rack); BIOS is a warning, because a
+# missing undionly.kpxe costs only legacy boxes and says so.
+# IPXE_DIRS is overridable so the function can be exercised on a fake tree.
+_stage_ipxe() {
+    local d uefi="" bios=""
+    for d in ${IPXE_DIRS:-/usr/share/ipxe /usr/lib/ipxe}; do
+        [[ -z "$uefi" && -f "$d/ipxe-x86_64.efi" ]] && uefi="$d/ipxe-x86_64.efi"
+        [[ -z "$uefi" && -f "$d/ipxe.efi" ]] && uefi="$d/ipxe.efi"
+        [[ -z "$bios" && -f "$d/undionly.kpxe" ]] && bios="$d/undionly.kpxe"
+    done
+    [[ -n "$uefi" ]] || die "no UEFI iPXE image in ${IPXE_DIRS:-/usr/share/ipxe /usr/lib/ipxe} — install ipxe-bootimgs-x86 (Fedora) / ipxe (Debian)"
+    cp -f "$uefi" "$ROOT/ipxe/ipxe.efi"
+    [[ -s "$ROOT/ipxe/ipxe.efi" ]] || die "ipxe.efi did not land in $ROOT/ipxe"
+    if [[ -n "$bios" ]]; then
+        cp -f "$bios" "$ROOT/ipxe/undionly.kpxe"
+    else
+        log "WARN: no undionly.kpxe found — legacy-BIOS machines cannot netboot from here (UEFI is fine)"
+    fi
+    log "ipxe     UEFI $(basename "$uefi") from $(dirname "$uefi")${bios:+, BIOS undionly.kpxe}"
+}
+
+# boot.ipxe: probe every NIC and CHAIN the first armed/<mac>.ipxe. The chained
+# snippet inherits ${base} set here, so arming needs no serve-time IP. A NIC
+# that is not armed 404s and the || moves to the next; all four exhausted goes
+# to the local boot order. net0 is not always the boot NIC (fiend 2026-09-11),
+# which is why every interface is tried.
 _write_boot_ipxe() {
     local base="$1"
     cat >"$ROOT/boot.ipxe" <<IPXE
 #!ipxe
 # Generated by kldload-netboot-server. Edit the tree, not this file.
 set base ${base}
-set seedfile
-isset \${net0/mac} && imgfetch --name probe \${base}/answers/\${net0/mac:hexhyp}.env && set seedfile \${net0/mac:hexhyp}.env && set bootmac \${net0/mac:hexhyp} ||
-isset \${seedfile} || isset \${net1/mac} && imgfetch --name probe \${base}/answers/\${net1/mac:hexhyp}.env && set seedfile \${net1/mac:hexhyp}.env && set bootmac \${net1/mac:hexhyp} ||
-isset \${seedfile} || isset \${net2/mac} && imgfetch --name probe \${base}/answers/\${net2/mac:hexhyp}.env && set seedfile \${net2/mac:hexhyp}.env && set bootmac \${net2/mac:hexhyp} ||
-isset \${seedfile} || isset \${net3/mac} && imgfetch --name probe \${base}/answers/\${net3/mac:hexhyp}.env && set seedfile \${net3/mac:hexhyp}.env && set bootmac \${net3/mac:hexhyp} ||
-imgfree probe ||
-isset \${seedfile} || goto notarmed
-
-echo kldload: \${bootmac} is armed — installing
-kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1 ip=dhcp rd.neednet=1 kldload.seed=\${base}/answers/\${seedfile} console=tty0
-initrd \${base}/kldload/initrd.img
-boot
+isset \${net0/mac} && chain \${base}/armed/\${net0/mac:hexhyp}.ipxe ||
+isset \${net1/mac} && chain \${base}/armed/\${net1/mac:hexhyp}.ipxe ||
+isset \${net2/mac} && chain \${base}/armed/\${net2/mac:hexhyp}.ipxe ||
+isset \${net3/mac} && chain \${base}/armed/\${net3/mac:hexhyp}.ipxe ||
+goto notarmed
 
 :notarmed
 echo kldload: no interface of this machine is armed — continuing boot order
@@ -153,9 +166,6 @@ IPXE
     [[ -s "$ROOT/boot.ipxe" ]] || die "boot.ipxe did not land"
 }
 
-# nginx: byte ranges (iPXE reads in pieces), autoindex OFF (answers/ holds
-# passwords in clear and must never be listable), and a generous send timeout
-# because the clients are firmware pulling multi-GB files.
 _write_nginx() {
     local ip="$1"
     cat >"$ROOT/nginx.conf" <<NGINX
@@ -169,8 +179,8 @@ http {
     access_log $ROOT/nginx-access.log;
     sendfile on;
     send_timeout 300s;
-    # Pin the runtime dirs into the tree so nginx never depends on
-    # /var/lib/nginx being writable — it is not, for a non-package instance.
+    # Pin runtime dirs into the tree; /var/lib/nginx is not writable for a
+    # non-package instance.
     client_body_temp_path $ROOT/tmp/body;
     proxy_temp_path $ROOT/tmp/proxy;
     fastcgi_temp_path $ROOT/tmp/fastcgi;
@@ -187,8 +197,6 @@ NGINX
         die "generated nginx.conf failed nginx -t"
 }
 
-# dnsmasq: proxyDHCP so it answers PXE ALONGSIDE the network's DHCP rather than
-# replacing it, bound to the one LAN interface, advertising both architectures.
 _write_dnsmasq() {
     local iface="$1" ip="$2" base="$3"
     cat >"$ROOT/dnsmasq.conf" <<DNS
@@ -202,59 +210,186 @@ tftp-root=$ROOT/ipxe
 dhcp-range=${ip},proxy
 dhcp-match=set:ipxe,175
 pxe-service=tag:!ipxe,x86PC,"kldload netboot (BIOS)",undionly.kpxe
-pxe-service=tag:!ipxe,x86-64_EFI,"kldload netboot (UEFI)",ipxe-x86_64.efi
-pxe-service=tag:!ipxe,BC_EFI,"kldload netboot (UEFI)",ipxe-x86_64.efi
+pxe-service=tag:!ipxe,x86-64_EFI,"kldload netboot (UEFI)",ipxe.efi
+pxe-service=tag:!ipxe,BC_EFI,"kldload netboot (UEFI)",ipxe.efi
 dhcp-boot=tag:ipxe,${base}/boot.ipxe
 DNS
-    # dnsmasq --test validates the config without binding anything.
     dnsmasq --test --conf-file="$ROOT/dnsmasq.conf" >/dev/null 2>&1 ||
         die "generated dnsmasq.conf failed dnsmasq --test"
 }
 
-# ── arm / disarm ───────────────────────────────────────────────────────────
-cmd_arm() {
-    local mac="${1:?usage: arm <mac> <answers-file>}" answers="${2:?usage: arm <mac> <answers-file>}"
+# ── arm-install ──────────────────────────────────────────────────────────────
+# Writes the seed the installer fetches AND a snippet whose kernel line points
+# at it. Same install as before, expressed as a per-MAC snippet.
+cmd_arm_install() {
+    local mac="${1:?usage: arm-install <mac> <answers-file>}" answers="${2:?usage: arm-install <mac> <answers-file>}"
     [[ -f "$answers" ]] || die "no such answers file: $answers"
     bash -n "$answers" || die "$answers is not valid shell"
     grep -q '^KLDLOAD_DISTRO=' "$answers" || die "$answers sets no KLDLOAD_DISTRO"
-    grep -qE '^KLDLOAD_(PASSWORD|ZFS_PASSPHRASE)=CHANGE-ME' "$answers" &&
+    ! grep -qE '^KLDLOAD_(PASSWORD|ZFS_PASSPHRASE)=CHANGE-ME' "$answers" ||
         die "$answers still holds the CHANGE-ME placeholder password — set a real one"
-    install -d -m 0755 "$ROOT/answers"
-    local name
-    name="$(_mac_file "$mac")"
-    install -m 0644 "$answers" "$ROOT/answers/$name"
-    [[ -s "$ROOT/answers/$name" ]] || die "$ROOT/answers/$name did not land"
-    log "ARMED $mac — next netboot installs $(sed -n 's/^KLDLOAD_DISTRO=//p' "$answers")/$(sed -n 's/^KLDLOAD_PROFILE=//p' "$answers")"
+    install -d -m 0755 "$ROOT/answers" "$ROOT/armed"
+    local m
+    m="$(_mac_norm "$mac")"
+    install -m 0644 "$answers" "$ROOT/answers/${m}.env"
+    [[ -s "$ROOT/answers/${m}.env" ]] || die "$ROOT/answers/${m}.env did not land"
+    cat >"$ROOT/armed/${m}.ipxe" <<IPXE
+#!ipxe
+# arm-install ${mac}. \${base} comes from boot.ipxe.
+kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img ${ISO_ARGS} kldload.seed=\${base}/answers/${m}.env
+initrd \${base}/kldload/initrd.img
+boot
+IPXE
+    [[ -s "$ROOT/armed/${m}.ipxe" ]] || die "$ROOT/armed/${m}.ipxe did not land"
+    log "ARMED-INSTALL $mac — next netboot installs $(sed -n 's/^KLDLOAD_DISTRO=//p' "$answers")/$(sed -n 's/^KLDLOAD_PROFILE=//p' "$answers")"
     if grep -qE '^KLDLOAD_(PASSWORD|ZFS_PASSPHRASE)=.+' "$answers"; then
         log "  WARN: this file carries a password, served unauthenticated to the LAN"
         log "        until you disarm: kldload-netboot-server disarm $mac"
     fi
 }
 
-cmd_disarm() {
-    local mac="${1:?usage: disarm <mac>}" name
-    name="$(_mac_file "$mac")"
-    if [[ -f "$ROOT/answers/$name" ]]; then
-        rm -f "$ROOT/answers/$name"
-        log "disarmed $mac"
+# ── arm-deploy ─────────────────────────────────────────────────────────────
+# Clone a prepared golden onto the target. No answers file, no secrets: the
+# parameters ride the kernel cmdline the installer's deploy verb already parses,
+# and the golden streams over HTTP (no keys). --disk is REQUIRED because the
+# deploy verb repartitions it and refuses to guess; identical rack boxes can
+# all take the same kernel name (/dev/nvme0n1), a mixed rack takes by-id.
+cmd_arm_deploy() {
+    local mac="${1:?usage: arm-deploy <mac> --golden <name> --disk D [--hostname H]}" golden="" disk="" host=""
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --golden)
+            golden="${2:?--golden needs a name}"
+            shift 2
+            ;;
+        --disk)
+            disk="${2:?--disk needs a value}"
+            shift 2
+            ;;
+        --hostname)
+            host="${2:?--hostname needs a value}"
+            shift 2
+            ;;
+        *) die "arm-deploy: unknown argument: $1" ;;
+        esac
+    done
+    [[ -n "$golden" ]] || die "arm-deploy: --golden <name> is required"
+    [[ -n "$disk" ]] || die "arm-deploy: --disk /dev/... is required (the deploy verb repartitions it and will not guess)"
+    [[ -f "$ROOT/golden/${golden}.zfs" ]] ||
+        die "no golden stream at $ROOT/golden/${golden}.zfs — run: kldload-netboot-server golden <dataset> as ${golden}"
+    [[ "$disk" =~ ^/dev/[a-zA-Z0-9/_-]+$ ]] ||
+        die "arm-deploy: --disk must be /dev/... (got '$disk')"
+    [[ -z "$host" || "$host" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] ||
+        die "arm-deploy: --hostname '$host' is not a valid hostname"
+    install -d -m 0755 "$ROOT/armed"
+    local m
+    m="$(_mac_norm "$mac")"
+    local diskarg=" kldload.disk=${disk}"
+    local hostarg=""
+    [[ -n "$host" ]] && hostarg=" kldload.hostname=${host}"
+    cat >"$ROOT/armed/${m}.ipxe" <<IPXE
+#!ipxe
+# arm-deploy ${mac} <- golden ${golden}. \${base} comes from boot.ipxe.
+kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img ${ISO_ARGS} kldload.action=deploy kldload.archive-url=\${base}/golden/${golden}.zfs${diskarg}${hostarg}
+initrd \${base}/kldload/initrd.img
+boot
+IPXE
+    [[ -s "$ROOT/armed/${m}.ipxe" ]] || die "$ROOT/armed/${m}.ipxe did not land"
+    log "ARMED-DEPLOY $mac — next netboot RECEIVES golden '${golden}' onto ${disk}${host:+ as $host}"
+}
+
+# ── golden ───────────────────────────────────────────────────────────────────
+# Turn a prepared dataset into a servable stream: `zfs send -R` of a fresh
+# recursive snapshot into golden/<name>.zfs; the target does curl | zfs receive
+# -F -d -u (kldload-restore-machine --archive-url). v1 is a static stream, so it
+# costs its size on disk; a send-on-connect endpoint is a later refinement.
+# The dataset must be UNENCRYPTED: -R on an encrypted dataset is refused by ZFS
+# unless raw, and a raw stream would make the clone depend on this server's
+# key. A golden is sealed and unencrypted by construction; the target applies
+# its own encryption policy on receive. zfs send fails loudly otherwise.
+cmd_golden() {
+    local dataset="${1:?usage: golden <dataset> [as <name>]}" name
+    shift || true
+    if [[ "${1:-}" == as ]]; then name="${2:?'as' needs a name}"; else name="${dataset##*/}"; fi
+    [[ "$name" =~ ^[a-zA-Z0-9._-]+$ ]] || die "golden: bad name '$name'"
+    zfs list -H -o name "$dataset" >/dev/null 2>&1 || die "no such dataset: $dataset"
+    install -d -m 0755 "$ROOT/golden"
+    local snap="${dataset}@golden-$(date +%Y%m%d%H%M%S)" out="$ROOT/golden/${name}.zfs"
+    log "snapshotting ${snap}"
+    zfs snapshot -r "$snap" || die "could not snapshot $dataset"
+    log "streaming to ${out} (this is the full golden; it takes a while)"
+    # Raw send: portable across the wire and self-contained. -R carries the
+    # whole tree under the dataset.
+    if zfs send -R "$snap" >"$out"; then
+        # Outcome, not exit code: a truncated stream fails a receive halfway.
+        [[ -s "$out" ]] || die "golden stream came out empty"
+        log "golden '${name}' ready: $(numfmt --to=iec "$(stat -c%s "$out")") at $out"
+        log "  arm a target with: kldload-netboot-server arm-deploy <mac> --golden ${name}"
     else
-        log "$mac was not armed"
+        rm -f "$out"
+        die "zfs send failed — no golden written"
     fi
+    zfs destroy -r "$snap" 2>/dev/null || log "  note: leftover snapshot $snap (destroy it manually)"
+}
+
+# ── disarm / status ──────────────────────────────────────────────────────────
+cmd_disarm() {
+    local mac="${1:?usage: disarm <mac>}" m
+    m="$(_mac_norm "$mac")"
+    local gone=0
+    [[ -f "$ROOT/armed/${m}.ipxe" ]] && {
+        rm -f "$ROOT/armed/${m}.ipxe"
+        gone=1
+    }
+    [[ -f "$ROOT/answers/${m}.env" ]] && {
+        rm -f "$ROOT/answers/${m}.env"
+        gone=1
+    }
+    ((gone)) && log "disarmed $mac" || log "$mac was not armed"
 }
 
 cmd_status() {
+    # The tree may not exist before `serve` has run: a bare `find` on a missing
+    # dir exits non-zero and trips set -e, so every listing is guarded on the
+    # directory existing first. "no tree yet" is the normal pre-serve state.
     printf 'payload : %s\n' "$([[ -s "$PAYLOAD/squashfs.img" ]] && echo "$PAYLOAD ($(cat "$PAYLOAD/VERSION" 2>/dev/null || echo '?'))" || echo 'ABSENT — install with KLDLOAD_KEEP_NETBOOT=1')"
-    printf 'service : %s\n' "$(systemctl is-active kldload-netboot.service 2>/dev/null || echo inactive)"
-    printf 'armed   : %s machine(s)\n' "$(find "$ROOT/answers" -maxdepth 1 -name '*-*-*-*-*-*.env' 2>/dev/null | wc -l)"
-    find "$ROOT/answers" -maxdepth 1 -name '*-*-*-*-*-*.env' 2>/dev/null |
-        while read -r a; do printf '          %s -> %s\n' "$(basename "$a" .env)" "$(sed -n 's/^KLDLOAD_DISTRO=//p' "$a")/$(sed -n 's/^KLDLOAD_PROFILE=//p' "$a")"; done
+    local svc
+    svc="$(systemctl is-active kldload-netboot.service 2>/dev/null)" || svc="inactive"
+    printf 'service : %s\n' "$svc"
+    if [[ -d "$ROOT/golden" ]]; then
+        printf 'goldens : %s\n' "$(find "$ROOT/golden" -maxdepth 1 -name '*.zfs' | wc -l)"
+        find "$ROOT/golden" -maxdepth 1 -name '*.zfs' |
+            while read -r g; do printf '          %s (%s)\n' "$(basename "$g" .zfs)" "$(numfmt --to=iec "$(stat -c%s "$g")")"; done
+    else
+        printf 'goldens : 0 (no tree yet — serve has not run)\n'
+    fi
+    if [[ -d "$ROOT/armed" ]]; then
+        printf 'armed   : %s machine(s)\n' "$(find "$ROOT/armed" -maxdepth 1 -name '*.ipxe' | wc -l)"
+        find "$ROOT/armed" -maxdepth 1 -name '*.ipxe' |
+            while read -r a; do
+                m="$(basename "$a" .ipxe)"
+                if grep -q 'kldload.action=deploy' "$a"; then mode="deploy ($(sed -nE 's#.*golden/([^ ]*)\.zfs.*#\1#p' "$a" | head -1))"; else mode="install"; fi
+                printf '          %s -> %s\n' "$m" "$mode"
+            done
+    else
+        printf 'armed   : 0 machine(s)\n'
+    fi
 }
 
 case "${1:-}" in
 serve) cmd_serve ;;
-arm)
+arm-install)
     shift
-    cmd_arm "$@"
+    cmd_arm_install "$@"
+    ;;
+arm-deploy)
+    shift
+    cmd_arm_deploy "$@"
+    ;;
+golden)
+    shift
+    cmd_golden "$@"
     ;;
 disarm)
     shift
@@ -262,7 +397,7 @@ disarm)
     ;;
 status) cmd_status ;;
 *)
-    printf 'usage: kldload-netboot-server serve | arm <mac> <answers> | disarm <mac> | status\n' >&2
+    printf 'usage: kldload-netboot-server serve | arm-install <mac> <answers> | arm-deploy <mac> --golden <name> --disk D [--hostname H] | golden <dataset> [as <name>] | disarm <mac> | status\n' >&2
     exit 2
     ;;
 esac
