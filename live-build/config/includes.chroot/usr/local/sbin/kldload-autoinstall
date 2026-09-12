@@ -188,12 +188,12 @@ done
 # package transactions, there is no upstream to fail, and there is no per-machine
 # DKMS build -- the slowest and most fragile part of every install. It does NOT
 # remove the package path, which is what builds the golden in the first place.
-_kld_action="$(sed -nE 's/(^|.*[[:space:]])kldload\.action=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
-_kld_source="$(sed -nE 's/(^|.*[[:space:]])kldload\.source=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
-_kld_be="$(sed -nE 's/(^|.*[[:space:]])kldload\.be=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
-_kld_pool="$(sed -nE 's/(^|.*[[:space:]])kldload\.pool=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
-_kld_disk="$(sed -nE 's/(^|.*[[:space:]])kldload\.disk=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
-_kld_host="$(sed -nE 's/(^|.*[[:space:]])kldload\.hostname=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw" || true)"
+_kld_action="$(sed -nE 's/(^|.*[[:space:]])kldload\.action=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
+_kld_source="$(sed -nE 's/(^|.*[[:space:]])kldload\.source=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
+_kld_be="$(sed -nE 's/(^|.*[[:space:]])kldload\.be=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
+_kld_pool="$(sed -nE 's/(^|.*[[:space:]])kldload\.pool=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
+_kld_disk="$(sed -nE 's/(^|.*[[:space:]])kldload\.disk=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
+_kld_host="$(sed -nE 's/(^|.*[[:space:]])kldload\.hostname=([^[:space:]]*).*/\2/p' <<<"$_cmdline_raw")"
 : "${_kld_pool:=rpool}"
 
 if [[ -n "$_kld_action" ]]; then
@@ -221,6 +221,18 @@ if [[ -n "$_kld_action" ]]; then
                 log "FATAL: kldload-restore-machine is not in this image"
                 exit 1
             }
+        if [[ -n "$_kld_host" ]] && ! [[ "$_kld_host" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]; then
+            log "REFUSING: kldload.hostname='${_kld_host}' is not a valid hostname"
+            exit 1
+        fi
+        [[ "$_kld_pool" =~ ^[a-zA-Z0-9._-]{1,64}$ ]] ||
+            {
+                log "REFUSING: kldload.pool='${_kld_pool}' is not a valid pool name"
+                exit 1
+            }
+        # exec replaces this shell: anything we would have cleaned up must go
+        # now. A seed file fetched earlier can hold KLDLOAD_PASSWORD.
+        [[ -n "${ANSWERS_TMP:-}" && -f "$ANSWERS_TMP" ]] && rm -f "$ANSWERS_TMP"
         _dep_host="${_kld_source%%:*}"
         _dep_ds="${_kld_source#*:}"
         log "DEPLOY: receiving ${_dep_ds} from ${_dep_host} onto ${_kld_disk}"
@@ -235,8 +247,18 @@ if [[ -n "$_kld_action" ]]; then
         # machine's boot environments, and picking one blind is how you roll a
         # machine back past the change you were trying to keep. Without an
         # explicit kldload.be= this LISTS and stops.
-        log "ROLLBACK: importing ${_kld_pool} to inspect its boot environments"
-        if ! zpool import -N -f "$_kld_pool" 2>/dev/null && ! zpool list "$_kld_pool" >/dev/null 2>&1; then
+        # Import READ-ONLY to look. Only a named kldload.be= needs read-write
+        # (zpool set bootfs), and only then is -f used -- forcing past an
+        # "in use by another system" claim on shared SAS is a split-brain
+        # import, so it is never done just to list.
+        if [[ -z "$_kld_be" ]]; then
+            log "ROLLBACK: importing ${_kld_pool} READ-ONLY to list its boot environments"
+            _imp_flags=(-N -o readonly=on)
+        else
+            log "ROLLBACK: importing ${_kld_pool} read-write (forced) to set bootfs=${_kld_be}"
+            _imp_flags=(-N -f)
+        fi
+        if ! zpool import "${_imp_flags[@]}" "$_kld_pool" 2>/dev/null && ! zpool list "$_kld_pool" >/dev/null 2>&1; then
             log "FATAL: could not import pool '${_kld_pool}' — nothing to roll back"
             exit 1
         fi
@@ -294,14 +316,15 @@ for _spec in \
     "encrypt:KLDLOAD_ZFS_ENCRYPT:^[01]$" \
     "topology:KLDLOAD_ZFS_TOPOLOGY:^[a-z0-9]{1,16}$" \
     "secureboot:KLDLOAD_ENABLE_SECURE_BOOT:^[01]$" \
-    "buildimages:KLDLOAD_BUILD_IMAGES:^[01]$"; do
+    "buildimages:KLDLOAD_BUILD_IMAGES:^[01]$" \
+    "keepnetboot:KLDLOAD_KEEP_NETBOOT:^[01]$"; do
     _k="${_spec%%:*}"
     _rest="${_spec#*:}"
     _var="${_rest%%:*}"
     _re="${_rest#*:}"
     # (^|.*space) so a key sitting first on the line is still matched -- the
     # same shape kldload.seed= needed, and the same bug it had.
-    _val="$(sed -nE "s/(^|.*[[:space:]])kldload\.${_k}=([^[:space:]]*).*/\2/p" <<<"$_cmdline_raw" || true)"
+    _val="$(sed -nE "s/(^|.*[[:space:]])kldload\.${_k}=([^[:space:]]*).*/\2/p" <<<"$_cmdline_raw")"
     [[ -n "$_val" ]] || continue
     if ! [[ "$_val" =~ $_re ]]; then
         log "REFUSING: kldload.${_k}=${_val} does not match ${_re}"
@@ -361,9 +384,14 @@ if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
     # masterclass is unambiguous about this -- "a pool created with /dev/sda
     # through /dev/sdx is a ticking time bomb ... use /dev/disk/by-id/ always"
     # -- because a kernel name moves when you plug in a USB stick or replace a
-    # drive at 3am. Prefers wwn- when present (firmware-independent), then a
-    # vendor/model/serial path, and falls back to the kernel name only when the
-    # device exposes no stable identity at all.
+    # drive at 3am.
+    #
+    # Prefers the vendor/model/serial path (ata-…, nvme-<model>_<serial>, scsi-…)
+    # because that is what a human reads off the label; wwn- is the fallback
+    # when no such path exists; the kernel name only when the device exposes no
+    # stable identity at all. (An earlier comment claimed wwn first -- the code
+    # never did that.) PERF: walks all of /dev/disk/by-id with a readlink per
+    # link, per disk; ~10k forks on a 45-bay chassis. Slow, not wrong.
     _disk_ident() {
         local d="$1" _l _best="" _wwn=""
         for _l in /dev/disk/by-id/*; do
@@ -428,7 +456,13 @@ if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
     # off FreeBSD.
     _disk_contents() {
         local d="$1" _pt _t _p _out=""
-        _pt="$(lsblk -dn -o PTTYPE "$d" 2>/dev/null | tr -d ' ')"
+        # lsblk failing outright means the device vanished or errors; that is
+        # "unreadable", never "empty". blkid exiting 2 (no signature) is the
+        # normal empty case and is fine; anything else is a probe failure.
+        if ! _pt="$(lsblk -dn -o PTTYPE "$d" 2>/dev/null | tr -d ' ')"; then
+            printf 'unreadable'
+            return
+        fi
         _t="$(blkid -o value -s TYPE "$d" 2>/dev/null)"
         [[ -n "$_t" ]] && _out="${_t}"
         # lsblk, not two globs: "$d"?* and "$d"p?* BOTH match nvme0n1p1, so
@@ -445,13 +479,23 @@ if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
                 _out="${_out:+$_out,}${_t}"
             fi
         done < <(lsblk -ln -o NAME,TYPE "$d" 2>/dev/null | awk '$2=="part"{print $1}')
-        # GELI: magic string in the final sector. blkid reports nothing for it,
-        # which is precisely why it has to be checked by hand.
-        if [[ -z "$_out" ]] && command -v blockdev >/dev/null 2>&1; then
-            local _sz
-            _sz="$(blockdev --getsize64 "$d" 2>/dev/null || echo 0)"
-            if ((_sz > 4096)) && dd if="$d" bs=512 count=1 skip=$(((_sz / 512) - 1)) \
-                status=none 2>/dev/null | grep -qa "GEOM::ELI"; then
+        # GELI: magic string at the start of the final PROVIDER SECTOR. blkid
+        # reports nothing for it, which is precisely why it is checked by hand.
+        # Read the last 4096 bytes, not 512: on a native-4Kn drive the last
+        # sector is 4096 wide and the magic sits at size-4096, outside a
+        # 512-byte read. abyss's da* are 512e so the short read passed there;
+        # a 4Kn SAS drive would have classified as empty (review, 2026-09-11).
+        if [[ -z "$_out" ]]; then
+            local _sz _tail
+            if ! _sz="$(blockdev --getsize64 "$d" 2>/dev/null)" || ((_sz < 8192)); then
+                # Cannot size it, or too small to carry anything: NOT "empty".
+                _out="unreadable"
+            elif ! _tail="$(dd if="$d" bs=4096 count=1 skip=$(((_sz / 4096) - 1)) status=none 2>/dev/null | tr -d '\0')"; then
+                # A read error is the signature of a dying drive, which is the
+                # most likely blank-looking disk on any chassis. Silence here
+                # used to classify it as an install candidate.
+                _out="unreadable"
+            elif [[ "$_tail" == *"GEOM::ELI"* ]]; then
                 _out="geli"
             fi
         fi
@@ -530,10 +574,12 @@ if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
     _DETECTED_ID="$(_disk_ident "$DETECTED")"
     log "Selected install disk: $DETECTED"
     [[ "$_DETECTED_ID" != "$DETECTED" ]] && log "  stable path: $_DETECTED_ID"
+    # Write the STABLE path. kldload-install-target resolves it back to a
+    # kernel name for partitioning and keeps the stable one for the manifest.
     if grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP"; then
-        sed -i "s|^KLDLOAD_DISK=.*|KLDLOAD_DISK=${DETECTED}|" "$ANSWERS_TMP"
+        sed -i "s|^KLDLOAD_DISK=.*|KLDLOAD_DISK=${_DETECTED_ID}|" "$ANSWERS_TMP"
     else
-        echo "KLDLOAD_DISK=${DETECTED}" >>"$ANSWERS_TMP"
+        echo "KLDLOAD_DISK=${_DETECTED_ID}" >>"$ANSWERS_TMP"
     fi
 fi
 
