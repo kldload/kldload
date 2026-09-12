@@ -2914,7 +2914,8 @@ ALPEOF
         kldload-srv-snapshot.service kldload-srv-snapshot.timer \
         kldload-snapshot.service kldload-snapshot.timer kldload-export.service \
         ttyd-k9s.service zexplore-api.service \
-        klab-prom-targets.service klab-prom-targets.timer; do
+        klab-prom-targets.service klab-prom-targets.timer \
+        kldload-netboot.service; do
         _src="/build/live-build/config/includes.chroot/usr/lib/systemd/system/${_svc}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/lib/systemd/system/${_svc}"
     done
