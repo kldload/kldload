@@ -1514,11 +1514,41 @@ set base ${base}
 # enumerated first. Arming both MACs was the workaround; probing is the fix.
 # \${netX/...} is empty in Fedora's build unless DHCP ran on it (checked in
 # qemu), so it is not relied on. Four NICs covers every board I have met.
+# iPXE does NOT short-circuit a chain of && / || across lines the way a shell
+# does. The first cut of this probe chained them; on fiend (2026-09-11) it
+# probed net1 after net0 had already matched, then probed net2 and net3 which
+# do not exist -- \${net2/mac:hexhyp} expands EMPTY, so it fetched
+# /answers/.env, took a 404, and printed an ipxe.org error at the console.
+# Explicit labels, one per interface, every failure routed by goto.
 set seedfile
-isset \${net0/mac} && imgfetch --name probe \${base}/answers/\${net0/mac:hexhyp}.env && set seedfile \${net0/mac:hexhyp}.env && set bootmac \${net0/mac:hexhyp} ||
-isset \${seedfile} || isset \${net1/mac} && imgfetch --name probe \${base}/answers/\${net1/mac:hexhyp}.env && set seedfile \${net1/mac:hexhyp}.env && set bootmac \${net1/mac:hexhyp} ||
-isset \${seedfile} || isset \${net2/mac} && imgfetch --name probe \${base}/answers/\${net2/mac:hexhyp}.env && set seedfile \${net2/mac:hexhyp}.env && set bootmac \${net2/mac:hexhyp} ||
-isset \${seedfile} || isset \${net3/mac} && imgfetch --name probe \${base}/answers/\${net3/mac:hexhyp}.env && set seedfile \${net3/mac:hexhyp}.env && set bootmac \${net3/mac:hexhyp} ||
+isset \${net0/mac} || goto try1
+imgfetch --name probe \${base}/answers/\${net0/mac:hexhyp}.env || goto try1
+imgfree probe
+set seedfile \${net0/mac:hexhyp}.env
+set bootmac \${net0/mac:hexhyp}
+goto armed
+:try1
+isset \${net1/mac} || goto try2
+imgfetch --name probe \${base}/answers/\${net1/mac:hexhyp}.env || goto try2
+imgfree probe
+set seedfile \${net1/mac:hexhyp}.env
+set bootmac \${net1/mac:hexhyp}
+goto armed
+:try2
+isset \${net2/mac} || goto try3
+imgfetch --name probe \${base}/answers/\${net2/mac:hexhyp}.env || goto try3
+imgfree probe
+set seedfile \${net2/mac:hexhyp}.env
+set bootmac \${net2/mac:hexhyp}
+goto armed
+:try3
+isset \${net3/mac} || goto notarmed
+imgfetch --name probe \${base}/answers/\${net3/mac:hexhyp}.env || goto notarmed
+imgfree probe
+set seedfile \${net3/mac:hexhyp}.env
+set bootmac \${net3/mac:hexhyp}
+goto armed
+:armed
 imgfree probe ||
 
 # ip=dhcp rd.neednet=1: root=live:http://... is fetched by dracut from INSIDE
