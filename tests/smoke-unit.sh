@@ -196,7 +196,10 @@ else
     # That was the state until 2026-09-12 — the deps were on the TARGET list
     # only, so "burn one USB, provision the rack" needed a machine installed
     # first, which is the step nobody wants.
-    if grep -qE 'dnf install -y dnsmasq ipxe-bootimgs-x86' "${ROOT}/builder/build-iso.sh"; then
+    # Matches the packages on an install line, not one exact command form: the
+    # form changed once already (chroot+dnf could not resolve a mirror, so it
+    # became dnf --installroot) and the gate went quiet rather than failing.
+    if grep -qE 'dnsmasq ipxe-bootimgs-x86' "${ROOT}/builder/build-iso.sh"; then
         _pass "netboot: the Fedora live image installs dnsmasq + iPXE images"
     else
         _fail "netboot live deps (fedora)" "build-iso.sh does not install dnsmasq/ipxe-bootimgs-x86 — a booted key cannot serve PXE"

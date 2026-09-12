@@ -2067,7 +2067,16 @@ HELMCHARTS
     # linux-image, linux-headers, shim-signed and grub with it, and two
     # machines installed "cleanly" with no kernel to load (fiend, 2026-08-15).
     # A netboot server that cannot install must cost only itself.
-    chroot "${ROOTFS}" dnf install -y dnsmasq ipxe-bootimgs-x86 >>"$LOG_FILE" 2>&1 ||
+    # --installroot from OUTSIDE, not `chroot ... dnf`. Inside the chroot there
+    # is no /etc/resolv.conf, so dnf reads cached metadata, names both packages
+    # with sizes, and then dies on "Could not resolve host: mirrors.fedora
+    # project.org" when it tries to download. The neighbouring smartmontools
+    # call has the same shape and never showed it, because that package is
+    # already in PKGS and the call is a no-op that downloads nothing
+    # (2026-09-12: caught by the assertion below, before the ISO was burned).
+    dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
+        --setopt=tsflags=nodocs --nogpgcheck -y install \
+        dnsmasq ipxe-bootimgs-x86 >>"$LOG_FILE" 2>&1 ||
         log "  WARNING netboot deps install failed — this key will not be able to serve PXE"
     # Outcome, not exit code, and the PATH rather than the package name: the
     # package is split by arch on Fedora and named plain 'ipxe' on Debian, but
