@@ -338,60 +338,182 @@ fi
 
 if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
     grep -q "^KLDLOAD_DISK=$" "$ANSWERS_TMP"; then
-    # Exclude the disks we must never wipe: the live boot medium and the
-    # KLDLOADSEED disk (if it's a separate USB). Picking either would brick
-    # the box or destroy the very answers file that drove this install.
+    # ── Disk inventory and target selection ──────────────────────────────────
+    # Replaces a five-entry hardcoded device list that only understood ZFS.
+    #
+    # The old loop looked at /dev/sda, vda, xvda, nvme0n1 and mmcblk0 and
+    # nothing else, so on any chassis with more than a handful of bays it never
+    # SAW most of the disks. Worse, it classified a disk as free unless blkid
+    # called a partition zfs_member -- so LVM, mdraid, LUKS, a foreign
+    # filesystem, or FreeBSD GELI all read as "empty" and became install
+    # targets. abyss, 2026-09-11: eight 15 TB GELI members present as blank
+    # unpartitioned disks to Linux, and were the most attractive candidates on
+    # the machine.
+    #
+    # The rule now is that "I do not recognise this" and "this is empty" are
+    # DIFFERENT answers, and only the second one makes a disk a candidate.
     _live="$(_live_disk)"
     _seed="$(_whole_disk "${SEED_DEV:-}")"
-    log "Excluded from auto-pick: live=${_live:-none} seed=${_seed:-none}"
-    # _pool_on <disk> — echo the name of any ZFS pool with a member on this
-    # disk, imported or not. Empty when the disk carries no pool.
-    _pool_on() {
-        local d="$1" p
-        for p in "$d"?* "$d"p?*; do
-            [[ -b "$p" ]] || continue
-            if [[ "$(blkid -o value -s TYPE "$p" 2>/dev/null)" == zfs_member ]]; then
-                blkid -o value -s LABEL "$p" 2>/dev/null
-                return 0
-            fi
+    log "Excluded from selection: live=${_live:-none} seed=${_seed:-none}"
+
+    # _disk_ident <dev> — the STABLE identifier for this disk: a /dev/disk/by-id
+    # path derived from the serial burned in at manufacture. The labeling
+    # masterclass is unambiguous about this -- "a pool created with /dev/sda
+    # through /dev/sdx is a ticking time bomb ... use /dev/disk/by-id/ always"
+    # -- because a kernel name moves when you plug in a USB stick or replace a
+    # drive at 3am. Prefers wwn- when present (firmware-independent), then a
+    # vendor/model/serial path, and falls back to the kernel name only when the
+    # device exposes no stable identity at all.
+    _disk_ident() {
+        local d="$1" _l _best="" _wwn=""
+        for _l in /dev/disk/by-id/*; do
+            [[ -L "$_l" ]] || continue
+            [[ "$(readlink -f "$_l")" == "$d" ]] || continue
+            case "${_l##*/}" in
+            wwn-*) _wwn="$_l" ;;
+            *-part*) ;;
+            *) [[ -z "$_best" ]] && _best="$_l" ;;
+            esac
+        done
+        printf '%s' "${_best:-${_wwn:-$d}}"
+    }
+
+    # _disk_slot <dev> — the physical enclosure slot, when the chassis reports
+    # one. by-slot symlinks come from udev rules; SES is the fallback and is
+    # what a JBOD actually exposes. Empty when neither is available.
+    _disk_slot() {
+        local d="$1" _l _enc _s _blk
+        for _l in /dev/disk/by-slot/*; do
+            [[ -L "$_l" ]] || continue
+            [[ "$(readlink -f "$_l")" == "$d" ]] && {
+                printf '%s' "${_l##*/}"
+                return
+            }
+        done
+        for _enc in /sys/class/enclosure/*/*/; do
+            [[ -d "$_enc" ]] || continue
+            _blk="$(ls "${_enc}device/block/" 2>/dev/null | head -1)"
+            [[ -n "$_blk" && "/dev/${_blk}" == "$d" ]] && {
+                printf 'slot%s' "$(basename "$_enc")"
+                return
+            }
         done
     }
 
-    # Two passes, and the order is the whole point. A disk carrying somebody
-    # else's pool must NEVER be auto-picked -- on a storage host /dev/sda is
-    # very often a vdev member, and this loop reaches it before the NVMe the
-    # OS actually lives on. fiend, 2026-09-07: /dev/sda is a fireball member
-    # and /dev/nvme0n1 is rpool, so an empty KLDLOAD_DISK would have wiped a
-    # mirror leg and installed Fedora onto an 8 TB spinner.
-    #
-    # A disk carrying rpool IS a legitimate target -- that is a reinstall of
-    # this machine -- so it is the second choice rather than excluded.
-    DETECTED=""
-    _fallback=""
-    for dev in /dev/sda /dev/vda /dev/xvda /dev/nvme0n1 /dev/mmcblk0; do
-        [[ -b "$dev" ]] || continue
-        [[ "$dev" == "$_live" ]] && continue
-        [[ -n "$_seed" && "$dev" == "$_seed" ]] && continue
-        _pool="$(_pool_on "$dev")"
-        if [[ -z "$_pool" ]]; then
-            DETECTED="$dev"
-            break
-        elif [[ "$_pool" == rpool && -z "$_fallback" ]]; then
-            _fallback="$dev"
-            log "  $dev carries rpool — a reinstall target, held as second choice"
+    # _disk_contents <dev> — describe what occupies this disk, or echo nothing
+    # when it is genuinely blank. Checks, in order: a partition table, any
+    # signature blkid knows on the whole device or any partition, and finally
+    # GELI, whose metadata lives in the LAST sector and which blkid cannot see
+    # at all. That last check is the one that matters on a machine migrating
+    # off FreeBSD.
+    _disk_contents() {
+        local d="$1" _pt _t _p _out=""
+        _pt="$(lsblk -dn -o PTTYPE "$d" 2>/dev/null | tr -d ' ')"
+        _t="$(blkid -o value -s TYPE "$d" 2>/dev/null)"
+        [[ -n "$_t" ]] && _out="${_t}"
+        # lsblk, not two globs: "$d"?* and "$d"p?* BOTH match nvme0n1p1, so
+        # every partition on an nvme was counted twice and the contents string
+        # came out as "vfat,zfs:rpool,vfat,zfs:rpool" (fiend, 2026-09-11).
+        while read -r _p; do
+            _p="/dev/${_p}"
+            [[ -b "$_p" ]] || continue
+            _t="$(blkid -o value -s TYPE "$_p" 2>/dev/null)"
+            [[ -z "$_t" ]] && continue
+            if [[ "$_t" == zfs_member ]]; then
+                _out="${_out:+$_out,}zfs:$(blkid -o value -s LABEL "$_p" 2>/dev/null || echo '?')"
+            else
+                _out="${_out:+$_out,}${_t}"
+            fi
+        done < <(lsblk -ln -o NAME,TYPE "$d" 2>/dev/null | awk '$2=="part"{print $1}')
+        # GELI: magic string in the final sector. blkid reports nothing for it,
+        # which is precisely why it has to be checked by hand.
+        if [[ -z "$_out" ]] && command -v blockdev >/dev/null 2>&1; then
+            local _sz
+            _sz="$(blockdev --getsize64 "$d" 2>/dev/null || echo 0)"
+            if ((_sz > 4096)) && dd if="$d" bs=512 count=1 skip=$(((_sz / 512) - 1)) \
+                status=none 2>/dev/null | grep -qa "GEOM::ELI"; then
+                _out="geli"
+            fi
+        fi
+        [[ -z "$_out" && -n "$_pt" ]] && _out="${_pt}-table"
+        printf '%s' "$_out"
+    }
+
+    # Every whole disk the kernel knows about, not a guessed list.
+    _all_disks=()
+    while read -r _n; do
+        [[ -b "/dev/$_n" ]] && _all_disks+=("/dev/$_n")
+    done < <(lsblk -dn -o NAME,TYPE 2>/dev/null |
+        awk '$2=="disk" && $1 !~ /^(zram|loop|ram|sr)[0-9]*$/ {print $1}')
+
+    _candidates=()
+    _reinstall=""
+    log "Disk inventory (${#_all_disks[@]} disks):"
+    for dev in "${_all_disks[@]}"; do
+        _sz="$(lsblk -dn -o SIZE "$dev" 2>/dev/null | tr -d ' ')"
+        if [[ "$dev" == "$_live" ]]; then
+            log "  $(printf '%-14s %-8s %s' "$dev" "$_sz" 'live boot medium — never a target')"
+            continue
+        fi
+        if [[ -n "$_seed" && "$dev" == "$_seed" ]]; then
+            log "  $(printf '%-14s %-8s %s' "$dev" "$_sz" 'seed disk — never a target')"
+            continue
+        fi
+        _ident="$(_disk_ident "$dev")"
+        _slot="$(_disk_slot "$dev")"
+        _mdl="$(lsblk -dn -o MODEL "$dev" 2>/dev/null | sed 's/  *$//')"
+        _ser="$(lsblk -dn -o SERIAL "$dev" 2>/dev/null | tr -d ' ')"
+        _what="$(_disk_contents "$dev")"
+        if [[ -z "$_what" ]]; then
+            log "  $(printf '%-14s %-8s %s' "$dev" "$_sz" 'empty — candidate')"
+            log "      $(printf '%s%s%s' "${_ident}" "${_ser:+  serial ${_ser}}" "${_slot:+  ${_slot}}")"
+            _candidates+=("$dev")
+        elif [[ ",${_what}," != *",zfs:"* || ",${_what}," == *",zfs:rpool,"* ]] &&
+            [[ "$(printf '%s' "$_what" | tr ',' '\n' | grep -vE '^(vfat|zfs:rpool)$' | wc -l)" -eq 0 ]]; then
+            # ONLY our own rpool and its ESP. Anything else on the disk, even
+            # alongside rpool, means it is not ours alone to destroy. Exact
+            # string matching failed here: the real value is "vfat,zfs:rpool".
+            log "  $(printf '%-14s %-8s %s' "$dev" "$_sz" 'carries rpool — reinstall candidate')"
+            [[ -z "$_reinstall" ]] && _reinstall="$dev"
         else
-            log "  SKIPPING $dev — carries pool '${_pool}', which is not ours to wipe"
+            log "  $(printf '%-14s %-8s %s' "$dev" "$_sz" "IN USE (${_what}) — refusing")"
+            log "      $(printf '%s%s%s%s' "${_ident}" "${_mdl:+  ${_mdl}}" "${_ser:+  serial ${_ser}}" "${_slot:+  ${_slot}}")"
         fi
     done
-    [[ -n "$DETECTED" ]] || DETECTED="$_fallback"
-    if [[ -n "$DETECTED" ]]; then
-        log "Auto-detected install disk: $DETECTED"
-        # Append or replace KLDLOAD_DISK
-        if grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP"; then
-            sed -i "s|^KLDLOAD_DISK=.*|KLDLOAD_DISK=${DETECTED}|" "$ANSWERS_TMP"
-        else
-            echo "KLDLOAD_DISK=${DETECTED}" >>"$ANSWERS_TMP"
-        fi
+
+    # One candidate is unambiguous. More than one is a guess, and a guess on a
+    # storage chassis destroys somebody's array. Refuse and name them instead.
+    DETECTED=""
+    if ((${#_candidates[@]} == 1)); then
+        DETECTED="${_candidates[0]}"
+    elif ((${#_candidates[@]} > 1)); then
+        log "REFUSING: ${#_candidates[@]} disks are empty and equally valid targets:"
+        for dev in "${_candidates[@]}"; do
+            log "    $dev  ($(lsblk -dn -o SIZE "$dev" 2>/dev/null | tr -d ' '))"
+        done
+        log "  Set KLDLOAD_DISK explicitly. Guessing here wipes the wrong one."
+        exit 1
+    elif [[ -n "$_reinstall" ]]; then
+        DETECTED="$_reinstall"
+        log "No empty disk; using the existing rpool disk (a reinstall of this machine)"
+    else
+        log "REFUSING: no disk is free. Every disk is the live medium, the seed,"
+        log "  or carries data this installer will not destroy on a guess."
+        log "  Set KLDLOAD_DISK explicitly if you mean to overwrite one."
+        exit 1
+    fi
+
+    # Record the STABLE path. The installer resolves it back to a kernel name
+    # for partitioning (see kldload-install-target), but what gets written into
+    # the answers file, the logs and any label is the by-id path, because that
+    # is the one that still means something after a reboot.
+    _DETECTED_ID="$(_disk_ident "$DETECTED")"
+    log "Selected install disk: $DETECTED"
+    [[ "$_DETECTED_ID" != "$DETECTED" ]] && log "  stable path: $_DETECTED_ID"
+    if grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP"; then
+        sed -i "s|^KLDLOAD_DISK=.*|KLDLOAD_DISK=${DETECTED}|" "$ANSWERS_TMP"
+    else
+        echo "KLDLOAD_DISK=${DETECTED}" >>"$ANSWERS_TMP"
     fi
 fi
 

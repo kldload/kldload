@@ -355,6 +355,55 @@ if ! k_have_func k_preflight; then
         [[ -n "${KLDLOAD_DISK:-}" ]] || k_die "KLDLOAD_DISK is not set"
         [[ -b "${KLDLOAD_DISK}" ]] || k_die "Target disk is not a block device: ${KLDLOAD_DISK}"
 
+        # Resolve /dev/disk/by-id/... (and by-path, by-slot) to the kernel name
+        # BEFORE anything derives a partition name from it.
+        #
+        # The labeling masterclass is unambiguous that pools are built from
+        # by-id paths, because a kernel name moves the moment someone plugs in
+        # a USB stick. But every partition name downstream is built by appending
+        # to this string, and the two naming schemes disagree: /dev/nvme0n1
+        # takes "p1" while /dev/disk/by-id/nvme-WD_BLACK_... takes "-part1".
+        # Feed a by-id path straight through and k_zfs_disk_prefix produces
+        # ...nvme-WD_BLACK_...p1, a device that does not exist, and the install
+        # dies partway through partitioning.
+        #
+        # So: ACCEPT the stable path, which is what an operator should be
+        # writing down, and work internally in kernel names. The stable path is
+        # kept for the log and the install manifest, because that is the one
+        # worth putting on a label.
+        if [[ -L "${KLDLOAD_DISK}" ]]; then
+            KLDLOAD_DISK_STABLE="${KLDLOAD_DISK}"
+            KLDLOAD_DISK="$(readlink -f "${KLDLOAD_DISK}")"
+            export KLDLOAD_DISK KLDLOAD_DISK_STABLE
+            k_log "Target disk: ${KLDLOAD_DISK_STABLE}"
+            k_log "  resolves to ${KLDLOAD_DISK}"
+            [[ -b "${KLDLOAD_DISK}" ]] ||
+                k_die "Target disk symlink does not resolve to a block device: ${KLDLOAD_DISK_STABLE}"
+        else
+            # Given a kernel name. Record the stable path anyway so the manifest
+            # and any label carry something that survives a reboot.
+            KLDLOAD_DISK_STABLE=""
+            for _sl in /dev/disk/by-id/*; do
+                [[ -L "$_sl" ]] || continue
+                [[ "${_sl}" == *-part* ]] && continue
+                [[ "$(readlink -f "$_sl")" == "${KLDLOAD_DISK}" ]] || continue
+                case "${_sl##*/}" in
+                wwn-*) [[ -z "${KLDLOAD_DISK_STABLE}" ]] && KLDLOAD_DISK_STABLE="$_sl" ;;
+                *)
+                    KLDLOAD_DISK_STABLE="$_sl"
+                    break
+                    ;;
+                esac
+            done
+            export KLDLOAD_DISK_STABLE
+            if [[ -n "${KLDLOAD_DISK_STABLE}" ]]; then
+                k_log "Target disk: ${KLDLOAD_DISK} (stable path ${KLDLOAD_DISK_STABLE})"
+            else
+                k_log "Target disk: ${KLDLOAD_DISK} — WARNING: this device exposes no"
+                k_log "  /dev/disk/by-id path, so it has no identifier that survives a reboot."
+            fi
+        fi
+
         # Fedora installs F44 (KLDLOAD_FEDORA_RELEASE default 44). F44's base repo
         # ships the 6.19.x GA kernel; bootstrap.sh excludes the 7.0.x updates at
         # install time AND pins kernel-7.* out of the installed system's dnf.conf,
@@ -1453,7 +1502,22 @@ EOF
         # Every prior install came off USB, where the ISO is always mounted and
         # _iso_path is always set, which is why this survived until now.
         if [[ -n "${_iso_path:-}" ]]; then
-            _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
+            # ${_iso_path:-}, not ${_iso_path}. This line sits OUTSIDE the guard
+            # that protects the sha256 above, and _iso_path is only ever assigned
+            # when a mounted ISO is found. A NETBOOT has no mounted ISO: livenet
+            # fetches the squashfs over HTTP and none of the probed mount points
+            # exist. So this dereferenced an unset variable, set -u killed the
+            # installer, and it died at "Finalising system..." with a complete root
+            # and NO BOOTLOADER -- the worst place available to fail.
+            #
+            # fiend, 2026-09-11, the first netboot install that ever got this far.
+            # Every prior install came off USB, where the ISO is always mounted and
+            # _iso_path is always set, which is why this survived until now.
+            if [[ -n "${_iso_path:-}" ]]; then
+                _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
+            else
+                _iso_build="$(date -Iseconds)"
+            fi
         else
             _iso_build="$(date -Iseconds)"
         fi
