@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-install-status — one line telling you whether an install is alive.
+#
+# WHAT IT DOES: reads the installer's own log and the target pool, and prints a
+# single line: what is being installed, which phase it is in, how many packages
+# have landed, how much has been written, and for how long. With --watch it
+# repaints that line in place until the install ends.
+#
+# WHY IT EXISTS: the installer logs at phase-start granularity, so the long
+# phases -- the dnf passes, the ZFS DKMS compile -- print one line and then work
+# in silence for minutes. fiend, 2026-09-11: an operator watching three separate
+# healthy installs read that silence as a hang each time, once on a machine that
+# had already finished and passed 65 of 65 smoke tests. The web UI's answer was
+# a wall of log lines, which is a worse way to say "alive" than a number that
+# moves. Everything is configured at boot now, so there is nothing to click:
+# the only question left is "is it still going", and that deserves one line.
+#
+# Works during an install (on the live system) and after it (on the installed
+# system, where it reports the install that built the machine). No daemon, no
+# state file, no GUI -- it reads what the installer already writes.
+#
+# Inputs : /var/log/installer/autoinstall.log, or the copy the installer leaves
+#          at /root/kldload-install-logs/autoinstall.log on the installed system
+# Outputs: one line on stdout. --watch repaints until the install finishes.
+# Exit   : 0 running or finished cleanly · 1 the install FAILED · 2 usage
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+
+LOGS=(/var/log/installer/autoinstall.log /root/kldload-install-logs/autoinstall.log)
+POOL="${KLDLOAD_POOL:-rpool}"
+TARGET="${KLDLOAD_TARGET_MNT:-/target}"
+
+usage() {
+    cat >&2 <<'EOF'
+usage: kldload-install-status [-w|--watch] [-v|--verbose]
+
+  (no args)   print one line and exit
+  -w, --watch repaint that line every 5s until the install ends
+  -v, --verbose  add the completed-phase strip on a second line
+
+EXIT STATUS
+  0  running, or finished cleanly   1  the install failed   2  usage
+EOF
+    exit 2
+}
+
+WATCH=0 VERBOSE=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -w | --watch) WATCH=1 ;;
+    -v | --verbose) VERBOSE=1 ;;
+    -h | --help) usage ;;
+    *)
+        printf 'kldload-install-status: unknown argument: %s\n' "$1" >&2
+        usage
+        ;;
+    esac
+    shift
+done
+
+_log() {
+    local f
+    for f in "${LOGS[@]}"; do [[ -r "$f" ]] && {
+        printf '%s' "$f"
+        return 0
+    }; done
+    return 1
+}
+
+# Strip the installer's colour codes: it writes for a terminal, this reads for a
+# human who may be piping it somewhere.
+_plain() { sed -e 's/\x1b\[[0-9;]*m//g'; }
+
+# One status line. Each field is skipped rather than faked when it cannot be
+# read -- a status tool that invents a number is worse than one that omits it.
+_line() {
+    local log phase done_n what pkgs alloc since now el rc=0
+    log="$(_log)" || {
+        printf 'no install log found — nothing has run on this machine\n'
+        return 0
+    }
+
+    # The last ▸ is what it is doing; ✔ lines are what it has finished.
+    what="$(_plain <"$log" | sed -n 's/^[[:space:]]*▸[[:space:]]*//p' | tail -1)"
+    done_n="$(_plain <"$log" | grep -c '✔' || true)"
+    phase="$(_plain <"$log" | sed -n 's/^[[:space:]]*✔[[:space:]]*\([A-Za-z-]*\).*/\1/p' | tail -1)"
+
+    # FATAL beats everything: say so and exit non-zero.
+    if grep -qa 'FATAL' "$log"; then
+        printf 'FAILED — %s\n' "$(_plain <"$log" | grep -a 'FATAL' | tail -1 | cut -c1-90)"
+        return 1
+    fi
+
+    pkgs="$(rpm --root="$TARGET" -qa 2>/dev/null | wc -l)" || pkgs=""
+    [[ "${pkgs:-0}" -eq 0 ]] && pkgs="$(rpm -qa 2>/dev/null | wc -l)"
+    alloc="$(zpool list -H -o alloc "$POOL" 2>/dev/null)" || alloc=""
+
+    # Elapsed from the log's first timestamp, which is when the installer began.
+    since="$(_plain <"$log" | sed -n 's/^\[\([0-9-]* [0-9:]*\)\].*/\1/p' | head -1)"
+    if [[ -n "$since" ]]; then
+        now=$(date +%s)
+        el=$((now - $(date -d "$since" +%s 2>/dev/null || echo "$now")))
+        # A negative elapsed means the log was written in another timezone (or
+        # on another machine, reading an archived log). Print nothing rather
+        # than "-415m0s", which is worse than no number at all.
+        if ((el >= 0)); then
+            el="$((el / 60))m$((el % 60))s"
+        else
+            el=""
+        fi
+    else
+        el=""
+    fi
+
+    if [[ -z "$what" && "$done_n" -gt 0 ]]; then what="complete"; fi
+    # The installer writes for a console: "Bootstrapping fedora base system
+    # (this takes a few minutes)..." is right there and wrong on a status line.
+    # Keep the clause, drop the aside and the ellipsis.
+    what="${what%% (*}"
+    what="${what%%...}"
+
+    # Six phases: Storage, Bootstrap, Network, Security, Profile, Snapshot.
+    # A count beats a bare name -- "3/6" answers "how much longer" and a phase
+    # name on its own does not.
+    # Cap at the last phase: once every phase is ✔ there is no seventh, and
+    # "[7/6] complete" is the kind of detail that makes a tool look careless.
+    local _cur=$((done_n + 1))
+    ((_cur > 6)) && _cur=6
+    printf '%s%s%s%s%s\n' \
+        "[${_cur}/6] " \
+        "${what:-starting}" \
+        "${pkgs:+  ·  ${pkgs} pkgs}" \
+        "${alloc:+  ·  ${alloc}}" \
+        "${el:+  ·  ${el}}"
+
+    ((VERBOSE)) && _plain <"$log" | sed -n 's/^[[:space:]]*✔[[:space:]]*\([A-Za-z-]*\).*/\1/p' |
+        tr '\n' ' ' | sed 's/^/  done: /;s/$/\n/'
+    return $rc
+}
+
+if ((WATCH)); then
+    # Repaint one line in place. Stop when the installer unit is gone, so this
+    # exits on its own rather than needing Ctrl-C.
+    while :; do
+        printf '\r\033[K%s' "$(_line | head -1)"
+        systemctl is-active kldload-autoinstall >/dev/null 2>&1 || {
+            printf '\n'
+            break
+        }
+        sleep 5
+    done
+    _line >/dev/null
+else
+    _line
+fi
