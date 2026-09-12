@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-hba — report the storage controllers, their firmware, and the drives
+# hanging off them, using only tools that may be redistributed.
+#
+# WHAT IT DOES, IN ORDER (default subcommand `status`):
+#   1. finds every storage controller by PCI CLASS (SCSI / RAID / SAS / SATA /
+#      NVMe) out of sysfs, and names it with lspci;
+#   2. maps each to its kernel driver and, where the driver exposes it, the
+#      controller's own firmware and BIOS version;
+#   3. counts the drives behind each one;
+#   4. says plainly which facts it CANNOT get without a vendor tool.
+#
+# WHY IT EXISTS: a machine that cannot report its own controller firmware is
+# not a substrate you would trust with a pool -- and the tools that normally
+# answer this (storcli, sas2flash, megacli) are proprietary Broadcom downloads
+# behind a clickthrough. They cannot go in a darksite mirror, because a mirror
+# may only carry what it may redistribute. So this reports everything the
+# kernel already knows, names the gap where a vendor tool would be needed, and
+# never pretends the gap is not there.
+#
+# WHAT IT DELIBERATELY DOES NOT DO: flash anything. Reflashing an HBA under a
+# live pool is how a pool is lost, and it wants its own guardrails, its own
+# confirmation, and its own man page -- not a flag bolted onto a reporting
+# tool.
+#
+# SUBCOMMANDS: status (default) | drives | enclosures | json
+#
+# Inputs : /sys/bus/pci/devices, /sys/class/scsi_host, /sys/class/enclosure,
+#          lspci, lsscsi, smartctl, sg_ses, nvme (all redistributable)
+# Outputs: a report on stdout. json emits one object; everything else is text.
+# Exit   : 0 ok · 1 a step failed · 2 usage.
+#
+# Notes:
+#   - Detection is by PCI CLASS, never by vendor string. onyx, 2026-09-11:
+#     grepping lspci for "LSI" matched an LSI FireWire controller and would
+#     have reported a 1394 card as a storage HBA.
+#   - A machine with no HBA at all (every desktop board) is the normal case,
+#     not an error: it reports the onboard AHCI and says there is no HBA.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+SYS_PCI="${SYS_PCI:-/sys/bus/pci/devices}"
+SYS_HOST="${SYS_HOST:-/sys/class/scsi_host}"
+SYS_ENCL="${SYS_ENCL:-/sys/class/enclosure}"
+
+die() {
+    printf 'kldload-hba: %s\n' "$*" >&2
+    exit "${2:-1}"
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# _class_name <6-hex-digit class> — the PCI class codes that mean "storage".
+# 0x0100 SCSI, 0x0104 RAID, 0x0106 SATA, 0x0107 SAS, 0x0108 NVMe. Anything
+# else is not a storage controller no matter whose name is on it.
+_class_name() {
+    case "${1:0:4}" in
+    0100) printf 'SCSI' ;;
+    0104) printf 'RAID' ;;
+    0106) printf 'SATA' ;;
+    0107) printf 'SAS' ;;
+    0108) printf 'NVMe' ;;
+    *) printf '' ;;
+    esac
+}
+
+# _is_hba <class> — SAS/SCSI/RAID controllers are HBAs in the sense that
+# matters here (a card with its own firmware, usually feeding a backplane).
+# SATA and NVMe are onboard or the drive itself, and are reported separately.
+_is_hba() { case "${1:0:4}" in 0100 | 0104 | 0107) return 0 ;; *) return 1 ;; esac }
+
+# _hosts_for <pci-addr> — the scsi_host numbers that belong to this controller.
+# The scsi_host lives under the PCI device in sysfs, so the PCI address appears
+# in its resolved path. No parsing of lsscsi text, which varies by version.
+_hosts_for() {
+    local pci="$1" h p
+    for h in "$SYS_HOST"/host*; do
+        [[ -e "$h" ]] || continue
+        p="$(readlink -f "$h" 2>/dev/null)" || continue
+        [[ "$p" == *"/$pci/"* ]] && basename "$h"
+    done
+    # A function returns its last command's status: without this, a final
+    # non-matching host makes the caller's assignment fail under set -e.
+    return 0
+}
+
+# _fw_for <host> — controller firmware as the DRIVER reports it. Every vendor
+# spells this differently and most expose nothing at all; the empty answer is
+# a fact to print, not a failure to hide.
+#   mpt3sas / mpt2sas : version_fw, version_bios, board_name  (LSI IT-mode)
+#   megaraid_sas      : fw_version                            (LSI IR/RAID)
+_fw_for() {
+    local h="$SYS_HOST/$1" fw="" bios="" board=""
+    [[ -r "$h/version_fw" ]] && fw="$(<"$h/version_fw")"
+    [[ -z "$fw" && -r "$h/fw_version" ]] && fw="$(<"$h/fw_version")"
+    [[ -r "$h/version_bios" ]] && bios="$(<"$h/version_bios")"
+    [[ -r "$h/board_name" ]] && board="$(<"$h/board_name")"
+    printf '%s|%s|%s' "$fw" "$bios" "$board"
+}
+
+# _mode_for <driver> <board> — IT (target mode, drives passed through) versus
+# IR/RAID (the card owns the array). The DRIVER is the honest signal: mpt3sas
+# binds IT-mode firmware, megaraid_sas binds RAID firmware. Reported as an
+# inference, never as a reading, because only a vendor tool can state it.
+_mode_for() {
+    case "$1" in
+    mpt3sas | mpt2sas) printf 'IT (inferred from driver)' ;;
+    megaraid_sas) printf 'IR/RAID (inferred from driver)' ;;
+    *) printf '-' ;;
+    esac
+}
+
+# _drives_for <host> — block devices behind this scsi_host.
+_drives_for() {
+    local h="$1" d n c=0
+    for d in /sys/block/*; do
+        [[ -e "$d" ]] || continue
+        n="$(basename "$d")"
+        case "$n" in loop* | ram* | zram* | zd* | dm-* | sr*) continue ;; esac
+        [[ "$(readlink -f "$d" 2>/dev/null)" == *"/${h}/"* ]] && ((++c))
+    done
+    printf '%s' "$c"
+    return 0
+}
+
+# ── status ───────────────────────────────────────────────────────────────────
+cmd_status() {
+    local pci cls cname drv name hosts h fw bios board hba_seen=0 any=0
+    printf 'CONTROLLERS\n'
+    for pci in "$SYS_PCI"/*; do
+        [[ -r "$pci/class" ]] || continue
+        cls="$(<"$pci/class")"
+        cls="${cls#0x}"
+        cname="$(_class_name "$cls")"
+        [[ -n "$cname" ]] || continue
+        any=1
+        pci="$(basename "$pci")"
+        drv="-"
+        [[ -e "$SYS_PCI/$pci/driver" ]] && drv="$(basename "$(readlink -f "$SYS_PCI/$pci/driver")")"
+        name="$(lspci -s "${pci#0000:}" 2>/dev/null | cut -d: -f3- | sed 's/^ //' | cut -c1-58)"
+        [[ -n "$name" ]] || name="(lspci unavailable)"
+        printf '  %-12s %-5s %-14s %s\n' "$pci" "$cname" "$drv" "$name"
+        if _is_hba "$cls"; then hba_seen=1; fi
+        hosts="$(_hosts_for "$pci")"
+        for h in $hosts; do
+            IFS='|' read -r fw bios board <<<"$(_fw_for "$h")"
+            if [[ -n "$fw$bios$board" ]]; then
+                printf '      %-8s fw=%-14s bios=%-12s %s\n' "$h" "${fw:--}" "${bios:--}" "${board:-}"
+                printf '      %-8s mode: %s\n' '' "$(_mode_for "$drv" "$board")"
+            else
+                printf '      %-8s %s drive(s); this driver exposes no firmware version in sysfs\n' \
+                    "$h" "$(_drives_for "$h")"
+            fi
+        done
+    done
+    ((any)) || printf '  (none found — is %s readable?)\n' "$SYS_PCI"
+
+    printf '\nENCLOSURES\n'
+    if [[ -d "$SYS_ENCL" ]] && compgen -G "$SYS_ENCL/*" >/dev/null; then
+        local e
+        for e in "$SYS_ENCL"/*; do
+            printf '  %-24s %s slot(s)\n' "$(basename "$e")" \
+                "$(find "$e" -maxdepth 1 -name 'Slot*' -o -maxdepth 1 -name '*Slot*' 2>/dev/null | wc -l)"
+        done
+    else
+        printf '  none (no SES backplane — expected on a desktop board)\n'
+    fi
+
+    printf '\nWHAT THIS CANNOT TELL YOU\n'
+    if ((hba_seen)); then
+        printf '  A SAS/RAID HBA is present. Its full firmware package version, its\n'
+        printf '  IT-vs-IR mode as the CARD reports it, and any reflash need storcli or\n'
+        printf '  sas3flash from Broadcom. Those are proprietary and cannot ship in a\n'
+        printf '  darksite mirror; drop them on the box and they will be used if found.\n'
+    else
+        printf '  No SAS/RAID HBA on this machine, so there is no vendor firmware to read.\n'
+    fi
+    have smartctl || printf '  smartctl is MISSING — per-drive firmware and health did not run.\n'
+}
+
+# ── drives ───────────────────────────────────────────────────────────────────
+# Per-drive identity and firmware. by-id first, because the masterclass is
+# unambiguous that a kernel name is a ticking time bomb.
+cmd_drives() {
+    local d n id model serial fwrev health
+    printf '%-26s %-18s %-10s %-8s %s\n' DEVICE MODEL SERIAL FW HEALTH
+    for d in /sys/block/*; do
+        [[ -e "$d" ]] || continue
+        n="$(basename "$d")"
+        # zd* are ZVOLs -- ZFS volumes backing VMs, not physical drives. onyx
+        # has a hundred of them and they buried the two real disks in the
+        # report (2026-09-11). Same reason loop/ram/zram/dm/sr are skipped.
+        case "$n" in loop* | ram* | zram* | zd* | dm-* | sr*) continue ;; esac
+        id="$n"
+        local l
+        for l in /dev/disk/by-id/*; do
+            [[ -e "$l" ]] || continue
+            [[ "$l" == *-part* ]] && continue
+            if [[ "$(readlink -f "$l")" == "/dev/$n" ]]; then
+                case "$(basename "$l")" in
+                wwn-* | nvme-eui* | nvme-nvme*)
+                    # wwn/eui are the fallback: only take one if nothing better
+                    # has been found yet, and keep looking for a model path.
+                    [[ "$id" == "$n" ]] && id="$(basename "$l")"
+                    ;;
+                *)
+                    id="$(basename "$l")"
+                    break
+                    ;;
+                esac
+            fi
+        done
+        model="-" serial="-" fwrev="-" health="-"
+        [[ -r "$d/device/model" ]] && model="$(<"$d/device/model")"
+        if have smartctl; then
+            # -i is identity only: no self-test, no writes, safe on a live pool.
+            local si
+            si="$(smartctl -i "/dev/$n" 2>/dev/null)" || si=""
+            if [[ -n "$si" ]]; then
+                serial="$(sed -n 's/^Serial Number: *//p' <<<"$si" | head -1)"
+                fwrev="$(sed -n 's/^Firmware Version: *//p' <<<"$si" | head -1)"
+            fi
+            # smartctl's exit status is a BITMASK, not success/failure: bit 0
+            # means "command line parse", bit 2 "some SMART command failed",
+            # and a healthy USB bridge or a drive without SMART sets bits
+            # routinely. With pipefail that non-zero killed the whole report
+            # after two drives (onyx, 2026-09-11). The OUTPUT is the answer;
+            # the status is noise here.
+            health="$(smartctl -H "/dev/$n" 2>/dev/null | sed -n 's/.*overall-health self-assessment test result: *//p;s/^SMART Health Status: *//p' | head -1)" || health=""
+        fi
+        printf '%-26s %-18s %-10s %-8s %s\n' "${id:0:26}" "${model:0:18}" "${serial:--}" "${fwrev:--}" "${health:--}"
+    done
+}
+
+# ── enclosures ───────────────────────────────────────────────────────────────
+# SES slot mapping: which physical bay holds which drive. This is the half that
+# makes a label meaningful, and it is why the labeling design in
+# kldload-autoinstall leans on the same source.
+cmd_enclosures() {
+    if [[ ! -d "$SYS_ENCL" ]] || ! compgen -G "$SYS_ENCL/*" >/dev/null; then
+        printf 'No SES enclosures. On a desktop board this is normal; on a Storinator it\n'
+        printf 'means the backplane is not presenting SES, which is worth chasing.\n'
+        return 0
+    fi
+    local e s dev
+    for e in "$SYS_ENCL"/*; do
+        printf '%s\n' "$(basename "$e")"
+        for s in "$e"/*/; do
+            [[ -r "$s/slot" ]] || continue
+            dev="-"
+            [[ -d "$s/device/block" ]] && dev="$(ls "$s/device/block" 2>/dev/null | head -1)"
+            printf '  slot %-4s %-10s status=%s\n' "$(<"$s/slot")" "$dev" \
+                "$([[ -r "$s/status" ]] && <"$s/status" || echo -)"
+        done
+    done
+}
+
+# ── json ─────────────────────────────────────────────────────────────────────
+# Machine-readable, for the label generator and for an inventory sweep across a
+# rack. stdout is data only: every diagnostic above goes to stderr by design.
+cmd_json() {
+    local pci cls cname drv hosts h fw bios board first=1
+    printf '{"host":"%s","controllers":[' "$(hostname)"
+    for pci in "$SYS_PCI"/*; do
+        [[ -r "$pci/class" ]] || continue
+        cls="$(<"$pci/class")"
+        cls="${cls#0x}"
+        cname="$(_class_name "$cls")"
+        [[ -n "$cname" ]] || continue
+        pci="$(basename "$pci")"
+        drv="-"
+        [[ -e "$SYS_PCI/$pci/driver" ]] && drv="$(basename "$(readlink -f "$SYS_PCI/$pci/driver")")"
+        hosts="$(_hosts_for "$pci")"
+        fw="" bios="" board=""
+        for h in $hosts; do
+            IFS='|' read -r fw bios board <<<"$(_fw_for "$h")"
+            if [[ -n "$fw" ]]; then break; fi
+        done
+        ((first)) || printf ','
+        first=0
+        printf '{"pci":"%s","class":"%s","driver":"%s","fw":"%s","bios":"%s","board":"%s","hba":%s}' \
+            "$pci" "$cname" "$drv" "$fw" "$bios" "$board" "$(_is_hba "$cls" && echo true || echo false)"
+    done
+    printf ']}\n'
+}
+
+usage() {
+    cat >&2 <<'EOF'
+usage: kldload-hba [status | drives | enclosures | json]
+
+  status       controllers, their driver, firmware where the kernel exposes it,
+               enclosures, and an honest list of what needs a vendor tool
+  drives       per-drive by-id, model, serial, firmware revision and SMART health
+  enclosures   SES slot -> device mapping (which bay holds which disk)
+  json         the controller inventory as one JSON object on stdout
+
+Reads only redistributable sources: sysfs, lspci, lsscsi, smartctl, sg_ses.
+It NEVER writes to a controller. Flashing an HBA is deliberately not here.
+
+EXIT STATUS
+  0  the report ran   1  a step failed   2  usage
+EOF
+    exit 2
+}
+
+case "${1:-status}" in
+status) cmd_status ;;
+drives) cmd_drives ;;
+enclosures) cmd_enclosures ;;
+json) cmd_json ;;
+-h | --help | help) usage ;;
+*) die "unknown subcommand: $1" 2 ;;
+esac
