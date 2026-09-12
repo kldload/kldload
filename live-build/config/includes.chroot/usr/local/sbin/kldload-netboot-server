@@ -55,7 +55,21 @@ trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 # install (fiend, 2026-09-11 -- 5.1G written, invisible after reboot).
 PAYLOAD=/var/lib/kldload-netboot
 ROOT=/var/lib/kldload/netboot-serve
-PORT=8080
+
+# Overridable, because the defaults encode a guess about somebody else's
+# network. The unit reads /etc/kldload/netboot.env, so these persist without
+# editing a shipped script.
+#
+#   NETBOOT_PORT   the HTTP port. 8080 collides more often than it looks: an
+#                  Open WebUI on the same box already owns 127.0.0.1:8080 here,
+#                  and nginx only escapes it by binding the LAN address.
+#   NETBOOT_IFACE  the interface to serve on. WITHOUT this, the server follows
+#                  the DEFAULT ROUTE, which is wrong for the layout most people
+#                  actually want: a dedicated provisioning NIC on an isolated
+#                  segment has no default route, so the server would bind the
+#                  production side instead and answer PXE where nobody asked.
+PORT="${NETBOOT_PORT:-8080}"
+IFACE="${NETBOOT_IFACE:-}"
 
 # Kernel args every entry shares — the ISO's own hard-won line (selinux=0 or
 # the live system dies with "Failed to allocate manager object", plus the USB
@@ -68,8 +82,24 @@ die() {
     exit 1
 }
 
-_lan_ip() { ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1; }
+# _lan_ip — the address to serve on. With NETBOOT_IFACE set it is that
+# interface's first global IPv4; otherwise it follows the default route, which
+# is only right when the provisioning LAN and the default route are the same
+# wire. Empty output means the caller must die: cmd_serve does.
+_lan_ip() {
+    if [[ -n "$IFACE" ]]; then
+        ip -o -4 addr show dev "$IFACE" scope global 2>/dev/null |
+            awk '{sub(/\/.*/, "", $4); print $4; exit}'
+        return 0
+    fi
+    ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1
+}
+
 _lan_iface() {
+    if [[ -n "$IFACE" ]]; then
+        printf '%s' "$IFACE"
+        return 0
+    fi
     local ip
     ip="$(_lan_ip)"
     ip -o -4 addr show 2>/dev/null | awk -v i="$ip" '$4 ~ "^"i"/" {print $2; exit}'
@@ -91,14 +121,31 @@ cmd_serve() {
         die "$PAYLOAD/squashfs.img is not a squashfs (bad magic) — refusing to serve a brick"
 
     local ip iface
+    # A named interface that does not exist is an operator typo, and the
+    # failure it causes further down (nginx binding nothing, dnsmasq silent) is
+    # miles from the cause. Name it here.
+    if [[ -n "$IFACE" ]]; then
+        [[ -e "/sys/class/net/$IFACE" ]] ||
+            die "NETBOOT_IFACE=$IFACE is not an interface on this host"
+    fi
     ip="$(_lan_ip)" || true
-    [[ -n "$ip" ]] || die "could not determine this host's LAN address"
+    [[ -n "$ip" ]] || die "could not determine an address to serve on${IFACE:+ for NETBOOT_IFACE=$IFACE}"
     iface="$(_lan_iface)"
     [[ -n "$iface" ]] || die "could not match $ip to an interface"
     local base="http://${ip}:${PORT}"
 
     log "payload  $PAYLOAD ($(numfmt --to=iec "$(stat -c%s "$PAYLOAD/squashfs.img")") rootfs, version $(cat "$PAYLOAD/VERSION" 2>/dev/null || echo '?'))"
-    log "serving  $base on $iface"
+    log "serving  $base on $iface${IFACE:+ (NETBOOT_IFACE)}"
+    # Said every time, because the failure it causes looks like a dead network:
+    # the target gets an address, fetches nothing, and reports a security
+    # violation or just falls through to the next boot device.
+    log "WARN: ipxe.efi is UNSIGNED — a target with Secure Boot ENABLED will refuse it."
+    log "      Turn Secure Boot off on the target, or enrol iPXE's key, before blaming the network."
+    log "NOTE: x86 only (BIOS + UEFI). arm64 targets are not offered a boot file."
+    # proxyDHCP shares the wire with whatever already runs DHCP, and two
+    # sources of boot options is a coin flip, not a configuration.
+    log "NOTE: proxyDHCP hands out NO addresses. If the site DHCP server also sets"
+    log "      next-server/bootfile, disable those there or the target gets two answers."
 
     install -d -m 0755 "$ROOT/kldload" "$ROOT/answers" "$ROOT/armed" "$ROOT/golden" "$ROOT/ipxe" "$ROOT/tmp"
     local f
@@ -412,7 +459,29 @@ disarm)
     ;;
 status) cmd_status ;;
 *)
-    printf 'usage: kldload-netboot-server serve | arm-install <mac> <answers> | arm-deploy <mac> --golden <name> --disk D [--hostname H] | golden <dataset> [as <name>] | disarm <mac> | status\n' >&2
+    cat >&2 <<'USAGE'
+usage: kldload-netboot-server <command>
+
+  serve                      run the PXE server (HTTP + TFTP + proxyDHCP)
+  arm-install <mac> <answers>  next netboot of <mac> INSTALLS from the mirror
+  arm-deploy <mac> --golden <name> --disk <d> [--hostname <h>]
+                             next netboot of <mac> CLONES a golden over HTTP
+  golden <dataset> [as <name>]  stage a dataset as a golden stream
+  disarm <mac>               remove the consent token; that MAC boots locally
+  status                     payload, service, goldens, armed machines
+
+environment (the unit reads /etc/kldload/netboot.env):
+  NETBOOT_PORT   HTTP port (default 8080)
+  NETBOOT_IFACE  interface to serve on (default: the one holding the default
+                 route). Set this when provisioning runs on its own NIC, which
+                 has no default route and would otherwise not be chosen.
+
+notes:
+  ipxe.efi is UNSIGNED: a target with Secure Boot enabled will refuse it.
+  x86 only; arm64 targets are not offered a boot file.
+  proxyDHCP hands out no addresses, but the site DHCP server must not also
+  set next-server/bootfile.
+USAGE
     exit 2
     ;;
 esac
