@@ -339,6 +339,24 @@ esac
 [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && WANT[klab]=1
 [[ "${KLDLOAD_KLAB_NO_AUTO:-0}" == "1" ]] && WANT[klab]=0
 
+# An explicit KLDLOAD_BUILD_IMAGES=0 is the operator saying NO, and it outranks
+# every template default. KLDLOAD_KLAB_ZFS_DEV and the zfslab template are
+# PREFERENCES about WHICH goldens to build, not a request to spend an hour
+# building them -- but they set WANT[klab] on their own, so a machine whose
+# answers file said BUILD_IMAGES=0 built five ztest goldens anyway. fiend,
+# 2026-09-11: ~60 minutes of work nobody asked for, on an install the operator
+# was watching, and the phase that failed inside it was the only visible sign.
+#
+# +isset distinguishes an explicit 0 from the variable never being set at all,
+# which matters: 0 is also the default, so testing the VALUE alone would
+# disable goldens for every zfslab install that simply never mentions the flag.
+if [[ "${KLDLOAD_BUILD_IMAGES+isset}" == "isset" && "${KLDLOAD_BUILD_IMAGES}" == "0" ]]; then
+    if [[ "${WANT[klab]}" == "1" ]]; then
+        log "KLDLOAD_BUILD_IMAGES=0 set explicitly — skipping the golden builds the template would have run"
+    fi
+    WANT[klab]=0
+fi
+
 # K8s cluster sizing — klab and k8s templates both land with a fully
 # bootstrapped 4-node cluster (1 CP + 3 workers). zfslab stays at 0
 # workers so the host budget goes to ZFS test VMs instead of empty
