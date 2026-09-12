@@ -403,6 +403,21 @@ DNS
         die "generated dnsmasq.conf failed dnsmasq --test"
 }
 
+# k_audit <text...> — a durable record of who armed or disarmed what.
+#
+# Arming a MAC authorises a destructive reinstall of that machine, and until
+# 2026-09-12 it left no trace anywhere: the tool runs as a separate process, so
+# its output goes to whichever terminal invoked it and never to the journal.
+# fiend was found armed an hour after a disarm that had reported success, and
+# there was nothing to audit -- no record of the arm, no record of who or what
+# did it. A consent token nobody can account for is not consent.
+#
+# logger, so it lands in the journal alongside the service's own output and
+# survives the terminal that ran it.
+k_audit() {
+    logger -t kldload-netboot -p daemon.notice -- "$*" 2>/dev/null || true # no journald in a container
+}
+
 # ── arm-install ──────────────────────────────────────────────────────────────
 # Writes the seed the installer fetches AND a snippet whose kernel line points
 # at it. Same install as before, expressed as a per-MAC snippet.
@@ -427,6 +442,7 @@ boot
 IPXE
     [[ -s "$ROOT/armed/${m}.ipxe" ]] || die "$ROOT/armed/${m}.ipxe did not land"
     log "ARMED-INSTALL $mac — next netboot installs $(sed -n 's/^KLDLOAD_DISTRO=//p' "$answers")/$(sed -n 's/^KLDLOAD_PROFILE=//p' "$answers")"
+    k_audit "ARMED-INSTALL $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) from $answers"
     if grep -qE '^KLDLOAD_(PASSWORD|ZFS_PASSPHRASE)=.+' "$answers"; then
         log "  WARN: this file carries a password, served unauthenticated to the LAN"
         log "        until you disarm: kldload-netboot-server disarm $mac"
@@ -482,6 +498,7 @@ boot
 IPXE
     [[ -s "$ROOT/armed/${m}.ipxe" ]] || die "$ROOT/armed/${m}.ipxe did not land"
     log "ARMED-DEPLOY $mac — next netboot RECEIVES golden '${golden}' onto ${disk}${host:+ as $host}"
+    k_audit "ARMED-DEPLOY $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) golden=$golden disk=$disk"
 }
 
 # ── golden ───────────────────────────────────────────────────────────────────
@@ -531,7 +548,13 @@ cmd_disarm() {
         rm -f "$ROOT/answers/${m}.env"
         gone=1
     }
-    ((gone)) && log "disarmed $mac" || log "$mac was not armed"
+    if ((gone)); then
+        log "disarmed $mac"
+        k_audit "DISARMED $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?"))"
+    else
+        log "$mac was not armed"
+        k_audit "DISARM $mac — was not armed"
+    fi
 }
 
 cmd_status() {

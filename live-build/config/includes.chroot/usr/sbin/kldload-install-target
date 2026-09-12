@@ -2565,7 +2565,44 @@ main() {
         _err "EFI partition is NOT mounted at ${KLDLOAD_TARGET_MNT}/boot/efi — refusing to write boot files into the rpool dataset"
         return 1
     fi
-    k_install_bootloader
+    k_install_bootloader || k_die "bootloader install failed"
+
+    # OUTCOME, not exit code. k_install_bootloader is 830 lines with fourteen
+    # swallowed failures in it, and the success line below used to print
+    # unconditionally -- so an install could format the ESP, lay down the whole
+    # system, announce "ZFSBootMenu + EFI registered", and reboot into a
+    # firmware menu whose only entry is PXE.
+    #
+    # That is precisely what happened on fiend, 2026-09-12: rpool ONLINE, every
+    # dataset present, /boot/efi a freshly formatted vfat with no EFI directory
+    # at all, and efibootmgr showing one entry -- the Realtek NIC. An unbootable
+    # install is worse than a failed one, because a failed one tells you.
+    #
+    # Two checks, because they fail differently: a missing FILE is this
+    # installer's bug, while a missing NVRAM entry is firmware that discarded
+    # what we wrote, and this board has form (23 enrolled MOKs, 22 stale).
+    local _efi_root="${KLDLOAD_TARGET_MNT}/boot/efi/EFI"
+    local _efi_count=0
+    [[ -d "$_efi_root" ]] &&
+        _efi_count="$(find "$_efi_root" -maxdepth 3 -iname '*.efi' -type f 2>/dev/null | wc -l)"
+    ((_efi_count > 0)) ||
+        k_die "no bootloader on the ESP: ${_efi_root} holds no .efi file. The system is installed and CANNOT BOOT. Do not reboot expecting it to work."
+    _ok "Bootloader" "$_efi_count EFI binaries on the ESP"
+
+    # A firmware that keeps no NVRAM entries is a real configuration (some
+    # boards, and any machine booting purely by fallback path), so this warns
+    # rather than dying -- but it must be LOUD, because the operator is the
+    # only one who can tell the difference.
+    if command -v efibootmgr >/dev/null 2>&1; then
+        if k_chroot_tool efibootmgr 2>/dev/null | grep -qiE '^Boot[0-9A-F]{4}\*?.*(kldload|zfsbootmenu|fedora|debian|ubuntu|rocky|centos|rhel)'; then
+            _ok "Boot entry" "registered in firmware"
+        else
+            _warn "NO firmware boot entry was created. The ESP has a bootloader, so the machine may still boot by the fallback path \\EFI\\BOOT\\BOOTX64.EFI — but if it drops to a boot menu, that is why."
+        fi
+    else
+        _warn "efibootmgr is unavailable — the firmware boot entry WAS NOT CHECKED"
+    fi
+
     case "${KLDLOAD_DISTRO:-}" in
     freebsd | ghostbsd) _ok "Bootloader" "loader.efi + EFI registered" ;;
     openbsd) _ok "Bootloader" "OpenBSD bootloader + EFI registered" ;;
