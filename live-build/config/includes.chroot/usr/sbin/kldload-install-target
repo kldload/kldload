@@ -1502,22 +1502,7 @@ EOF
         # Every prior install came off USB, where the ISO is always mounted and
         # _iso_path is always set, which is why this survived until now.
         if [[ -n "${_iso_path:-}" ]]; then
-            # ${_iso_path:-}, not ${_iso_path}. This line sits OUTSIDE the guard
-            # that protects the sha256 above, and _iso_path is only ever assigned
-            # when a mounted ISO is found. A NETBOOT has no mounted ISO: livenet
-            # fetches the squashfs over HTTP and none of the probed mount points
-            # exist. So this dereferenced an unset variable, set -u killed the
-            # installer, and it died at "Finalising system..." with a complete root
-            # and NO BOOTLOADER -- the worst place available to fail.
-            #
-            # fiend, 2026-09-11, the first netboot install that ever got this far.
-            # Every prior install came off USB, where the ISO is always mounted and
-            # _iso_path is always set, which is why this survived until now.
-            if [[ -n "${_iso_path:-}" ]]; then
-                _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
-            else
-                _iso_build="$(date -Iseconds)"
-            fi
+            _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
         else
             _iso_build="$(date -Iseconds)"
         fi
@@ -1536,6 +1521,54 @@ target_profile = ${KLDLOAD_PROFILE:-?}
 ATTEST
         chmod 0644 "${target}/etc/kldload/install.attest"
         k_log "Install attestation written: ${target}/etc/kldload/install.attest"
+
+        # ── Retain the netboot payload ───────────────────────────────────────
+        # KLDLOAD_KEEP_NETBOOT=1 copies the kernel, initramfs and root
+        # filesystem this machine was installed FROM onto the target, so the
+        # installed system can serve the SAME image to other machines over PXE.
+        #
+        # WHY: "burn one USB, provision the rack" needs machine one to become a
+        # provisioning server, and an installed system otherwise keeps none of
+        # this. The artefacts live on the ISO and are gone the moment you
+        # unplug it, so shipping dnsmasq without them gets you a server that
+        # answers DHCP and then hands out a boot script pointing at nothing.
+        #
+        # OFF BY DEFAULT: it costs the size of the root filesystem, ~5.4 GB on
+        # a darksite image. Cheap on a server, absurd on a laptop, so it is a
+        # decision rather than a default.
+        #
+        # The artefacts are copied verbatim from the medium. No rebuild and no
+        # re-extraction: what this machine booted is exactly what it serves on.
+        if [[ "${KLDLOAD_KEEP_NETBOOT:-0}" == "1" ]]; then
+            if [[ -z "${_iso_path:-}" ]]; then
+                k_log "KLDLOAD_KEEP_NETBOOT=1 but no live medium is mounted — nothing to retain."
+                k_log "  A netboot install fetches the rootfs over HTTP and never lands it on disk."
+            else
+                local _nb="${target}/var/lib/kldload/netboot" _src _dst _nb_ok=1
+                install -d -m 0755 "${_nb}"
+                for _src in images/pxeboot/vmlinuz images/pxeboot/initrd.img LiveOS/squashfs.img; do
+                    _dst="${_nb}/$(basename "${_src}")"
+                    if [[ -f "${_iso_path}/${_src}" ]]; then
+                        cp -f "${_iso_path}/${_src}" "${_dst}" && chmod 0644 "${_dst}" || _nb_ok=0
+                    else
+                        k_log "  netboot payload: ${_src} is not on this medium"
+                        _nb_ok=0
+                    fi
+                done
+                # Outcome, not exit code. A truncated squashfs netboots another
+                # machine into a kernel panic halfway across the room, and the
+                # copy that produced it exited 0.
+                if ((_nb_ok == 1)) &&
+                    [[ -s "${_nb}/vmlinuz" && -s "${_nb}/initrd.img" && -s "${_nb}/squashfs.img" ]]; then
+                    printf '%s\n' "${_iso_ver:-unknown}" >"${_nb}/VERSION"
+                    k_log "Netboot payload retained ($(du -sh "${_nb}" 2>/dev/null | cut -f1)) in /var/lib/kldload/netboot"
+                    k_log "  this machine can serve the same image to others over PXE"
+                else
+                    k_log "WARNING: could not retain the netboot payload — this machine cannot serve PXE."
+                    rm -rf "${_nb}"
+                fi
+            fi
+        fi
     }
 fi
 
