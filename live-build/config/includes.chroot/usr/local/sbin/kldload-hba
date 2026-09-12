@@ -65,6 +65,16 @@ _class_name() {
     esac
 }
 
+# _json_str <text> — escape for a JSON string. Model and serial come from
+# firmware, and firmware is vendor text: a stray backslash or quote would emit
+# a document that parses as something else, or not at all. Control characters
+# are dropped rather than escaped; none belong in an identity field.
+_json_str() {
+    local t="${1//\\/\\\\}"
+    t="${t//\"/\\\"}"
+    printf '%s' "${t//[[:cntrl:]]/}"
+}
+
 # _is_hba <class> — SAS/SCSI/RAID controllers are HBAs in the sense that
 # matters here (a card with its own firmware, usually feeding a backplane).
 # SATA and NVMe are onboard or the drive itself, and are reported separately.
@@ -182,9 +192,19 @@ cmd_status() {
 # ── drives ───────────────────────────────────────────────────────────────────
 # Per-drive identity and firmware. by-id first, because the masterclass is
 # unambiguous that a kernel name is a ticking time bomb.
-cmd_drives() {
-    local d n id model serial fwrev health
-    printf '%-26s %-18s %-10s %-8s %s\n' DEVICE MODEL SERIAL FW HEALTH
+# _collect_drives — one TAB-separated record per physical drive:
+#
+#     kernel-name \t by-id \t model \t serial \t firmware \t health
+#
+# One collector because there are two consumers, and the JSON used to have
+# neither this nor the enclosures: it emitted host and controllers only, while
+# its own comment said it feeds the label generator, which needs serials
+# (2026-09-12). A second copy of this walk would have drifted from the first.
+#
+# Absent fields come back as "-", never empty, so a consumer can tell "asked and
+# got nothing" from "never asked".
+_collect_drives() {
+    local d n id model serial fwrev health l
     for d in /sys/block/*; do
         [[ -e "$d" ]] || continue
         n="$(basename "$d")"
@@ -193,7 +213,6 @@ cmd_drives() {
         # report (2026-09-11). Same reason loop/ram/zram/dm/sr are skipped.
         case "$n" in loop* | ram* | zram* | zd* | dm-* | sr*) continue ;; esac
         id="$n"
-        local l
         for l in /dev/disk/by-id/*; do
             [[ -e "$l" ]] || continue
             [[ "$l" == *-part* ]] && continue
@@ -229,8 +248,56 @@ cmd_drives() {
             # the status is noise here.
             health="$(smartctl -H "/dev/$n" 2>/dev/null | sed -n 's/.*overall-health self-assessment test result: *//p;s/^SMART Health Status: *//p' | head -1)" || health=""
         fi
-        printf '%-26s %-18s %-10s %-8s %s\n' "${id:0:26}" "${model:0:18}" "${serial:--}" "${fwrev:--}" "${health:--}"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$n" "$id" "${model:--}" "${serial:--}" "${fwrev:--}" "${health:--}"
     done
+    return 0
+}
+
+# ── drives ──────────────────────────────────────────────────────────
+# Per-drive identity and firmware. by-id first, because the masterclass is
+# unambiguous that a kernel name is a ticking time bomb.
+#
+# Columns are measured from the DATA, not fixed. They were fixed — 26 for the
+# device — and a real by-id name runs 31 to 45 characters, so every row printed
+# a path that DOES NOT EXIST, and on fiend's five identical 8TB Seagates the
+# truncation landed exactly where the serial begins, rendering all five as the
+# same string (2026-09-12). A truncated path that still looks like a path is
+# worse than an obviously clipped one: it pastes into a zpool command and fails,
+# or matches the wrong thing. The serial column had the opposite bug — fixed at
+# 10 while a SAS serial is 16 — so it overflowed and shoved FW and HEALTH out of
+# alignment on exactly the rows an operator is comparing.
+cmd_drives() {
+    local -a recs=()
+    local line
+    while IFS= read -r line; do
+        recs+=("$line")
+    done < <(_collect_drives)
+
+    # Widths from the widest value in each column, header included.
+    local wid=6 wmod=5 wser=6 wfw=2
+    local n id model serial fwrev health
+    for line in "${recs[@]}"; do
+        IFS=$'\t' read -r n id model serial fwrev health <<<"$line"
+        ((${#id} > wid)) && wid=${#id}
+        # A model may be clipped; a PATH or a SERIAL may not. That is the whole
+        # distinction the old fixed widths missed -- they clipped the two fields
+        # you paste into another command and left the prose field whole.
+        ((${#model} > 24)) && model="${model:0:24}"
+        ((${#model} > wmod)) && wmod=${#model}
+        ((${#serial} > wser)) && wser=${#serial}
+        ((${#fwrev} > wfw)) && wfw=${#fwrev}
+    done
+
+    printf '%-*s %-*s %-*s %-*s %s\n' "$wid" DEVICE "$wmod" MODEL "$wser" SERIAL "$wfw" FW HEALTH
+    for line in "${recs[@]}"; do
+        IFS=$'\t' read -r n id model serial fwrev health <<<"$line"
+        printf '%-*s %-*s %-*s %-*s %s\n' \
+            "$wid" "$id" "$wmod" "${model:0:24}" "$wser" "$serial" "$wfw" "$fwrev" "$health"
+    done
+    # A count, so a reader can check it against lsblk rather than trusting the
+    # list to be complete.
+    printf '\n%s drive(s)\n' "${#recs[@]}"
 }
 
 # ── enclosures ───────────────────────────────────────────────────────────────
@@ -238,27 +305,52 @@ cmd_drives() {
 # makes a label meaningful, and it is why the labeling design in
 # kldload-autoinstall leans on the same source.
 cmd_enclosures() {
+    local last_e=""
     if [[ ! -d "$SYS_ENCL" ]] || ! compgen -G "$SYS_ENCL/*" >/dev/null; then
         printf 'No SES enclosures. On a desktop board this is normal; on a Storinator it\n'
         printf 'means the backplane is not presenting SES, which is worth chasing.\n'
         return 0
     fi
     local e s dev
+    while IFS=$'\t' read -r e s dev st; do
+        [[ "$e" == "$last_e" ]] || printf '%s\n' "$e"
+        last_e="$e"
+        printf '  slot %-4s %-10s status=%s\n' "$s" "$dev" "$st"
+    done < <(_collect_enclosures)
+}
+
+# _collect_enclosures — one TAB-separated record per SES slot:
+#
+#     enclosure \t slot \t block-device \t status
+#
+# Same reason as _collect_drives: the JSON needs these too, and the label
+# generator's whole point is slot-to-serial.
+_collect_enclosures() {
+    local e s dev
+    [[ -d "$SYS_ENCL" ]] || return 0
+    compgen -G "$SYS_ENCL/*" >/dev/null || return 0
     for e in "$SYS_ENCL"/*; do
-        printf '%s\n' "$(basename "$e")"
         for s in "$e"/*/; do
             [[ -r "$s/slot" ]] || continue
             dev="-"
             [[ -d "$s/device/block" ]] && dev="$(ls "$s/device/block" 2>/dev/null | head -1)"
-            printf '  slot %-4s %-10s status=%s\n' "$(<"$s/slot")" "$dev" \
+            printf '%s\t%s\t%s\t%s\n' "$(basename "$e")" "$(<"$s/slot")" "$dev" \
                 "$([[ -r "$s/status" ]] && <"$s/status" || echo -)"
         done
     done
+    return 0
 }
 
 # ── json ─────────────────────────────────────────────────────────────────────
 # Machine-readable, for the label generator and for an inventory sweep across a
 # rack. stdout is data only: every diagnostic above goes to stderr by design.
+#
+# It emitted host and controllers ONLY -- no drives, no enclosures -- while the
+# line above claimed it feeds the label generator, which needs serial and slot
+# and nothing else (caught 2026-09-12 on fiend, where `jq .drives|length` said
+# 0 while `drives` printed eight). Worse than missing: `.drives` was null, and
+# `null|length` is 0 in jq, so a consumer counting drives got a plausible answer
+# instead of an error.
 cmd_json() {
     local pci cls cname drv hosts h fw bios board first=1
     printf '{"host":"%s","controllers":[' "$(hostname)"
@@ -282,6 +374,27 @@ cmd_json() {
         printf '{"pci":"%s","class":"%s","driver":"%s","fw":"%s","bios":"%s","board":"%s","hba":%s}' \
             "$pci" "$cname" "$drv" "$fw" "$bios" "$board" "$(_is_hba "$cls" && echo true || echo false)"
     done
+    printf '],"drives":['
+    local n id model serial fwrev health line
+    first=1
+    while IFS= read -r line; do
+        IFS=$'\t' read -r n id model serial fwrev health <<<"$line"
+        ((first)) || printf ','
+        first=0
+        printf '{"kernel":"%s","by_id":"%s","model":"%s","serial":"%s","firmware":"%s","health":"%s"}' \
+            "$(_json_str "$n")" "$(_json_str "$id")" "$(_json_str "$model")" \
+            "$(_json_str "$serial")" "$(_json_str "$fwrev")" "$(_json_str "$health")"
+    done < <(_collect_drives)
+    printf '],"enclosures":['
+    local enc slot dev st
+    first=1
+    while IFS= read -r line; do
+        IFS=$'\t' read -r enc slot dev st <<<"$line"
+        ((first)) || printf ','
+        first=0
+        printf '{"enclosure":"%s","slot":"%s","device":"%s","status":"%s"}' \
+            "$(_json_str "$enc")" "$(_json_str "$slot")" "$(_json_str "$dev")" "$(_json_str "$st")"
+    done < <(_collect_enclosures)
     printf ']}\n'
 }
 

@@ -144,6 +144,68 @@ else
     _pass "direct menuentry no longer hardcodes 'rhgb quiet'"
 fi
 
+# ─── kldload-hba: the report has to be USABLE, not just present ──────────────
+# Two defects, both of which produced output that looked fine:
+#   - the device column was a fixed 26 while a real by-id name runs 31-45, so
+#     every row printed a path that does not exist, and fiend's five identical
+#     8TB Seagates all rendered as the same string (2026-09-12);
+#   - `json` emitted host and controllers only. `.drives` was NULL, and
+#     `null|length` is 0 in jq, so a consumer counting drives got a plausible
+#     number instead of an error.
+# Both are checked here against THIS machine's real disks.
+hba="${CHROOT}/usr/local/sbin/kldload-hba"
+if [[ ! -x "$hba" ]]; then
+    _fail "kldload-hba" "not executable at $hba"
+elif ! command -v jq >/dev/null 2>&1; then
+    _fail "kldload-hba json" "jq is missing — this check DID NOT RUN"
+else
+    _hba_json="$(mktemp)"
+    if ! "$hba" json >"${_hba_json}" 2>/dev/null; then
+        _fail "kldload-hba json" "exited non-zero"
+    elif ! jq -e . "${_hba_json}" >/dev/null 2>&1; then
+        _fail "kldload-hba json" "not valid JSON"
+    else
+        _pass "kldload-hba json: valid"
+        # Arrays, not null: `jq .drives|length` must fail loudly when the key
+        # is absent rather than answering 0.
+        for _k in controllers drives enclosures; do
+            if jq -e "has(\"${_k}\") and (.${_k}|type == \"array\")" "${_hba_json}" >/dev/null 2>&1; then
+                _pass "kldload-hba json: .${_k} is an array"
+            else
+                _fail "kldload-hba json" ".${_k} is missing or not an array"
+            fi
+        done
+        # Every by_id must name a link that EXISTS. This is the truncation
+        # guard: a clipped path still looks like a path, which is what made the
+        # old output dangerous rather than merely ugly.
+        _bad=0
+        while IFS= read -r _id; do
+            [[ -z "$_id" || "$_id" == "-" ]] && continue
+            [[ "$_id" == *-part* ]] && continue
+            # A kernel name (sda, nvme0n1) is the documented fallback when the
+            # disk has no by-id link at all, so accept /dev/<name> too.
+            [[ -e "/dev/disk/by-id/${_id}" || -e "/dev/${_id}" ]] || {
+                _bad=$((_bad + 1))
+                printf '      truncated or bogus device id: %s\n' "$_id" >&2
+            }
+        done < <(jq -r '.drives[].by_id' "${_hba_json}" 2>/dev/null)
+        if [[ ${_bad} -eq 0 ]]; then
+            _pass "kldload-hba: every device id resolves to a real path"
+        else
+            _fail "kldload-hba device ids" "${_bad} id(s) name nothing on this machine"
+        fi
+        # The table and the JSON must agree on how many drives there are.
+        _tbl="$("$hba" drives 2>/dev/null | sed -n 's/^\([0-9]\+\) drive(s)$/\1/p')"
+        _jsn="$(jq '.drives|length' "${_hba_json}" 2>/dev/null)"
+        if [[ -n "${_tbl}" && "${_tbl}" == "${_jsn}" ]]; then
+            _pass "kldload-hba: table and json agree (${_jsn} drives)"
+        else
+            _fail "kldload-hba" "table says '${_tbl}' drives, json says '${_jsn}'"
+        fi
+    fi
+    rm -f "${_hba_json}"
+fi
+
 # ─── summary ─────────────────────────────────────────────────────────────────
 printf "\n  \e[1m%d passed\e[0m, %s\n" "${PASS}" \
     "$([[ ${FAILN} -gt 0 ]] && printf '\e[1;31m%d failed\e[0m' "${FAILN}" || printf '0 failed')"
