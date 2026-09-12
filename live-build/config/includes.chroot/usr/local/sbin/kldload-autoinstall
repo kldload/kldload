@@ -381,6 +381,26 @@ if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
     # _disk_slot <dev> — the physical enclosure slot, when the chassis reports
     # one. by-slot symlinks come from udev rules; SES is the fallback and is
     # what a JBOD actually exposes. Empty when neither is available.
+    #
+    # WHY model, serial, by-id and slot are gathered here and not just the
+    # device name: they are the fields a physical drive label carries, and this
+    # is the only place that already has to read every disk anyway.
+    #
+    # The labeling design they feed, decided 2026-09-11, NOT yet built:
+    #   * the STICKER carries only immutable facts -- asset id, serial, model,
+    #     vendor, RMA url. Printed once at procurement, before the drive ships.
+    #     It can never go stale because nothing on it can change.
+    #   * the POOL carries the mutable assignment as com.kldload: user
+    #     properties, so a drive that moves takes its record with it and a
+    #     replicated dataset arrives with its tags intact.
+    #   * ansible reconciles the two and reports drift. It generates labels for
+    #     NEW and REPLACEMENT drives only, which is the one case where printing
+    #     happens on a trip to the rack you were already making. Regenerating a
+    #     sticker for a drive that merely moved produces a correct label on a
+    #     printer and a wrong one still stuck to the drive.
+    #
+    # The missing piece is a JSON emit mode so nothing downstream parses these
+    # log lines. Deliberately deferred until the install path is proven.
     _disk_slot() {
         local d="$1" _l _enc _s _blk
         for _l in /dev/disk/by-slot/*; do
