@@ -12,7 +12,16 @@ Description=kldload netboot server (offline PXE for the rest of the rack)
 Documentation=https://kldload.com/
 # The payload only exists if this machine was installed with
 # KLDLOAD_KEEP_NETBOOT=1; the tool fails loudly if it is absent.
-ConditionPathExists=/var/lib/kldload/netboot/squashfs.img
+#
+# This path MUST match PAYLOAD in kldload-netboot-server. It did not: the tool
+# moved to /var/lib/kldload-netboot because rpool/kldload/state mounts at
+# /var/lib/kldload and shadowed the payload written during the install (fiend,
+# 2026-09-11, 5.1G written and invisible after reboot) -- and this condition was
+# left pointing at the old path. A failed ConditionPathExists is SILENT: the
+# unit is skipped, `systemctl start` reports success, and is-active says
+# inactive. So the server could never have started even once it shipped
+# (2026-09-12). smoke-unit asserts the two files agree.
+ConditionPathExists=/var/lib/kldload-netboot/squashfs.img
 After=network-online.target
 Wants=network-online.target
 

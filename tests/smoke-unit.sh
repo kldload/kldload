@@ -144,6 +144,46 @@ else
     _pass "direct menuentry no longer hardcodes 'rhgb quiet'"
 fi
 
+# ─── the netboot unit and its tool must agree on the payload path ───────────
+# A failed ConditionPathExists is SILENT: systemd skips the unit, `systemctl
+# start` reports success, and is-active says inactive with no error anywhere.
+#
+# They disagreed. The tool moved its payload to /var/lib/kldload-netboot
+# because rpool/kldload/state mounts at /var/lib/kldload and shadowed 5.1G
+# written during the install (fiend, 2026-09-11), and the unit was left
+# pointing at the old path. So the netboot server could never have started,
+# on any machine, and nothing would have said why (found 2026-09-12).
+_nb_tool="${CHROOT}/usr/local/sbin/kldload-netboot-server"
+_nb_unit="${CHROOT}/usr/lib/systemd/system/kldload-netboot.service"
+if [[ ! -r "$_nb_tool" || ! -r "$_nb_unit" ]]; then
+    _fail "netboot unit/tool agreement" "tool or unit missing — this check DID NOT RUN"
+else
+    _nb_payload="$(sed -n 's/^PAYLOAD=//p' "$_nb_tool" | head -1)"
+    _nb_cond="$(sed -n 's/^ConditionPathExists=//p' "$_nb_unit" | head -1)"
+    _nb_exec="$(sed -n 's/^ExecStart=//p' "$_nb_unit" | head -1 | awk '{print $1}')"
+    if [[ -z "$_nb_payload" || -z "$_nb_cond" ]]; then
+        _fail "netboot unit/tool agreement" "could not read PAYLOAD ('${_nb_payload}') or ConditionPathExists ('${_nb_cond}')"
+    elif [[ "${_nb_cond}" != "${_nb_payload}"/* ]]; then
+        _fail "netboot unit/tool agreement" \
+            "unit waits on ${_nb_cond} but the tool serves ${_nb_payload} — the unit will be SKIPPED silently"
+    else
+        _pass "netboot: unit condition (${_nb_cond}) sits under the tool's payload (${_nb_payload})"
+    fi
+    # The unit has to point at a tool that actually ships in the image.
+    if [[ -x "${CHROOT}${_nb_exec}" ]]; then
+        _pass "netboot: ExecStart ${_nb_exec} ships and is executable"
+    else
+        _fail "netboot ExecStart" "${_nb_exec} is not an executable in includes.chroot"
+    fi
+    # And build-iso has to carry the unit into the rootfs: the copy loop is a
+    # `[[ -f ]] && cp`, which skips in silence.
+    if grep -q 'kldload-netboot.service' "${ROOT}/builder/build-iso.sh"; then
+        _pass "netboot: build-iso carries the unit into the image"
+    else
+        _fail "netboot unit" "build-iso.sh never copies kldload-netboot.service — it would not reach the ISO"
+    fi
+fi
+
 # ─── kldload-hba: the report has to be USABLE, not just present ──────────────
 # Two defects, both of which produced output that looked fine:
 #   - the device column was a fixed 26 while a real by-id name runs 31-45, so
