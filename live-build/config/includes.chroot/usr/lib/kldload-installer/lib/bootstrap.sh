@@ -2424,6 +2424,8 @@ CUSTOMREPO
             --setopt=cachedir="${target}/var/cache/dnf" \
             --disableplugin=subscription-manager --disableplugin=product-id \
             --nogpgcheck -q list --available grep >/dev/null 2>&1; then
+            # Output discarded on purpose: the exit code is the whole signal
+            # here, and the FATAL below names the cause.
             k_log_to "$log" "FATAL: the Fedora BASE repo is not serving packages."
             k_log_to "$log" "       'grep' is not visible, which means [fedora] did not load while"
             k_log_to "$log" "       [fedora-updates] did. Installing now yields a system with no"
@@ -4619,6 +4621,10 @@ _k_bootstrap_openbsd() {
     local user="${KLDLOAD_USERNAME:-admin}"
     local pass="${KLDLOAD_PASSWORD:-admin}"
     local hostname="${KLDLOAD_HOSTNAME:-kldload}"
+    # OpenBSD's autoinstall cannot expire a password the way chage does on the
+    # Linux path, so a defaulted one is at least said out loud, in capitals.
+    [[ -n "${KLDLOAD_PASSWORD:-}" ]] ||
+        k_log_to "$log" "SECURITY: no KLDLOAD_PASSWORD given — OpenBSD '${user}' will have the DEFAULT password 'admin'. Change it at first login."
 
     k_log_to "$log" "OpenBSD ${openbsd_ver} chain-boot install starting..."
     k_log_to "$log" "Strategy: stage bsd.rd + autoinstall on EFI, installer pulls sets from cdn.openbsd.org"

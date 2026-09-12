@@ -972,6 +972,14 @@ if ! k_have_func k_configure_security; then
         local user="${KLDLOAD_USERNAME:-admin}"
         local upass="${KLDLOAD_PASSWORD:-admin}"
         local distro="${KLDLOAD_DISTRO:-centos}"
+        # The PXE menu composes a cmdline with NO password -- deliberately, since
+        # /proc/cmdline is world-readable forever -- and kldload-autoinstall
+        # refuses one there. So every menu install used to land as admin:admin,
+        # silently: a rack provisioned from the menu was a rack of default
+        # credentials (review, 2026-09-11). A defaulted password is now marked
+        # temporary and expired below, so the first login must change it.
+        local _pw_defaulted=0
+        [[ -n "${KLDLOAD_PASSWORD:-}" ]] || _pw_defaulted=1
 
         # BSD user creation and SSH config is handled in bootstrap
         case "${distro}" in
@@ -989,6 +997,18 @@ if ! k_have_func k_configure_security; then
         chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/useradd -m -s /bin/bash "${user}" \
             >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
         echo "${user}:${upass}" | chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/chpasswd >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1
+        if ((_pw_defaulted)); then
+            # chage -d 0: last change "never", so PAM demands a new password at
+            # the first login, console or ssh. sudo stays usable because
+            # sudoers.d grants NOPASSWD below; unattended ssh with the default
+            # password does NOT work, which is the point.
+            if chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/chage -d 0 "${user}" >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1; then
+                k_log "SECURITY: no KLDLOAD_PASSWORD was given. '${user}' has the TEMPORARY password"
+                k_log "          '${upass}' and must change it at first login (chage -d 0)."
+            else
+                k_die "no KLDLOAD_PASSWORD given and could not expire the temporary one for '${user}' — refusing to ship a default credential"
+            fi
+        fi
         # The sudoers group is named differently per distro: `wheel` on RPM
         # (CentOS/Fedora/RHEL/Rocky), `sudo` on Debian/Ubuntu. Add to whichever
         # exists. Harmless if neither does — sudoers.d/kldload-admin below
@@ -1374,6 +1394,9 @@ if ! k_have_func k_write_install_manifest; then
         [[ -z "${_kld_iso_ver}" ]] && _kld_iso_ver="1.1.0"
 
         cat >"${target}/etc/kldload/install-manifest.env" <<EOF
+# The by-id path of the disk this system was installed on: the identifier that
+# survives a reboot, a reorder of /dev/sd*, and a label printer.
+KLDLOAD_DISK_STABLE=${KLDLOAD_DISK_STABLE:-}
 # KLDload Install Manifest — written by installer $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 # KLDLOAD_INSTALLED=1 is the canonical "came from installer, not live ISO"
 # flag. kldload-webui's is_live_mode() reads this; without it the webui
@@ -1556,7 +1579,7 @@ ATTEST
             # star becomes a tree of about six rounds. The first version of
             # this block gave up on a netboot with a polite message (fiend,
             # 2026-09-11) and that is exactly the topology it locked in.
-            local _nb="${target}/var/lib/kldload/netboot" _nb_src="" _nb_url="" _nb_ok=1 _name
+            local _nb="${target}/var/lib/kldload/netboot" _nb_src="" _nb_url="" _nb_ok=1 _name _from
             if [[ -n "${_iso_path:-}" ]]; then
                 _nb_src="medium"
             else
@@ -1583,9 +1606,15 @@ ATTEST
                     else
                         # -f: a 404 is an error, not an HTML file named squashfs.img.
                         k_log "  fetching ${_name} from ${_nb_url}/"
-                        curl -fsSL --retry 3 --retry-delay 2 -o "${_nb}/${_name}" \
-                            "${_nb_url}/${_name}" || _nb_ok=0
+                        # --speed-*: abort if under 100 KB/s for a minute. A
+                        # hard --max-time is wrong here (5 GB at 1 Gbit is fine,
+                        # at 10 Mbit it is not), a stalled server hanging
+                        # finalisation forever is worse.
+                        curl -fsSL --retry 3 --retry-delay 2 --speed-time 60 --speed-limit 102400 \
+                            -o "${_nb}/${_name}" "${_nb_url}/${_name}" || _nb_ok=0
                     fi
+                    # A file that failed to arrive does not exist to chmod; the
+                    # outcome check below is what catches that, not this line.
                     chmod 0644 "${_nb}/${_name}" 2>/dev/null || true
                 done
                 # Outcome, not exit code. A truncated squashfs netboots another
