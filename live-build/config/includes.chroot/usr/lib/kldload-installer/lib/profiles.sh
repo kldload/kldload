@@ -545,6 +545,33 @@ k_profile_optional_packages() {
         ;;
     esac
 
+    # ── Netboot serving: any installed box can provision the next ────────
+    #
+    # kldload-netboot-server (off by default, one unit to enable) turns an
+    # installed machine into the PXE server for the rest of the rack from
+    # the payload it retained at install. It needs three packages on the
+    # TARGET, not the live image: dnsmasq (proxyDHCP + TFTP), the iPXE boot
+    # images it hands out, and nginx for the HTTP tree. Without these the
+    # unit fails at start with "no iPXE binaries", which is loud, but the
+    # promise on the box is "burn one USB, provision the rack", and that
+    # cannot depend on a mirror the machine no longer has.
+    #
+    # Names verified in clean containers 2026-09-11: Fedora 44 AND CentOS
+    # Stream 10 split the images by arch (ipxe-bootimgs-x86, files under
+    # /usr/share/ipxe); Debian trixie and Ubuntu ship one package, ipxe,
+    # under /usr/lib/ipxe.
+    # The first build with the unsplit name was silently skipped by the
+    # mirror builder -- "Missing from Fedora 44 repos" -- which is why the
+    # name is verified here and not assumed. Inert unless the unit is
+    # enabled, so every profile carries them; the mirror gate below keeps a
+    # missing one from costing anything else.
+    case "$_distro" in
+    fedora) out+=(dnsmasq nginx ipxe-bootimgs-x86) ;;
+    centos | rocky | rhel) out+=(dnsmasq nginx ipxe-bootimgs-x86) ;;
+    debian | ubuntu) out+=(dnsmasq nginx ipxe) ;;
+    *) : ;; # alpine/arch: names not audited, so not claimed
+    esac
+
     # ── Swap: a zram runway on every host, whatever the profile ──────────
     #
     # The zram config block in k_install_system_files used to sit under the
