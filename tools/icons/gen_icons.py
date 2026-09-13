@@ -46,6 +46,18 @@ def P(d,fill=False,w=11,cap="round",join="round"): return f'<path d="{d}" '+(f'f
 # Highlight philosophy: each glyph gets at most ONE element painted in ACCENT2
 # (via the Cf2/RRf2/Pf2 helpers) to keep the set cohesive — one warm accent
 # against the cool primary so the icon reads as crafted instead of monochrome.
+def installer():  # a system landing ON a disk: arrow down into a drive plate,
+    # the landing line lit amber. Distinct from console() at a glance, which is
+    # a prompt, and from zfs(), which is stacked plates.
+    #
+    # It exists because the installer window had NO icon of its own: no .desktop
+    # claimed app_id com.kldload.installer, so GNOME fell back to its generic
+    # mark and the operator got a blue diamond (2026-09-13).
+    return (P("M128 44 L128 118", w=16)
+            + P("M94 90 L128 126 L162 90", w=16)
+            + RR(50, 150, 156, 58, 14, sw=13)
+            + RRf2(74, 172, 60, 14, 7))            # amber = the written system
+
 def console():   return P("M86 90 L124 128 L86 166",w=16)+RRf2(138,150,48,16,8)  # amber prompt = cursor
 def zfs():  # layered dataset plates + snapshot branch — the zxplore motif, so the
     # ZFS tiles read as one family with the console that manages them.
@@ -233,7 +245,7 @@ ICONS = {
  # RETIRED 2026-08-04 (operator, FOSSY pass): kldload-webui (tile uses the
  # brand mark), kldload-terminal + kst-dashboard (no .desktop references
  # them), ksnap + kldload-zfs-manager (their jobs moved into zxplore).
- "kldload-console":kldload_hex,
+ "kldload-console":kldload_hex, "kldload-installer":installer,
  "kldload-zfs":zfs, "kldload-zfslab":zfslab,
  "kldload-k8s":kubernetes, "kldload-vms":vms,
  "kldload-metrics":metrics, "bob-chat":bob, "bob-gaming":bob_gaming,
@@ -256,7 +268,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
     "ollama":"Ollama",
  "kldload-helm":"Helm","kldload-ansible":"Ansible","kldload-klab":"klab",
  "kexport":"Export",
- "kldload-k9s":"k9s","kldload-console":"kldload","kldload-mok-repair":"SB Repair",
+ "kldload-k9s":"k9s","kldload-installer":"installer", "kldload-console":"kldload","kldload-mok-repair":"SB Repair",
  "wgxplore":"WG Console",
  "vmxplore":"VM Console",
  "kldload-buildmon":"Build & Audit",
