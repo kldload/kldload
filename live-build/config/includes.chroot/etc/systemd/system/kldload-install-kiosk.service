@@ -1,0 +1,117 @@
+# kldload-install-kiosk.service — the install show, with no desktop under it.
+#
+# Role: owns tty1 during an unattended install and runs ONE Wayland client
+# full screen — Chrome on https://localhost:8443/, which is the install show.
+# Read by: systemd, on the live image only.
+#
+# WHY THIS UNIT EXISTS: the show used to need a full GNOME session, because the
+# autostart entry that opens it lives in one. On fiend mid-install (2026-09-12)
+# gnome-shell was 530 MB RSS and 326-407% CPU while the installer was writing
+# 1678 packages to ZFS — all of it for a screen with nothing to click on. cage
+# measured 56 MB RSS and 0.6% CPU showing the same SPA (onyx, 2026-09-12).
+# Chrome itself costs the same either way -- it is the session under it that
+# goes away.
+#
+# Consequence if missing: an unattended boot falls back to GDM + GNOME and the
+# show still appears, just expensively. Nothing breaks.
+#
+# Consequence if it starts when it should not: a full-screen browser replaces
+# the operator's desktop. That is why the decision lives in an ExecCondition
+# that requires positive evidence of a live boot, and not in this file.
+
+[Unit]
+Description=kldload install show (cage kiosk, no desktop)
+Documentation=https://kldload.com/
+Documentation=man:cage(1)
+
+# Exactly gdm.service's shape, and for the same reason: this REPLACES whatever
+# else would own tty1, so each one gets a Conflicts= to stop it and an After=
+# to make sure the stop lands first. Two programs racing for one VT gives a
+# screen full of garbage and an unreadable journal.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+Conflicts=kldload-live-tui.service
+After=kldload-live-tui.service
+Conflicts=plymouth-quit.service
+After=plymouth-quit.service
+
+# And the display manager. The netboot path pins systemd.unit=multi-user.target
+# so GNOME is never started at all, but a hand-typed kldload.kiosk=1 on a
+# graphical boot has to work too — there it stops GDM instead of pre-empting it.
+# Both names on purpose: display-manager.service is gdm's alias on the RPM
+# substrates and lightdm's on Debian, where GDM 48 has a systemd bug on Trixie.
+Conflicts=gdm.service display-manager.service
+After=gdm.service display-manager.service
+
+After=systemd-user-sessions.service systemd-logind.service
+
+# The show is served by nginx over a unix socket from kldload-webui. Wants, not
+# Requires: if the backend is late or broken, cage should still paint and let
+# the operator read the connection error, rather than leave a black screen with
+# no clue on it. kldload-webui-launch polls the URL for 60s before it gives up.
+Wants=nginx.service kldload-webui.service
+After=nginx.service kldload-webui.service
+
+# Live only, twice over: this condition AND the live-medium probe inside
+# `kldload-install-kiosk check`. Belt and braces because the failure mode is
+# hijacking an installed machine's desktop.
+ConditionPathExists=!/var/lib/kldload-installer/install-done
+
+# A genuine crash loop has to end somewhere visible rather than spinning on the
+# VT forever: five failures in a minute and the unit stays failed, which fires
+# the OnFailure below and hands tty1 to a login prompt.
+#
+# These two keys are [Unit], not [Service]. `systemd-analyze verify` called that
+# out as "Unknown key 'StartLimitIntervalSec' in section [Service], ignoring"
+# when I first wrote them next to Restart= where they read more naturally
+# (2026-09-12) -- a rate limit that silently does nothing is worse than none.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Failsafe. If cage cannot start — no DRM device, a serial-only box, a missing
+# package — something still has to own tty1, or the operator is left with a
+# black screen and no way in.
+OnFailure=getty@tty1.service
+
+[Service]
+Type=simple
+# ExecCondition, NOT ExecStartPre: "this boot wants the desktop" is a normal
+# answer, and ExecStartPre would record it as a failed unit on every hands-on
+# live boot.
+ExecCondition=/usr/local/sbin/kldload-install-kiosk check
+ExecStart=/usr/local/sbin/kldload-install-kiosk run
+
+# A kiosk comes back. Closing the window is not a way out of an install.
+Restart=always
+RestartSec=2
+User=live
+# PAMName is what makes this work at all as a non-root user. The PAM session
+# stack (see /etc/pam.d/kldload-kiosk) runs pam_systemd, which registers a
+# logind session on seat0 for this VT; libseat then asks logind for the DRM and
+# input devices. Without it cage exits immediately with "Could not create
+# backend" and Chrome would be left with nowhere to draw.
+PAMName=kldload-kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty-fail
+StandardOutput=journal
+# journal+console for errors only: a fatal line has to reach the screen the
+# operator is already looking at, and normal chatter must not scribble over the
+# compositor.
+StandardError=journal+console
+UtmpIdentifier=tty1
+UtmpMode=user
+
+# kldload-chrome-app reads XDG_SESSION_TYPE to choose its ozone platform. It
+# defaults to "auto" when unset, which is a coin toss; say wayland, because
+# cage is a Wayland compositor and there is no X server on this screen.
+Environment=XDG_SESSION_TYPE=wayland
+Environment=HOME=/home/live
+# No keyring here and no gnome-keyring to unlock one: kldload-chrome-app
+# already passes --password-store=basic, which is the flag that stops Chrome
+# popping a blocking "create a password for your keyring" dialog on a session
+# with no keyring daemon.
+
+[Install]
+WantedBy=multi-user.target

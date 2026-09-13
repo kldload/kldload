@@ -345,6 +345,43 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
                 _pass "all ${_checked} kldload unit ExecStart paths exist in the rootfs"
             fi
             rm -rf "$UUNITS"
+
+            # ── The install kiosk ────────────────────────────────────────
+            # Five files have to be in the image together or the unattended
+            # install falls back to a full GNOME session -- which still works,
+            # which is exactly why nobody would notice. The unit and the tool
+            # reach the image by two DIFFERENT mechanisms (an explicit copy in
+            # build-iso.sh and the usr/local/sbin glob), so either can go
+            # missing on its own, and neither shows up in a linter.
+            #
+            # usr/local/sbin is a symlink to usr/local/bin in the image, hence
+            # the bin spelling of the tool here -- the same usrmerge trap the
+            # ExecStart gate above documents.
+            _kiosk_missing=0
+            for _kf in \
+                /usr/bin/cage \
+                /usr/local/bin/kldload-install-kiosk \
+                /etc/systemd/system/kldload-install-kiosk.service \
+                /etc/systemd/system/multi-user.target.wants/kldload-install-kiosk.service \
+                /etc/pam.d/kldload-kiosk; do
+                if grep -qxF "$_kf" "$ULIST"; then
+                    continue
+                fi
+                _kiosk_missing=$((_kiosk_missing + 1))
+                case "$_kf" in
+                /usr/bin/cage)
+                    _fail "install kiosk: cage" "not in the image — an unattended install falls back to the full GNOME session"
+                    ;;
+                */multi-user.target.wants/*)
+                    _fail "install kiosk: enabled" "the unit is not enabled — it would never run"
+                    ;;
+                *)
+                    _fail "install kiosk" "${_kf} is not in the image"
+                    ;;
+                esac
+            done
+            ((_kiosk_missing == 0)) &&
+                _pass "install kiosk: cage, the tool, the unit, its enable symlink and its PAM stack are all in the image"
         else
             _warn "unit ExecStart gate" "could not list the squashfs — this gate DID NOT RUN"
         fi

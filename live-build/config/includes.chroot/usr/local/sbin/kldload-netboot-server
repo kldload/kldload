@@ -103,6 +103,24 @@ DHCP_RANGE="${NETBOOT_DHCP_RANGE:-}"
 # blacklists and overlay size), followed by the netboot additions.
 ISO_ARGS='rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1 ip=dhcp rd.neednet=1 console=tty0'
 
+# Args for an UNATTENDED install specifically: no desktop, just the show.
+#
+# systemd.unit=multi-user.target so GDM and GNOME are never started in the
+# first place, and kldload.kiosk=1 so kldload-install-kiosk.service takes tty1
+# with cage and one full-screen Chrome on the install show. The kiosk unit also
+# infers itself from kldload.seed= being present, so the flag here is
+# belt-and-braces — but it is the line an operator reads when they want to know
+# why this boot has no desktop, so it is spelled out rather than implied.
+#
+# WHY: gnome-shell was 530 MB and 326-407% CPU on fiend during an install
+# (2026-09-12) to host a page with nothing to click on. Escape hatch:
+# kldload.kiosk=0 anywhere on the line wins and gives back the full desktop.
+#
+# Install only, not deploy: a golden restore would benefit the same way, but it
+# drives a different tool and publishes no progress, so it keeps the desktop
+# until that is wired up.
+KIOSK_ARGS='kldload.kiosk=1 systemd.unit=multi-user.target'
+
 log() { printf '[kldload-netboot] %s\n' "$*" >&2; }
 die() {
     printf '[kldload-netboot] FATAL: %s\n' "$*" >&2
@@ -436,7 +454,7 @@ cmd_arm_install() {
     cat >"$ROOT/armed/${m}.ipxe" <<IPXE
 #!ipxe
 # arm-install ${mac}. \${base} comes from boot.ipxe.
-kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img ${ISO_ARGS} kldload.seed=\${base}/answers/${m}.env
+kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img ${ISO_ARGS} ${KIOSK_ARGS} kldload.seed=\${base}/answers/${m}.env
 initrd \${base}/kldload/initrd.img
 boot
 IPXE

@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-install-kiosk — put the install show on the screen without a desktop
+#
+# WHAT IT DOES, IN ORDER:
+#   check   1. Read the kernel cmdline and decide whether this boot wants the
+#              kiosk instead of the GNOME session. Exit 0 for yes, 1 for no.
+#   run     2. Assert cage and the payload exist, then exec
+#              `cage -d -s -- kldload-webui-launch`, which brings up Chrome
+#              full screen on the install show and nothing else at all.
+#
+# WHY THIS EXISTS:
+#   The install show was only ever reachable through a full GNOME session,
+#   because that is where the autostart entry lives. On fiend (2026-09-12,
+#   mid-install) gnome-shell alone was 530 MB RSS and sat between 326% and
+#   407% CPU while the machine was trying to lay down 1678 packages onto ZFS.
+#   Every bit of that is overhead for a screen that shows one full-screen page
+#   and takes no input: there is no dash to use, no app grid to open, no second
+#   window to switch to. cage is a Wayland compositor that runs exactly one
+#   client full screen; measured against the real SPA on onyx (2026-09-12) it
+#   was 56 MB RSS at 0.6% CPU. Chrome's own cost is unchanged, because Chrome
+#   runs either way -- what goes away is the session underneath it. The
+#   operator's words were "i dont want the entire gnome running id be happy if
+#   the installer was all shell but had the same slide show".
+#
+#   The desktop is NOT removed. A live boot somebody is driving by hand still
+#   gets GNOME — that session is how you reach a terminal, the ZFS console and
+#   a browser. Only an unattended boot, which has nothing to click, trades it
+#   for the kiosk.
+#
+# SELECTION (check):
+#   kldload.kiosk=1          -> kiosk, always
+#   kldload.kiosk=0          -> desktop, always (the escape hatch)
+#   kldload.seed=<url|path>  -> kiosk; an unattended install has nothing on
+#                               screen to click, so it does not need a desktop
+#   neither                  -> desktop
+#   In every case the kiosk additionally REQUIRES a live boot. It must never
+#   fire on an installed machine, where it would replace the user's desktop
+#   with a full-screen browser they cannot close.
+#
+# INPUTS:   /proc/cmdline, the live-medium markers, /usr/bin/cage
+# OUTPUTS:  execs cage (run); nothing on stdout (check) — diagnostics on stderr
+# EXIT:     0 kiosk wanted / cage exec'd, 1 not wanted or a missing dependency,
+#           2 usage.
+#
+# Notes:
+#   - `check` is the unit's ExecCondition=, not ExecStartPre=. A failed
+#     ExecCondition skips the unit cleanly; a failed ExecStartPre marks it
+#     FAILED, and "this boot wants a desktop" is not a failure.
+#   - Every path this reads can be redirected by an env var, so the decision
+#     logic is testable on a running desktop without root and without a live
+#     medium. That is how the truth table below was exercised before it shipped.
+#   - SEE ALSO: kldload-install-kiosk.service, kldload-webui-launch,
+#     kldload-chrome-app, kldload-autoinstall, kldload-netboot-server.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+# No ERR trap here, deliberately. `check` returning 1 is a perfectly ordinary
+# answer -- "this boot wants the desktop" -- and an ERR trap turns every one of
+# those into a scary "FAIL at line 189: return 1" in the journal. Caught by
+# running the truth table before committing (2026-09-12). Every exit path in
+# this file prints its own reason, so there is nothing left for a trap to add.
+
+# Test hooks. Same shape as kldload-netboot-server's NETBOOT_* overrides: the
+# defaults are the real paths, and a test points them somewhere harmless.
+KIOSK_CMDLINE="${KLDLOAD_KIOSK_CMDLINE:-/proc/cmdline}"
+KIOSK_ROOT="${KLDLOAD_KIOSK_ROOT:-}"
+KIOSK_CAGE="${KLDLOAD_KIOSK_CAGE:-/usr/bin/cage}"
+KIOSK_PAYLOAD="${KLDLOAD_KIOSK_PAYLOAD:-/usr/local/bin/kldload-webui-launch}"
+
+_say() { printf 'kldload-install-kiosk: %s\n' "$*" >&2; }
+
+# ─── Reading the cmdline ─────────────────────────────────────────────────────
+# read -ra, never `for t in $(cat /proc/cmdline)`. The cmdline is attacker- or
+# at least accident-supplied data and word-splitting it through an unquoted
+# expansion also runs pathname expansion over it, so a stray `*` in a kernel
+# argument would glob against the current directory.
+#
+# _karg prints the value and returns 0 when the argument is present. A bare
+# argument with no `=` counts as present with the value 1, which is what makes
+# `kldload.kiosk` on its own behave like `kldload.kiosk=1`.
+_karg() {
+    local _n="$1" _tok
+    local -a _toks=()
+    read -ra _toks <"${KIOSK_CMDLINE}" || return 1
+    for _tok in "${_toks[@]}"; do
+        case "${_tok}" in
+        "${_n}="*)
+            printf '%s\n' "${_tok#*=}"
+            return 0
+            ;;
+        "${_n}")
+            printf '1\n'
+            return 0
+            ;;
+        esac
+    done
+    return 1
+}
+
+# Positive evidence of a live boot, never an inference from something being
+# absent — the same three markers kldload-webui-launch and
+# kldload-install-target probe for.
+_live_medium() {
+    local _d
+    for _d in /run/live/medium /run/initramfs/live /lib/live/mount/medium; do
+        [[ -d "${KIOSK_ROOT}${_d}" ]] && return 0
+    done
+    return 1
+}
+
+# ─── check ───────────────────────────────────────────────────────────────────
+# Return convention: 0 = start the kiosk, 1 = leave the desktop alone. Both are
+# normal outcomes and both explain themselves on stderr, because the one
+# question an operator will ask at the blank-screen moment is "why did it pick
+# that".
+kiosk_wanted() {
+    local _flag
+    if _flag="$(_karg kldload.kiosk)"; then
+        case "${_flag}" in
+        0 | no | off | false)
+            _say "kldload.kiosk=${_flag} — the desktop keeps the screen"
+            return 1
+            ;;
+        *) _say "kldload.kiosk=${_flag} on the cmdline" ;;
+        esac
+    elif _karg kldload.seed >/dev/null; then
+        _say "kldload.seed is set — an unattended install has nothing to click, so the kiosk takes the screen"
+    else
+        _say "no kldload.kiosk and no kldload.seed — this is a hands-on live boot, the desktop keeps the screen"
+        return 1
+    fi
+
+    # Both paths land here, and both have to clear the same two gates.
+    if ! _live_medium; then
+        _say "no live medium — refusing to replace an installed machine's desktop with a kiosk"
+        return 1
+    fi
+    if [[ -e "${KIOSK_ROOT}/var/lib/kldload-installer/install-done" ]]; then
+        _say "install-done exists — this machine is already installed"
+        return 1
+    fi
+    return 0
+}
+
+# ─── run ─────────────────────────────────────────────────────────────────────
+# -d: no client-side decorations. Chrome in --app mode draws none anyway, but a
+#     future payload might.
+# -s: allow VT switching, so ctrl+alt+F2 still reaches a console. An install
+#     kiosk that cannot be escaped is a machine you cannot diagnose.
+kiosk_run() {
+    if [[ ! -x "${KIOSK_CAGE}" ]]; then
+        _say "FATAL: no compositor at ${KIOSK_CAGE} — the install show has nothing to draw on."
+        _say "  Install the 'cage' package, or boot with kldload.kiosk=0 for the full desktop."
+        return 1
+    fi
+    if [[ ! -x "${KIOSK_PAYLOAD}" ]]; then
+        _say "FATAL: ${KIOSK_PAYLOAD} is missing — nothing to show."
+        return 1
+    fi
+    _say "starting ${KIOSK_CAGE} with ${KIOSK_PAYLOAD}"
+    exec "${KIOSK_CAGE}" -d -s -- "${KIOSK_PAYLOAD}"
+}
+
+usage() {
+    cat <<'USAGE'
+usage: kldload-install-kiosk <check|run>
+
+  check   Exit 0 if this boot should run the install show in a cage kiosk
+          instead of a GNOME session, 1 if it should not. Used as the
+          ExecCondition= of kldload-install-kiosk.service. Prints the reason
+          for its answer on stderr.
+
+  run     Exec `cage -d -s -- kldload-webui-launch`: one Wayland client, full
+          screen, no desktop. Replaces this process. Exits 1 if cage or the
+          payload is missing, loudly, rather than leaving a black screen.
+
+Selection, highest precedence first:
+  kldload.kiosk=0     on the kernel cmdline   -> desktop
+  kldload.kiosk=1     on the kernel cmdline   -> kiosk
+  kldload.seed=<...>  on the kernel cmdline   -> kiosk (unattended install)
+  otherwise                                   -> desktop
+A live boot is required either way; on an installed system check always says no.
+
+Environment (test hooks, all default to the real path):
+  KLDLOAD_KIOSK_CMDLINE   file read instead of /proc/cmdline
+  KLDLOAD_KIOSK_ROOT      prefix for the live-medium and install-done probes
+  KLDLOAD_KIOSK_CAGE      compositor binary            (/usr/bin/cage)
+  KLDLOAD_KIOSK_PAYLOAD   client to run full screen    (kldload-webui-launch)
+
+Exit: 0 success, 1 not wanted or a missing dependency, 2 usage.
+USAGE
+}
+
+case "${1:-}" in
+check) kiosk_wanted ;;
+run) kiosk_run ;;
+-h | --help | help) usage ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac

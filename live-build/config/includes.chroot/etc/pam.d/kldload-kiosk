@@ -1,0 +1,21 @@
+# PAM stack for kldload-install-kiosk.service (systemd PAMName=kldload-kiosk).
+#
+# Read by: pam_systemd, via systemd's PAM session setup for that unit.
+# What it is for: registering a logind SESSION on seat0 for tty1, so cage can
+# be handed the DRM and input devices as the unprivileged `live` user. That is
+# the whole job — there is no password to check, because systemd runs only the
+# account and session stacks of a PAMName= file, never auth.
+#
+# Consequence if missing: systemd cannot open the PAM session, the unit fails
+# with a PAM error, and the install show never appears. A dedicated stack
+# rather than reusing /etc/pam.d/login, because login's session stack pulls in
+# pam_selinux and pam_keyinit, neither of which has anything to do with a
+# kiosk — and the live image boots with selinux=0 on the cmdline anyway.
+auth       required    pam_permit.so
+account    required    pam_unix.so
+session    required    pam_limits.so
+session    required    pam_unix.so
+session    optional    pam_loginuid.so
+# The one that matters. After pam_loginuid, so the session is registered with
+# the loginuid already set.
+session    optional    pam_systemd.so

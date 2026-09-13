@@ -2086,6 +2086,88 @@ HELMCHARTS
             log "  WARNING netboot: ${_nb_need} is missing from the live rootfs — serve will die there"
     done
 
+    # ── cage: the install show without a desktop under it ────────────────────
+    # A Wayland compositor that runs exactly ONE client, full screen, and
+    # nothing else — no shell, no dash, no app grid, no second window. That is
+    # precisely the shape of the install show, which is one page that takes no
+    # input.
+    #
+    # WHY: on fiend mid-install (2026-09-12) gnome-shell alone was 530 MB RSS
+    # and swung between 326% and 407% CPU while the installer was laying 1678
+    # packages onto ZFS, purely to host a full-screen browser. The operator's
+    # verdict was "i dont want the entire gnome running id be happy if the
+    # installer was all shell but had the same slide show". cage + Chrome is
+    # the same slide show with a 56 MB compositor at 0.6% CPU under it,
+    # measured against the real SPA on onyx before this shipped (2026-09-12).
+    #
+    # The desktop stays. GNOME is still what a hands-on live boot gets, because
+    # that session is how you reach a terminal and the ZFS console. Only an
+    # unattended boot, which has nothing to click, trades it for the kiosk —
+    # see kldload-install-kiosk(8) for the cmdline that decides.
+    #
+    # Its OWN transaction, never the kernel's, for the steam-installer reason
+    # (fiend, 2026-08-15). On an image that already carries GNOME the cost is
+    # small: installing it on onyx, which has GNOME, pulled exactly two packages
+    # -- cage at 73 KiB and wlroots at 1.4 MiB. Everything else it needs (mesa,
+    # llvm, libinput, xkeyboard-config, libseat) is already in for GNOME's sake.
+    # On a bare root it would be 68 MiB, which is the number you get if you test
+    # it in a scratch container and forget what the image already contains.
+    #
+    # --installroot from OUTSIDE, not `chroot ... dnf`: inside the chroot there
+    # is no /etc/resolv.conf, so dnf lists the packages from cached metadata and
+    # then dies on "Could not resolve host". The netboot deps above were broken
+    # exactly that way earlier the same day.
+    dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
+        --setopt=tsflags=nodocs --nogpgcheck -y install cage >>"$LOG_FILE" 2>&1 ||
+        log "  WARNING cage install failed — an unattended install will fall back to the full GNOME session"
+    # Outcome, not exit code, and the PATH the unit actually names. A missing
+    # compositor does not break the install: kldload-install-kiosk prints a
+    # FATAL, the unit fails, OnFailure hands tty1 to a login prompt, and the
+    # install carries on headless. So this is a WARNING, not a die.
+    if [[ -x "${ROOTFS}/usr/bin/cage" ]]; then
+        log "Install kiosk: cage present ($(chroot "$ROOTFS" rpm -q cage 2>/dev/null || echo unknown))"
+    else
+        log "  WARNING /usr/bin/cage is missing from the live rootfs — the install show will need GNOME"
+    fi
+
+    # The kiosk's PAM stack. pam_systemd in this stack is what registers the
+    # logind session on seat0 that lets cage open the DRM and input devices as
+    # the unprivileged live user; without the file systemd cannot open the PAM
+    # session at all and the unit fails before cage runs.
+    install -d -m 0755 "${ROOTFS}/etc/pam.d"
+    install -m 0644 /build/live-build/config/includes.chroot/etc/pam.d/kldload-kiosk \
+        "${ROOTFS}/etc/pam.d/kldload-kiosk" ||
+        die "FATAL: etc/pam.d/kldload-kiosk missing from the source tree — the kiosk cannot open a session"
+    # The modules that stack names, checked in the TARGET rootfs rather than the
+    # builder's: a guarded PAM module that is not packaged is the shape of the
+    # pam_unix failure that let a service come up healthy and refuse every
+    # login (2026-08-22).
+    for _pm in pam_permit pam_unix pam_limits pam_loginuid pam_systemd; do
+        [[ -e "${ROOTFS}/usr/lib64/security/${_pm}.so" ]] ||
+            log "  WARNING PAM module ${_pm}.so is not in the live rootfs — the install kiosk session will fail"
+    done
+
+    # The unit itself, plus its enable symlink. multi-user.target.wants by hand
+    # because `systemctl enable` in a chroot with no running systemd is a
+    # coin toss, and the autoinstall service two hundred lines down does the
+    # same thing for the same reason.
+    install -d -m 0755 "${ROOTFS}/etc/systemd/system/multi-user.target.wants"
+    install -m 0644 /build/live-build/config/includes.chroot/etc/systemd/system/kldload-install-kiosk.service \
+        "${ROOTFS}/etc/systemd/system/kldload-install-kiosk.service" ||
+        die "FATAL: kldload-install-kiosk.service missing from the source tree"
+    ln -sf /etc/systemd/system/kldload-install-kiosk.service \
+        "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-install-kiosk.service"
+    # Installed and ENABLED are one operation (five units in this codebase were
+    # once found shipped-but-dead). Check the symlink, not the copy.
+    [[ -L "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-install-kiosk.service" ]] ||
+        die "FATAL: the install kiosk unit is not enabled — it would never run"
+    # And the tool the unit executes. It reaches the rootfs through the
+    # usr/local/sbin glob further down, but the unit names an absolute path, so
+    # a miss here is a 203/EXEC on every unattended boot.
+    [[ -f /build/live-build/config/includes.chroot/usr/local/sbin/kldload-install-kiosk ]] ||
+        die "FATAL: kldload-install-kiosk is missing from includes.chroot/usr/local/sbin"
+    log "Install kiosk: unit installed and enabled (cage + kldload-install-kiosk)"
+
     # ebpf_exporter (Cloudflare) — per-device block I/O latency histograms.
     # BPF programs + yaml configs ship via includes.chroot/etc/ebpf_exporter.
     _ebpf_tmp="$(mktemp -d)"
