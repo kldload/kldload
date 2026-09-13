@@ -871,6 +871,76 @@ if [[ "$EDITION" != "core" ]]; then
     rm -f /tmp/ztx-bin /tmp/ztx-tui
     rm -rf /tmp/ztx-src
 
+    # ── mxplore — the metrics explorer, from in-tree mxplore/.
+    #
+    # In-tree, and the reason is the same one that folded wgxplore in and kept
+    # ztxplore here: everything it reads is decided in this repo. The exporter
+    # set, the scrape config, the target generator that knows where klab and
+    # kspawn and Cilium and Tetragon put their ports, and the four-workspace
+    # compass its views are ordered to match — none of that travels. zxplore
+    # and vmxplore stay upstream because they run on ANY OpenZFS or libvirt
+    # box; a tree of kldload's own exporters does not.
+    #
+    # WHY IT EXISTS AT ALL: 28 Grafana dashboards answer "show me a time
+    # series" and the question an operator actually asks is "which one" —
+    # which disk in which vdev in which pool. That is a walk down a hierarchy,
+    # and a dashboard answers it by making you already know the answer.
+    _mx_src="/build/mxplore"
+    [[ -f "${_mx_src}/main.go" ]] ||
+        die "FATAL: mxplore/ missing from the repo — the metrics explorer lives in-tree."
+    log "Building mxplore from in-tree mxplore/ ..."
+    rm -rf /tmp/mx-src
+    cp -a "$_mx_src" /tmp/mx-src
+    # A developer's working tree carries build output and an exec-capable
+    # TMPDIR; neither may reach the ISO.
+    rm -rf /tmp/mx-src/.testtmp /tmp/mx-src/mx /tmp/mx-src/mx-tui
+    _mx_commit="$(git -C /build rev-parse HEAD 2>/dev/null || echo unknown)"
+    printf '%s\n' "$_mx_commit" >"${ROOTFS}/etc/kldload/mxplore-commit"
+
+    # Static first. The machines most worth watching are headless, so the
+    # terminal build is the one that must always exist.
+    if (cd /tmp/mx-src &&
+        HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+            CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_mx_commit:0:8}" \
+            -o /tmp/mx-tui .) >>"$LOG_FILE" 2>&1; then
+        install -Dm0755 /tmp/mx-tui "${ROOTFS}/usr/local/bin/mx-tui" ||
+            die "FATAL: mx-tui install failed."
+        log "mx-tui installed (static)."
+    else
+        die "FATAL: mxplore static build failed."
+    fi
+
+    # GUI only where the rootfs can link it, with the same readelf guard the
+    # rest of the family uses: a '-tags gui' build that silently produced the
+    # terminal binary installs a "GUI" that opens no window.
+    if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
+        if (cd /tmp/mx-src &&
+            HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+                CGO_ENABLED=1 go build -trimpath -tags gui \
+                -ldflags "-X main.buildNum=${_mx_commit:0:8}" -o /tmp/mx-bin .) >>"$LOG_FILE" 2>&1; then
+            if ! readelf -d /tmp/mx-bin 2>/dev/null |
+                grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
+                die "FATAL: mx built WITHOUT the GUI (no GL/X11/wayland libs) — '-tags gui' produced the terminal binary."
+            fi
+            install -Dm0755 /tmp/mx-bin "${ROOTFS}/usr/local/bin/mx" ||
+                die "FATAL: mx (GUI) install failed."
+            install -Dm0644 /tmp/mx-src/contrib/mxplore.desktop \
+                "${ROOTFS}/usr/share/applications/mxplore.desktop" ||
+                die "FATAL: mxplore launcher install failed."
+            install -Dm0644 /tmp/mx-src/assets/mxplore.svg \
+                "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/mxplore.svg" ||
+                die "FATAL: mxplore icon install failed — a launcher with no icon is the blue diamond again."
+            log "mx installed (GUI, GL-capable rootfs)."
+        else
+            die "FATAL: mxplore GUI build failed on a GL-capable rootfs."
+        fi
+    else
+        log "mxplore GUI skipped (headless rootfs) — mx-tui covers it."
+    fi
+
+    rm -f /tmp/mx-bin /tmp/mx-tui
+    rm -rf /tmp/mx-src
+
     # ── vmxplore — the KVM console, built from its OWN repo
     # (github.com/vmxplore/vmxplore, public). Third console in the family and
     # the same deal as zxplore and wgxplore: it runs on ANY libvirt host, and
