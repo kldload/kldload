@@ -539,12 +539,16 @@ else
             _fail "kiosk pre-emption gate" "the unit declares '${_line}' — conflicts are resolved before ExecCondition runs, so this kills the desktop on boots where the kiosk then skips itself"
             _kio_bad=$((_kio_bad + 1))
             ;;
+        TTYReset=* | TTYVHangup=*)
+            _fail "kiosk pre-emption gate" "the unit sets '${_line}' — the TTY settings are applied to the ExecCondition process too, so this hangs up tty1 even on boots where the kiosk then skips itself, kicking the text installer off its own terminal"
+            _kio_bad=$((_kio_bad + 1))
+            ;;
         Condition*=*kldload.kiosk*)
             _fail "kiosk pre-emption gate" "'${_line}' — a Condition is evaluated after the transaction is built, same fault as Conflicts; the decision belongs in ExecCondition plus the run path"
             _kio_bad=$((_kio_bad + 1))
             ;;
         esac
-    done < <(grep -E '^(Conflicts|Condition)' "$_kio")
+    done < <(grep -E '^(Conflicts|Condition|TTYReset|TTYVHangup)' "$_kio")
     # And the other half: the run path has to actually do the job the
     # conflicts used to, or the kiosk comes up fighting getty for the VT.
     _kio_tool="${ROOT}/live-build/config/includes.chroot/usr/local/sbin/kldload-install-kiosk"

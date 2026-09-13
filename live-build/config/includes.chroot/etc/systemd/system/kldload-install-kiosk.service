@@ -104,8 +104,14 @@ User=live
 # backend" and Chrome would be left with nowhere to draw.
 PAMName=kldload-kiosk
 TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
+# TTYReset and TTYVHangup are NOT set, and that is the same lesson as the
+# missing Conflicts= above. systemd applies the TTY settings when it builds the
+# exec context, and ExecCondition= runs inside that context — so a unit that
+# hangs up tty1 does it even on the boots where it goes on to skip itself. With
+# the conflicts gone, kldload-live-tui legitimately owns tty1 on a hands-on
+# boot, and a vhangup from a kiosk that is about to stand down would kick it
+# off its own terminal. gdm.service sets none of these either; cage takes the
+# VT through logind, which is what PAMName plus TTYPath is for.
 StandardInput=tty-fail
 StandardOutput=journal
 # journal+console for errors only: a fatal line has to reach the screen the
