@@ -11750,8 +11750,48 @@ async def main_async(args):
                                            "detail": "\t".join(_f[2:])})
             except OSError:
                 pass  # steps file appears with the first completed step
-            _body = json.dumps({"phase": _phase, "steps": _steps,
-                                "running": bool(_phase)}).encode()
+            # First boot is the OTHER long wait, and the worse one: the machine
+            # has rebooted, it looks finished, and kldload-autodeploy is still
+            # an hour from ready. It publishes a whole plan rather than a
+            # single line -- one file per phase under phases/, each holding
+            # "<state> <epoch>" -- so unlike the install this stage has a real
+            # denominator and can show an honest percentage.
+            _plan, _cphase = [], ""
+            try:
+                import os as _os
+                _pd = "/var/lib/kldload/phases"
+                for _n in sorted(_os.listdir(_pd)):
+                    try:
+                        with open(_os.path.join(_pd, _n)) as _f:
+                            _st = _f.read().split()
+                    except OSError:
+                        continue  # a phase file replaced mid-read; next poll gets it
+                    _plan.append({
+                        "name": _n.split("-", 1)[-1].replace("-", " "),
+                        "state": _st[0] if _st else "pending",
+                        "at": _st[1] if len(_st) > 1 else "",
+                    })
+            except OSError:
+                pass  # no phases dir until autodeploy runs, which is the normal case
+            try:
+                with open("/var/lib/kldload/current-phase") as _fh:
+                    _cphase = _fh.read().strip()
+            except OSError:
+                pass  # autodeploy has not started, or has finished and cleaned up
+
+            # The install wins if both are present: it means this is the live
+            # environment, and autodeploy state belongs to a previous machine.
+            _stage = "install" if _phase else ("converge" if _plan or _cphase else "")
+            _done = sum(1 for _x in _plan if _x["state"] == "done")
+            _body = json.dumps({
+                "stage": _stage,
+                "phase": _phase or _cphase,
+                "steps": _steps,
+                "plan": _plan,
+                "done": _done,
+                "total": len(_plan),
+                "running": bool(_stage),
+            }).encode()
             return WsResponse(200, "OK", WsHeaders([
                 ("Content-Type", "application/json"),
                 ("Cache-Control", "no-store"),

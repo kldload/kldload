@@ -124,8 +124,24 @@ fi
 # other background talkers; none of them do anything useful for a window
 # whose entire content is served from a unix socket on this box
 # (fiend, 2026-08-16).
+# Full screen for the INSTALLER only. During an unattended install there is
+# nothing to click, the machine is usually on a monitor somebody is watching
+# from across a room, and a window with a title bar and a desktop behind it
+# reads as an application rather than as a machine installing itself.
+#
+# Conditioned on the app id rather than applied to every tool: vmxplore, the
+# ZFS console and the rest are things you work IN, and taking their window
+# controls away would be hostile.
+_fullscreen=()
+case "$app_id" in
+com.kldload.installer) _fullscreen=(--start-fullscreen) ;;
+esac
+[[ "${KLDLOAD_CHROME_FULLSCREEN:-}" == 1 ]] && _fullscreen=(--start-fullscreen)
+[[ "${KLDLOAD_CHROME_FULLSCREEN:-}" == 0 ]] && _fullscreen=()
+
 exec "$chrome" \
     --ozone-platform="$_ozone" \
+    "${_fullscreen[@]}" \
     --user-data-dir="$profile_dir" \
     --class="$app_id" \
     --no-first-run \

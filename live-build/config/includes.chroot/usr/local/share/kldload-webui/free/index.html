@@ -172,6 +172,21 @@ html.kld-app #term-drawer{display:none!important;}
   border:1px solid rgba(61,255,136,.16)}
 .ishow-step::before{content:"\2713";color:#3dff88;font-weight:700}
 .ishow-step b{color:#cfe0f0;font-weight:600}
+/* The first-boot checklist. This stage HAS a denominator -- autodeploy
+   publishes one file per phase -- so it earns a real bar and real states,
+   which the install deliberately does not. */
+#ishow-plan{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.7rem;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.72rem}
+.ishow-ph{display:inline-flex;align-items:center;gap:.4rem;padding:.18rem .55rem;
+  border-radius:999px;border:1px solid rgba(255,255,255,.1);color:#7f90a4}
+.ishow-ph.done{color:#cfe0f0;background:rgba(61,255,136,.07);border-color:rgba(61,255,136,.2)}
+.ishow-ph.done::before{content:"\2713";color:#3dff88;font-weight:700}
+.ishow-ph.running{color:#f4f8fc;background:rgba(77,166,255,.1);border-color:rgba(77,166,255,.35)}
+.ishow-ph.running::before{content:"";width:.5rem;height:.5rem;border-radius:50%;
+  background:#4da6ff;box-shadow:0 0 8px #4da6ff;animation:ishow-pulse 1.4s ease-in-out infinite}
+.ishow-ph.failed{color:#ffd4d4;background:rgba(255,95,95,.12);border-color:rgba(255,95,95,.4)}
+.ishow-ph.failed::before{content:"\2717";color:#ff5f5f;font-weight:700}
+.ishow-ph.pending::before{content:"\00b7";color:#55647a;font-weight:700}
 #ishow-brand{position:absolute;bottom:6.6rem;left:3.2rem;z-index:2;display:flex;
   align-items:center;gap:.7rem;font-size:.74rem;letter-spacing:.34em;
   text-transform:uppercase;color:#6d7f93;font-weight:700}
@@ -11878,6 +11893,7 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
   <div id="ishow-strip">
     <div id="ishow-phase">Starting…</div>
     <div id="ishow-steps"></div>
+    <div id="ishow-plan"></div>
   </div>
   <div id="ishow-brand">kldload</div>
   <div id="ishow-deck"></div>
@@ -12163,11 +12179,28 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
             (hh ? String(hh).padStart(2, '0') + ':' : '') +
             String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
         }
-        // Steps completed, stated as a count rather than a percentage. The
-        // installer does not know its own total, and inventing a denominator
-        // to draw a progress bar would be a lie told very confidently.
-        document.getElementById('ishow-count').textContent =
-          steps.length + (steps.length === 1 ? ' STEP DONE' : ' STEPS DONE');
+        // Two stages, two honest ways to report.
+        //
+        // INSTALL has no denominator: the step count varies by distro, profile
+        // and options, so it gets a count that only goes up. Inventing a total
+        // to draw a bar would be a lie told very confidently.
+        //
+        // CONVERGE does have one: autodeploy publishes a file per phase, so a
+        // percentage here is a fact rather than a guess.
+        var conv = p.stage === 'converge';
+        document.getElementById('ishow-live').textContent =
+          conv ? 'SETTING UP' : 'INSTALLING';
+        document.getElementById('ishow-count').textContent = conv
+          ? (p.done + ' / ' + p.total + ' PHASES')
+          : steps.length + (steps.length === 1 ? ' STEP DONE' : ' STEPS DONE');
+
+        var plan = document.getElementById('ishow-plan');
+        plan.innerHTML = (p.plan || []).map(function (ph) {
+          var e = document.createElement('span');
+          e.className = 'ishow-ph ' + (ph.state || 'pending');
+          e.textContent = ph.name;
+          return e.outerHTML;
+        }).join('');
 
         var last = steps.slice(-4);
         document.getElementById('ishow-steps').innerHTML = last.map(function (s) {
