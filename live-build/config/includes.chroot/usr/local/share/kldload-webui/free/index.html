@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>kldload</title>
+<title>kldload — Supercharge your Linux</title>
 <link rel="stylesheet" href="/css/app.css">
 <style>
 .target-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 0.6rem; margin-bottom: 1rem; }
@@ -98,33 +98,89 @@ html.kld-app #content{margin-left:0!important;padding-left:0!important;}
 html.kld-app #term-launcher,
 html.kld-app #term-drawer{display:none!important;}
 
-#install-show{position:fixed;inset:0;z-index:9000;background:var(--bg,#0b0e13);
-  display:flex;flex-direction:column;justify-content:center;align-items:center;
-  overflow:hidden}
-/* Each slide stacks in the same place and cross-fades; only .on is visible. */
+#install-show{position:fixed;inset:0;z-index:9000;background:#070a0f;
+  display:flex;flex-direction:column;overflow:hidden;
+  font-feature-settings:"kern" 1,"liga" 1}
+/* A wash of the current slide's accent, so the whole screen carries the
+   section colour instead of one coloured word. */
+#install-show::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background:
+    radial-gradient(85% 60% at 12% 8%,var(--ishow-accent,#4da6ff) 0%,transparent 60%),
+    radial-gradient(70% 55% at 92% 96%,var(--ishow-accent,#4da6ff) 0%,transparent 62%);
+  opacity:.22;transition:background 1s ease}
+#install-show::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(180deg,transparent 55%,rgba(0,0,0,.55) 100%)}
 #ishow-slides{position:relative;flex:1;width:100%;display:flex;
-  align-items:center;justify-content:center}
-.ishow-slide{position:absolute;max-width:52rem;padding:0 3rem;text-align:center;
-  opacity:0;transform:translateY(14px);transition:opacity .9s ease,transform .9s ease;
+  align-items:center;justify-content:center;z-index:1}
+.ishow-slide{position:absolute;width:min(72rem,86vw);padding:0 2rem;
+  display:flex;flex-direction:column;align-items:center;text-align:center;
+  opacity:0;transform:translateY(18px) scale(.995);
+  transition:opacity 1s cubic-bezier(.2,.7,.2,1),transform 1s cubic-bezier(.2,.7,.2,1);
   pointer-events:none}
 .ishow-slide.on{opacity:1;transform:none}
-.ishow-kicker{font-size:.8rem;letter-spacing:.22em;text-transform:uppercase;
-  color:var(--accent,#4da6ff);margin-bottom:1.1rem}
-.ishow-title{font-size:2.6rem;line-height:1.15;font-weight:700;
-  color:var(--text,#e8eef6);margin-bottom:1.1rem}
-.ishow-body{font-size:1.05rem;line-height:1.65;color:var(--muted,#9aa7b8)}
-/* The strip is deliberately quiet: the show is the subject, progress is the
-   reassurance. A spinner says "wait"; a named step says "this is happening". */
-#ishow-strip{width:100%;padding:1.2rem 2.4rem 1.8rem;border-top:1px solid var(--border,#1e2734);
-  background:rgba(0,0,0,.25)}
-#ishow-phase{font-size:.95rem;color:var(--text,#e8eef6);margin-bottom:.5rem}
-#ishow-phase::before{content:"◈ ";color:var(--accent,#4da6ff)}
-#ishow-steps{display:flex;gap:1.6rem;flex-wrap:wrap;font-size:.78rem;
-  color:var(--muted,#9aa7b8);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.ishow-step b{color:var(--good,#3dff88);font-weight:600}
-#ishow-brand{position:absolute;top:1.6rem;left:2.4rem;font-size:.8rem;
-  letter-spacing:.3em;text-transform:uppercase;color:var(--subtle,#6b7a8d)}
-@media (max-width:700px){.ishow-title{font-size:1.7rem}.ishow-slide{padding:0 1.4rem}}
+/* Kicker: a rule in the accent, then the section name. Reads as a label
+   rather than a heading, which keeps the eye on the title. */
+.ishow-kicker{display:flex;align-items:center;gap:1rem;font-size:.86rem;
+  letter-spacing:.32em;text-transform:uppercase;font-weight:700;
+  color:var(--ishow-accent,#4da6ff);margin-bottom:2rem}
+.ishow-kicker::before,.ishow-kicker::after{content:"";width:3.2rem;height:2px;
+  border-radius:2px;background:var(--ishow-accent,#4da6ff);
+  box-shadow:0 0 14px var(--ishow-accent,#4da6ff)}
+.ishow-title{font-size:clamp(2.4rem,5.6vw,4.4rem);line-height:1.04;
+  font-weight:800;letter-spacing:-.028em;color:#f4f8fc;margin-bottom:1.9rem;
+  text-wrap:balance;text-shadow:0 2px 40px rgba(0,0,0,.6)}
+.ishow-body{font-size:clamp(1.15rem,1.75vw,1.62rem);line-height:1.62;
+  color:#a9bbd0;max-width:52rem;text-wrap:pretty;font-weight:400}
+/* Highlighted phrases carry the accent and a faint underline, so the eye
+   catches the claim without the paragraph turning into a rainbow. */
+.ishow-body .hl{color:#e8f0f8;font-weight:600;font-style:normal;
+  box-shadow:inset 0 -.42em 0 color-mix(in srgb,var(--ishow-accent,#4da6ff) 22%,transparent)}
+/* Position in the deck: thin, quiet, and honest about how long this runs. */
+/* The deck position, demoted to a hairline. It is NOT install progress and
+   must never be mistaken for it: a bar that looks like progress and is not is
+   worse than no bar at all. */
+#ishow-deck{position:absolute;bottom:0;left:0;right:0;height:2px;z-index:3;
+  opacity:.5;transition:background 1s ease;
+  background:linear-gradient(90deg,var(--ishow-accent,#4da6ff) 0 var(--ishow-deck,0%),
+             transparent var(--ishow-deck,0%))}
+/* The status header. Large, unmistakable, and always on screen. */
+#ishow-head{position:relative;z-index:2;display:flex;align-items:center;
+  justify-content:space-between;padding:2.2rem 3.2rem 0 3.2rem;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+#ishow-head-l,#ishow-head-r{display:flex;align-items:center;gap:1.1rem}
+#ishow-live{display:inline-flex;align-items:center;gap:.7rem;font-size:1rem;
+  font-weight:800;letter-spacing:.34em;color:#3dff88}
+#ishow-live::before{content:"";width:.72rem;height:.72rem;border-radius:50%;
+  background:#3dff88;box-shadow:0 0 14px #3dff88;
+  animation:ishow-pulse 1.9s ease-in-out infinite}
+#ishow-target{font-size:.86rem;letter-spacing:.16em;color:#6d7f93}
+#ishow-elapsed{font-size:1.05rem;font-weight:700;color:#cfe0f0;
+  font-variant-numeric:tabular-nums}
+#ishow-count{font-size:.8rem;letter-spacing:.14em;color:#6d7f93}
+#ishow-strip{position:relative;z-index:2;width:100%;
+  padding:1.15rem 2.6rem 1.9rem;border-top:1px solid rgba(255,255,255,.08);
+  background:rgba(0,0,0,.38);backdrop-filter:blur(6px)}
+#ishow-phase{display:flex;align-items:center;gap:.6rem;font-size:1rem;
+  font-weight:600;color:#eaf1f8;margin-bottom:.65rem;letter-spacing:-.01em}
+#ishow-phase::before{content:"";width:.62rem;height:.62rem;border-radius:50%;
+  background:#3dff88;box-shadow:0 0 10px #3dff88;animation:ishow-pulse 1.9s ease-in-out infinite}
+@keyframes ishow-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.82)}}
+#ishow-steps{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.76rem;
+  color:#7f90a4;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ishow-step{display:inline-flex;align-items:center;gap:.42rem;
+  padding:.2rem .6rem;border-radius:999px;background:rgba(61,255,136,.07);
+  border:1px solid rgba(61,255,136,.16)}
+.ishow-step::before{content:"\2713";color:#3dff88;font-weight:700}
+.ishow-step b{color:#cfe0f0;font-weight:600}
+#ishow-brand{position:absolute;bottom:6.6rem;left:3.2rem;z-index:2;display:flex;
+  align-items:center;gap:.7rem;font-size:.74rem;letter-spacing:.34em;
+  text-transform:uppercase;color:#6d7f93;font-weight:700}
+#ishow-brand::before{content:"";width:.55rem;height:.55rem;border-radius:2px;
+  background:var(--ishow-accent,#4da6ff);box-shadow:0 0 10px var(--ishow-accent,#4da6ff);
+  transition:background .9s ease,box-shadow .9s ease}
+@media (max-width:760px){.ishow-slide{padding:0 1.3rem}
+  #ishow-strip{padding:1rem 1.3rem 1.5rem}#ishow-brand{left:1.3rem}
+  #ishow-dots{left:1.3rem;right:1.3rem}}}
 
 </style>
 <script>try{if(new URLSearchParams(location.search).has('app'))document.documentElement.classList.add('kld-app');}catch(e){}</script>
@@ -3953,7 +4009,7 @@ function _startHeartbeat() {
       return;
     }
     try { ws.send(JSON.stringify({ action: 'ping' })); } catch (e) {}
-  }, 8000);
+  }, 10000);
 }
 
 // ── Auth handshake ────────────────────────────────────────────────────────
@@ -4190,7 +4246,7 @@ function handle(msg) {
       // to the wrong ISO.
       const bidEl = document.getElementById('s-build-id');
       if (bidEl) bidEl.textContent = d.build_id ? ('build ' + d.build_id) : '';
-      document.title = (d.hostname || 'kldload') + ' — kldload';
+      document.title = (d.hostname || 'kldload') + ' — Supercharge your Linux';
       // AI status card
       const aiCard = document.getElementById('ai-status-card');
       if (aiCard && d.ai_ollama !== undefined) {
@@ -11805,12 +11861,26 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
      were using. Self-contained on purpose: no framework, no dependency, and
      nothing it touches outside its own ids. ───────────────────────────────── -->
 <div id="install-show" style="display:none">
+  <!-- The status header is the SUBJECT: a viewer must know instantly that a
+       machine is being installed and roughly how far in it is. The slides are
+       what fills the waiting, not the other way round. -->
+  <div id="ishow-head">
+    <div id="ishow-head-l">
+      <span id="ishow-live">INSTALLING</span>
+      <span id="ishow-target"></span>
+    </div>
+    <div id="ishow-head-r">
+      <span id="ishow-elapsed">00:00</span>
+      <span id="ishow-count"></span>
+    </div>
+  </div>
   <div id="ishow-slides"></div>
   <div id="ishow-strip">
     <div id="ishow-phase">Starting…</div>
     <div id="ishow-steps"></div>
   </div>
   <div id="ishow-brand">kldload</div>
+  <div id="ishow-deck"></div>
 </div>
 
 <script>
@@ -11819,41 +11889,254 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
   // page edit, not a rebuild of a 14GB ISO.
   var SLIDES = [
     ["The substrate", "ZFS from the first block",
-     "Not a filesystem you add afterwards. The pool is created before the first package lands, so boot environments, snapshots and rollback are properties of the machine rather than features bolted on."],
+     "Not a filesystem added afterwards. The pool exists before the first package lands, so snapshots, rollback and boot environments are properties of the machine rather than features bolted on later."],
+    ["Layout", "Everything is a dataset",
+     "Home, var, logs, containers, VMs: each its own dataset with its own properties. Quota one, compress another, snapshot a third on its own schedule, without touching the rest."],
     ["Undo", "A bad upgrade is a reboot away",
-     "Every system change happens inside a boot environment. If an update breaks the machine, roll back to the one that worked and reboot. No rescue USB, no reinstall."],
+     "System changes happen inside a boot environment. If an update breaks the machine, boot the one that worked. No rescue media, no reinstall, no evening lost."],
+    ["Coverage", "The rollback covers what matters",
+     "The package database, the binaries and /opt all live inside the boot environment. Roll back and they move together, so you never get a system whose package manager disagrees with its own disk."],
+    ["Snapshots", "Cheap enough to take constantly",
+     "A snapshot is a marker, not a copy. It costs nothing until blocks change, which is why taking one before every risky operation is the default here rather than a ceremony."],
+    ["Integrity", "Every block is checksummed",
+     "Silent corruption is detected rather than served. On redundant pools the bad copy is repaired from a good one during a scrub, and you are told it happened."],
+    ["Replication", "send and receive, not rsync",
+     "Differences move at the block level, incrementally, with the receiving side identical rather than merely similar. The same mechanism backs up a laptop and rebuilds a node."],
+    ["Encryption", "Native, per dataset",
+     "Encryption is a dataset property, so one pool can hold encrypted and plain datasets side by side, and an encrypted stream can be replicated without ever being decrypted in transit."],
+    ["Compression", "On by default, because it is faster",
+     "Modern compression reads and writes less from the disk than it costs in CPU. The default is on because the measurement says on, not because it sounds thorough."],
     ["zxplore", "The universal ZFS console",
-     "Pools, datasets, snapshots and replication in one window, on this machine or over ssh to any other. It shows the commands it runs, so you learn the tool it is driving."],
-    ["vmxplore", "VMs that are zvols, not disk images",
-     "No qcow2, no vmdk, no image conversion. Seal a machine into a golden and clone it in milliseconds, because a clone is metadata and the blocks are shared until they diverge."],
-    ["Firecracker", "MicroVMs from the same goldens",
-     "The same golden that boots as a full VM clones into a Firecracker microVM in about two hundred milliseconds, with the isolation of a virtual machine and the start time of a container."],
+     "Pools, datasets, snapshots and replication in one window, local or over ssh to any other machine. It shows the commands it runs, so it teaches the tool underneath instead of hiding it."],
+    ["vmxplore", "A VM manager built for OpenZFS",
+     "Not a hypervisor and not a daemon. One static binary over the libvirt you already have, with the estate, both consoles and the storage in a single window."],
+    ["No images", "There is no qcow2 here",
+     "No vmdk, no vdi, no vhdx, no image conversion step. A VM disk is a zvol, so copy-on-write, snapshots and thin provisioning come from the layer that already does them well."],
+    ["Goldens", "Seal a machine, stamp out a fleet",
+     "Build one machine properly, seal it, then clone it. The clone shares every block with its parent until it diverges, so the tenth is as cheap as the first."],
+    ["Clones", "Creation is metadata",
+     "A clone is not a copy, so it completes in milliseconds regardless of size. Forty-five servers take about as long to create as one, which is the whole point."],
+    ["MicroVMs", "Firecracker from the same golden",
+     "The golden that boots as a full VM also clones into a Firecracker microVM in roughly two hundred milliseconds: the isolation of a virtual machine, the start time of a container."],
     ["klab", "A cluster out of nothing",
-     "Control planes and workers conjured as instant clones on their own encrypted backplane. Forty-five machines, each on the mesh and holding a certificate, in under four minutes."],
-    ["Darksite", "Installs with the internet unplugged",
-     "Every package, image and artefact this install needs was downloaded when the image was built and carried on the media. Nothing is fetched from a mirror that may not be there."],
+     "Control planes and workers conjured as instant clones on their own encrypted backplane, each holding a certificate from the local authority and appearing in the inventory."],
+    ["Kubernetes", "Three control planes, not one",
+     "High availability is the default shape rather than an upgrade path. The cluster is built from the same clones as everything else, so rebuilding it costs minutes."],
+    ["WireGuard", "The backplane is encrypted",
+     "Nodes talk over a mesh that is private by construction. No VLAN gymnastics, no trusting the switch, and the same mesh works across sites without changing anything."],
+    ["Certificates", "A real CA, locally",
+     "Services get certificates from an authority this machine owns, so internal traffic is verified rather than waved through, and no browser has to be told to ignore a warning."],
+    ["Darksite", "It installs with the internet unplugged",
+     "Every package this install needs was downloaded when the image was built and carried on the media. Nothing is fetched from a mirror that might be gone, rate limited, or lying."],
+    ["Reproducible", "The same media, the same machine",
+     "An install pinned to the artefacts it shipped with produces the same system next month as it does today. That is what makes a rebuild a repair rather than a gamble."],
     ["Netboot", "One machine provisions the rack",
-     "The machine being installed keeps the payload it installed from, so it can serve the next one. Burn one key, and every box after it arrives over the network."]
+     "The machine being installed keeps the payload it installed from, so it can serve the next one. Burn one key, and everything after it arrives over the network."],
+    ["Consent", "A machine is never touched by accident",
+     "Netbooting only installs a machine whose hardware address was deliberately armed. Anything else fetches a 404 and continues to its own disk, untouched."],
+    ["Choice", "Eight substrates, one experience",
+     "Fedora, Debian, Ubuntu, Rocky, CentOS Stream, RHEL, Arch, Alpine. The distribution is a choice at install time, not a different product with a different manual."],
+    ["Secure Boot", "Supported, not assumed",
+     "Shim and key enrolment are handled where you want them, and skipped where you do not. Either way the machine tells you which it did rather than leaving you to discover it."],
+    ["Observability", "Graphs on the first boot",
+     "Pool health, drive temperatures, block latency histograms and cluster state are already collected and already plotted. Nothing to install before you can see what the machine is doing."],
+    ["Containers", "On datasets, not on a disk image",
+     "Container layers are datasets, so pulling and building share blocks the way clones do, and a runaway image cannot quietly eat a filesystem nobody was watching."],
+    ["Recovery", "Rebuild a node from its replica",
+     "A machine that dies is restored from the stream its replica already holds, with the boot environment restamped so it boots here. The replica is not merely a backup, it is a spare."],
+    ["Transparency", "The tools show their work",
+     "Every console prints the command it is about to run. When something breaks at three in the morning you are debugging ZFS and libvirt, not somebody's abstraction over them."],
+    ["Yours", "A real machine underneath",
+     "Not an appliance. A full Linux system you can log into, install packages on, and modify, where the storage and virtualisation are first class rather than something the product owns."],
+    ["Build", "Make a golden in three moves",
+     "Install a machine the way you want it, shut it down, seal it. From then on it is a template, and every machine you make from it starts identical and diverges only where you change it."],
+    ["Build", "Post-install hooks do the boring part",
+     "A profile is a package set plus a bundle of hooks. The hooks run once, on first boot, and turn a generic machine into the specific one you meant: users, keys, services, mounts."],
+    ["Apps", "A self-hosted app as one button",
+     "Every how-to-self-host guide is the same four moves: fetch a pinned artefact, write a config, initialise a database, drop in a unit file. The catalog encodes that once per app, so a weekend becomes a click."],
+    ["Images", "Cloud images, made local",
+     "Distribution cloud images are pulled once, verified against the vendor's own manifest, and kept as goldens. Building the fleet after that never touches the internet again."],
+    ["Export", "Take a machine with you",
+     "A golden exports to a raw or qcow2 image when something outside needs one. Inside, nothing converts: the artefact is the zvol, and conversion is only ever for other people's tools."],
+    ["zxplore", "Walk files across every snapshot",
+     "Pick a dataset and browse it as it was at any point in its history. Find the version of the file you want and pull it out, without rolling anything back or mounting anything by hand."],
+    ["zxplore", "Send a dataset anywhere, like scp",
+     "Choose a source, choose a host, send. Under it is zfs send and receive over ssh, incremental and verified, so moving a filesystem is as ordinary as copying a file."],
+    ["zxplore", "Backups that restore themselves",
+     "Scheduled snapshots and replication to another machine, with restore as a first-class verb rather than a runbook. The drill is automated because a backup nobody has restored is a rumour."],
+    ["zxplore", "Boot environments you can see",
+     "Every boot environment listed with its origin, its size and which one is active. Create, activate, roll back, destroy, from a list rather than from memory."],
+    ["vmxplore", "Two consoles, no bridge",
+     "A serial console and a VNC client built from scratch, rendering the guest's framebuffer natively. No websockify, no noVNC, no virt-viewer, and no unauthenticated port on the network."],
+    ["vmxplore", "Drive a headless hypervisor",
+     "Point it at another machine over ssh and the whole tool follows: estate, verbs, storage, both consoles. No agent on the far side and no second credential."],
+    ["vmxplore", "Pass a GPU straight through",
+     "The card is detached from the host and handed to the guest whole, with the tool checking what the machine can actually do rather than offering options that will fail at boot."],
+    ["Mesh", "The WireGuard estate, mapped",
+     "Every node, every peer, every route, derived from what the machines actually have rather than from a registry somebody has to keep true. Read-only on purpose: it reports, it does not invent."],
+    ["Scale", "Forty-five servers in under four minutes",
+     "Not forty-five containers. Forty-five machines, each cloned from a golden, on the encrypted mesh, holding a certificate, and in the inventory. On one desktop."],
+    ["Scale", "In Ansible the moment they exist",
+     "New machines land in the inventory as they are created, so configuration management has something to target immediately instead of waiting for someone to write them down."],
+    ["Scale", "Graphed before you can open the tab",
+     "Metrics start flowing the second a node is alive. Pool health, latency, cluster state: the dashboard already has the machine by the time you go looking for it."],
+    ["Scale", "Tear it all down just as fast",
+     "Clones are cheap to make and cheap to destroy. An estate you can rebuild in four minutes is one you are willing to experiment on, which changes what you are prepared to try."],
+    ["Obsolete", "No disk image formats",
+     "qcow2, vmdk, vdi, vhdx: all solving copy-on-write, snapshots and thin provisioning one layer above something that already does all three, better."],
+    ["Obsolete", "No volume manager",
+     "No LVM, no thin pools, no metadata volume sized wrong two years ago, no pvmove at two in the morning."],
+    ["Obsolete", "No image conversion",
+     "Nothing to convert, because the thing you built and the thing you boot are the same bytes on the same block device."],
+    ["Obsolete", "No storage driver underneath your containers",
+     "No overlay whiteouts, no devicemapper thin pool, no layer limits. Layers are datasets and clones, which is what they always wanted to be."],
+    ["Obsolete", "No separate backup product",
+     "No agent in the guest, no image-level backup software, no deduplicating appliance. Send and receive, incremental, verified, in the format the source already uses."],
+    ["Obsolete", "No rescue USB",
+     "The recovery tools are on the machine and the install media is the rescue media. Rolling back a bad upgrade is a boot menu entry, not an evening."],
+    ["Obsolete", "No provisioning server to build",
+     "The installed machine keeps what it installed from and serves it. There is no separate PXE stack to stand up, configure and then maintain forever."],
+    ["Rethink", "Userland is mostly optional",
+     "Once the storage layer does snapshots, cloning, replication and integrity, an enormous amount of what we install on top of Linux turns out to be scaffolding for problems that no longer exist."],
+    ["Rethink", "The machine is the artefact",
+     "Not an image of a machine, not a description of a machine, not a recipe that builds one. The dataset is the thing, and it clones, snapshots and ships as itself."],
+    ["Rethink", "Storage stopped being a backend",
+     "Everywhere else ZFS is a plugin behind an abstraction that also has to fit LVM and Ceph. Here it is the foundation, so per-workload tuning, dataset hierarchy and diffs are simply available."],
+    ["Rethink", "Reproducible, not immutable",
+     "The installed system is a full, mutable Linux you own. What is fixed is the way it was produced: the same media builds the same machine, next month and next year."],
+    ["Rethink", "Layer zero",
+     "Packer, Terraform and Ansible all assume a machine already exists, configured and reachable. This is the layer underneath that assumption, and it is the one nobody shipped."],
+    ["Rethink", "Nothing here is invented",
+     "ZFS, KVM, Firecracker, WireGuard, Kubernetes: all proven, all boring, all somebody else's. What is new is the opinion about how they fit together, and the refusal to hide any of them."],
+    ["Inside", "Block latency, not just utilisation",
+     "An *eBPF exporter* records per-device I/O latency as histograms, so you can see the *tail* rather than an average that hides it. The disk that is fine until it is not shows up here first."],
+    ["Inside", "Five exporters, already running",
+     "ARC statistics, pool scrub state, drive health from SMART, microVM counts and lab inventory. All collected from *first boot*, with no agent to install and nothing to wire up."],
+    ["Inside", "Twenty-nine dashboards, provisioned",
+     "Grafana arrives with the dashboards already in it, sorted into folders. You are not handed an empty install and a link to a gallery: the graphs for *this* machine already exist."],
+    ["Inside", "Kubernetes in the browser",
+     "A full terminal running *k9s* and a graphical cluster view, both behind the same TLS proxy as everything else. No kubeconfig to copy around and no extra port to open."],
+    ["Inside", "One certificate authority, locally",
+     "Services get real certificates from an authority this machine owns, so internal traffic is *verified* rather than waved past a warning. One trust anchor covers the whole estate."],
+    ["Inside", "Snapshots on a schedule you did not write",
+     "Hourly, daily and monthly retention is configured before you arrive, on the datasets that matter. The first thing you do on a new machine is usually the thing already done here."],
+    ["Inside", "The core edition",
+     "Strip everything back to *ZFS and the installer* when that is all you want. The same substrate, the same install path, none of the tooling on top."],
+    ["Why", "Rebuild beats repair",
+     "When a machine can be reproduced in minutes from media you already hold, *fixing* a broken one stops being the only option. That changes how much risk an afternoon can carry."],
+    ["Why", "The clone is the unit of work",
+     "Not the file, not the image, not the container. Once creating a machine costs *milliseconds*, you stop conserving machines and start using them like variables."],
+    ["Why", "Offline is the default, not a mode",
+     "Everything needed was carried on the media. There is no degraded *air-gapped mode* to enable, because the ordinary path never needed the internet in the first place."],
+    ["Why", "One machine, one command, a rack",
+     "The box you just installed can provision the next one. Capability *spreads* rather than being centralised in something you have to keep alive."],
+    ["Use it for", "The homelab that stops eating weekends",
+     "Snapshots before every experiment, rollback when it goes wrong, and a rebuild that takes minutes. The *fear* of breaking the box is what was costing you the weekend."],
+    ["Use it for", "Edge sites with no hands",
+     "Machines that install themselves from a key or over the network, come up on an encrypted mesh, and report metrics before anyone logs in. *Nobody has to be there*."],
+    ["Use it for", "CI that is not a shared mutable mess",
+     "Every run on a *fresh clone* of a known-good machine, destroyed afterwards. No accumulated state, no works-on-the-runner, no queue behind one dirty host."],
+    ["Use it for", "Teaching and labs",
+     "Stand up a *cluster of real machines* for a class, break them on purpose, and reset the whole estate between sessions in the time it takes to say so."],
+    ["Use it for", "Disaster recovery you have actually tested",
+     "The replica is not a tarball nobody has opened. It is a machine waiting to be *restamped* and booted here, and the drill runs on a schedule."],
+    ["Use it for", "Air-gapped and regulated",
+     "Nothing phones home, nothing is fetched at install time, and every artefact was pinned when the image was built. What went in the vault is what comes out."],
+    ["Netboot", "Armed by hardware address",
+     "A machine installs only when *its own MAC* has been deliberately armed. Everything else fetches a 404 and boots from its own disk. Consent is a file, not a policy document."],
+    ["Netboot", "Install it, or clone onto it",
+     "Arm a machine to *install from the mirror*, or to *receive a golden* streamed over HTTP. Same boot, same consent, two completely different outcomes."],
+    ["Netboot", "Beside your DHCP, or instead of it",
+     "On an office network it runs as *proxyDHCP* and hands out no addresses, leaving your existing server alone. On an isolated rack it can *be* the DHCP server. Both are one setting."],
+    ["Netboot", "No agent, no imaging server",
+     "The target needs nothing installed and nothing pre-registered. It needs a network card and permission. Everything else is already on the machine doing the serving."],
+    ["Recovery", "A replica is a spare, not an archive",
+     "Restore is not unpacking a tarball and hoping. The replica already holds the machine; recovery *restamps* it to boot here and starts it."],
+    ["Recovery", "The drill runs itself",
+     "Disaster recovery is exercised on a schedule with a *canary* written before and checked after, so the answer to “when did we last test restores” is a timestamp rather than a wince."],
+    ["Recovery", "From a key to a rack, from nothing",
+     "One USB installs a machine with no internet. That machine provisions the next. *Total prerequisites: a key and power.* Nothing else has to survive the disaster."],
+    ["Workloads", "Pick the shape at install time",
+     "Templates for *Kubernetes, labs, ZFS testing, developer boxes, AI and plain virtualisation*. The choice is one line in an answers file, applied while the machine first boots."],
+    ["Workloads", "Converge once, then get out of the way",
+     "First boot builds what the template asked for and stops. No agent left running, no controller reconciling forever, nothing to keep alive so the machine keeps working."],
+    ["MicroVMs", "Between a container and a VM",
+     "Firecracker gives a *real kernel boundary* with container-grade start times. For workloads you do not fully trust, that is a better trade than a namespace."],
+    ["Editions", "Full, net, or core",
+     "*Full* carries every mirror and installs with the internet unplugged. *Net* is the same installer without the payload. *Core* is ZFS and the installer, nothing else."],
+    ["Editions", "Three ways onto a machine",
+     "Boot the key, netboot from another machine, or receive a golden. All three land the same system, and the one you pick is about logistics rather than capability."],
+    ["Editions", "Choose which mirrors you carry",
+     "Build an image with Debian, Fedora and Enterprise Linux mirrors, or only the one you use. The image is sized by the *decision you made*, not by everything that might be needed."],
+    ["Learn", "The documentation is the reason",
+     "Not a feature list. Why a dataset layout keeps a rollback consistent, why a zvol under a filesystem costs you, what an eBPF latency histogram is actually telling you."],
+    ["Learn", "Every incident became a comment",
+     "The code carries the dates, the machines and the symptoms of things that went wrong. You are not reading someone's theory, you are reading *what actually happened* and what it cost."]
   ];
 
+  // Section colours. The kicker names the section, so one lookup drives the
+  // kicker, the title underline, the background wash and the brand dot — the
+  // whole screen shifts hue as the deck moves through a theme.
+  var ACCENT = {
+    "The substrate": "#4da6ff", "Layout": "#4da6ff", "Undo": "#4da6ff",
+    "Coverage": "#4da6ff", "Snapshots": "#4da6ff", "Integrity": "#4da6ff",
+    "Replication": "#4da6ff", "Encryption": "#4da6ff", "Compression": "#4da6ff",
+    "zxplore": "#33e6e6", "vmxplore": "#c77dff", "Mesh": "#d45fff",
+    "Build": "#ffd043", "Apps": "#ffd043", "Images": "#ffd043", "Export": "#ffd043",
+    "No images": "#c77dff", "Goldens": "#ffd043", "Clones": "#ffd043",
+    "MicroVMs": "#c77dff", "klab": "#3dff88", "Kubernetes": "#3dff88",
+    "WireGuard": "#d45fff", "Certificates": "#33e6e6",
+    "Darksite": "#ffd043", "Reproducible": "#ffd043",
+    "Netboot": "#3dff88", "Consent": "#3dff88", "Scale": "#3dff88",
+    "Choice": "#4da6ff", "Secure Boot": "#ffd043",
+    "Observability": "#33e6e6", "Containers": "#c77dff",
+    "Recovery": "#4da6ff", "Transparency": "#33e6e6", "Yours": "#3dff88",
+    "Obsolete": "#ff5f5f", "Rethink": "#3dff88",
+    "Inside": "#33e6e6", "Use it for": "#ffd043", "Why": "#4da6ff",
+    "Workloads": "#ffd043", "Editions": "#4da6ff", "Learn": "#33e6e6"
+  };
+  var DEFAULT_ACCENT = "#4da6ff";
+
+  // *text* in the copy becomes a highlight. Written this way so the slide
+  // array stays readable prose rather than markup.
+  function body(text) {
+    var out = "", i = 0;
+    text.split("*").forEach(function (part, n) {
+      var e = document.createElement(n % 2 ? "em" : "span");
+      if (n % 2) e.className = "hl";
+      e.textContent = part;
+      out += e.outerHTML;
+    });
+    return out;
+  }
+
   var wrap = document.getElementById('ishow-slides');
-  SLIDES.forEach(function (s, i) {
+  SLIDES.forEach(function (sl, i) {
     var d = document.createElement('div');
     d.className = 'ishow-slide' + (i === 0 ? ' on' : '');
     d.innerHTML = '<div class="ishow-kicker"></div><div class="ishow-title"></div><div class="ishow-body"></div>';
-    d.children[0].textContent = s[0];
-    d.children[1].textContent = s[1];
-    d.children[2].textContent = s[2];
+    d.children[0].textContent = sl[0];
+    d.children[1].textContent = sl[1];
+    d.children[2].innerHTML = body(sl[2]);
     wrap.appendChild(d);
   });
 
+  var show = document.getElementById('install-show');
   var cur = 0, slides = wrap.children;
+
+  function paint(i) {
+    show.style.setProperty('--ishow-accent', ACCENT[SLIDES[i][0]] || DEFAULT_ACCENT);
+    show.style.setProperty('--ishow-deck', ((i + 1) / SLIDES.length * 100).toFixed(1) + '%');
+  }
+  paint(0);
+
   setInterval(function () {
-    if (document.getElementById('install-show').style.display === 'none') return;
+    if (show.style.display === 'none') return;
     slides[cur].classList.remove('on');
     cur = (cur + 1) % slides.length;
     slides[cur].classList.add('on');
-  }, 7000);
+    paint(cur);
+  }, 10000);
 
   // Poll the progress the installer publishes. A seeded install is one this
   // page did not start, so window._installStartedHere stays false and the show
@@ -11867,7 +12150,26 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
         if (p.running && !window._installStartedHere) show.style.display = 'flex';
         if (!p.running) show.style.display = 'none';
         if (p.phase) document.getElementById('ishow-phase').textContent = p.phase;
-        var last = (p.steps || []).slice(-4);
+
+        // Elapsed comes from the FIRST step's timestamp, not from when this
+        // page loaded: a browser that reloads mid-install must not reset the
+        // clock and claim the install just started.
+        var steps = p.steps || [];
+        if (steps.length && !window._ishowT0) window._ishowT0 = parseInt(steps[0].at, 10) * 1000;
+        if (window._ishowT0) {
+          var secs = Math.max(0, Math.floor((Date.now() - window._ishowT0) / 1000));
+          var hh = Math.floor(secs / 3600), mm = Math.floor(secs / 60) % 60, ss = secs % 60;
+          document.getElementById('ishow-elapsed').textContent =
+            (hh ? String(hh).padStart(2, '0') + ':' : '') +
+            String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
+        }
+        // Steps completed, stated as a count rather than a percentage. The
+        // installer does not know its own total, and inventing a denominator
+        // to draw a progress bar would be a lie told very confidently.
+        document.getElementById('ishow-count').textContent =
+          steps.length + (steps.length === 1 ? ' STEP DONE' : ' STEPS DONE');
+
+        var last = steps.slice(-4);
         document.getElementById('ishow-steps').innerHTML = last.map(function (s) {
           var b = document.createElement('b'), d = document.createElement('span');
           b.textContent = s.label; d.textContent = ' ' + s.detail;
