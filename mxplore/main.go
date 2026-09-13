@@ -52,6 +52,7 @@ func main() {
 		watch    = flag.Duration("watch", 0, "redraw every interval, e.g. 10s (0 = draw once)")
 		showVer  = flag.Bool("version", false, "print the version and exit")
 		wantGUI  = flag.Bool("gui", false, "open the window (GUI build only)")
+		check    = flag.Bool("check", false, "run every query and report the ones that return nothing")
 		hostName = flag.String("host", hostname(), "name for the root of the tree")
 	)
 	flag.Usage = usage
@@ -71,6 +72,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  start it with: systemctl start prometheus\n")
 		fmt.Fprintf(os.Stderr, "  or point elsewhere: mxplore --prometheus http://host:9090\n")
 		os.Exit(1)
+	}
+
+	if *check {
+		os.Exit(runCheck(p))
 	}
 
 	if *wantGUI {
@@ -104,6 +109,53 @@ func main() {
 	}
 }
 
+// runCheck runs every query in every view and reports the ones that answer
+// with no series. Returns the process exit code.
+//
+// WHY THIS EXISTS: a spec that names a metric no exporter publishes produces
+// an EMPTY branch, not an error — Prometheus answers "success, no data" and
+// the tree renders a heading with nothing under it. That is indistinguishable
+// from a machine that genuinely has no VMs. Two specs shipped that way in the
+// first hour of this tool: node_zfs_arc_size, which does not exist on a
+// machine whose node_exporter runs --no-collector.zfs, and a block-latency
+// query that read a histogram's _sum counter and rendered 33 minutes as a
+// latency. Both were found by looking at the output rather than by anything
+// automatic, which is exactly what this flag is for.
+func runCheck(q Querier) int {
+	empty, failed, ok := 0, 0, 0
+	var walk func(path string, s Spec)
+	walk = func(path string, s Spec) {
+		p := path + "/" + s.Title
+		if s.Query != "" {
+			samples, err := q.Query(s.Query)
+			switch {
+			case err != nil:
+				fmt.Printf("FAIL  %-36s %v\n", p, err)
+				failed++
+			case len(samples) == 0:
+				fmt.Printf("EMPTY %-36s %s\n", p, s.Query)
+				empty++
+			default:
+				fmt.Printf("ok    %-36s %d series\n", p, len(samples))
+				ok++
+			}
+		}
+		for _, c := range s.Children {
+			walk(p, c)
+		}
+	}
+	for _, v := range Views() {
+		walk("", v)
+	}
+	fmt.Printf("\n%d answered, %d empty, %d failed\n", ok, empty, failed)
+	if failed > 0 {
+		return 1
+	}
+	// Empty is not a failure: a host with no guests SHOULD have an empty
+	// Guests branch. It is reported so a human can tell the two apart.
+	return 0
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `mxplore — the metrics explorer: a machine as a tree you walk into
 
@@ -115,6 +167,9 @@ usage: mxplore [options]
   --depth N          stop drawing below depth N; 0 draws everything
   --watch DURATION   redraw on an interval, e.g. --watch 10s
   --gui              open the window (the `+"`mx`"+` build only; `+"`mx-tui`"+` says so)
+  --check            run every query and report which return nothing, so an
+                     empty branch can be told from a spec naming a metric no
+                     exporter here publishes
   --version          print the version and exit
 
 The four views match the desktop's compass layout, so view N is what the

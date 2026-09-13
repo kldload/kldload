@@ -92,13 +92,32 @@ func storageView() Spec {
 				Format: func(v float64) string { return trimFloat(v) + " °C" },
 			},
 			{
-				Title: "Block latency", Kind: KindProbe,
-				Query: "topk(5, ebpf_exporter_bio_latency_seconds_sum)", Label: "device",
+				// p99 out of the histogram, NOT the _sum counter. The first
+				// version of this line read topk(5, ..._seconds_sum), which is
+				// a monotonic total since boot: onyx rendered "33m48s" as a
+				// block latency and it looked like a catastrophe rather than a
+				// units mistake (2026-09-13). A histogram's sum is not a
+				// latency and never was.
+				Title: "Block latency p99", Kind: KindProbe,
+				Query:  "histogram_quantile(0.99, sum by (device, le) (rate(ebpf_exporter_bio_latency_seconds_bucket[5m])))",
+				Label:  "device",
 				Format: Seconds,
 			},
 			{
+				// klab-exporter, not node_exporter: the node_exporter unit
+				// runs with --no-collector.zfs because it double-counts
+				// against zfs_exporter, so node_zfs_arc_size does not exist on
+				// a kldload machine. Checked against a live Prometheus rather
+				// than assumed — the name I reached for first returned zero
+				// series.
 				Title: "ARC size", Kind: KindGroup,
-				Query: "node_zfs_arc_size", Format: Bytes,
+				Query: "klab_zfs_arc_size_bytes", Format: Bytes,
+			},
+			{
+				// The number that actually tells you whether the ARC is doing
+				// its job. A ratio in 0..1, which is what Percent wants.
+				Title: "ARC hit ratio", Kind: KindGroup,
+				Query: "klab_zfs_arc_hit_ratio", Format: Percent,
 			},
 		},
 	}
