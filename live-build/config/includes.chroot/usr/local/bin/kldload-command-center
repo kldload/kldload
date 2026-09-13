@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-command-center — four dashboards, four workspaces, one key
+#
+# WHAT IT DOES:
+#   urls    Resolve the four dashboard URLs, one per workspace, and print them
+#           in workspace order (1..4), one per line. This is what the GNOME
+#           extension reads before it launches anything.
+#   stop    Close every command-center window.
+#   status  Say whether it is up, and how many windows are open.
+#
+# WHY IT EXISTS: the machine already has 28 dashboards and four static
+# workspaces and no way to put one on each. The operator's words were "metrics
+# should ideally be an app that uses 4 virtual desktops to display a system
+# status ... like a modern dashboard / command center" (2026-09-13).
+#
+# WHY THE SPLIT with the extension: placing a window on a specific workspace is
+# not something a launcher can ask for. Wayland has no "open me over there",
+# and matching a window to a workspace after the fact means guessing at app ids
+# that Chrome derives differently depending on version and session type. The
+# extension sidesteps all of it: it activates a workspace, launches one window,
+# waits for it, moves on. New windows open on the ACTIVE workspace, so the
+# placement is a consequence rather than a request. This half only has to
+# answer "which four URLs" and "kill them".
+#
+# THE FOUR VIEWS, matching the compass layout of the workspaces:
+#   1 (north) network and eBPF   — Hubble flows, Cilium datapath, Tetragon
+#   2 (west)  storage and ZFS    — pools, ARC, latency distributions
+#   3 (east)  cluster and VMs    — Kubernetes, libvirt guests
+#   4 (south) host and forensics — every system metric, kernel logs
+#
+# INPUTS:   Grafana on $KLDLOAD_CC_GRAFANA (default http://localhost:3000),
+#           read anonymously — see the grafana-server drop-in that allows it.
+# OUTPUTS:  urls on stdout, one per line, ALWAYS four lines. Diagnostics on
+#           stderr, because the extension parses stdout.
+# EXIT:     0 ok · 1 a step failed · 2 usage.
+#
+# Notes:
+#   - Never fewer than four lines. A missing dashboard falls back to Grafana's
+#     dashboard list rather than an empty string, because the extension pairs
+#     line N with workspace N and a blank line would silently leave a
+#     workspace empty while everything reported success.
+#   - kiosk mode (&kiosk) is what removes Grafana's own chrome. Without it each
+#     window carries a nav bar and a breadcrumb, which is four copies of
+#     furniture nobody reads on a wall display.
+#   - SEE ALSO: kldload-workspace-keys extension, kldload-chrome-app.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+
+GRAFANA="${KLDLOAD_CC_GRAFANA:-http://localhost:3000}"
+APP_PREFIX="com.kldload.cc"
+
+_say() { printf 'kldload-command-center: %s\n' "$*" >&2; }
+
+# _find <search-term> — print the URL path of the first dashboard whose title
+# or folder matches, or nothing. Grafana's /api/search takes a query string and
+# returns JSON; anonymous viewer access is what makes it readable without a
+# credential in this file.
+_find() {
+    local q="$1" out
+    out="$(curl -sf --max-time 6 --get --data-urlencode "query=${q}" \
+        --data-urlencode "type=dash-db" --data-urlencode "limit=1" \
+        "${GRAFANA}/api/search" 2>/dev/null)" || return 1
+    printf '%s' "$out" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not d:
+    sys.exit(1)
+print(d[0]["url"])
+' 2>/dev/null
+}
+
+# _pick <term>... — the first term that resolves wins. Several terms because a
+# dashboard can be renamed and the next one along is still the right idea.
+_pick() {
+    local t u
+    for t in "$@"; do
+        if u="$(_find "$t")" && [[ -n "$u" ]]; then
+            printf '%s%s?kiosk&refresh=30s\n' "$GRAFANA" "$u"
+            return 0
+        fi
+    done
+    # Fallback, never a blank line: the dashboard list is at least a place the
+    # operator can navigate from.
+    _say "no dashboard matched: $* — falling back to the dashboard list"
+    printf '%s/dashboards\n' "$GRAFANA"
+}
+
+cmd_urls() {
+    if ! curl -sf --max-time 5 -o /dev/null "${GRAFANA}/api/health"; then
+        _say "FATAL: Grafana is not answering at ${GRAFANA}"
+        _say "  start it with: systemctl start grafana-server"
+        return 1
+    fi
+    # Most specific title first, then progressively looser, so a renamed
+    # dashboard degrades to a neighbour that means the same thing instead of
+    # to the fallback list. The bare last term is deliberately broad.
+    #
+    # The loose-first version of this picked "Kernel Forensics" for the storage
+    # workspace, because its title carries the words "ZFS dbgmsg" and it
+    # happened to sort first (fiend, 2026-09-13). Ordering is the whole trick.
+    _pick "Traffic Microscope" "Hubble" "eBPF Deep Dive" "Network"
+    _pick "ZFS Pool Health" "Block I/O Latency" "Compression Trends" "Storage"
+    _pick "Live Cluster Lifecycle" "VM Estate" "Cilium Agent" "Kubernetes"
+    _pick "Host Full" "Live Matrix" "Kernel Forensics" "Host"
+}
+
+cmd_stop() {
+    local n=0
+    # Match the per-app profile dir, not the window title: the profile path is
+    # ours and cannot collide with a browser the operator opened themselves.
+    if pkill -f "user-data-dir=.*kldload-chrome/${APP_PREFIX}"; then
+        n=1
+    fi
+    ((n)) && _say "command center closed" || _say "nothing was running"
+    return 0
+}
+
+cmd_status() {
+    local n
+    n="$(pgrep -fc "user-data-dir=.*kldload-chrome/${APP_PREFIX}" 2>/dev/null || true)"
+    # pgrep -c prints 0 and exits 1 when nothing matches; the || true above
+    # covers the exit, this covers the empty string on some builds.
+    [[ -n "$n" ]] || n=0
+    if ((n > 0)); then
+        printf 'running (%s browser processes)\n' "$n"
+    else
+        printf 'stopped\n'
+    fi
+}
+
+usage() {
+    cat <<'USAGE'
+usage: kldload-command-center <urls|stop|status>
+
+  urls    Print the four dashboard URLs, workspace order, one per line.
+          Always prints exactly four lines; a dashboard that cannot be
+          resolved falls back to Grafana's dashboard list rather than an
+          empty line.
+  stop    Close every command-center window.
+  status  running / stopped.
+
+The key that drives this is Ctrl+Delete, bound by the kldload-workspace-keys
+GNOME extension, which reads `urls` and then opens one window per workspace.
+Running `urls` by hand is the way to see what it WOULD open.
+
+Environment:
+  KLDLOAD_CC_GRAFANA   Grafana base URL (default http://localhost:3000)
+
+Exit: 0 success, 1 a step failed, 2 usage.
+USAGE
+}
+
+case "${1:-}" in
+urls) cmd_urls ;;
+stop) cmd_stop ;;
+status) cmd_status ;;
+-h | --help | help) usage ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac

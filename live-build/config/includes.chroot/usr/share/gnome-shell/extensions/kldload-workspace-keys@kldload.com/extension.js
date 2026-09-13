@@ -41,6 +41,8 @@
  *     never a no-op that leaves the operator wondering whether it registered.
  * ------------------------------------------------------------------------- */
 
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -49,6 +51,17 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {gridCells} from './layout.js';
 
 const WORKSPACES = 4;
+
+// The resolver that answers "which four dashboards". Kept out of here on
+// purpose: which dashboard belongs on which workspace is an operator decision
+// that changes, and a shell extension is the worst place to edit a URL.
+const CC_TOOL = '/usr/local/bin/kldload-command-center';
+// One Chrome profile per window, and the prefix the tool's `stop` matches on.
+const CC_APP_PREFIX = 'com.kldload.cc';
+// A window that never appears must not hang the launch loop. Ten seconds is
+// far longer than Chrome takes to map its first frame and short enough that a
+// failure is obvious rather than a desktop that seems to have frozen.
+const CC_WINDOW_TIMEOUT_MS = 10000;
 
 export default class KldloadWorkspaceKeys extends Extension {
     enable() {
@@ -81,6 +94,21 @@ export default class KldloadWorkspaceKeys extends Extension {
             Shell.ActionMode.NORMAL,
             () => this._tileGrid());
         this._bound.push('tile-grid');
+
+        // Ctrl+Delete. The operator's ask was a mode rather than a permanent
+        // rearrangement: "for the command center ... ctrl+del, and have that
+        // launch the tiling command center, then you turn it off when you
+        // exit" (2026-09-13).
+        Main.wm.addKeybinding(
+            'command-center',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            () => this._toggleCommandCenter());
+        this._bound.push('command-center');
+
+        this._ccOpen = false;
+        this._ccBusy = false;
     }
 
     disable() {
@@ -91,6 +119,176 @@ export default class KldloadWorkspaceKeys extends Extension {
             Main.wm.removeKeybinding(key);
         this._bound = null;
         this._settings = null;
+        // Deliberately does NOT close the command-center windows. disable()
+        // runs on lock, on a shell restart and on an extension reload, and
+        // tearing down the operator's wall display because the screen locked
+        // would be its own bug. The windows are ordinary windows; the tool's
+        // `stop` verb closes them whenever the operator wants.
+        this._ccOpen = false;
+        this._ccBusy = false;
+    }
+
+    /* ── Command center ──────────────────────────────────────────────────
+     *
+     * Ctrl+Delete opens one dashboard per workspace and Ctrl+Delete closes
+     * them. That is the whole interface.
+     *
+     * WHY THE LAUNCH IS SEQUENTIAL AND SWITCHES WORKSPACE BETWEEN EACH:
+     * Wayland has no "open this window over there". The alternatives are to
+     * match windows after the fact by app id — which Chrome derives
+     * differently depending on version and whether the session is Wayland or
+     * X11, and which the comment block in kldload-chrome-app has been wrong
+     * about in both directions — or to put each window where new windows
+     * already go. New windows open on the ACTIVE workspace. So the extension
+     * activates workspace N, launches one window, waits for it to actually
+     * appear, and moves on. Placement becomes a consequence instead of a
+     * request, and there is no app id to guess.
+     *
+     * Failure modes a reader should know about: the resolver not answering
+     * (Grafana down) aborts before anything is opened and says so; a window
+     * that never maps times out after CC_WINDOW_TIMEOUT_MS and the loop
+     * continues, so one bad dashboard costs one workspace rather than the
+     * whole wall.
+     */
+    _toggleCommandCenter() {
+        // Guard re-entry: the launch takes seconds and Ctrl+Delete is exactly
+        // the kind of key an impatient operator presses twice.
+        if (this._ccBusy)
+            return;
+        if (this._ccOpen)
+            this._stopCommandCenter();
+        else
+            this._startCommandCenter();
+    }
+
+    _stopCommandCenter() {
+        this._ccOpen = false;
+        try {
+            Gio.Subprocess.new([CC_TOOL, 'stop'], Gio.SubprocessFlags.NONE);
+        } catch (e) {
+            logError(e, 'kldload command center: could not run the stop verb');
+        }
+    }
+
+    _startCommandCenter() {
+        this._ccBusy = true;
+        this._ccUrls()
+            .then(urls => {
+                if (urls.length < WORKSPACES) {
+                    Main.notify('kldload command center',
+                        `resolver returned ${urls.length} of ${WORKSPACES} dashboards — not opening`);
+                    this._ccBusy = false;
+                    return;
+                }
+                return this._ccLaunchAll(urls).then(() => {
+                    this._ccOpen = true;
+                    this._ccBusy = false;
+                    // Land back where the operator started, not on the last
+                    // workspace the loop happened to touch.
+                    global.workspace_manager
+                        .get_workspace_by_index(0)
+                        .activate(global.get_current_time());
+                });
+            })
+            .catch(e => {
+                this._ccBusy = false;
+                logError(e, 'kldload command center');
+                Main.notify('kldload command center', `failed: ${e.message}`);
+            });
+    }
+
+    /* Ask the resolver for the four URLs. Resolves to an array of strings;
+     * rejects when the tool fails, which is the Grafana-is-down case. stdout
+     * only — the tool puts its diagnostics on stderr precisely so this parse
+     * cannot be poisoned by a warning. */
+    _ccUrls() {
+        return new Promise((resolve, reject) => {
+            let proc;
+            try {
+                proc = Gio.Subprocess.new([CC_TOOL, 'urls'],
+                    Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
+            } catch (e) {
+                reject(e);
+                return;
+            }
+            proc.communicate_utf8_async(null, null, (p, res) => {
+                try {
+                    const [, stdout] = p.communicate_utf8_finish(res);
+                    if (!p.get_successful()) {
+                        reject(new Error(`${CC_TOOL} urls exited non-zero`));
+                        return;
+                    }
+                    resolve((stdout ?? '').split('\n').map(l => l.trim()).filter(l => l.length > 0));
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        });
+    }
+
+    /* Walk the workspaces, one window each, in order. */
+    _ccLaunchAll(urls) {
+        let chain = Promise.resolve();
+        for (let i = 0; i < WORKSPACES; i++) {
+            const index = i;
+            chain = chain.then(() => {
+                const ws = global.workspace_manager.get_workspace_by_index(index);
+                if (!ws)
+                    return null;
+                ws.activate(global.get_current_time());
+                return this._ccLaunchOne(urls[index], index);
+            });
+        }
+        return chain;
+    }
+
+    /* Launch one dashboard window and resolve once it has mapped, or once the
+     * timeout fires. Never rejects: one dashboard that will not open must not
+     * take the other three with it. */
+    _ccLaunchOne(url, index) {
+        return new Promise(resolve => {
+            let done = false;
+            let handler = 0;
+            let timer = 0;
+
+            const finish = win => {
+                if (done)
+                    return;
+                done = true;
+                if (handler)
+                    global.display.disconnect(handler);
+                if (timer)
+                    GLib.source_remove(timer);
+                if (win) {
+                    // Maximize rather than fullscreen: fullscreen hides the
+                    // top bar, and the top bar is how the operator sees which
+                    // workspace they are on — which is the entire point of
+                    // spreading these over four of them.
+                    win.maximize(Meta.MaximizeFlags.BOTH);
+                }
+                resolve();
+            };
+
+            handler = global.display.connect('window-created', (_d, win) => {
+                if (win.get_window_type() === Meta.WindowType.NORMAL)
+                    finish(win);
+            });
+
+            timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CC_WINDOW_TIMEOUT_MS, () => {
+                timer = 0;
+                finish(null);
+                return GLib.SOURCE_REMOVE;
+            });
+
+            try {
+                Gio.Subprocess.new(
+                    ['/usr/local/bin/kldload-chrome-app', `${CC_APP_PREFIX}.${index + 1}`, url],
+                    Gio.SubprocessFlags.NONE);
+            } catch (e) {
+                logError(e, 'kldload command center: launch failed');
+                finish(null);
+            }
+        });
     }
 
     /* Move the focused window to workspace `index` (0-based) and go there.
