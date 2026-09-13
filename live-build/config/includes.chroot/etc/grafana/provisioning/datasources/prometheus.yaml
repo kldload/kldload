@@ -1,0 +1,36 @@
+# Prometheus datasource for every kldload Grafana dashboard.
+#
+# Role: the datasource 226 of the 294 panel references in
+# /var/lib/grafana/dashboards point at. Read by grafana-server at startup.
+#
+# WHY uid MATTERS MORE THAN ANYTHING ELSE HERE: a provisioned datasource with
+# no explicit uid gets a random one (Grafana handed fiend PBFA97CFB590B2093 on
+# 2026-09-13). Every dashboard names its datasource by the literal uid
+# "prometheus", so with a generated uid all 226 references resolve to nothing
+# and every panel renders empty -- on a machine whose exporters are all up and
+# whose Prometheus has every target green. It looks exactly like broken
+# metrics and is actually one missing line. loki.yaml beside this file pins
+# "loki" for the same reason, which is why the Loki panels always worked and
+# the Prometheus ones never did.
+#
+# Consequence if this file is missing entirely: that is the state fiend shipped
+# in. The repo had loki.yaml and no Prometheus datasource at all, so a fresh
+# install had Loki wired and PromQL pointing nowhere.
+apiVersion: 1
+
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      # Matches prometheus.yml's scrape_interval; a shorter one makes Grafana
+      # ask for points that do not exist and draws gappy lines.
+      timeInterval: 30s

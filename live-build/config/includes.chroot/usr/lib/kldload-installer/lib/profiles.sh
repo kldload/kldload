@@ -1784,10 +1784,21 @@ DASHSTART
         # NOT the binaries, so the app-grid tile opened onto nothing (fiend,
         # 2026-08-16). The warning above was already there. It is now three
         # names long.
+        # The exporters are PATTERNS, not names, and that is deliberate. This
+        # list has now been extended four times by adding one more name after
+        # one more broken install, and the fourth was six tools at once:
+        # zfs_exporter, smartctl_exporter, ebpf_exporter, zpool-scrub-exporter,
+        # loki and promtail all shipped in the ISO, all matched no glob here,
+        # and so reached no installed machine ever. fiend, 2026-09-13: a
+        # six-node KVM cluster with a Metrics menu and not one exporter behind
+        # it, because none of those six names begins with k. The two exporter
+        # globs mean the NEXT one ships without anyone remembering this line.
         for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* \
             /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob* \
             /usr/local/bin/wgx /usr/local/bin/vmxplore /usr/local/bin/vmx \
-            /usr/local/bin/ztx /usr/local/bin/ztx-tui /usr/local/bin/timer; do
+            /usr/local/bin/ztx /usr/local/bin/ztx-tui /usr/local/bin/timer \
+            /usr/local/bin/*_exporter /usr/local/bin/*-exporter \
+            /usr/local/bin/loki /usr/local/bin/promtail; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
             # ZFS Console is an installer checkbox (default on) — honor an
@@ -1798,6 +1809,24 @@ DASHSTART
             chmod +x "${target}/usr/local/bin/${_name}"
         done
         shopt -u nullglob
+
+        # A count is not a result: compare what the live image HAS against what
+        # the target GOT, per tool, and name every one that did not make it.
+        # Every bug this block has ever had was a tool that existed on the ISO
+        # and silently matched nothing here -- zexplore, wgx, vmxplore, ztx, and
+        # then six exporters at once. Nothing errored on any of those installs,
+        # which is exactly why they survived to be found by hand months later.
+        _missed=0
+        for _src in /usr/local/bin/*_exporter /usr/local/bin/*-exporter \
+            /usr/local/bin/loki /usr/local/bin/promtail; do
+            [[ -x "$_src" ]] || continue
+            _name="$(basename "$_src")"
+            [[ -x "${target}/usr/local/bin/${_name}" ]] && continue
+            k_log "WARNING: ${_name} is on the live image and did NOT reach the target — whatever unit runs it will fail 203/EXEC"
+            _missed=$((_missed + 1))
+        done
+        ((_missed == 0)) ||
+            k_log "WARNING: ${_missed} observability binaries did not land — the Metrics view will have nothing behind it"
 
         # ── Component DEFINITIONS ───────────────────────────────────────
         #
@@ -3011,6 +3040,24 @@ REPL
             cp -r /usr/local/share/klab/* "${target}/usr/local/share/klab/"
         fi
 
+    fi
+    # ── Observability + system hooks: EVERY install, not just KVM hosts ──────
+    #
+    # Everything from here to the VM snapshot timer below used to sit inside
+    # the KVM gate above, which fires only when the profile is literally "kvm"
+    # or KLDLOAD_ENABLE_KVM=1 is set. The klab and k8s templates do neither --
+    # they bring up libvirt guests at FIRST BOOT, long after this code has run.
+    # So fiend installed as profile=desktop template=klab, came up running six
+    # KVM guests and a Kubernetes cluster, and had no exporter units, no
+    # exporter configs, no Grafana provisioning and no dashboards: the Metrics
+    # menu pointed at a stack that had never been installed (2026-09-13).
+    #
+    # None of this is KVM-specific. node/ZFS/SMART/eBPF exporters measure the
+    # HOST; the NetworkManager TLS hook and the heal-pending retry are general
+    # system plumbing that was only ever reaching KVM machines by accident.
+    # core is the one exclusion, and for the reason it always is: core is bare
+    # ZFS plus SSH, with no kldload tools and no webui to show any of this in.
+    if [[ "$_profile" != "core" ]]; then
         # ── observability-stack: configs, dashboards, enable services ─────
         # ── Observability unit + timer copy (glob-driven, not hardcoded) ─────
         # Lesson from pass-21/22: hardcoded lists of unit filenames repeatedly
@@ -3173,6 +3220,9 @@ REPL
                 "${target}/etc/grafana/provisioning/datasources/" 2>/dev/null || true
         fi
 
+    fi
+    # ── back to the KVM host specifics ───────────────────────────────────────
+    if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
         # Hourly VM snapshot timer
         mkdir -p "${target}/etc/systemd/system"
         cat >"${target}/etc/systemd/system/kvm-snapshot.service" <<'SNAPSVC'

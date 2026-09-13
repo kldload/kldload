@@ -398,6 +398,120 @@ fi
 rmdir "$MOUNTPOINT" 2>/dev/null
 
 # ── Git state ────────────────────────────────────────────────────────────────
+_section "Observability binaries the installer can actually copy"
+
+# Every observability unit names a binary in its ExecStart. profiles.sh copies
+# tools to the target with a LIST OF GLOBS, and a binary whose name matches no
+# glob is dropped in silence -- the unit ships, the binary does not, and the
+# service fails 203/EXEC on a machine nobody is watching yet.
+#
+# That is not hypothetical. zexplore, wgx, vmxplore and ztx were each found
+# this way, one broken install at a time, and the comment above the glob list
+# says so in three paragraphs. Then it happened to six tools at once:
+# zfs_exporter, smartctl_exporter, ebpf_exporter, zpool-scrub-exporter, loki
+# and promtail all shipped in the ISO and reached no installed machine ever,
+# because not one of those names begins with k (fiend, 2026-09-13).
+#
+# So this gate reads the globs OUT of profiles.sh and tests each unit's
+# ExecStart against them. It tracks the code rather than restating it: edit the
+# glob list and this gate follows, delete a glob and it goes red.
+_obs_units="${ROOT}/live-build/config/includes.chroot/usr/lib/systemd/system"
+_obs_prof="${ROOT}/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+if [[ ! -d "$_obs_units" || ! -f "$_obs_prof" ]]; then
+    _warn "observability copy gate" "units dir or profiles.sh missing — gate DID NOT RUN"
+else
+    # The glob list, lifted from the loop itself.
+    mapfile -t _obs_globs < <(
+        sed -n '/^        for _src in \/usr\/local\/bin\/k\*/,/; do$/p' "$_obs_prof" |
+            grep -oE '/usr/local/bin/[^ \\;]+'
+    )
+    if ((${#_obs_globs[@]} == 0)); then
+        _warn "observability copy gate" "could not read the glob list out of profiles.sh — gate DID NOT RUN"
+    else
+        _obs_bad=0
+        _obs_seen=0
+        for _ou in "$_obs_units"/*exporter*.service "$_obs_units"/loki.service "$_obs_units"/promtail.service; do
+            [[ -f "$_ou" ]] || continue
+            _oe=$(grep -m1 '^ExecStart=' "$_ou" | cut -d= -f2- | awk '{print $1}')
+            # Only /usr/local/bin matters: anything in /usr/bin came from a
+            # package and the package manager put it on the target.
+            [[ "$_oe" == /usr/local/bin/* ]] || continue
+            _obs_seen=$((_obs_seen + 1))
+            _hit=0
+            for _g in "${_obs_globs[@]}"; do
+                # The glob IS the pattern here -- that is the whole test, so the
+                # right-hand side must stay unquoted.
+                # shellcheck disable=SC2053
+                [[ "$_oe" == $_g ]] && {
+                    _hit=1
+                    break
+                }
+            done
+            ((_hit)) || {
+                _fail "observability copy gate" "$(basename "$_ou") runs ${_oe}, which matches no glob in profiles.sh — it will never reach an installed system"
+                _obs_bad=$((_obs_bad + 1))
+            }
+        done
+        if ((_obs_seen == 0)); then
+            _warn "observability copy gate" "no observability unit named a /usr/local/bin binary — gate DID NOT RUN"
+        elif ((_obs_bad == 0)); then
+            _pass "observability copy gate: all ${_obs_seen} exporter binaries match a profiles.sh copy glob"
+        fi
+    fi
+fi
+
+_section "Grafana dashboards point at a datasource that exists"
+
+# Every shipped dashboard names its datasource by uid. Provisioning decides
+# what uids exist. Nothing connects the two, so a dashboard can reference a uid
+# no provisioning file defines and Grafana will load it, render every panel,
+# and draw nothing -- on a machine where Prometheus is green and every exporter
+# is up. It reads as "metrics is broken" and is a missing line of YAML.
+#
+# HISTORY: fiend, 2026-09-13. 226 panel references to uid "prometheus" and no
+# Prometheus datasource file in the repo at all; Grafana generated
+# PBFA97CFB590B2093 for the one added by hand and every panel stayed empty. The
+# Loki panels worked the whole time because loki.yaml pinned uid "loki".
+_g_dash="${ROOT}/live-build/config/includes.chroot/var/lib/grafana/dashboards"
+_g_ds="${ROOT}/live-build/config/includes.chroot/etc/grafana/provisioning/datasources"
+if [[ ! -d "$_g_dash" || ! -d "$_g_ds" ]]; then
+    _warn "grafana datasource gate" "dashboards or provisioning dir missing — gate DID NOT RUN"
+else
+    # uids the provisioning actually defines.
+    mapfile -t _g_have < <(grep -rhoE '^[[:space:]]*uid:[[:space:]]*[A-Za-z0-9_-]+' "$_g_ds" | awk '{print $2}' | sort -u)
+    # uids the dashboards reference, but only for real datasource types --
+    # panels, rows and library elements carry uids of their own.
+    mapfile -t _g_want < <(
+        grep -rhoE '"datasource":[[:space:]]*\{[^}]*\}' "$_g_dash" |
+            grep -oE '"uid":[[:space:]]*"[^"]+"' | sed 's/.*"\(.*\)"/\1/' |
+            grep -vE '^\$' | sort -u
+    )
+    if ((${#_g_want[@]} == 0)); then
+        _warn "grafana datasource gate" "no datasource uids found in the dashboards — gate DID NOT RUN"
+    else
+        _g_bad=0
+        for _w in "${_g_want[@]}"; do
+            _ok=0
+            for _h in "${_g_have[@]}"; do [[ "$_w" == "$_h" ]] && _ok=1 && break; done
+            ((_ok)) && continue
+            # A dashboard may reference a datasource kldload does not provision
+            # (an imported community board). Those are a warning, not a failure
+            # -- but the two kldload pins are not optional.
+            case "$_w" in
+            prometheus | loki)
+                _fail "grafana datasource gate" "dashboards reference uid '${_w}' and no provisioning file defines it — every one of those panels renders empty"
+                _g_bad=$((_g_bad + 1))
+                ;;
+            *)
+                _warn "grafana datasource gate" "uid '${_w}' is referenced but not provisioned (imported dashboard?)"
+                ;;
+            esac
+        done
+        ((_g_bad == 0)) &&
+            _pass "grafana datasource gate: every core datasource uid the dashboards use is provisioned (${#_g_have[@]} defined)"
+    fi
+fi
+
 _section "Duplicated files that must not drift"
 
 # Some files are shipped TWICE on purpose: once into the live rootfs and once
