@@ -42,12 +42,12 @@ ANSWERS="${ROOT}/live-build/pxe/answers/$(tr 'A-Z:' 'a-z-' <<<"$MAC").env"
 DISTRO=fedora
 PROFILE=desktop
 TEMPLATE=""
-WORKERS=""
-CONTROL_PLANES=""
+WORKERS="3"
+CONTROL_PLANES="3"
 ENCRYPT=0
 PASSPHRASE=""
 SECURE_BOOT=0
-BUILD_IMAGES=0
+BUILD_IMAGES=1
 PASSWORD="${FIEND_PASSWORD:-Passw0rd}"
 DRY_RUN=0
 
@@ -66,6 +66,7 @@ usage: redeploy-fiend.sh [options]
                          the installed system at /etc/kldload/zfs-passphrase
   --secure-boot          prepare shim/MOK on the target (see Notes in header)
   --build-images         build every golden, klab image and appliance
+  --no-build-images      do NOT build them (the default in this copy is ON)
   --password TEXT        admin password (default Passw0rd)
   --dry-run              print the answers file and stop, arming nothing
   --status               show what is armed, then exit
@@ -103,6 +104,10 @@ while (($#)); do
     --encrypt) ENCRYPT=1 && shift ;;
     --secure-boot) SECURE_BOOT=1 && shift ;;
     --build-images) BUILD_IMAGES=1 && shift ;;
+    # Needed because the DEFAULT is 1 in this copy: without an off switch
+    # there is no way to ask for an install that does not spend its first
+    # boot building five goldens and an appliance catalog.
+    --no-build-images) BUILD_IMAGES=0 && shift ;;
     --dry-run) DRY_RUN=1 && shift ;;
     --status)
         server status
