@@ -1797,7 +1797,6 @@ DASHSTART
             /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob* \
             /usr/local/bin/wgx /usr/local/bin/vmxplore /usr/local/bin/vmx \
             /usr/local/bin/ztx /usr/local/bin/ztx-tui /usr/local/bin/timer \
-            /usr/local/bin/mx /usr/local/bin/mx-tui \
             /usr/local/bin/*_exporter /usr/local/bin/*-exporter \
             /usr/local/bin/loki /usr/local/bin/promtail; do
             [[ -x "$_src" ]] || continue
