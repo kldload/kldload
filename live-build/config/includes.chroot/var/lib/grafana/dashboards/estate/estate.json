@@ -110,7 +110,7 @@
       },
       "targets": [
         {
-          "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)",
+          "expr": "(1 - (sum by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[2m])) / sum by (instance) (rate(node_cpu_seconds_total[2m])))) * 100",
           "refId": "A"
         }
       ],
@@ -136,7 +136,9 @@
                 "value": 90
               }
             ]
-          }
+          },
+          "min": 0,
+          "max": 100
         }
       },
       "options": {
@@ -328,36 +330,24 @@
             "renameByName": {
               "domain": "VM",
               "state_desc": "State",
-              "Value #A": "state_code",
               "Value #B": "vCPUs",
               "Value #C": "RAM (MB)",
               "Value #D": "CPU (cores)",
               "Value #E": "RAM used (bytes)"
             },
             "excludeByName": {
-              "state_code": true,
               "__name__": true,
               "Value": true,
               "instance": true,
               "job": true,
-              "source_host_name": true
+              "source_host_name": true,
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Value #A": true
             }
-          }
-        },
-        {
-          "id": "calculateField",
-          "options": {
-            "mode": "reduceRow",
-            "reduce": {
-              "reducer": "allValues"
-            },
-            "alias": "Type",
-            "binary": {
-              "left": "VM",
-              "operator": "/",
-              "right": "VM"
-            },
-            "replaceFields": false
           }
         }
       ],
@@ -406,39 +396,6 @@
               {
                 "id": "decimals",
                 "value": 2
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Type"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "regex",
-                    "options": {
-                      "pattern": ".*-golden.*",
-                      "result": {
-                        "text": "\ud83d\udccb Template",
-                        "color": "orange"
-                      }
-                    }
-                  },
-                  {
-                    "type": "special",
-                    "options": {
-                      "match": "null+nan",
-                      "result": {
-                        "text": "\ud83d\udda7 VM",
-                        "color": "blue"
-                      }
-                    }
-                  }
-                ]
               }
             ]
           }
