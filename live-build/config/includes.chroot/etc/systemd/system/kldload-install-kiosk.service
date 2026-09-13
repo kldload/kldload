@@ -55,6 +55,14 @@ Documentation=man:cage(1)
 # work I thought they were.
 After=plymouth-quit.service
 
+# Ordering ONLY — no Conflicts, no Wants. After= neither starts a unit nor
+# stops one; it just says "not before". Without it there is a real race on the
+# netboot path: multi-user.target wants both this and kldload-live-tui, so the
+# kiosk could run its stop of live-tui BEFORE live-tui had started, and then
+# agetty would come up and take tty1 out from under cage. Ordering after them
+# means whatever is there is there before the kiosk goes looking for it.
+After=getty@tty1.service kldload-live-tui.service
+
 After=systemd-user-sessions.service systemd-logind.service
 
 # The show is served by nginx over a unix socket from kldload-webui. Wants, not
