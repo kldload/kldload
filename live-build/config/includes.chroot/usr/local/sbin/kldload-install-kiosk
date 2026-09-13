@@ -66,6 +66,7 @@ KIOSK_CMDLINE="${KLDLOAD_KIOSK_CMDLINE:-/proc/cmdline}"
 KIOSK_ROOT="${KLDLOAD_KIOSK_ROOT:-}"
 KIOSK_CAGE="${KLDLOAD_KIOSK_CAGE:-/usr/bin/cage}"
 KIOSK_PAYLOAD="${KLDLOAD_KIOSK_PAYLOAD:-/usr/local/bin/kldload-webui-launch}"
+KIOSK_SYSTEMCTL="${KLDLOAD_KIOSK_SYSTEMCTL:-systemctl}"
 
 _say() { printf 'kldload-install-kiosk: %s\n' "$*" >&2; }
 
@@ -147,6 +148,28 @@ kiosk_wanted() {
 #     future payload might.
 # -s: allow VT switching, so ctrl+alt+F2 still reaches a console. An install
 #     kiosk that cannot be escaped is a machine you cannot diagnose.
+# Take tty1 from whatever else owns it. This lives HERE, in the run path,
+# rather than in the unit's Conflicts=, because Conflicts= is resolved when
+# systemd builds the boot transaction and ExecCondition runs long afterwards.
+# The unit used to declare both; the result was that every hands-on live boot
+# lost its desktop AND its text installer to a kiosk that then decided not to
+# run (2026-09-13, the first ISO that carried this unit). Stopping them from
+# in here cannot have that fault: nothing below runs unless `check` already
+# said yes.
+#
+# Failure to stop one is a loud warning, not a fatal: cage may still get the
+# VT, and a kiosk that comes up fighting for tty1 is more useful than no kiosk
+# and no explanation.
+kiosk_take_tty() {
+    local _u
+    for _u in getty@tty1.service kldload-live-tui.service gdm.service display-manager.service; do
+        "${KIOSK_SYSTEMCTL}" is-active --quiet "${_u}" 2>/dev/null || continue
+        _say "stopping ${_u} — the kiosk is taking tty1"
+        "${KIOSK_SYSTEMCTL}" stop "${_u}" ||
+            _say "WARNING: could not stop ${_u}; cage may have to fight it for the VT"
+    done
+}
+
 kiosk_run() {
     if [[ ! -x "${KIOSK_CAGE}" ]]; then
         _say "FATAL: no compositor at ${KIOSK_CAGE} — the install show has nothing to draw on."
@@ -157,6 +180,7 @@ kiosk_run() {
         _say "FATAL: ${KIOSK_PAYLOAD} is missing — nothing to show."
         return 1
     fi
+    kiosk_take_tty
     _say "starting ${KIOSK_CAGE} with ${KIOSK_PAYLOAD}"
     exec "${KIOSK_CAGE}" -d -s -- "${KIOSK_PAYLOAD}"
 }
@@ -186,6 +210,7 @@ Environment (test hooks, all default to the real path):
   KLDLOAD_KIOSK_ROOT      prefix for the live-medium and install-done probes
   KLDLOAD_KIOSK_CAGE      compositor binary            (/usr/bin/cage)
   KLDLOAD_KIOSK_PAYLOAD   client to run full screen    (kldload-webui-launch)
+  KLDLOAD_KIOSK_SYSTEMCTL systemctl to drive           (systemctl)
 
 Exit: 0 success, 1 not wanted or a missing dependency, 2 usage.
 USAGE

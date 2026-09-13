@@ -24,24 +24,36 @@ Description=kldload install show (cage kiosk, no desktop)
 Documentation=https://kldload.com/
 Documentation=man:cage(1)
 
-# Exactly gdm.service's shape, and for the same reason: this REPLACES whatever
-# else would own tty1, so each one gets a Conflicts= to stop it and an After=
-# to make sure the stop lands first. Two programs racing for one VT gives a
-# screen full of garbage and an unreadable journal.
-Conflicts=getty@tty1.service
-After=getty@tty1.service
-Conflicts=kldload-live-tui.service
-After=kldload-live-tui.service
-Conflicts=plymouth-quit.service
+# NO Conflicts= HERE, and that is the whole point of this comment.
+#
+# This unit used to carry Conflicts= for getty@tty1, kldload-live-tui and
+# gdm.service, copying gdm's own shape, with the kiosk/desktop decision in
+# ExecCondition= below. That is broken, and it broke every hands-on live boot
+# on the 2026-09-13 ISO.
+#
+# systemd resolves Conflicts= when it BUILDS the transaction, at boot. It runs
+# ExecCondition= much later, when the job actually executes. So the order on a
+# plain USB boot was: enqueue this unit (WantedBy=multi-user.target), drop
+# gdm.service's and kldload-live-tui's start jobs because this unit conflicts
+# with them, open a PAM session, and only THEN ask ExecCondition whether to run
+# — which correctly answered "no, this is a hands-on boot, leave the desktop
+# alone". Too late. The journal reads:
+#
+#   Starting kldload-install-kiosk.service...
+#   pam_unix(kldload-kiosk:session): session opened for user live
+#   kldload-install-kiosk.service: Skipped due to 'exec-condition'.
+#
+# and gdm has NO entries for that boot at all. The operator got a text console,
+# no desktop, and no text installer either, because live-tui was in the same
+# list. A Condition= instead of ExecCondition= has the identical fault; the
+# conflict jobs are already gone by the time any condition is evaluated.
+#
+# So the unit declares no conflicts and `kldload-install-kiosk run` stops the
+# other owners of tty1 itself, which happens only once the decision has
+# actually come out yes. The netboot path pins systemd.unit=multi-user.target
+# anyway, so GDM is never started there and the conflicts were never doing the
+# work I thought they were.
 After=plymouth-quit.service
-
-# And the display manager. The netboot path pins systemd.unit=multi-user.target
-# so GNOME is never started at all, but a hand-typed kldload.kiosk=1 on a
-# graphical boot has to work too — there it stops GDM instead of pre-empting it.
-# Both names on purpose: display-manager.service is gdm's alias on the RPM
-# substrates and lightdm's on Debian, where GDM 48 has a systemd bug on Trixie.
-Conflicts=gdm.service display-manager.service
-After=gdm.service display-manager.service
 
 After=systemd-user-sessions.service systemd-logind.service
 

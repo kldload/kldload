@@ -512,6 +512,50 @@ else
     fi
 fi
 
+_section "The install kiosk cannot pre-empt the desktop"
+
+# systemd resolves Conflicts= when it BUILDS the boot transaction. It runs
+# ExecCondition= long afterwards, when the job executes. So a unit that both
+# conflicts with gdm and decides in ExecCondition whether to run has already
+# killed gdm by the time it decides not to.
+#
+# That shipped. On the 2026-09-13 ISO every hands-on live boot came up with no
+# desktop and no text installer, because kldload-install-kiosk.service listed
+# Conflicts= for gdm.service and kldload-live-tui.service and then correctly
+# skipped itself. The journal reads "Skipped due to 'exec-condition'" and gdm
+# has no entries for the boot at all.
+#
+# The unit must therefore declare NO Conflicts=. It takes tty1 from inside its
+# own run path, where nothing executes unless the decision already came out
+# yes. A Condition= would have the same fault, so that is barred too.
+_kio="${ROOT}/live-build/config/includes.chroot/etc/systemd/system/kldload-install-kiosk.service"
+if [[ ! -f "$_kio" ]]; then
+    _warn "kiosk pre-emption gate" "the unit is missing — gate DID NOT RUN"
+else
+    _kio_bad=0
+    while IFS= read -r _line; do
+        case "$_line" in
+        Conflicts=*)
+            _fail "kiosk pre-emption gate" "the unit declares '${_line}' — conflicts are resolved before ExecCondition runs, so this kills the desktop on boots where the kiosk then skips itself"
+            _kio_bad=$((_kio_bad + 1))
+            ;;
+        Condition*=*kldload.kiosk*)
+            _fail "kiosk pre-emption gate" "'${_line}' — a Condition is evaluated after the transaction is built, same fault as Conflicts; the decision belongs in ExecCondition plus the run path"
+            _kio_bad=$((_kio_bad + 1))
+            ;;
+        esac
+    done < <(grep -E '^(Conflicts|Condition)' "$_kio")
+    # And the other half: the run path has to actually do the job the
+    # conflicts used to, or the kiosk comes up fighting getty for the VT.
+    _kio_tool="${ROOT}/live-build/config/includes.chroot/usr/local/sbin/kldload-install-kiosk"
+    if ! grep -q 'kiosk_take_tty' "$_kio_tool" 2>/dev/null; then
+        _fail "kiosk pre-emption gate" "nothing in kldload-install-kiosk stops the other owners of tty1 — removing the conflicts without this leaves two programs on one VT"
+        _kio_bad=$((_kio_bad + 1))
+    fi
+    ((_kio_bad == 0)) &&
+        _pass "kiosk pre-emption gate: no Conflicts=, no kiosk Condition=, and the run path takes tty1 itself"
+fi
+
 _section "Duplicated files that must not drift"
 
 # Some files are shipped TWICE on purpose: once into the live rootfs and once
