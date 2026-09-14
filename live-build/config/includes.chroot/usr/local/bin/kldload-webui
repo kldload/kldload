@@ -217,6 +217,7 @@ def db_init():
     _ensure_col("vms",   "deleted_at", "TEXT DEFAULT ''")
     con.commit()
     con.close()
+    _state_db_group_perms(DB_PATH)
     LOG.info("State DB ready: %s", DB_PATH)
 
 # ── Bob conversation persistence ──────────────────────────────────────────────
@@ -291,6 +292,44 @@ def _zfs_create(ds: str, props: dict, role: str, purpose: str):
     ]
     cmd.append(ds)
     subprocess.run(cmd, check=False, stderr=subprocess.DEVNULL, timeout=15)
+
+def _state_db_group_perms(db_path, group="kldload"):
+    """Give the state database and its directory to the kldload group, as
+    kldload-db does on every root run: directory 2775 (setgid, so SQLite's -wal and
+    -shm files inherit the group), database 0664. Root only; a missing group or a
+    read-only mount leaves things as they are.
+
+    WHY HERE: this process creates rpool/kldload/state on the first installed boot
+    and mounts it over /var/lib/kldload, hiding whatever the installer prepared in
+    that directory, and then creates a fresh database with the default root:root
+    0644. Installs where autodeploy calls kldload-db as root were repaired by that
+    call; a server edition has none, and its smoke report failed "state.db
+    permissions" on two installs in a row (7-net and 2-server, fiend 2026-09-13/14).
+
+    Returns True when both paths ended up group-writable by the group.
+    """
+    if os.geteuid() != 0:
+        return False
+    try:
+        import grp
+        gid = grp.getgrnam(group).gr_gid
+    except (KeyError, ImportError):
+        LOG.warning("no '%s' group yet — %s stays root-only until kldload-db repairs it", group, db_path)
+        return False
+    ok = True
+    for path, mode in ((db_path.parent, 0o2775), (db_path, 0o664)):
+        try:
+            if path.exists():
+                if path.stat().st_gid != gid:
+                    os.chown(path, -1, gid)
+                if (path.stat().st_mode & 0o7777) != mode:
+                    os.chmod(path, mode)
+            st = path.stat()
+            ok = ok and st.st_gid == gid and (st.st_mode & 0o7777) == mode
+        except OSError as e:
+            LOG.warning("could not give %s to group %s: %s", path, group, e)
+            ok = False
+    return ok
 
 def _ensure_kldload_datasets():
     """Create the full kldload ZFS namespace if we're on rpool. Properties are

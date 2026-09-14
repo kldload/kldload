@@ -789,11 +789,16 @@ else
     _pass "NVIDIA DKMS version probe checks rpm -q before trusting its output"
 fi
 
-# state.db lands group-writable by kldload (non-root tools deregister through it).
-if grep -qF 'chgrp kldload /var/lib/kldload /var/lib/kldload/state.db' "${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-install-target"; then
-    _pass "installer gives state.db to the kldload group"
+# state.db is group-writable by kldload (non-root tools deregister through it). The
+# web UI creates it, on the rpool/kldload/state dataset it mounts over /var/lib/kldload
+# on first boot, so that is where the permissions are set: an installer-side chgrp
+# lands in the directory the mount hides (7-net and 2-server, fiend 2026-09-13/14).
+_wu="${ROOT}/live-build/config/includes.chroot/usr/local/bin/kldload-webui"
+if grep -qE '^def _state_db_group_perms\(' "$_wu" &&
+    awk '/con.close\(\)/{c=NR} /_state_db_group_perms\(DB_PATH\)/{if (c && NR - c <= 2) f=1} END{exit !f}' "$_wu"; then
+    _pass "web UI gives the state.db it creates to the kldload group"
 else
-    _fail "state.db permissions" "kldload-install-target copies state.db without giving it to the kldload group — server editions fail the permissions smoke check"
+    _fail "state.db permissions" "kldload-webui creates state.db without _state_db_group_perms — server editions fail the permissions smoke check"
 fi
 
 # The kiosk opens the page as the install show, so the dashboard never flashes.

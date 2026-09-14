@@ -2608,20 +2608,6 @@ main() {
         k_log "Copying live session state.db to target..."
         mkdir -p "${KLDLOAD_TARGET_MNT}/var/lib/kldload"
         cp "/var/lib/kldload/state.db" "${KLDLOAD_TARGET_MNT}/var/lib/kldload/state.db"
-        # The fleet database must be writable by the kldload group (kldload-db
-        # explains why: non-root tools deregister VMs through it). A plain cp left it
-        # root:root 0644 with the directory 0755. kldload-db repairs that on its next
-        # root run, so installs where autodeploy registers VMs were fine; a server
-        # edition has no such run, and its smoke report failed "state.db permissions"
-        # (7-net, fiend 2026-09-13). Set it here, where the file lands.
-        if chroot "${KLDLOAD_TARGET_MNT}" getent group kldload >/dev/null 2>&1; then
-            chroot "${KLDLOAD_TARGET_MNT}" chgrp kldload /var/lib/kldload /var/lib/kldload/state.db &&
-                chmod 2775 "${KLDLOAD_TARGET_MNT}/var/lib/kldload" &&
-                chmod 0664 "${KLDLOAD_TARGET_MNT}/var/lib/kldload/state.db" ||
-                k_log "WARNING: could not give state.db to the kldload group — non-root tools cannot write the inventory"
-        else
-            k_log "WARNING: no kldload group on the target — state.db stays root-only until kldload-db repairs it"
-        fi
     fi
 
     _info "▸  Taking factory snapshot..."
