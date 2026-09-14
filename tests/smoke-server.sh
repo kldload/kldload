@@ -244,7 +244,14 @@ else
 fi
 
 if command -v bpftrace >/dev/null 2>&1; then
-    if timeout 3 bpftrace -e 'BEGIN { printf("ok\n"); exit(); }' 2>/dev/null | grep -q "ok"; then
+    # Captured, then searched, with room to start. HISTORY: fiend 2026-09-13
+    # (Secure Boot, lockdown=integrity): the same probe as `timeout 3 bpftrace
+    # | grep -q ok` passed in one smoke-all run and warned in the next, on a
+    # host where bpftrace takes 280 ms idle. Under the full suite's load the
+    # BTF parse can outlast 3 s, and under pipefail grep's early exit can turn
+    # a match into a failure. Neither says anything about eBPF.
+    _bt_out="$(timeout 20 bpftrace -e 'BEGIN { printf("ok\n"); exit(); }' 2>/dev/null)" || _bt_out=""
+    if grep -qx "ok" <<<"$_bt_out"; then
         _pass "bpftrace executes"
     else
         _warn "bpftrace execution" "failed — may need root or BTF"

@@ -362,7 +362,8 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
                 /usr/bin/cage \
                 /usr/local/bin/kldload-install-kiosk \
                 /etc/systemd/system/kldload-install-kiosk.service \
-                /etc/systemd/system/multi-user.target.wants/kldload-install-kiosk.service \
+                /etc/systemd/system/kldload-install-kiosk-fallback.service \
+                /usr/lib/systemd/system-generators/kldload-kiosk-generator \
                 /etc/pam.d/kldload-kiosk; do
                 if grep -qxF "$_kf" "$ULIST"; then
                     continue
@@ -372,16 +373,33 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
                 /usr/bin/cage)
                     _fail "install kiosk: cage" "not in the image — an unattended install falls back to the full GNOME session"
                     ;;
-                */multi-user.target.wants/*)
-                    _fail "install kiosk: enabled" "the unit is not enabled — it would never run"
+                */system-generators/*)
+                    _fail "install kiosk: generator" "not in the image — nothing ever starts the kiosk, and an unattended install shows the text installer"
                     ;;
                 *)
                     _fail "install kiosk" "${_kf} is not in the image"
                     ;;
                 esac
             done
+            # The inverse check. The unit has no ExecCondition any more, so an
+            # enable symlink would put a full-screen kiosk on EVERY boot of the
+            # image, hands-on USB boots included.
+            if grep -qxF /etc/systemd/system/multi-user.target.wants/kldload-install-kiosk.service "$ULIST"; then
+                _fail "install kiosk: not enabled" "the unit is enabled in the image — it would take the screen on every boot; only kldload-kiosk-generator may start it"
+                _kiosk_missing=$((_kiosk_missing + 1))
+            fi
             ((_kiosk_missing == 0)) &&
-                _pass "install kiosk: cage, the tool, the unit, its enable symlink and its PAM stack are all in the image"
+                _pass "install kiosk: cage, the tool, the unit, its fallback, the generator and the PAM stack are in the image, and the unit is not enabled"
+
+            # The live ISO's Secure Boot MOK private key shipped in the image
+            # from 2026-04-10 to 2026-09-13. The builder now keeps it outside
+            # the rootfs and scans for private keys before mksquashfs; this is
+            # the independent check on the artifact itself.
+            if grep -qxE '/var/lib/dkms/mok\.key' "$ULIST"; then
+                _fail "no MOK private key in the image" "/var/lib/dkms/mok.key is in the squashfs — every download would carry the Secure Boot signing key"
+            else
+                _pass "no MOK private key in the image (/var/lib/dkms/mok.key absent)"
+            fi
         else
             _warn "unit ExecStart gate" "could not list the squashfs — this gate DID NOT RUN"
         fi
@@ -512,52 +530,358 @@ else
     fi
 fi
 
-_section "The install kiosk cannot pre-empt the desktop"
+_section "The install kiosk decides before the boot transaction"
 
-# systemd resolves Conflicts= when it BUILDS the boot transaction. It runs
-# ExecCondition= long afterwards, when the job executes. So a unit that both
-# conflicts with gdm and decides in ExecCondition whether to run has already
-# killed gdm by the time it decides not to.
-#
-# That shipped. On the 2026-09-13 ISO every hands-on live boot came up with no
-# desktop and no text installer, because kldload-install-kiosk.service listed
-# Conflicts= for gdm.service and kldload-live-tui.service and then correctly
-# skipped itself. The journal reads "Skipped due to 'exec-condition'" and gdm
-# has no entries for the boot at all.
-#
-# The unit must therefore declare NO Conflicts=. It takes tty1 from inside its
-# own run path, where nothing executes unless the decision already came out
-# yes. A Condition= would have the same fault, so that is barred too.
-_kio="${ROOT}/live-build/config/includes.chroot/etc/systemd/system/kldload-install-kiosk.service"
-if [[ ! -f "$_kio" ]]; then
-    _warn "kiosk pre-emption gate" "the unit is missing — gate DID NOT RUN"
+# The kiosk/desktop decision was made too late twice on 2026-09-13.
+#   1. Conflicts= on tty1's owners with the decision in ExecCondition=: the
+#      conflicts are resolved while the transaction is built, so every hands-on
+#      USB boot lost GDM and the text installer to a kiosk that then skipped.
+#   2. No Conflicts=, and the run path stopped getty itself: StandardInput=tty
+#      is acquired for the ExecCondition process too, getty already held tty1,
+#      and the kiosk died "Operation not permitted" before any of its code ran.
+#      Its OnFailure=getty@tty1 then handed tty1 back after the first crash, so
+#      no restart could ever win (fiend netboot).
+# Both passed a text gate that checked the previous fault. The design now is a
+# generator that decides before any transaction exists, and this gate checks
+# the SHAPE of that design, in both files, so neither half can drift back.
+_kio_src="${ROOT}/live-build/config/includes.chroot"
+_kio="${_kio_src}/etc/systemd/system/kldload-install-kiosk.service"
+_kio_gen="${_kio_src}/usr/lib/systemd/system-generators/kldload-kiosk-generator"
+_kio_tool="${_kio_src}/usr/local/sbin/kldload-install-kiosk"
+if [[ ! -f "$_kio" || ! -f "$_kio_gen" || ! -f "$_kio_tool" ]]; then
+    _fail "kiosk decision gate" "the unit, the generator or the tool is missing from includes.chroot"
 else
     _kio_bad=0
+    _kio_fail() {
+        _fail "kiosk decision gate" "$1"
+        _kio_bad=$((_kio_bad + 1))
+    }
     while IFS= read -r _line; do
         case "$_line" in
-        Conflicts=*)
-            _fail "kiosk pre-emption gate" "the unit declares '${_line}' — conflicts are resolved before ExecCondition runs, so this kills the desktop on boots where the kiosk then skips itself"
-            _kio_bad=$((_kio_bad + 1))
-            ;;
-        TTYReset=* | TTYVHangup=*)
-            _fail "kiosk pre-emption gate" "the unit sets '${_line}' — the TTY settings are applied to the ExecCondition process too, so this hangs up tty1 even on boots where the kiosk then skips itself, kicking the text installer off its own terminal"
-            _kio_bad=$((_kio_bad + 1))
-            ;;
-        Condition*=*kldload.kiosk*)
-            _fail "kiosk pre-emption gate" "'${_line}' — a Condition is evaluated after the transaction is built, same fault as Conflicts; the decision belongs in ExecCondition plus the run path"
-            _kio_bad=$((_kio_bad + 1))
-            ;;
+        Conflicts=*) _kio_fail "the unit declares '${_line}' — conflicts are resolved while the transaction is built; the generator masks tty1's owners instead" ;;
+        ExecCondition=*) _kio_fail "the unit declares '${_line}' — a decision there runs after tty1 is already owned (fiend, 2026-09-13)" ;;
+        WantedBy=*) _kio_fail "the unit declares '${_line}' — enabling it starts the kiosk on every boot; only the generator may add it" ;;
+        TTYReset=* | TTYVHangup=*) _kio_fail "the unit sets '${_line}' — the kiosk unit must not hang up a terminal it may not own" ;;
+        OnFailure=getty@tty1.service) _kio_fail "OnFailure=getty@tty1.service — that unit is masked on kiosk boots, and it hands tty1 back after one crash" ;;
         esac
-    done < <(grep -E '^(Conflicts|Condition|TTYReset|TTYVHangup)' "$_kio")
-    # And the other half: the run path has to actually do the job the
-    # conflicts used to, or the kiosk comes up fighting getty for the VT.
-    _kio_tool="${ROOT}/live-build/config/includes.chroot/usr/local/sbin/kldload-install-kiosk"
-    if ! grep -q 'kiosk_take_tty' "$_kio_tool" 2>/dev/null; then
-        _fail "kiosk pre-emption gate" "nothing in kldload-install-kiosk stops the other owners of tty1 — removing the conflicts without this leaves two programs on one VT"
-        _kio_bad=$((_kio_bad + 1))
-    fi
+    done < <(grep -E '^(Conflicts|ExecCondition|WantedBy|TTYReset|TTYVHangup|OnFailure)=' "$_kio")
+    grep -qxF 'RestartMode=direct' "$_kio" ||
+        _kio_fail "no RestartMode=direct — every crash passes through 'failed' and fires OnFailure= before the restart"
+    [[ -x "$_kio_gen" ]] ||
+        _kio_fail "the generator is not executable in the source tree — systemd skips a generator it cannot exec"
+    grep -qE '"\$TOOL" check' "$_kio_gen" ||
+        _kio_fail "the generator does not call 'kldload-install-kiosk check' — the decision must have exactly one implementation"
+    grep -qF 'getty@tty1.service' "$_kio_gen" ||
+        _kio_fail "the generator does not mask getty@tty1 — the kiosk would fight the console login for tty1 again"
+    grep -qF 'Unable to create the wlroots renderer' "$_kio_tool" && grep -qF 'WLR_RENDERER=pixman' "$_kio_tool" ||
+        _kio_fail "the tool has no software-renderer fallback — a GPU with no usable GL (nouveau on Ampere, fiend) leaves a black screen"
     ((_kio_bad == 0)) &&
-        _pass "kiosk pre-emption gate: no Conflicts=, no kiosk Condition=, and the run path takes tty1 itself"
+        _pass "kiosk decision gate: generator decides and masks tty1's owners, unit has no ExecCondition/WantedBy/Conflicts, direct restarts, own fallback, pixman retry"
+fi
+
+_section "Install show in the initramfs"
+
+# A netboot spends minutes in the initramfs downloading the root image, and the
+# screen used to be blank for all of it (fiend, 2026-09-13). Four things have to
+# hold for the show to appear: the module is complete, build-iso.sh adds it and
+# asserts the outcome with lsinitrd, the slide list in the page still parses, and
+# the script draws a frame. The last two are EXECUTED here, not grepped.
+_sh_mod="${ROOT}/live-build/config/includes.chroot/usr/lib/dracut/modules.d/95kldload-show"
+_sh_bad=0
+_sh_fail() {
+    _fail "initramfs show" "$1"
+    _sh_bad=$((_sh_bad + 1))
+}
+for _f in module-setup.sh kldload-initrd-show.sh kldload-show-generator; do
+    [[ -x "${_sh_mod}/${_f}" ]] || _sh_fail "${_f} is missing or not executable in 95kldload-show"
+done
+[[ -f "${_sh_mod}/kldload-initrd-show.service" ]] || _sh_fail "kldload-initrd-show.service is missing"
+grep -qE -- '--add "[^"]*\bkldload-show\b' "$ROOT/builder/build-iso.sh" ||
+    _sh_fail "build-iso.sh does not --add kldload-show to the live initramfs"
+grep -qF 'etc/systemd/system/sysinit.target.wants/kldload-initrd-show.service' "$ROOT/builder/build-iso.sh" ||
+    _sh_fail "build-iso.sh no longer asserts the module landed (lsinitrd outcome check) — dracut exits 0 when it skips a module"
+# Without fbcon=nodefer a quiet boot never binds the framebuffer console, and the
+# show paints into the dummy console for the whole download (UEFI qemu, 2026-09-13).
+grep -qE "^ISO_ARGS='[^']*\bfbcon=nodefer\b" "${ROOT}/live-build/config/includes.chroot/usr/local/sbin/kldload-netboot-server" ||
+    _sh_fail "kldload-netboot-server's ISO_ARGS lack fbcon=nodefer — under quiet the show is invisible"
+# A descriptor to tty1 opened once dies at the first vhangup of /dev/console, and
+# every later frame goes nowhere (UEFI qemu, 2026-09-13). Open per frame.
+if grep -qE '^[[:space:]]*exec[[:space:]]+[0-9]*>>?[[:space:]]*"?\$TTY' "${_sh_mod}/kldload-initrd-show.sh"; then
+    _sh_fail "kldload-initrd-show holds tty1 open with exec — a hangup of /dev/console kills the show for the rest of the download"
+fi
+_sh_tmp="$(mktemp -d)"
+printf 'root=live:http://192.0.2.1/kldload/squashfs.img quiet\n' >"${_sh_tmp}/cmdline"
+: >"${_sh_tmp}/tty"
+KLDLOAD_SHOW_CMDLINE="${_sh_tmp}/cmdline" KLDLOAD_SHOW_TTY="${_sh_tmp}/tty" \
+    KLDLOAD_SHOW_FETCHDIR="${_sh_tmp}" KLDLOAD_SHOW_ONCE=1 timeout 20 bash "${_sh_mod}/kldload-initrd-show.sh" </dev/null
+grep -qF 'connecting to 192.0.2.1' "${_sh_tmp}/tty" ||
+    _sh_fail "kldload-initrd-show drew no download status line"
+grep -qF 'DOWNLOAD' "${_sh_tmp}/tty" ||
+    _sh_fail "kldload-initrd-show drew no stage strip"
+mkdir -p "${_sh_tmp}/gen"
+KLDLOAD_SHOW_CMDLINE="${_sh_tmp}/cmdline" bash "${_sh_mod}/kldload-show-generator" "${_sh_tmp}/gen"
+grep -qxF 'StandardError=journal' "${_sh_tmp}/gen/dracut-initqueue.service.d/50-kldload-show.conf" 2>/dev/null ||
+    _sh_fail "the generator did not move dracut-initqueue's stderr off the console — curl's meter draws over the show"
+rm -rf "$_sh_tmp"
+((_sh_bad == 0)) &&
+    _pass "initramfs show: module complete, added and asserted by build-iso.sh, a frame draws, initqueue quieted"
+
+_section "Installer outcome checks"
+
+# Substrate safety must run before core's early return. fiend, 2026-09-13: the
+# journal, the kernel/ZFS holds and the boot repair all sat after it, so core
+# installs had no working journal and an unpinned kernel.
+_isp="${ROOT}/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+_isp_call="$(awk '/^k_install_system_files\(\) \{/{f=1} f&&/^[[:space:]]*k_install_substrate_safety/{print NR; exit}' "$_isp")"
+_isp_core="$(awk '/^k_install_system_files\(\) \{/{f=1} f&&/"\$_profile" == "core"/{print NR; exit}' "$_isp")"
+if [[ -z "$_isp_call" ]]; then
+    _fail "substrate safety on core" "k_install_system_files never calls k_install_substrate_safety"
+elif [[ -z "$_isp_core" ]] || ((_isp_call < _isp_core)); then
+    _pass "substrate safety on core: called before the core early return (line ${_isp_call} < ${_isp_core:-none})"
+else
+    _fail "substrate safety on core" "k_install_substrate_safety (line ${_isp_call}) runs after the core return (line ${_isp_core}) — core installs lose journal, holds and boot repair"
+fi
+
+# The trust-bundle paths are substrate, not a first-boot job: core has no first boot
+# (fiend 2026-09-13, every https repo naming ca-bundle.crt failed on core).
+_iss_body="$(awk '/^k_install_substrate_safety\(\) \{/,/^}/' "$_isp")"
+if grep -qF '/etc/pki/tls/certs/ca-bundle.crt' <<<"$_iss_body" && grep -qF '/etc/pki/tls/cert.pem' <<<"$_iss_body"; then
+    _pass "substrate safety creates the legacy CA bundle paths on every profile"
+else
+    _fail "substrate safety on core" "k_install_substrate_safety no longer creates /etc/pki/tls/certs/ca-bundle.crt and cert.pem — core has no firstboot to repair them"
+fi
+
+# k_chroot_tool's first argument is the target root. Called with a tool name first
+# it chroots into a directory named after the tool, and its output goes to the log
+# fd, so nothing downstream can read it (install-target, fiend 2026-09-13: the
+# firmware boot-entry check could never pass).
+_kct="$(grep -rnE 'k_chroot_tool[[:space:]]+[a-z]' \
+    "${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-install-target" \
+    "${ROOT}/live-build/config/includes.chroot/usr/lib/kldload-installer" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || :)"
+if [[ -z "$_kct" ]]; then
+    _pass "k_chroot_tool: every call passes a target root first"
+else
+    _fail "k_chroot_tool called without a target root" "$_kct"
+fi
+
+# lsinitrd lists files, never dracut module directory names such as 90zfs. And its
+# listing is captured before it is searched: `lsinitrd | grep -q` under pipefail is
+# false on a MATCH, because grep exits at the first hit and lsinitrd dies of SIGPIPE
+# (fiend 2026-09-13: "zfs.ko is NOT in initramfs" for an image that booted from ZFS).
+_zc_dir="${ROOT}/live-build/config/includes.chroot/usr/lib/kldload-installer"
+_zc_pipe="$(awk 'FNR == 1 { prev = "" }
+    /^[[:space:]]*#/ { next }
+    prev ~ /lsinitrd/ && prev ~ /\|[[:space:]]*$/ && $0 ~ /grep -q/ { print FILENAME ":" FNR }
+    $0 ~ /lsinitrd.*\|[[:space:]]*grep -q/ { print FILENAME ":" FNR }
+    { prev = $0 }' "$_zc_dir"/lib/*.sh "$_zc_dir"/backend/*.sh 2>/dev/null)"
+if grep -rnE "grep -q[a-zA-Z]* ['\"]?[0-9]{2}zfs" "$_zc_dir" >/dev/null 2>&1; then
+    _fail "initramfs ZFS check" "a check greps lsinitrd output for a dracut module directory (NNzfs), which lsinitrd never prints — it warns on every install"
+elif [[ -n "$_zc_pipe" ]]; then
+    _fail "initramfs ZFS check" "lsinitrd piped straight into grep -q, which is false on a match under pipefail: ${_zc_pipe}"
+else
+    _pass "initramfs ZFS check looks for the zfs.ko file in a captured listing"
+fi
+
+# The akmods signing key is given to the akmods group AFTER the package transaction
+# that creates the group. fiend 2026-09-13 (full-secure): the early chgrp did not
+# take, akmodsbuild could not read the key, nvidia.ko built unsigned and the desktop
+# came up on nouveau.
+_bs="${_zc_dir}/lib/bootstrap.sh"
+_bs_tx="$(grep -nE '^[[:space:]]*akmod-nvidia xorg-x11-drv-nvidia' "$_bs" | head -n 1 | cut -d: -f1)"
+_bs_fix="$(grep -nE 'chroot "\$\{target\}" chgrp akmods "\$\{_ak_key_rel\}"' "$_bs" | head -n 1 | cut -d: -f1)"
+if [[ -n "$_bs_tx" && -n "$_bs_fix" ]] && ((_bs_fix > _bs_tx)); then
+    _pass "akmods signing key is re-grouped after the akmod-nvidia transaction (line ${_bs_fix} > ${_bs_tx})"
+else
+    _fail "akmods signing key ownership" "no chgrp akmods of the signing key after the akmod-nvidia install (transaction line ${_bs_tx:-none}, fix line ${_bs_fix:-none}) — nvidia.ko builds unsigned under Secure Boot"
+fi
+
+# A BootNext left by the netboot trigger outranks BootOrder. fiend 2026-09-13: the
+# reboot after install went straight back to PXE and MokManager never appeared.
+if grep -qE 'efibootmgr -N' "${_zc_dir}/lib/bootloader.sh" &&
+    grep -qF 'the next boot is the kldload entry' "${_zc_dir}/lib/bootloader.sh"; then
+    _pass "installer clears a stale BootNext and verifies the next boot is kldload"
+else
+    _fail "firmware next boot" "bootloader.sh no longer clears BootNext (efibootmgr -N) or verifies BootOrder/BootNext — a netboot reinstall can reboot into PXE instead of the install"
+fi
+
+# kube-cluster falls back to the Fedora master when the redirector's mirror is down
+# (fiend 2026-09-13: muug.ca refused 443, the k8s bootstrap died 4 s in).
+_kc="${ROOT}/live-build/config/includes.chroot/usr/local/bin/kube-cluster"
+# The release LISTING needs the same fallback: with only the redirector asked, a dead
+# mirror made the F44 listing empty and the loop built Fedora 43 nodes instead.
+if ! grep -qE 'curl -fSL --retry [0-9]+ .*-o "\$\{dest\}\.partial"' "$_kc" ||
+    ! grep -qF 'url="https://dl.fedoraproject.org/${url#https://download.fedoraproject.org/}"' "$_kc"; then
+    _fail "kube-cluster cloud image download" "no retry or no dl.fedoraproject.org fallback for the download — one dead mirror kills the k8s bootstrap"
+elif ! grep -qE '^[[:space:]]+https://dl\.fedoraproject\.org/pub/fedora/linux/releases; do' "$_kc"; then
+    _fail "kube-cluster cloud image listing" "the release listing does not ask dl.fedoraproject.org before dropping a Fedora version — a dead mirror silently builds older nodes"
+else
+    _pass "kube-cluster cloud image listing and download fall back to the Fedora master"
+fi
+
+# vmx --build-all prints generated appliance passwords. autodeploy.log is 0644
+# (fiend 2026-09-13: the Web Stack's PostgreSQL and Valkey passwords were
+# world-readable), so its output reaches that log only through the redaction.
+_ad="${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-autodeploy"
+if grep -qE 'vmx --build-all[^|]*>>[[:space:]]*"\$LOG_FILE"' "$_ad"; then
+    _fail "appliance passwords in autodeploy.log" "vmx --build-all output is appended to the world-readable log unredacted"
+elif grep -qE 'vmx --build-all 2>&1 \| tee "\$_apps_summary"' "$_ad" && grep -qF '(PASS|PASSWORD|PASSPHRASE|SECRET|TOKEN|KEY)' "$_ad"; then
+    _pass "appliance passwords: build-all summary to a 0600 root file, masked in autodeploy.log"
+else
+    _fail "appliance passwords in autodeploy.log" "the build-all redaction (tee to /root/kldload-appliances.txt, sed mask) is gone"
+fi
+
+# nvidia-smi loads the driver. Probing it with a desktop already up hands the boot
+# framebuffer to nvidia-drm under the live session (fiend 2026-09-13: gnome-shell
+# drew on a vanished device for six hours, then SIGSEGV). The AI probe must hold off
+# when display-manager is active and the module is not loaded.
+_adh="$(awk '/_nv_hold=1/{h=NR} /nvidia-smi -L/{if(!l)l=NR} END{print h+0, l+0}' "$_ad")"
+if [[ "${_adh% *}" -gt 0 && "${_adh#* }" -gt 0 ]] && ((${_adh% *} < ${_adh#* })) &&
+    grep -qF 'systemctl is-active --quiet display-manager.service' "$_ad" &&
+    grep -qF '[[ "${_nv_hold:-0}" != 1 ]] && command -v nvidia-smi' "$_ad"; then
+    _pass "AI GPU probe does not load nvidia under a running desktop"
+else
+    _fail "AI GPU probe" "kldload-autodeploy probes nvidia-smi without the display-manager hold — a first-boot driver rebuild hot-loads nvidia-drm under the desktop"
+fi
+
+_section "Install slides"
+
+# The kiosk deck is a JS array in the canonical SPA. Each slide is [kicker, title,
+# body]; the kicker picks the accent colour. A kicker missing from ACCENT renders in
+# the default blue, a duplicate title reads as the show repeating itself, and the
+# operator asked for 150-200 slides (2026-09-13).
+_sl_html="${ROOT}/live-build/config/includes.chroot/usr/local/share/kldload-webui/free/index.html"
+if command -v python3 >/dev/null 2>&1; then
+    _sl_out="$(
+        python3 - "$_sl_html" <<'PYSLIDES' 2>&1
+import json, re, sys
+s = open(sys.argv[1], encoding="utf-8").read()
+a = s.index("  var SLIDES = [")
+b = s.index("\n  ];", a)
+slides = json.loads(s[a + len("  var SLIDES = "):b + 4])
+ai = s.index("  var ACCENT = {")
+accent = set(re.findall(r'"([^"]+)"\s*:\s*"#[0-9a-fA-F]{6}"', s[ai:s.index("};", ai)]))
+errs = []
+if len(slides) < 150:
+    errs.append("only %d slides (want at least 150)" % len(slides))
+titles = [x[1] for x in slides]
+dup = sorted({t for t in titles if titles.count(t) > 1})
+if dup:
+    errs.append("duplicate titles: " + "; ".join(dup))
+bad = sorted({x[0] for x in slides if x[0] not in accent})
+if bad:
+    errs.append("kickers with no ACCENT colour: " + ", ".join(bad))
+shape = [str(i) for i, x in enumerate(slides) if len(x) != 3 or not all(isinstance(y, str) and y.strip() for y in x)]
+if shape:
+    errs.append("malformed slides at index " + ",".join(shape))
+print("ERR " + " | ".join(errs) if errs else "OK %d slides, %d kickers" % (len(slides), len({x[0] for x in slides})))
+PYSLIDES
+    )"
+    if [[ "$_sl_out" == OK* ]]; then
+        _pass "install slides: ${_sl_out#OK }, unique titles, every kicker has a colour"
+    else
+        _fail "install slides" "$_sl_out"
+    fi
+else
+    _warn "install slides: python3 missing — this check DID NOT RUN"
+fi
+
+_section "Answers files"
+
+# The installer reads answers files line by line (k_answers_load_env_file), not as
+# shell. The shipped TEMPLATE.env failed that loader for months while `bash -n` and
+# arm-install both passed it (audit, 2026-09-13). Every shipped answers file is
+# LOADED here with the real loader, and every value it produces is checked.
+_an_lib="${ROOT}/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/answers.sh"
+_an_bad=0 _an_n=0
+for _af in "${ROOT}"/live-build/config/includes.chroot/etc/kldload/answers/*.env \
+    "${ROOT}"/live-build/config/includes.chroot/etc/kldload/debz/answers/*.env; do
+    [[ -f "$_af" ]] || continue
+    _an_n=$((_an_n + 1))
+    _an_out="$(bash -c 'set -uo pipefail
+        k_die() { echo "loader refused: $*"; exit 1; }
+        source "$1"
+        k_answers_load_env_file "$2"
+        for v in $(compgen -v KLDLOAD_); do
+            [[ "${!v}" =~ [[:space:]]# ]] && echo "value of $v carries a comment: ${!v}"
+        done
+        exit 0' _ "$_an_lib" "$_af" 2>&1)" || _an_out="${_an_out:-loader exited non-zero}"
+    if [[ -n "$_an_out" ]]; then
+        _fail "answers file ${_af#"$ROOT"/}" "$_an_out"
+        _an_bad=$((_an_bad + 1))
+    fi
+done
+if ((_an_n == 0)); then
+    _fail "answers files" "found no shipped answers files to check — gate DID NOT RUN"
+elif ((_an_bad == 0)); then
+    _pass "answers files: all ${_an_n} shipped files load through the installer's loader with clean values"
+fi
+
+# Arming must use that same loader, never `bash -n` alone.
+_an_nb="${ROOT}/live-build/config/includes.chroot/usr/local/sbin/kldload-netboot-server"
+_an_chk="$(awk '/^_check_answers\(\) \{/,/^}/' "$_an_nb")"
+if grep -qF 'k_answers_load_env_file "$answers"' <<<"$_an_chk"; then
+    _pass "netboot-server checks answers files with the installer's own loader"
+else
+    _fail "netboot-server answers check" "_check_answers no longer loads the file with k_answers_load_env_file — it will arm files the installer rejects"
+fi
+
+# Secrets never reach effective-config.env, which is copied to the installed
+# system's /root. Executed with a fake secret in every name shape that exists.
+_an_tmp="$(mktemp -d)"
+bash -c 'set -uo pipefail
+    k_die() { :; }
+    source "$1"
+    export KLDLOAD_LOG_DIR="$2" KLDLOAD_PASSWORD=s3cr3t-a KLDLOAD_ROOT_PASSWORD=s3cr3t-b \
+        KLDLOAD_ZFS_PASSPHRASE=s3cr3t-c KLDLOAD_WIFI_PSK=s3cr3t-d KLDLOAD_EXPORT_SCP_PASS=s3cr3t-e \
+        KLDLOAD_MOK_PASSWORD=s3cr3t-f KLDLOAD_RHEL_KEY=s3cr3t-g KLDLOAD_RHEL_PASSWORD=s3cr3t-h \
+        KLDLOAD_HOSTNAME=visible-host
+    k_save_effective_config' _ "$_an_lib" "$_an_tmp" >/dev/null 2>&1 || :
+if [[ ! -s "${_an_tmp}/effective-config.env" ]]; then
+    _fail "effective-config redaction" "k_save_effective_config wrote nothing — gate DID NOT RUN"
+elif grep -q 's3cr3t-' "${_an_tmp}/effective-config.env"; then
+    _fail "effective-config redaction" "secrets written in clear: $(grep -o 'KLDLOAD_[A-Z_]*=s3cr3t-[a-z]' "${_an_tmp}/effective-config.env" | tr '\n' ' ')"
+elif ! grep -q '^KLDLOAD_HOSTNAME=visible-host$' "${_an_tmp}/effective-config.env"; then
+    _fail "effective-config redaction" "non-secret KLDLOAD_HOSTNAME was redacted too — autodeploy reads this file"
+else
+    _pass "effective-config.env redacts every password/passphrase/PSK/key and keeps the rest"
+fi
+rm -rf "$_an_tmp"
+
+# First-boot sets default OFF when an answers file does not ask for them.
+_an_it="${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-install-target"
+_an_heavy="$(grep -E '^KLDLOAD_(K8S_BOOTSTRAP|ENABLE_AI|KLAB_ZFS_DEV)="\$\{KLDLOAD_[A-Z_]+:-' "$_an_it" | grep -v ':-0}"' || :)"
+if [[ -z "$_an_heavy" ]]; then
+    _pass "install manifest: cluster, AI and ZFS-lab default to 0 unless asked for"
+else
+    _fail "install manifest defaults" "a first-boot set defaults ON again — every answers-file install converges it: ${_an_heavy}"
+fi
+
+_section "autodeploy reads only what the install manifest writes"
+
+# kldload-autodeploy runs on the INSTALLED system and learns what the operator
+# asked for from /etc/kldload/install-manifest.env. A KLDLOAD_ key it reads that
+# the manifest does not write is a setting that works in the live installer and
+# silently vanishes at reboot. fiend, 2026-09-13: an answers file set
+# KLDLOAD_K8S_WORKERS and KLDLOAD_K8S_CONTROL_PLANES, the manifest wrote
+# neither, and 3+3 only came out right because it matched the template default.
+_ad="${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-autodeploy"
+_it="${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-install-target"
+if [[ ! -f "$_ad" || ! -f "$_it" ]]; then
+    _fail "manifest coverage gate" "kldload-autodeploy or kldload-install-target is missing"
+else
+    _man_start="$(grep -nF 'cat >"${target}/etc/kldload/install-manifest.env" <<EOF' "$_it" | head -1 | cut -d: -f1)"
+    if [[ -z "$_man_start" ]]; then
+        _fail "manifest coverage gate" "cannot find the install-manifest heredoc in kldload-install-target — gate DID NOT RUN"
+    else
+        _man_writes="$(awk -v s="$_man_start" 'NR > s && /^EOF$/ { exit } NR > s' "$_it" | grep -oE '^KLDLOAD_[A-Z0-9_]+' | sort -u)"
+        _ad_reads="$(grep -oE '\$\{?KLDLOAD_[A-Z0-9_]+' "$_ad" | tr -d '${' | sort -u)"
+        _missing="$(comm -23 <(printf '%s\n' "$_ad_reads") <(printf '%s\n' "$_man_writes"))"
+        if [[ -n "$_missing" ]]; then
+            _fail "manifest coverage gate" "autodeploy reads keys the install manifest never writes (lost at reboot): $(tr '\n' ' ' <<<"$_missing")"
+        else
+            _pass "manifest coverage gate: all $(wc -l <<<"$_ad_reads") KLDLOAD_ keys autodeploy reads are persisted by the install manifest"
+        fi
+    fi
 fi
 
 _section "Duplicated files that must not drift"
