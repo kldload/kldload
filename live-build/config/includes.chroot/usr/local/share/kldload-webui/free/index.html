@@ -98,6 +98,11 @@ html.kld-app #content{margin-left:0!important;padding-left:0!important;}
 html.kld-app #term-launcher,
 html.kld-app #term-drawer{display:none!important;}
 
+/* Opened by the kiosk (?show=1): cover the dashboard with the show's own background
+   from the first paint, until the first progress poll says whether an install is
+   running (poll() lifts it). Without it the dashboard flashed for a second on every
+   kiosk boot (operator, fiend netboot 2026-09-13). */
+html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background:#070a0f}
 #install-show{position:fixed;inset:0;z-index:9000;background:#070a0f;
   display:flex;flex-direction:column;overflow:hidden;
   font-feature-settings:"kern" 1,"liga" 1}
@@ -149,9 +154,9 @@ html.kld-app #term-drawer{display:none!important;}
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 #ishow-head-l,#ishow-head-r{display:flex;align-items:center;gap:1.1rem}
 #ishow-live{display:inline-flex;align-items:center;gap:.7rem;font-size:1rem;
-  font-weight:800;letter-spacing:.34em;color:#3dff88}
+  font-weight:800;letter-spacing:.34em;color:#c77dff}
 #ishow-live::before{content:"";width:.72rem;height:.72rem;border-radius:50%;
-  background:#3dff88;box-shadow:0 0 14px #3dff88;
+  background:#c77dff;box-shadow:0 0 14px #c77dff;
   animation:ishow-pulse 2.6s ease-in-out infinite}
 #ishow-target{font-size:.86rem;letter-spacing:.16em;color:#6d7f93}
 #ishow-elapsed{font-size:1.05rem;font-weight:700;color:#cfe0f0;
@@ -159,21 +164,21 @@ html.kld-app #term-drawer{display:none!important;}
 #ishow-count{font-size:.8rem;letter-spacing:.14em;color:#6d7f93}
 #ishow-close{font:inherit;font-size:.78rem;letter-spacing:.14em;color:#cfe0f0;background:transparent;
   border:1px solid rgba(207,224,240,.35);border-radius:4px;padding:.35rem .8rem;cursor:pointer}
-#ishow-close:hover,#ishow-close:focus-visible{border-color:#3dff88;color:#3dff88;outline:none}
+#ishow-close:hover,#ishow-close:focus-visible{border-color:#c77dff;color:#c77dff;outline:none}
 #ishow-strip{position:relative;z-index:2;width:100%;
   padding:1.15rem 2.6rem 1.9rem;border-top:1px solid rgba(255,255,255,.08);
   background:#070a0fd9}
 #ishow-phase{display:flex;align-items:center;gap:.6rem;font-size:1rem;
   font-weight:600;color:#eaf1f8;margin-bottom:.65rem;letter-spacing:-.01em}
 #ishow-phase::before{content:"";width:.62rem;height:.62rem;border-radius:50%;
-  background:#3dff88;box-shadow:0 0 10px #3dff88}
+  background:#c77dff;box-shadow:0 0 10px #c77dff}
 @keyframes ishow-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.82)}}
 #ishow-steps{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.76rem;
   color:#7f90a4;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .ishow-step{display:inline-flex;align-items:center;gap:.42rem;
-  padding:.2rem .6rem;border-radius:999px;background:rgba(61,255,136,.07);
-  border:1px solid rgba(61,255,136,.16)}
-.ishow-step::before{content:"\2713";color:#3dff88;font-weight:700}
+  padding:.2rem .6rem;border-radius:999px;background:rgba(199,125,255,.07);
+  border:1px solid rgba(199,125,255,.16)}
+.ishow-step::before{content:"\2713";color:#c77dff;font-weight:700}
 .ishow-step b{color:#cfe0f0;font-weight:600}
 /* The first-boot checklist. This stage HAS a denominator -- autodeploy
    publishes one file per phase -- so it earns a real bar and real states,
@@ -182,8 +187,8 @@ html.kld-app #term-drawer{display:none!important;}
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.72rem}
 .ishow-ph{display:inline-flex;align-items:center;gap:.4rem;padding:.18rem .55rem;
   border-radius:999px;border:1px solid rgba(255,255,255,.1);color:#7f90a4}
-.ishow-ph.done{color:#cfe0f0;background:rgba(61,255,136,.07);border-color:rgba(61,255,136,.2)}
-.ishow-ph.done::before{content:"\2713";color:#3dff88;font-weight:700}
+.ishow-ph.done{color:#cfe0f0;background:rgba(199,125,255,.07);border-color:rgba(199,125,255,.2)}
+.ishow-ph.done::before{content:"\2713";color:#c77dff;font-weight:700}
 .ishow-ph.running{color:#f4f8fc;background:rgba(77,166,255,.1);border-color:rgba(77,166,255,.35)}
 .ishow-ph.running::before{content:"";width:.5rem;height:.5rem;border-radius:50%;
   background:#4da6ff;box-shadow:0 0 8px #4da6ff}
@@ -196,12 +201,98 @@ html.kld-app #term-drawer{display:none!important;}
 #ishow-brand::before{content:"";width:.55rem;height:.55rem;border-radius:2px;
   background:var(--ishow-accent,#4da6ff);box-shadow:0 0 10px var(--ishow-accent,#4da6ff);
   transition:background .9s ease,box-shadow .9s ease}
+/* ── Circuit: the backdrop chosen in the Show Lab (operator, 2026-09-13: "a
+   backdrop of the system command console ... an electronic chip with an
+   electricity vibe", then "100% circuit"). A chip in the lower right, traces routed
+   out of its pins with 45-degree bends, pulses of current along them, and the
+   install's own steps scrolling faintly behind: real lines from the progress this
+   page already polls, never invented ones. Hairline traces and pool rings in the
+   margins and a greets scroller above the strip. The backdrop takes the accent of
+   whichever slide is up when the minute turns. All of it sits behind the slides with
+   pointer-events:none, drawn with a 2D canvas at 30 fps: no WebGL to fall back from. */
+@property --ishow-scene{syntax:"<color>";inherits:true;initial-value:#c77dff}
+#install-show{--ishow-scene:#c77dff;transition:--ishow-scene 12s ease-in-out}
+#ishow-circuit{position:absolute;inset:0;width:100%;height:100%;opacity:0;
+  transition:opacity 1.6s ease;pointer-events:none}
+#install-show.fx-motion #ishow-circuit{opacity:1}
+.ishow-lines{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;
+  color:var(--ishow-scene);opacity:0;transition:opacity 6s ease-in-out}
+#install-show.fx-motion .ishow-lines.live{opacity:1}
+.ishow-lines .trace{fill:none;stroke:currentColor;stroke-width:1.1;stroke-linejoin:round;
+  stroke-linecap:round;stroke-dasharray:1;stroke-dashoffset:1;
+  animation:ishow-draw 5.5s cubic-bezier(.35,.1,.2,1) forwards}
+.ishow-lines .trace.faint{stroke-width:.8;opacity:.45;animation-delay:.35s}
+@keyframes ishow-draw{to{stroke-dashoffset:0}}
+.ishow-lines .rings{transform-box:view-box;animation:ishow-spin 140s linear infinite}
+.ishow-lines .ring{fill:none;stroke:currentColor;stroke-width:.9}
+.ishow-lines .ring.dash{stroke-dasharray:2 9}
+.ishow-lines .ripple{fill:none;stroke:currentColor;stroke-width:1;opacity:0;transform-box:fill-box;
+  transform-origin:center;animation:ishow-ripple 9s cubic-bezier(.2,.6,.3,1) infinite}
+@keyframes ishow-spin{to{transform:rotate(360deg)}}
+@keyframes ishow-ripple{0%{opacity:0;transform:scale(.35)}15%{opacity:.55}100%{opacity:0;transform:scale(1.25)}}
+.ishow-lines .mark{fill:none;stroke:currentColor;stroke-width:1;
+  animation:ishow-float 11s ease-in-out infinite alternate}
+@keyframes ishow-float{from{transform:translate(0,0)}to{transform:translate(0,-6px)}}
+#ishow-scroller{position:absolute;left:0;right:0;bottom:100%;width:100%;height:44px;
+  pointer-events:none;opacity:0;transition:opacity 2s ease}
+#install-show.fx-motion #ishow-scroller{opacity:.62}
+/* The scroller opens with the name, so the small brand mark it would run through
+   steps aside (first render, 2026-09-13: "KLDLOAD GREETS" over "kldload"). */
+#install-show.fx-motion #ishow-brand{display:none}
+/* Chroma settle: two coloured copies of the title converge when a slide arrives. */
+.ishow-title{position:relative}
+/* Brushed steel, cool rather than white (operator, 2026-09-13: "less white and a
+   little more blue / brushed metallic silver"). A soft horizon band gives the
+   metal its sheen; the shadow moves to a filter because text-shadow shows through
+   text painted with background-clip. */
+#install-show.fx-motion .ishow-title{color:#c9d6e4;text-shadow:none;
+  background:linear-gradient(180deg,#eef3f9 0%,#c6d3e1 44%,#93a8bf 50%,#b7c7d8 58%,#dfe8f2 100%);
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+  filter:drop-shadow(0 2px 26px rgba(0,0,0,.55))}
+#install-show.fx-motion .ishow-title::before,#install-show.fx-motion .ishow-title::after{-webkit-text-fill-color:currentColor}
+.ishow-title::before,.ishow-title::after{content:attr(data-text);position:absolute;inset:0;
+  pointer-events:none;opacity:0;mix-blend-mode:screen;text-shadow:none}
+.ishow-title::before{color:#ff2a6d}
+.ishow-title::after{color:#21e6ff}
+#install-show.fx-motion .ishow-slide.on .ishow-title::before{animation:ishow-chroma-a 1.8s cubic-bezier(.16,.84,.24,1) both}
+#install-show.fx-motion .ishow-slide.on .ishow-title::after{animation:ishow-chroma-b 1.8s cubic-bezier(.16,.84,.24,1) both}
+@keyframes ishow-chroma-a{0%{opacity:.8;transform:translate(-7px,0)}100%{opacity:.22;transform:translate(-.8px,0)}}
+@keyframes ishow-chroma-b{0%{opacity:.8;transform:translate(7px,0)}100%{opacity:.22;transform:translate(.8px,0)}}
+/* The rest of the Show Lab "Demoscene" preset the operator picked (no copper bars):
+   glitch slices as a slide arrives, a holo sweep over the kicker, scanlines and a
+   fine grain over the whole screen. */
+#install-show.fx-motion .ishow-slide.glitching .ishow-title{animation:ishow-slice .46s steps(1) both}
+/* The second way in: a signal tear, skewing out of sync and snapping back. */
+#install-show.fx-motion .ishow-slide.tearing .ishow-title{animation:ishow-tear .62s cubic-bezier(.2,.8,.2,1) both}
+@keyframes ishow-tear{0%{transform:skewX(-22deg) translateX(-38px) scaleY(1.04);filter:brightness(1.8) blur(1.5px)}
+  18%{transform:skewX(14deg) translateX(22px);filter:brightness(1.35) blur(.6px)}
+  34%{transform:skewX(-7deg) translateX(-10px);filter:brightness(1.15)}52%{transform:skewX(3deg) translateX(4px);filter:none}
+  68%,100%{transform:none;filter:none}}
+@keyframes ishow-slice{0%{clip-path:inset(8% 0 62% 0);transform:translate(-18px,0)}
+  14%{clip-path:inset(48% 0 22% 0);transform:translate(14px,0)}28%{clip-path:inset(70% 0 4% 0);transform:translate(-8px,0)}
+  42%{clip-path:inset(20% 0 50% 0);transform:translate(10px,0)}56%{clip-path:inset(0 0 0 0);transform:translate(-3px,0)}
+  70%,100%{clip-path:inset(0 0 0 0);transform:none}}
+#install-show.fx-motion .ishow-kicker span{background:linear-gradient(100deg,var(--ishow-accent,#4da6ff) 0%,
+  var(--ishow-accent,#4da6ff) 38%,#dfe8f2 50%,var(--ishow-accent,#4da6ff) 62%,var(--ishow-accent,#4da6ff) 100%);
+  background-size:260% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+  animation:ishow-holo 3.4s cubic-bezier(.45,0,.2,1) infinite}
+@keyframes ishow-holo{0%{background-position:130% 0}60%,100%{background-position:-30% 0}}
+#ishow-scan{position:absolute;inset:0;pointer-events:none;z-index:2;opacity:0;transition:opacity .6s;
+  background:repeating-linear-gradient(180deg,rgba(255,255,255,.035) 0 1px,transparent 1px 3px);mix-blend-mode:overlay}
+#ishow-grain{position:absolute;inset:-50%;pointer-events:none;z-index:2;opacity:0;transition:opacity .6s;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .55 0'/></filter><rect width='180' height='180' filter='url(%23n)'/></svg>");
+  animation:ishow-grain .9s steps(6) infinite}
+#install-show.fx-motion #ishow-scan{opacity:1}
+#install-show.fx-motion #ishow-grain{opacity:.07}
+@keyframes ishow-grain{0%{transform:translate(0,0)}20%{transform:translate(-4%,3%)}40%{transform:translate(3%,-5%)}
+  60%{transform:translate(-6%,-2%)}80%{transform:translate(5%,4%)}100%{transform:translate(0,0)}}
+@media (prefers-reduced-motion:reduce){#ishow-circuit,#ishow-scroller,.ishow-lines,#ishow-scan,#ishow-grain{display:none}}
 @media (max-width:760px){.ishow-slide{padding:0 1.3rem}
   #ishow-strip{padding:1rem 1.3rem 1.5rem}#ishow-brand{left:1.3rem}
   #ishow-dots{left:1.3rem;right:1.3rem}}}
 
 </style>
-<script>try{if(new URLSearchParams(location.search).has('app'))document.documentElement.classList.add('kld-app');}catch(e){}</script>
+<script>try{var _q=new URLSearchParams(location.search);if(_q.has('app'))document.documentElement.classList.add('kld-app');if(_q.has('show'))document.documentElement.classList.add('ishow-boot');}catch(e){}</script>
 </head>
 <body>
 
@@ -11879,6 +11970,11 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
      were using. Self-contained on purpose: no framework, no dependency, and
      nothing it touches outside its own ids. ───────────────────────────────── -->
 <div id="install-show" style="display:none">
+  <canvas id="ishow-circuit" aria-hidden="true"></canvas>
+  <svg class="ishow-lines" id="ishow-lines-a" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice" aria-hidden="true"></svg>
+  <svg class="ishow-lines" id="ishow-lines-b" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice" aria-hidden="true"></svg>
+  <div id="ishow-grain" aria-hidden="true"></div>
+  <div id="ishow-scan" aria-hidden="true"></div>
   <!-- The status header is the SUBJECT: a viewer must know instantly that a
        machine is being installed and roughly how far in it is. The slides are
        what fills the waiting, not the other way round. -->
@@ -11898,6 +11994,7 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
   </div>
   <div id="ishow-slides"></div>
   <div id="ishow-strip">
+    <canvas id="ishow-scroller" aria-hidden="true"></canvas>
     <div id="ishow-phase">Starting…</div>
     <div id="ishow-steps"></div>
     <div id="ishow-plan"></div>
@@ -12359,8 +12456,10 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     var d = document.createElement('div');
     d.className = 'ishow-slide';
     d.innerHTML = '<div class="ishow-kicker"></div><div class="ishow-title"></div><div class="ishow-body"></div>';
-    d.children[0].textContent = sl[0];
+    d.children[0].innerHTML = '<span></span>';
+    d.children[0].firstChild.textContent = sl[0];
     d.children[1].textContent = sl[1];
+    d.children[1].setAttribute('data-text', sl[1]);
     d.children[2].innerHTML = body(sl[2]);
     wrap.appendChild(d);
   });
@@ -12408,15 +12507,17 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
   paint(pos);
   remember();
 
-  // 14 s a slide. 10 s was too fast to read a body paragraph on fiend's
-  // screen (operator, 2026-09-13: "they need an extra 3-4 sec"). The deck is
-  // meant to outlast an install: at 14 s a slide, 200 slides run 47 minutes.
-  var SLIDE_MS = 14000;
+  // 10 s a slide. HISTORY, all 2026-09-13: 10 s read as too fast on fiend ("they
+  // need an extra 3-4 sec") and went to 14; that evening the operator chose 10
+  // again in the Show Lab with the demoscene effects, where the decoding title and
+  // the moving backdrop change how long a slide feels. 202 slides run 34 minutes.
+  var SLIDE_MS = 10000;
   setInterval(function () {
     if (show.style.display === 'none') return;
     slides[order[pos]].classList.remove('on');
     pos = (pos + 1) % slides.length;
     slides[order[pos]].classList.add('on');
+    slideFx(slides[order[pos]], order[pos]);
     paint(pos);
     remember();
   }, SLIDE_MS);
@@ -12453,12 +12554,19 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
         if (canClose && dismissed()) { show.style.display = 'none'; return; }
         if (p.running && !window._installStartedHere) show.style.display = 'flex';
         if (!p.running) show.style.display = 'none';
+        // First answer: whatever it says, the kiosk's cover has done its job.
+        document.documentElement.classList.remove('ishow-boot');
         if (p.phase) document.getElementById('ishow-phase').textContent = p.phase;
 
         // Elapsed comes from the FIRST step's timestamp, not from when this
         // page loaded: a browser that reloads mid-install must not reset the
         // clock and claim the install just started.
         var steps = p.steps || [];
+        // The circuit backdrop's console text: the install's own steps, as they land.
+        window._ishowLog = steps.map(function (s) {
+          var at = parseInt(s.at, 10), t0 = steps.length ? parseInt(steps[0].at, 10) : at, d = Math.max(0, at - t0);
+          return '[' + ('   ' + Math.floor(d / 60)).slice(-3) + ':' + ('0' + d % 60).slice(-2) + '] ' + s.label + '  ' + (s.detail || '');
+        }).concat(p.phase ? ['        ' + p.phase] : []);
         if (steps.length && !window._ishowT0) window._ishowT0 = parseInt(steps[0].at, 10) * 1000;
         if (window._ishowT0) {
           var secs = Math.max(0, Math.floor((Date.now() - window._ishowT0) / 1000));
@@ -12499,7 +12607,251 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
       })
       .catch(function () { /* the route is absent on older images; stay hidden */ });
   }
+  // slideFx — as a slide arrives: one of three ways in, picked at random (glitch
+  // slices, a signal tear, or a plain fade; operator, 2026-09-13: "two different ones
+  // and a normal one"), and the title decoding from noise left to right. Only when
+  // the effects are running.
+  var DECODE_GLYPHS = '\u2593\u2592\u2591<>/\\|=+*#%01ABCDEFXZ';
+  function slideFx(el, i) {
+    var root = document.getElementById('install-show');
+    if (!root.classList.contains('fx-motion')) return;
+    var way = Math.random() * 3 | 0;
+    if (way === 0) { el.classList.add('glitching'); setTimeout(function () { el.classList.remove('glitching'); }, 520); }
+    if (way === 1) { el.classList.add('tearing'); setTimeout(function () { el.classList.remove('tearing'); }, 700); }
+    var title = el.querySelector('.ishow-title'), text = SLIDES[i][1], start = performance.now(), id = (title._dec || 0) + 1;
+    title._dec = id;
+    (function frame(now) {
+      if (title._dec !== id) return;
+      var k = Math.min(1, (now - start) / 780), out = '';
+      for (var c = 0; c < text.length; c++) {
+        out += (text[c] === ' ' || c / text.length < k * 1.15 - 0.12) ? text[c] : DECODE_GLYPHS[(Math.random() * DECODE_GLYPHS.length) | 0];
+      }
+      title.textContent = out;
+      if (k < 1) requestAnimationFrame(frame); else title.textContent = text;
+    })(start);
+  }
+
+  // ── Circuit backdrop, line work, greets scroller ──────────────────────────
+  // Chosen in the Show Lab (2026-09-13). Runs only while the show is on screen and
+  // the tab is visible, at 30 fps on a 2D canvas, so it costs a few milliseconds a
+  // frame even where the live image has no GPU driver yet.
+  function startShowFx() {
+    var root = document.getElementById('install-show');
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    root.classList.add('fx-motion');
+
+    function hex(h) { var n = parseInt(h.slice(1), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; }
+    function visible() { return root.style.display !== 'none' && !document.hidden; }
+    var sceneCol = hex('#c77dff'), sceneTarget = sceneCol.slice();
+    function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+    // line work, one arrangement per scene, crossfaded between two layers
+    var layers = [document.getElementById('ishow-lines-a'), document.getElementById('ishow-lines-b')], live = 0;
+    function trace(r, y0, amp) {
+      var x = -40, y = y0, d = 'M' + x + ' ' + y;
+      while (x < 1640) {
+        var run = 30 + r() * 90, kind = r();
+        if (kind < .45) { x += run; }
+        else if (kind < .75) { x += run * .5; y = y0 + (r() - .5) * 2 * amp; }
+        else { var st = (r() < .5 ? -1 : 1) * (8 + r() * amp * .8); x += Math.abs(st); y = Math.max(y0 - amp, Math.min(y0 + amp, y + st)); }
+        d += ' L' + x.toFixed(1) + ' ' + y.toFixed(1);
+      }
+      return d;
+    }
+    function linework(seed) {
+      var r = rng(seed * 7919 + 13), top = r() < .5, next = 1 - live, svg = layers[next];
+      var cx = (120 + r() * 120).toFixed(0), cy = (top ? 790 + r() * 60 : 90 + r() * 60).toFixed(0);
+      var ty = top ? 118 + r() * 30 : 792 - r() * 30, out = '';
+      out += '<g opacity=".30"><path class="trace" pathLength="1" d="' + trace(r, ty, 22) + '"/>';
+      out += '<path class="trace faint" pathLength="1" d="' + trace(r, ty + (top ? 16 : -16), 12) + '"/></g>';
+      out += '<g opacity=".16"><g class="rings" style="transform-origin:' + cx + 'px ' + cy + 'px">';
+      [110, 190, 290, 410, 560].forEach(function (rad, k) {
+        out += '<circle class="ring' + (k % 2 ? ' dash' : '') + '" cx="' + cx + '" cy="' + cy + '" r="' + rad + '"/>';
+      });
+      out += '</g><circle class="ripple" cx="' + cx + '" cy="' + cy + '" r="380"/>';
+      out += '<circle class="ripple" style="animation-delay:4.5s" cx="' + cx + '" cy="' + cy + '" r="380"/></g><g opacity=".32">';
+      for (var k = 0; k < 5; k++) {
+        var mx = 70 + r() * 250, my = 170 + r() * 560, sz = 4 + r() * 4;
+        out += '<path class="mark" style="animation-delay:-' + (r() * 11).toFixed(1) + 's" d="M' + (mx - sz) + ' ' + my + 'H' + (mx + sz) + 'M' + mx + ' ' + (my - sz) + 'V' + (my + sz) + '"/>';
+      }
+      svg.innerHTML = out + '</g>';
+      layers[live].classList.remove('live');
+      svg.classList.add('live');
+      live = next;
+    }
+
+    // scene: once a minute, from the slide on screen
+    var sceneN = 0;
+    function scene() {
+      var acc = ACCENT[SLIDES[order[pos]][0]] || DEFAULT_ACCENT;
+      root.style.setProperty('--ishow-scene', acc);
+      sceneTarget = hex(acc);
+      linework(order[pos] * 31 + sceneN++);
+    }
+    scene();
+    setInterval(function () { if (visible()) scene(); }, 60000);
+
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    var MONO = 'ui-monospace,SFMono-Regular,Menlo,monospace';
+    function rgb() { return [sceneCol[0] * 255 | 0, sceneCol[1] * 255 | 0, sceneCol[2] * 255 | 0]; }
+
+    // circuit: the chip lower right, traces out of its pins, pulses of current,
+    // and the install's real steps scrolling very faintly behind
+    var cv = document.getElementById('ishow-circuit'), cx2 = cv.getContext('2d');
+    var cW = 0, cH = 0, chip = null, traces = [], pulses = [], rows = [];
+    function logLine(i) {
+      var log = window._ishowLog || [];
+      if (!log.length) return '        waiting for the installer to report its first step';
+      return log[i % log.length];
+    }
+    function buildCircuit() {
+      cW = cv.clientWidth; cH = cv.clientHeight;
+      cv.width = Math.round(cW * dpr); cv.height = Math.round(cH * dpr); cx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // Bottom right, clear of the text column: at 0.76/0.64 the package clipped the end
+      // of a body paragraph on a 1600x900 screen (first render, 2026-09-13).
+      var r = rng(9173), cs = Math.min(cW, cH) * 0.17, pins = 12, pitch = cs / (pins + 1);
+      chip = { x: cW * 0.87 - cs / 2, y: cH * 0.73 - cs / 2, s: cs };
+      traces = [];
+      [[0, -1], [0, 1], [-1, 0], [1, 0]].forEach(function (dir) {
+        for (var i = 1; i <= pins; i++) {
+          if (r() < 0.35) continue;
+          var x = dir[0] ? (dir[0] < 0 ? chip.x : chip.x + cs) : chip.x + i * pitch;
+          var y = dir[1] ? (dir[1] < 0 ? chip.y : chip.y + cs) : chip.y + i * pitch;
+          var pts = [[x, y]], len = 30 + r() * 60, dx = dir[0], dy = dir[1];
+          x += dx * len; y += dy * len; pts.push([x, y]);
+          for (var k = 0; k < 4 + (r() * 4 | 0); k++) {
+            var turn = r();
+            if (turn < 0.45) {
+              var nx = dx - dy, ny = dy + dx;
+              if (r() < .5) { nx = dx + dy; ny = dy - dx; }
+              var l = Math.hypot(nx, ny); dx = Math.round(nx / l); dy = Math.round(ny / l);
+            } else if (turn < 0.6 && dx && dy) { if (r() < .5) dy = 0; else dx = 0; }
+            len = 40 + r() * 140; x += dx * len; y += dy * len; pts.push([x, y]);
+            if (x < -40 || y < -40 || x > cW + 40 || y > cH + 40) break;
+          }
+          var total = 0;
+          for (var q = 1; q < pts.length; q++) total += Math.hypot(pts[q][0] - pts[q - 1][0], pts[q][1] - pts[q - 1][1]);
+          traces.push({ pts: pts, len: total, via: r() < 0.5 });
+        }
+      });
+      pulses = [];
+      rows = [];
+      for (var n = 0; n < Math.ceil(cH / 22) + 2; n++) rows.push({ y: n * 22, i: n });
+    }
+    function pointAt(tr, d) {
+      for (var i = 1; i < tr.pts.length; i++) {
+        var a = tr.pts[i - 1], b = tr.pts[i], l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (d <= l) return [a[0] + (b[0] - a[0]) * d / l, a[1] + (b[1] - a[1]) * d / l];
+        d -= l;
+      }
+      return tr.pts[tr.pts.length - 1];
+    }
+    var rowSeq = 0;
+    function drawCircuit() {
+      if (!cv.clientWidth) return;
+      if (cW !== cv.clientWidth || cH !== cv.clientHeight) buildCircuit();
+      var c = rgb(), sc = c[0] + ',' + c[1] + ',' + c[2];
+      cx2.clearRect(0, 0, cW, cH);
+      cx2.font = '12px ' + MONO;
+      cx2.fillStyle = 'rgba(150,170,195,.085)';
+      rows.forEach(function (row) {
+        row.y -= 0.35;
+        if (row.y < -20) { row.y += rows.length * 22; row.i = rowSeq++; }
+        cx2.fillText(logLine(row.i), 40 + (row.i % 3) * 18, row.y);
+      });
+      cx2.lineWidth = 1.1; cx2.lineJoin = 'round';
+      traces.forEach(function (tr) {
+        cx2.strokeStyle = 'rgba(' + sc + ',.17)';
+        cx2.beginPath(); cx2.moveTo(tr.pts[0][0], tr.pts[0][1]);
+        for (var i = 1; i < tr.pts.length; i++) cx2.lineTo(tr.pts[i][0], tr.pts[i][1]);
+        cx2.stroke();
+        if (tr.via) {
+          var e = tr.pts[tr.pts.length - 1];
+          cx2.strokeStyle = 'rgba(' + sc + ',.22)'; cx2.beginPath(); cx2.arc(e[0], e[1], 3, 0, 6.283); cx2.stroke();
+        }
+      });
+      var s = chip.s;
+      cx2.fillStyle = 'rgba(10,14,20,.85)'; cx2.strokeStyle = 'rgba(' + sc + ',.35)'; cx2.lineWidth = 1.2;
+      cx2.fillRect(chip.x, chip.y, s, s); cx2.strokeRect(chip.x, chip.y, s, s);
+      cx2.strokeStyle = 'rgba(196,210,226,.18)'; cx2.strokeRect(chip.x + s * .18, chip.y + s * .18, s * .64, s * .64);
+      cx2.fillStyle = 'rgba(196,210,226,.10)';
+      for (var p = 1; p <= 12; p++) {
+        var o = p * s / 13;
+        cx2.fillRect(chip.x + o - 1.5, chip.y - 7, 3, 7); cx2.fillRect(chip.x + o - 1.5, chip.y + s, 3, 7);
+        cx2.fillRect(chip.x - 7, chip.y + o - 1.5, 7, 3); cx2.fillRect(chip.x + s, chip.y + o - 1.5, 7, 3);
+      }
+      cx2.font = '600 ' + Math.round(s * .075) + 'px ' + MONO;
+      cx2.fillStyle = 'rgba(196,210,226,.22)'; cx2.textAlign = 'center';
+      cx2.fillText('KLDLOAD', chip.x + s / 2, chip.y + s / 2 - s * .02);
+      cx2.fillText('L0 SUBSTRATE', chip.x + s / 2, chip.y + s / 2 + s * .09);
+      cx2.textAlign = 'start';
+      if (traces.length && pulses.length < 9 && Math.random() < 0.08) {
+        pulses.push({ tr: traces[(Math.random() * traces.length) | 0], d: 0, v: 90 + Math.random() * 140 });
+      }
+      pulses = pulses.filter(function (pu) {
+        pu.d += pu.v / 30;
+        if (pu.d > pu.tr.len + 60) return false;
+        for (var k = 0; k < 14; k++) {
+          var dd = pu.d - k * 5;
+          if (dd < 0 || dd > pu.tr.len) continue;
+          var pt = pointAt(pu.tr, dd), fade = 1 - k / 14;
+          cx2.fillStyle = k === 0 ? 'rgba(225,236,248,' + (.9 * fade) + ')' : 'rgba(' + sc + ',' + (.55 * fade * fade) + ')';
+          cx2.beginPath(); cx2.arc(pt[0], pt[1], k === 0 ? 2.1 : 1.6, 0, 6.283); cx2.fill();
+        }
+        return true;
+      });
+    }
+
+    // greets scroller
+    var GREETS = '   KLDLOAD GREETS   OPENZFS  *  ZFSBOOTMENU  *  WIREGUARD  *  FIRECRACKER  *  KVM  *  QEMU  *  LIBVIRT  *  ' +
+      'CILIUM  *  HUBBLE  *  SANOID  *  PROMETHEUS  *  GRAFANA  *  OLLAMA  *  FEDORA  *  DEBIAN  *  UBUNTU  *  ROCKY  *  ARCH  *  ' +
+      'NO KEYBOARD WAS TOUCHED DURING THIS INSTALL  *  THE POOL REMEMBERS  *  SEE YOU AT 100%   ';
+    var sc = document.getElementById('ishow-scroller'), sctx = sc.getContext('2d');
+    var scrollX = 0, charW = 10, sizedW = 0;
+    function sizeScroller() {
+      var w = sc.clientWidth, h = sc.clientHeight;
+      if (!w || w === sizedW) return;
+      sizedW = w;
+      sc.width = Math.round(w * dpr); sc.height = Math.round(h * dpr);
+      sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      sctx.font = '700 15px ' + MONO;
+      charW = sctx.measureText('M').width + 3;
+    }
+    function drawScroller(t) {
+      var w = sc.clientWidth, h = sc.clientHeight, c = rgb();
+      if (!w) return;
+      sctx.clearRect(0, 0, w, h);
+      scrollX = (scrollX + 1.6) % (GREETS.length * charW);
+      var first = Math.floor(scrollX / charW);
+      for (var i = 0; i * charW < w + charW; i++) {
+        var ch = GREETS[(first + i) % GREETS.length];
+        if (ch === ' ') continue;
+        var x = i * charW - (scrollX % charW), k = 0.5 + 0.5 * Math.sin(x * 0.012 + t * 1.6 + 1.2);
+        // crest colour: brushed silver-blue (#c4d2e2), not white
+        sctx.globalAlpha = Math.max(0, Math.min(1, x / 120, (w - x) / 120));
+        sctx.fillStyle = 'rgb(' + (c[0] + (196 - c[0]) * k | 0) + ',' + (c[1] + (210 - c[1]) * k | 0) + ',' + (c[2] + (226 - c[2]) * k | 0) + ')';
+        sctx.fillText(ch, x, h / 2 + 6 + Math.sin(x * 0.012 + t * 1.6) * 8);
+      }
+      sctx.globalAlpha = 1;
+    }
+
+    var last = 0;
+    (function frame(now) {
+      requestAnimationFrame(frame);
+      if (!visible() || now - last < 1000 / 30) return;
+      last = now;
+      for (var i = 0; i < 3; i++) sceneCol[i] += (sceneTarget[i] - sceneCol[i]) * 0.012;
+      sizeScroller();
+      drawCircuit();
+      drawScroller(now / 1000);
+    })(0);
+  }
+
+  // A kiosk whose progress route never answers must not stay a blank screen.
+  setTimeout(function () { document.documentElement.classList.remove('ishow-boot'); }, 20000);
   if (!APP_WINDOW) {
+    startShowFx();
     poll();
     setInterval(poll, 2000);
   }

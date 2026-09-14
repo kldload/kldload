@@ -60,6 +60,10 @@ mkdir -p "${HOME}/.local/state/kldload" 2>/dev/null || true
 : >"${HOME}/.local/state/kldload/webui-opened" 2>/dev/null || true
 
 url='https://localhost:8443/'
+# The kiosk passes KLDLOAD_KIOSK_SHOW=1 (kldload-install-kiosk): open the page as the
+# install show. The wait loop below keeps probing the bare URL.
+page_url="$url"
+[[ "${KLDLOAD_KIOSK_SHOW:-}" == 1 ]] && page_url="${url}?show=1"
 
 # Wait for the SPA to answer (up to ~60s). `curl -k` because the cert is the
 # local kldload-webui cert; we only care that the endpoint is serving.
@@ -114,4 +118,4 @@ for _live in /run/live/medium /run/initramfs/live /lib/live/mount/medium; do
         break
     fi
 done
-exec /usr/local/bin/kldload-chrome-app "$_app_id" "$url"
+exec /usr/local/bin/kldload-chrome-app "$_app_id" "$page_url"
