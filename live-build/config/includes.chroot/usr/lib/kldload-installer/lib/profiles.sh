@@ -698,6 +698,129 @@ k_profile_optional_packages() {
 # k_install_system_files — copy kldload system files from the live environment
 # into the freshly bootstrapped target. These files live in the live ISO chroot
 # but debootstrap creates a clean slate, so they must be copied explicitly.
+# ── Substrate safety — every profile, core included ─────────────────────────
+# k_install_substrate_safety — what a ZFS-root install needs to stay diagnosable,
+# upgrade-safe and bootable, whatever the profile adds on top.
+#
+# WHY its own function, called before core's early return in
+# k_install_system_files: all of this used to sit inside the non-core branch, so
+# core ("ZFS on root + boot environments + stock distro") got the ZFS root and none
+# of what keeps one working. fiend, 2026-09-13, the first core install of the
+# install matrix: the system journal had recorded nothing (journald's file was
+# shadowed under the rpool/var/log mount), `dnf versionlock list` was empty, and no
+# boot-path repair was installed. None of these is a kldload tool; each exists
+# because of the dataset layout and the out-of-tree module that core has too.
+#
+# Installs and enables, in the same breath:
+#   journal   journald.conf.d/persistent.conf, kldload-journal-flush.service,
+#             kldload-journal-assert. HISTORY .132 2026-08-26: two consecutive
+#             boots recorded zero system messages while journald reported
+#             "active (running)"; the unit had been copied for months and never
+#             enabled. persistent.conf removes the race, the unit proves the
+#             journal records and repairs it when it does not.
+#   holds     kldload-package-holds.service, kldload-apply-platform-holds. Pins
+#             kernel, ZFS and NVIDIA together so an upgrade cannot move the kernel
+#             out from under the DKMS modules (fiend 2026-08-16: nothing held).
+#   boot      kldload-boot-assert.service, kldload-boot-assert. Re-checks the EFI
+#             boot path on every boot and repairs it (2026-08-25: an SB-off
+#             fallback path shipped broken and went unnoticed for six days).
+#   trust     /etc/pki/tls/certs/ca-bundle.crt and /etc/pki/tls/cert.pem on the RPM
+#             family — the legacy paths openssl, librepo and the NVIDIA repo's
+#             sslcacert= open. ca-certificates' scriptlet normally creates them and
+#             on these installs it does not run. kldload-firstboot repaired them,
+#             so every profile but core was fine; fiend's core, 2026-09-13, failed
+#             every https repo that names the path ("error adding trust anchors").
+#             firstboot's repair stays as the second failsafe.
+#
+# Enabling is the wants symlink, written directly: that is what `systemctl enable`
+# writes for these units, and it works on a target whose systemd cannot be run
+# from the installer.
+#
+# Returns: 0 when every piece landed and is enabled; 1 otherwise, after logging
+# each missing piece. The caller warns rather than aborting: none of these makes a
+# machine unbootable by being absent, and an install that stops here would leave
+# one that is.
+k_install_substrate_safety() {
+    local target="${KLDLOAD_TARGET:?}"
+    local bad=0 src dst unit wants
+
+    # source-on-live-system:destination-on-target, same path on both sides
+    # because each unit's ExecStart names the path it is copied to.
+    local -a files=(
+        /etc/systemd/journald.conf.d/persistent.conf
+        /usr/lib/systemd/system/kldload-journal-flush.service
+        /usr/local/sbin/kldload-journal-assert
+        /etc/systemd/system/kldload-package-holds.service
+        /usr/sbin/kldload-apply-platform-holds
+        /usr/lib/systemd/system/kldload-boot-assert.service
+        /usr/local/sbin/kldload-boot-assert
+    )
+    for src in "${files[@]}"; do
+        dst="${target}${src}"
+        if [[ ! -f "$src" ]]; then
+            k_log "WARNING: substrate safety: ${src} is missing from the live system — not installed on the target"
+            bad=1
+            continue
+        fi
+        case "$src" in
+        */sbin/*) install -D -m 0755 "$src" "$dst" ;;
+        *) install -D -m 0644 "$src" "$dst" ;;
+        esac || {
+            k_log "WARNING: substrate safety: could not install ${src}"
+            bad=1
+        }
+    done
+
+    # trust — only where the RPM trust layout exists; Debian and Arch keep theirs
+    # under /etc/ssl and are not affected.
+    local ext=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem link
+    if [[ -d "${target}/etc/pki/ca-trust" ]]; then
+        if [[ ! -s "${target}${ext}" ]]; then
+            chroot "$target" update-ca-trust extract ||
+                k_log "WARNING: substrate safety: update-ca-trust extract failed in the target"
+        fi
+        mkdir -p "${target}/etc/pki/tls/certs"
+        for link in /etc/pki/tls/certs/ca-bundle.crt /etc/pki/tls/cert.pem; do
+            # swallow: a link that failed to land is reported by the outcome check below.
+            [[ -e "${target}${link}" ]] || ln -sfn "$ext" "${target}${link}" || true
+            # Outcome: the path resolves, INSIDE the target, to a non-empty bundle.
+            # Not `-s` on the link itself: the link is absolute, so the test would
+            # follow it into the live system's own bundle and pass for a target
+            # that has none (caught testing this, 2026-09-13).
+            local ok=0
+            if [[ -L "${target}${link}" ]]; then
+                [[ -s "${target}$(readlink "${target}${link}")" ]] && ok=1
+            elif [[ -s "${target}${link}" ]]; then
+                ok=1
+            fi
+            if ((ok)); then
+                k_log "substrate safety: ${link} resolves to the system trust bundle"
+            else
+                k_log "WARNING: substrate safety: ${link} does not resolve to a CA bundle — https repos that name it will fail"
+                bad=1
+            fi
+        done
+    fi
+
+    wants="${target}/etc/systemd/system/multi-user.target.wants"
+    mkdir -p "$wants"
+    for unit in /usr/lib/systemd/system/kldload-journal-flush.service \
+        /etc/systemd/system/kldload-package-holds.service \
+        /usr/lib/systemd/system/kldload-boot-assert.service; do
+        [[ -f "${target}${unit}" ]] || continue # already reported above
+        # swallow: a link that failed to land is reported by the outcome check below.
+        ln -sfn "$unit" "${wants}/${unit##*/}" || true
+        # The outcome, not ln's status: the link exists and resolves inside the target.
+        if [[ -L "${wants}/${unit##*/}" && -f "${target}$(readlink "${wants}/${unit##*/}")" ]]; then
+            k_log "substrate safety: ${unit##*/} installed and enabled"
+        else
+            k_log "WARNING: substrate safety: ${unit##*/} is NOT enabled — it will not run"
+            bad=1
+        fi
+    done
+    return "$bad"
+}
+
 k_install_system_files() {
     local target="${KLDLOAD_TARGET:?}"
     local root_ds
@@ -761,6 +884,9 @@ k_install_system_files() {
     # down ran for ALL profiles including core. The smoke-test correctly
     # caught a kldload-webui binary in /usr/local/bin on a core install.
     # Belt-and-suspenders: early-return for core in addition to the else.
+    k_install_substrate_safety ||
+        k_log "WARNING: substrate safety incomplete (see above) — journal, package holds or boot repair may be missing"
+
     if [[ "$_profile" == "core" ]]; then
         k_log "Core profile — skipping kldload tools, sanoid, webui, snapshot hooks."
         return 0
@@ -889,7 +1015,7 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer kldload-boot-assert.service; do
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -905,21 +1031,14 @@ k_install_system_files() {
         # dashboard was permanently empty — with the collector binary present
         # and the kstat readable the whole time (fiend, 2026-08-16).
         #
-        # kldload-package-holds.service is in this list for the same reason.
-        # Its `systemctl enable` further down has been failing since the day it
-        # was written — you cannot enable a unit whose file was never copied —
-        # so it warned into the installer log and every install shipped with an
-        # unheld kernel. That unit is the SECOND failsafe on the kernel/DKMS
-        # pairing; the first, APT::NeverAutoRemove in 60-debz-kernel, only stops
-        # the OLD kernel being garbage-collected and does nothing to stop a NEW
-        # one arriving and orphaning the ZFS and NVIDIA modules (fiend,
-        # 2026-08-16: `apt-mark showhold` was empty on a running install).
+        # kldload-package-holds.service used to be in this list; it is installed
+        # for every profile by k_install_substrate_safety now.
         mkdir -p "${target}/etc/systemd/system"
         # kldload-ansible-firstboot.service is here for the same reason as the
-        # two above: a unit that is not copied cannot be enabled, and the
+        # one above: a unit that is not copied cannot be enabled, and the
         # `systemctl enable` further down would warn into a log nobody reads.
         for f in kldload-zfs-dbgmsg.service kldload-zfs-dbgmsg.timer \
-            kldload-package-holds.service kldload-ansible-firstboot.service; do
+            kldload-ansible-firstboot.service; do
             [[ -f "/etc/systemd/system/${f}" ]] &&
                 cp "/etc/systemd/system/${f}" "${target}/etc/systemd/system/${f}"
         done
@@ -962,12 +1081,11 @@ k_install_system_files() {
         # was the 1.0.4 regression where kldload-autodeploy.service had a
         # symlink in multi-user.target.wants but no binary behind it.
         mkdir -p "${target}/usr/sbin"
-        # kldload-apply-platform-holds and kldload-rollback are the two halves
-        # of the update model — pin the substrate, and provide a way back when
-        # something moves anyway. Both are useless without the other: holds
-        # with no rollback means an operator who unholds and upgrades has no
-        # undo, and rollback with no holds means they need it far more often.
-        for bin in kldload-autodeploy kldload-apply-platform-holds kldload-rollback; do
+        # kldload-rollback is the second half of the update model; the first,
+        # kldload-apply-platform-holds, is installed for every profile by
+        # k_install_substrate_safety. Holds with no rollback means an operator who
+        # unholds and upgrades has no undo.
+        for bin in kldload-autodeploy kldload-rollback; do
             if [[ -f "/usr/sbin/${bin}" ]]; then
                 cp "/usr/sbin/${bin}" "${target}/usr/sbin/${bin}" &&
                     chmod +x "${target}/usr/sbin/${bin}" &&
@@ -1052,11 +1170,7 @@ k_install_system_files() {
         # kfire — Firecracker microVMs from an appliance golden (2026-09-05).
         #   vmxplore on the installed system calls it; without this entry the
         #   Firecracker branch offers clones the host cannot make.
-        # kldload-boot-assert must reach the TARGET too, not just the live ISO:
-        # its unit is enabled on the installed system, so a copy that stops at
-        # the squashfs leaves multi-user.target pulling in a unit whose
-        # ExecStart does not exist.
-        for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-session kldload-headlamp-install kldload-secure-boot kldload-debug-bundle kldload-rhel-composer-build kldload-boot-assert kldload-journal-assert kfire; do
+        for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-session kldload-headlamp-install kldload-secure-boot kldload-debug-bundle kldload-rhel-composer-build kfire; do
             [[ -f "/usr/local/sbin/${bin}" ]] &&
                 cp "/usr/local/sbin/${bin}" "${target}/usr/local/sbin/${bin}" &&
                 chmod +x "${target}/usr/local/sbin/${bin}" &&
@@ -1163,32 +1277,9 @@ k_install_system_files() {
         # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
         ln -sf "/usr/lib/systemd/system/kldload-enroll-sweep.timer" "${target}/etc/systemd/system/timers.target.wants/kldload-enroll-sweep.timer" || true
 
-        # kldload-boot-assert: re-checks the EFI boot path on EVERY boot and
-        # repairs it. Copied in the loop above; without this symlink it would
-        # ship in the squashfs and never run -- the exact defect the comments
-        # for kldload-collect and inventory-sync directly below describe, and
-        # the reason the SB-off fallback breakage went unnoticed for six days.
-        # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
+        # kldload-boot-assert and kldload-journal-flush are installed and enabled
+        # for every profile by k_install_substrate_safety.
         mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
-        # swallow: ln -sf fails only if the wants dir is unwritable; the
-        # symlink already existing is the normal re-run case and succeeds.
-        ln -sf "/usr/lib/systemd/system/kldload-boot-assert.service" "${target}/etc/systemd/system/multi-user.target.wants/kldload-boot-assert.service" || true
-
-        # kldload-journal-flush: makes the system journal persistent and then
-        # PROVES it is recording, restarting journald if it is not.
-        #
-        # The unit has been in the copy loop above for months and was never
-        # given this symlink, so on every installed system it read
-        # "disabled / inactive" and nothing ever healed the journal. That is
-        # the seventh instance of the defect the copy loop's own comment warns
-        # about, and it is the one that hid all the others: .132 2026-08-26 ran
-        # two consecutive boots recording ZERO system messages — no kernel
-        # ring, no PID 1 — because journald had opened its file on the
-        # unmounted rpool/var and zfs-mount then covered it. journald reported
-        # "active (running)" throughout. The failure was invisible precisely
-        # because the thing that would have reported it was never started.
-        # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
-        ln -sf "/usr/lib/systemd/system/kldload-journal-flush.service" "${target}/etc/systemd/system/multi-user.target.wants/kldload-journal-flush.service" || true
 
         # kldload-collect: samples the kernel cockpit's signal set into a JSONL
         # corpus every 60s. Added to the copy list in 99355e23 but never given
@@ -2860,24 +2951,9 @@ WPEOF
     fi
 
     # ── Pin the kernel-coupled substrate — EVERY distro ───────────────────────
-    # Second failsafe for Debian (the b653 pattern, paired with the apt.conf.d
-    # drop-in above); the ONLY pinning on every other substrate.
-    #
-    # WHY it sits outside the debian/ubuntu block: it used to sit inside it, so
-    # a Fedora or RHEL install — the primary substrate — enabled nothing, and
-    # the script it would have run was apt-only anyway. Both halves were fixed
-    # together 2026-08-17; kldload-apply-platform-holds now dispatches on the
-    # package manager (apt-mark / dnf versionlock / pacman IgnorePkg) and
-    # writes what it actually pinned to /var/lib/kldload/platform-holds.list.
-    #
-    # The unit shipped from the very first build but nothing ever enabled it,
-    # so on Debian BOTH layers of this protection were inert too.
-    if ! chroot "${target}" systemctl enable kldload-package-holds.service \
-        >/dev/null 2>&1; then
-        k_log "WARN: kldload-package-holds.service not enabled — the kernel," \
-            "zfs and nvidia are unpinned; an upgrade may replace the kernel" \
-            "out from under the DKMS modules (distro=${_distro})"
-    fi
+    # kldload-package-holds is installed and enabled for every profile, core
+    # included, by k_install_substrate_safety; the apt.conf.d drop-in above is the
+    # Debian half that pairs with it.
 
     # Proves Ansible reaches the estate, once, at first boot, into
     # /root/kldload-ansible-report.txt. Nothing did before: the control
@@ -3182,9 +3258,6 @@ REPL
             cp /etc/loki/loki.yaml "${target}/etc/loki/loki.yaml"
         [[ -f /etc/promtail/promtail.yaml ]] &&
             cp /etc/promtail/promtail.yaml "${target}/etc/promtail/promtail.yaml"
-        [[ -f /etc/systemd/journald.conf.d/persistent.conf ]] &&
-            cp /etc/systemd/journald.conf.d/persistent.conf \
-                "${target}/etc/systemd/journald.conf.d/persistent.conf"
         # Grafana Loki datasource + dashboards (firstboot also copies the
         # dashboards to /var/lib/grafana/dashboards — belt + suspenders)
         if [[ -f /etc/grafana/provisioning/datasources/loki.yaml ]]; then

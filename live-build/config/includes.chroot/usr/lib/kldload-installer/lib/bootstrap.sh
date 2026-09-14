@@ -3110,6 +3110,31 @@ NCTREPO
                 >>"$log" 2>&1 ||
                 k_log_to "$log" "WARNING: akmod-nvidia install had issues — check darksite or RPM Fusion reachability"
 
+            # 3b. Give the akmods user its signing key, now that the package
+            #     that creates the akmods group has landed.
+            #
+            # HISTORY: fiend 2026-09-13, full-secure netboot install. The MOK
+            # seeding step runs long before this transaction, its groupadd did
+            # not take, and bootstrap.log said "WARNING: could not set akmods
+            # group on the signing key". The key stayed root:root 0640, and on
+            # first boot akmodsbuild (which runs as the akmods user) died with
+            # "sign-file: Permission denied ... modules are unsigned!". The
+            # desktop came up on nouveau. firstboot did correct the group, ten
+            # seconds AFTER akmods.service had already failed. Rebuilding by
+            # hand with the corrected key produced a module signed by the
+            # enrolled MOK. So the ownership is set here, where the group is
+            # guaranteed to exist, and checked on the landed file.
+            local _ak_key_rel=/etc/pki/akmods/private/private_key.priv
+            if [[ -f "${target}${_ak_key_rel}" ]]; then
+                chroot "${target}" chgrp akmods "${_ak_key_rel}" >>"$log" 2>&1 &&
+                    chmod 0640 "${target}${_ak_key_rel}"
+                if [[ "$(chroot "${target}" stat -c '%G' "${_ak_key_rel}" 2>/dev/null)" == akmods ]]; then
+                    k_log_to "$log" "  akmods signing key is root:akmods 0640 — akmods can sign nvidia.ko on first boot"
+                else
+                    k_log_to "$log" "WARNING: akmods signing key is NOT group akmods — nvidia.ko will build unsigned and be refused under Secure Boot (firstboot retries)"
+                fi
+            fi
+
             # 4. Blacklist nouveau so it doesn't grab the GPU on first boot
             #    before akmods has built nvidia.ko. akmods runs early in the
             #    boot sequence (akmods.service, multi-user.target.wants) and

@@ -1409,11 +1409,18 @@ if ! k_have_func k_write_install_manifest; then
         local target="${KLDLOAD_TARGET_MNT}"
         mkdir -p "${target}/etc/kldload"
 
-        # For non-core profiles, default the autodeploy-driven subsystems
-        # (K8s cluster, klab goldens, AI) to ON so the UX is "install, reboot,
-        # watch the UI indicator, come back to a running cluster." Core
-        # profile is bare ZFS only and stays opt-in. Individual flags can
-        # still be overridden by the installer env or web UI.
+        # What first boot converges when an answers file does not say.
+        #
+        # Cluster, AI and the ZFS-test lab are OFF unless asked for, on every
+        # profile. They used to default ON for every profile but core, so an
+        # answers file naming only PROFILE=server bootstrapped a 3-node k8s
+        # cluster, installed Ollama and inferred the zfslab template on first
+        # boot (install-matrix audit, 2026-09-13). The operator's product model
+        # is the opposite: install lean, add sets afterwards. The web UI always
+        # sends these keys explicitly, so only answers-file installs change.
+        #
+        # Metrics (ENABLE_DEVOPS) stay on for every profile but core: "metrics on
+        # by default" is part of the same model.
         local _kld_heavy=1
         [[ "${KLDLOAD_PROFILE:-server}" == "core" ]] && _kld_heavy=0
 
@@ -1480,7 +1487,7 @@ KLDLOAD_INSTALLER_VERSION="${KLDLOAD_INSTALLER_VERSION:-${_kld_iso_ver}}"
 # Deployment intent: standalone | cluster-manager | join
 KLDLOAD_INFRA_MODE="${KLDLOAD_INFRA_MODE:-standalone}"
 KLDLOAD_DISTRO="${KLDLOAD_DISTRO:-centos}"
-KLDLOAD_ENABLE_AI="${KLDLOAD_ENABLE_AI:-${_kld_heavy}}"
+KLDLOAD_ENABLE_AI="${KLDLOAD_ENABLE_AI:-0}"
 KLDLOAD_ENABLE_EBPF="${KLDLOAD_ENABLE_EBPF:-0}"
 KLDLOAD_NVIDIA_DRIVERS="${KLDLOAD_NVIDIA_DRIVERS:-auto}"
 KLDLOAD_WIREGUARD="${KLDLOAD_WIREGUARD:-0}"
@@ -1505,11 +1512,35 @@ KLDLOAD_ENABLE_SECURE_BOOT="${KLDLOAD_ENABLE_SECURE_BOOT:-0}"
 KLDLOAD_ENABLE_KVM="${KLDLOAD_ENABLE_KVM:-0}"
 KLDLOAD_BUILD_IMAGES="${KLDLOAD_BUILD_IMAGES:-0}"
 KLDLOAD_ENABLE_K8S="${KLDLOAD_ENABLE_K8S:-0}"
-KLDLOAD_K8S_BOOTSTRAP="${KLDLOAD_K8S_BOOTSTRAP:-${_kld_heavy}}"
+KLDLOAD_K8S_BOOTSTRAP="${KLDLOAD_K8S_BOOTSTRAP:-0}"
 KLDLOAD_ENABLE_DEVOPS="${KLDLOAD_ENABLE_DEVOPS:-${_kld_heavy}}"
-KLDLOAD_KLAB_ZFS_DEV="${KLDLOAD_KLAB_ZFS_DEV:-${_kld_heavy}}"
+KLDLOAD_KLAB_ZFS_DEV="${KLDLOAD_KLAB_ZFS_DEV:-0}"
 # For join mode: LAN IP of the Cluster Manager to connect to at first boot
 KLDLOAD_HUB_LAN="${KLDLOAD_HUB_LAN:-}"
+# ── Everything else kldload-autodeploy reads. Empty means "use autodeploy's
+# default" — every one of these is read as \${VAR:-default} there.
+# HISTORY: fiend, 2026-09-13. An answers file set KLDLOAD_K8S_WORKERS=3 and
+# KLDLOAD_K8S_CONTROL_PLANES=3; neither was written here, and autodeploy's other
+# source, /var/log/installer/effective-config.env, only exists on the LIVE system
+# (the installer copies it to /root/kldload-install-logs/). The template's
+# defaults happened to be 3+3, so nobody saw the keys being dropped. The
+# smoke-build gate "autodeploy reads only what the manifest writes" now fails
+# the build if autodeploy grows a key this block does not persist.
+KLDLOAD_K8S_CONTROL_PLANES="${KLDLOAD_K8S_CONTROL_PLANES:-}"
+KLDLOAD_K8S_WORKERS="${KLDLOAD_K8S_WORKERS:-}"
+KLDLOAD_KEEP_CPS="${KLDLOAD_KEEP_CPS:-}"
+KLDLOAD_KEEP_WORKERS="${KLDLOAD_KEEP_WORKERS:-}"
+KLDLOAD_KLAB_NO_AUTO="${KLDLOAD_KLAB_NO_AUTO:-}"
+KLDLOAD_ZFSLAB_MODE="${KLDLOAD_ZFSLAB_MODE:-}"
+KLDLOAD_BUILD_ZTEST_GOLDENS="${KLDLOAD_BUILD_ZTEST_GOLDENS:-}"
+KLDLOAD_AI_MODEL="${KLDLOAD_AI_MODEL:-}"
+KLDLOAD_AI_PULL_MODEL="${KLDLOAD_AI_PULL_MODEL:-}"
+KLDLOAD_AUTODEPLOY_PARALLEL_AI="${KLDLOAD_AUTODEPLOY_PARALLEL_AI:-}"
+KLDLOAD_BOB_DARKSITE="${KLDLOAD_BOB_DARKSITE:-}"
+KLDLOAD_BOB_MODEL="${KLDLOAD_BOB_MODEL:-}"
+KLDLOAD_FORCE_AI="${KLDLOAD_FORCE_AI:-}"
+KLDLOAD_MIN_AI_VRAM_GB="${KLDLOAD_MIN_AI_VRAM_GB:-}"
+KLDLOAD_PULL_VISION_MODEL="${KLDLOAD_PULL_VISION_MODEL:-}"
 EOF
         chmod 0640 "${target}/etc/kldload/install-manifest.env"
         k_log "Install manifest written: ${target}/etc/kldload/install-manifest.env"
@@ -1742,10 +1773,22 @@ if ! k_have_func k_enable_firstboot; then
             ;;
         esac
 
+        # Core ships no firstboot unit by design. HISTORY fiend 2026-09-13: every
+        # core install logged "WARNING: could not enable" and then, one line later,
+        # "enabled" — both false, and the second printed regardless of the first.
+        if [[ ! -f "${target}/usr/lib/systemd/system/kldload-firstboot.service" &&
+            ! -f "${target}/etc/systemd/system/kldload-firstboot.service" ]]; then
+            k_log "kldload-firstboot.service: not part of profile ${KLDLOAD_PROFILE:-?} — nothing to enable"
+            return 0
+        fi
         chroot "${target}" systemctl enable kldload-firstboot.service \
             >>"${KLDLOAD_LOG_DIR}/bootstrap.log" 2>&1 ||
-            k_log "WARNING: could not enable kldload-firstboot.service"
-        k_log "kldload-firstboot.service enabled"
+            k_log "WARNING: systemctl enable kldload-firstboot.service returned non-zero"
+        if [[ -L "${target}/etc/systemd/system/multi-user.target.wants/kldload-firstboot.service" ]]; then
+            k_log "kldload-firstboot.service enabled"
+        else
+            k_log "WARNING: kldload-firstboot.service is NOT enabled — first boot will not configure this system"
+        fi
     }
 fi
 
@@ -2543,7 +2586,12 @@ main() {
 
     _info "▸  Applying security settings..."
     k_configure_security
-    _ok "Security" "SSH hardened, APT holds set"
+    # WHY this wording: the old "SSH hardened, APT holds set" was printed on
+    # every distro, Fedora included (fiend's install show, 2026-09-13), and
+    # k_configure_security sets no package holds anywhere — those come later,
+    # from the profile and firstboot versionlock. A step line must say what the
+    # step did.
+    _ok "Security" "users, sudo and SSH configured"
 
     _info "▸  Installing profile packages (${KLDLOAD_PROFILE:-server})..."
     k_apply_profile
@@ -2666,8 +2714,13 @@ main() {
     # boards, and any machine booting purely by fallback path), so this warns
     # rather than dying -- but it must be LOUD, because the operator is the
     # only one who can tell the difference.
+    # NVRAM is the machine's, not the target's, so the live system's efibootmgr
+    # reads the same entries. HISTORY fiend 2026-09-13: this called
+    # `k_chroot_tool efibootmgr` with no target argument — chroot tried to enter a
+    # directory named "efibootmgr" — and k_chroot_tool sends its output to the log
+    # fd anyway, so grep saw nothing and the check could never pass.
     if command -v efibootmgr >/dev/null 2>&1; then
-        if k_chroot_tool efibootmgr 2>/dev/null | grep -qiE '^Boot[0-9A-F]{4}\*?.*(kldload|zfsbootmenu|fedora|debian|ubuntu|rocky|centos|rhel)'; then
+        if efibootmgr 2>/dev/null | grep -qiE '^Boot[0-9A-F]{4}\*?.*(kldload|zfsbootmenu|fedora|debian|ubuntu|rocky|centos|rhel)'; then
             _ok "Boot entry" "registered in firmware"
         else
             _warn "NO firmware boot entry was created. The ESP has a bootloader, so the machine may still boot by the fallback path \\EFI\\BOOT\\BOOTX64.EFI — but if it drops to a boot menu, that is why."
@@ -2868,7 +2921,14 @@ MOKENROLL
     fi
 
     # ── Schedule firstboot smoke test — runs after first reboot, saves report ──
-    cat >"${target}/etc/systemd/system/kldload-smoke-firstboot.service" <<'SMOKEFB'
+    # Only where the suite exists. HISTORY fiend 2026-09-13, core install: core
+    # ships no /usr/local/share/kldload/tests, so this unit's ExecStartPre sat for
+    # 90 minutes waiting for autodeploy markers core never writes, then would have
+    # run nothing; the operator's reboot stopped it and ExecStopPost marked it done.
+    if [[ ! -x "${target}/usr/local/share/kldload/tests/smoke-all.sh" ]]; then
+        _ok "Smoke test" "not scheduled — this profile ships no smoke suite"
+    else
+        cat >"${target}/etc/systemd/system/kldload-smoke-firstboot.service" <<'SMOKEFB'
 [Unit]
 Description=kldload post-install smoke test
 # Run AFTER autodeploy + klab-firstboot finish, not in parallel with them.
@@ -2924,9 +2984,29 @@ TimeoutStartSec=6000
 [Install]
 WantedBy=multi-user.target
 SMOKEFB
-    ln -sf /etc/systemd/system/kldload-smoke-firstboot.service \
-        "${target}/etc/systemd/system/multi-user.target.wants/kldload-smoke-firstboot.service" 2>/dev/null || true
-    _ok "Smoke test" "scheduled for first boot → /root/kldload-smoke-report.txt"
+        ln -sf /etc/systemd/system/kldload-smoke-firstboot.service \
+            "${target}/etc/systemd/system/multi-user.target.wants/kldload-smoke-firstboot.service" 2>/dev/null || true
+        _ok "Smoke test" "scheduled for first boot → /root/kldload-smoke-report.txt"
+    fi
+
+    # ── Core: retire the offline RPM repo now — nothing later will ─────────────
+    # Every other profile retires it in kldload-firstboot (_fb_retire_darksite_repo,
+    # which explains the dnf5 metadata-cache half of this). Core has no first boot
+    # service, so on fiend 2026-09-13 the installed core kept an enabled repo at
+    # file:///run/kldload-darksite, a tmpfs path that is gone after the reboot —
+    # the exact state that failed dnf transactions on 2026-09-03. This runs after
+    # the last package install of a core run. The apt side is not handled here:
+    # core Debian gets no kldload-apt-mirror and has not been audited yet.
+    if [[ "${KLDLOAD_PROFILE:-}" == "core" && -f "${target}/etc/yum.repos.d/kldload-darksite.repo" ]]; then
+        rm -f "${target}/etc/yum.repos.d/kldload-darksite.repo"
+        rm -rf "${target}"/var/cache/libdnf5/kldload-darksite-* "${target}"/var/cache/dnf/kldload-darksite-*
+        if [[ -e "${target}/etc/yum.repos.d/kldload-darksite.repo" ]] ||
+            compgen -G "${target}/var/cache/libdnf5/kldload-darksite-*" >/dev/null; then
+            _warn "the offline repo is still configured on the target — dnf will try a path that no longer exists"
+        else
+            _ok "Offline repo" "retired (core has no first boot to do it)"
+        fi
+    fi
 
     # ── Record what built this machine, and what it was asked for ──────────
     # Written BEFORE finalize, because finalize exports the pool and the target

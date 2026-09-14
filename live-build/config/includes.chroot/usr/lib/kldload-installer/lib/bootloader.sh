@@ -1795,13 +1795,37 @@ DRACUT
                 k_log "WARNING: dracut rebuild failed for ${_kver}"
             fi
         done
-        # Verify ZFS made it into the initramfs
-        local _lsinitrd
-        if _lsinitrd="$(k_target_tool "${target}" lsinitrd)" &&
-            ! chroot "${target}" "$_lsinitrd" \
-                "/boot/initramfs-$(ls "${target}"/usr/lib/modules/ 2>/dev/null | head -1).img" 2>/dev/null |
-            grep -q '90zfs'; then
-            k_log "WARNING: ZFS module may not be in initramfs — check bootloader.log"
+        # Verify ZFS made it into the initramfs: the module file itself, in every
+        # image built above. HISTORY fiend 2026-09-13: this grepped for "90zfs",
+        # a dracut module DIRECTORY name that lsinitrd's listing never prints, so
+        # it warned on every install while zfs.ko was sitting in the image.
+        local _lsinitrd _img _kv
+        if _lsinitrd="$(k_target_tool "${target}" lsinitrd)"; then
+            for _img in "${target}"/boot/initramfs-*.img; do
+                [[ -f "$_img" ]] || continue
+                _kv="${_img##*/initramfs-}"
+                _kv="${_kv%.img}"
+                # Only kernels that got a zfs.ko above were rebuilt with it.
+                compgen -G "${target}/usr/lib/modules/${_kv}/extra/zfs*" >/dev/null || continue
+                # Capture, THEN search. `lsinitrd | grep -q` under pipefail
+                # reports failure on a match: grep exits at the first hit,
+                # lsinitrd dies of SIGPIPE (141) and the pipeline is false.
+                # HISTORY fiend 2026-09-13: every install logged "zfs.ko is NOT in
+                # initramfs" for an image that booted from ZFS a minute later.
+                # A listing that cannot be produced is reported as that, not as
+                # a missing module.
+                local _listing
+                if ! _listing="$(chroot "${target}" "$_lsinitrd" "/boot/${_img##*/}" 2>/dev/null)" ||
+                    [[ -z "$_listing" ]]; then
+                    k_log "WARNING: could not list ${_img##*/} — ZFS in this initramfs WAS NOT CHECKED"
+                elif grep -qE '/zfs\.ko(\.xz|\.zst|\.gz)?$' <<<"$_listing"; then
+                    k_log "initramfs ${_img##*/}: zfs.ko present"
+                else
+                    k_log "WARNING: zfs.ko is NOT in ${_img##*/} — this kernel cannot mount the ZFS root"
+                fi
+            done
+        else
+            k_log "WARNING: no lsinitrd in the target — ZFS in the initramfs WAS NOT CHECKED"
         fi
     else
         k_log "WARNING: no initramfs tool found in the target (looked for update-initramfs, mkinitcpio, mkinitfs, dracut in sbin and bin)"
@@ -1904,6 +1928,23 @@ DRACUT
             k_log "Boot order set: ${_uefi_bootnum} (shim → signed GRUB → ZFSBootMenu)"
         fi
 
+        # A one-shot BootNext outranks BootOrder. A netboot reinstall is started
+        # with `efibootmgr -n <PXE>`, and not every firmware consumes it.
+        # HISTORY: fiend 2026-09-13 (ASUS board, full-secure netboot): the
+        # installer logged "BootNext: 0002" (the Realtek PXE entry) through the
+        # whole install, set BootOrder to kldload, and the reboot went straight
+        # back to PXE, so the MokManager enrolment screen never appeared until
+        # the operator changed the boot device by hand. Clear it.
+        local _efi_state
+        _efi_state=$(efibootmgr 2>&1) || _efi_state=""
+        if [[ "$_efi_state" =~ BootNext:\ ([0-9A-Fa-f]{4}) && "${BASH_REMATCH[1]}" != "${_uefi_bootnum:-}" ]]; then
+            if efibootmgr -N >&7 2>&1; then
+                k_log "Cleared a one-shot BootNext=${BASH_REMATCH[1]} left by the netboot trigger — the reboot goes to kldload"
+            else
+                k_log "WARNING: could not clear BootNext=${BASH_REMATCH[1]} — the next boot may go back to the network instead of this install"
+            fi
+        fi
+
         k_log "EFI boot entries registered: disk=${disk} part=${part_num}"
     else
         k_log "WARNING: Could not determine disk for efibootmgr — skipping EFI registration"
@@ -1961,8 +2002,24 @@ k_bootloader_assert_esp() {
     fi
     k_log "ESP verified: EFI/BOOT/BOOTX64.EFI and EFI/zbm/BOOTX64.EFI present on ${_t}/boot/efi"
     if command -v efibootmgr >/dev/null 2>&1 && [[ -d /sys/firmware/efi/efivars ]]; then
-        if efibootmgr 2>/dev/null | grep -qiE '^Boot[0-9A-F]{4}\*? kldload'; then
+        local _nv
+        _nv=$(efibootmgr 2>&1) || _nv=""
+        if grep -qiE '^Boot[0-9A-F]{4}\*? kldload' <<<"$_nv"; then
             k_log "NVRAM verified: a 'kldload' boot entry exists"
+            # The entry existing is not the machine booting it: check what the
+            # firmware will actually pick next (fiend 2026-09-13, see BootNext
+            # above).
+            local _next="" _first="" _kl
+            _kl=$(grep -ioE '^Boot[0-9A-F]{4}\*? kldload' <<<"$_nv" | head -1 | cut -c5-8)
+            [[ "$_nv" =~ BootNext:\ ([0-9A-Fa-f]{4}) ]] && _next="${BASH_REMATCH[1]}"
+            [[ "$_nv" =~ BootOrder:\ ([0-9A-Fa-f]{4}) ]] && _first="${BASH_REMATCH[1]}"
+            if [[ -n "$_next" && "${_next^^}" != "${_kl^^}" ]]; then
+                k_log "WARNING: firmware BootNext=${_next} is not the kldload entry (${_kl}) — the first reboot will NOT boot this install"
+            elif [[ "${_first^^}" != "${_kl^^}" ]]; then
+                k_log "WARNING: BootOrder starts with ${_first:-nothing}, not the kldload entry (${_kl}) — the reboot may not boot this install"
+            else
+                k_log "NVRAM verified: the next boot is the kldload entry (${_kl})"
+            fi
         else
             k_log "WARNING: no 'kldload' entry in NVRAM — the firmware has to find \\EFI\\BOOT\\BOOTX64.EFI on its own (most boards do); kldload-boot-assert retries the registration on first boot"
         fi

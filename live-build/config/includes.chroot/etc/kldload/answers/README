@@ -1,20 +1,25 @@
 Answers files for the unattended installer.
 
-Each file is plain shell, sourced by kldload-install-target under `set -a`, so
-every assignment becomes an environment variable. Anything the guided
-installer asks, an answers file can state.
+Each file is one machine's install: KEY=value lines that the installer reads line
+by line (k_answers_load_env_file in the installer library). It is NOT sourced as
+shell: no export, no $VARIABLES, and comments only on their own line. A comment
+after a value on the same line is refused. TEMPLATE.env is the complete,
+commented reference; start every file from it.
 
 Two ways one reaches a machine:
 
   USB      ./deploy.sh seed-disk --answers <file> --device /dev/sdX
-           writes a 32 MB FAT32 volume labelled KLDLOAD-SEED holding
+           writes a 32 MB FAT32 volume labelled KLDLOADSEED holding
            answers.env. kldload-autoinstall finds it by label.
 
-  Netboot  serve the file over HTTP and put its URL on the kernel cmdline as
+  Netboot  kldload-netboot-server arm-install <mac> <file> serves the file over
+           HTTP and puts its URL on that machine's kernel cmdline as
            kldload.seed=http://host/answers/<mac>.env — checked BEFORE the
            seed disk, because a cmdline is per-boot intent and a forgotten
-           stick in the front panel is not.
+           stick in the front panel is not. Arming checks the file with the
+           installer's own loader and refuses what the installer would refuse.
 
-KLDLOAD_DISK may be left empty: the installer picks the first disk that is
-neither the live medium nor the seed disk. Set it explicitly on any machine
-with more than one candidate.
+KLDLOAD_DISK may be left empty only on a machine with exactly one candidate:
+autoinstall takes the single empty disk, or the disk holding nothing but a
+previous kldload install, and refuses to guess between two. Set it explicitly
+everywhere else.
