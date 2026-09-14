@@ -157,6 +157,9 @@ html.kld-app #term-drawer{display:none!important;}
 #ishow-elapsed{font-size:1.05rem;font-weight:700;color:#cfe0f0;
   font-variant-numeric:tabular-nums}
 #ishow-count{font-size:.8rem;letter-spacing:.14em;color:#6d7f93}
+#ishow-close{font:inherit;font-size:.78rem;letter-spacing:.14em;color:#cfe0f0;background:transparent;
+  border:1px solid rgba(207,224,240,.35);border-radius:4px;padding:.35rem .8rem;cursor:pointer}
+#ishow-close:hover,#ishow-close:focus-visible{border-color:#3dff88;color:#3dff88;outline:none}
 #ishow-strip{position:relative;z-index:2;width:100%;
   padding:1.15rem 2.6rem 1.9rem;border-top:1px solid rgba(255,255,255,.08);
   background:#070a0fd9}
@@ -11887,6 +11890,10 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     <div id="ishow-head-r">
       <span id="ishow-elapsed">00:00</span>
       <span id="ishow-count"></span>
+      <!-- First boot only: the machine is usable while it builds, so the show
+           must not trap anyone. Hidden during the live install, where there is
+           nothing else to use. -->
+      <button id="ishow-close" type="button" hidden>CLOSE</button>
     </div>
   </div>
   <div id="ishow-slides"></div>
@@ -11904,6 +11911,8 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
   // Content lives here rather than in the installer so a copy change is a
   // page edit, not a rebuild of a 14GB ISO.
   var SLIDES = [
+    ["Your Layer Zero OS", "Kernel loaded. Installing your Linux substrate.",
+     "ZFS on root, checksummed and snapshotted from block one. Boot environments you roll back to from the boot menu. A kernel held together with ZFS and NVIDIA. Packages that travel with the image, on any distro. Nobody at the console: it reboots into the *finished system* on its own."],
     ["The substrate", "ZFS from the first block",
      "Not a filesystem added afterwards. The pool exists before the first package lands, so snapshots, rollback and boot environments are properties of the machine rather than features bolted on later."],
     ["Layout", "Everything is a dataset",
@@ -11983,11 +11992,9 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     ["zxplore", "Boot environments you can see",
      "Every boot environment listed with its origin, its size and which one is active. Create, activate, roll back, destroy, from a list rather than from memory."],
     ["vmxplore", "Two consoles, no bridge",
-     "A serial console and a VNC client built from scratch, rendering the guest's framebuffer natively. No websockify, no noVNC, no virt-viewer, and no unauthenticated port on the network."],
+     "A serial console and a VNC client built from scratch, rendering the guest's framebuffer natively. No websockify, no noVNC and no virt-viewer in between."],
     ["vmxplore", "Drive a headless hypervisor",
      "Point it at another machine over ssh and the whole tool follows: estate, verbs, storage, both consoles. No agent on the far side and no second credential."],
-    ["vmxplore", "Pass a GPU straight through",
-     "The card is detached from the host and handed to the guest whole, with the tool checking what the machine can actually do rather than offering options that will fail at boot."],
     ["Mesh", "The WireGuard estate, mapped",
      "Every node, every peer, every route, derived from what the machines actually have rather than from a registry somebody has to keep true. Read-only on purpose: it reports, it does not invent."],
     ["Scale", "Forty-five servers in under four minutes",
@@ -12035,7 +12042,7 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     ["Inside", "One certificate authority, locally",
      "Services get real certificates from an authority this machine owns, so internal traffic is *verified* rather than waved past a warning. One trust anchor covers the whole estate."],
     ["Inside", "Snapshots on a schedule you did not write",
-     "Hourly, daily and monthly retention is configured before you arrive, on the datasets that matter. The first thing you do on a new machine is usually the thing already done here."],
+     "Daily, weekly and monthly retention is configured before you arrive, on the datasets that matter. The first thing you do on a new machine is usually the thing already done here."],
     ["Inside", "The core edition",
      "Strip everything back to *ZFS and the installer* when that is all you want. The same substrate, the same install path, none of the tooling on top."],
     ["Why", "Rebuild beats repair",
@@ -12087,7 +12094,227 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     ["Learn", "The documentation is the reason",
      "Not a feature list. Why a dataset layout keeps a rollback consistent, why a zvol under a filesystem costs you, what an eBPF latency histogram is actually telling you."],
     ["Learn", "Every incident became a comment",
-     "The code carries the dates, the machines and the symptoms of things that went wrong. You are not reading someone's theory, you are reading *what actually happened* and what it cost."]
+     "The code carries the dates, the machines and the symptoms of things that went wrong. You are not reading someone's theory, you are reading *what actually happened* and what it cost."],
+    ["vmxplore", "A window, or a terminal",
+     "vmxplore is the graphical build; vmx is the same code compiled as a static terminal tool and installed on every profile. A server with no display still gets the estate, the verbs and a serial console."],
+    ["vmxplore", "Every verb is a plain command",
+     "Each action is a short plan of virsh and zfs commands, shown before it runs. If a step fails partway through, the undo steps already planned for it run newest first."],
+    ["vmxplore", "No retype-the-name dialogs",
+     "Force off, delete and rollback act when you press them. A VM here is remade from a golden in seconds, so the safeguard is a record of what ran rather than a box asking whether you meant it."],
+    ["vmxplore", "Every VM command, with its exit code",
+     "vmxplore appends the time, the user, the exact command and how it exited to */var/log/kldload/vmx.log*. The history of the estate is a text file you can grep."],
+    ["vmxplore", "Resize all three layers",
+     "Growing a disk enlarges the zvol, then the partition inside the guest, then the filesystem, and reports the filesystem size as the result. It only grows: shrinking under a mounted filesystem destroys it."],
+    ["vmxplore", "Snapshots sorted by who made them",
+     "A rules file groups snapshot names into human, golden, replication, checkpoint and scheduled noise, so the one you took by hand is not buried under hundreds of automatic ones."],
+    ["vmxplore", "Make Golden is one menu item",
+     "It shuts the VM down, seals it with kldload-seal and snapshots its disks as @golden. Cloning from that golden is then one zfs clone per disk and a fresh identity for every copy."],
+    ["vmxplore", "Each clone gets its own name",
+     "Clones once inherited the golden's cloud-init seed, and three of them booted calling themselves the golden (2026-08-17). Now every clone gets a seed with its *own hostname* and instance-id."],
+    ["vmxplore", "Five Fedora boxes, one gesture",
+     "EZ Fleet builds a VM from a cloud image, turns it into a golden and clones it as many times as you ask. It waits for the disk to stop growing before sealing, not for a fixed pause a desktop would outrun."],
+    ["vmxplore", "Host keys are checked",
+     "The libvirt connection to a remote hypervisor fails closed on an unknown or changed host key. The ssh commands behind the verbs set their own policy instead of inheriting a lab machine's relaxed one."],
+    ["vmxplore", "Guest consoles stay on loopback",
+     "VMs built by vmxplore bind VNC to 127.0.0.1. On a remote host the Screen tab reaches it through an ssh tunnel, so no guest framebuffer is offered to the network."],
+    ["vmxplore", "Sound only where it will work",
+     "Every VM gets a sound card, but host audio is wired in only after a real access test as the qemu user, because qemu refuses to start a guest whose audio backend it cannot reach."],
+    ["No images", "Sparse from the first write",
+     "A new VM disk is a sparse zvol attached as virtio. A large disk costs only the blocks the guest has actually written, and it snapshots and clones like any other dataset."],
+    ["No images", "Grow a disk while the VM runs",
+     "In zxplore, select the zvol behind a running VM, edit its size and press Enter. The volume is larger at once, with no virsh step and no maintenance window."],
+    ["No images", "A VM rollback is a zfs rollback",
+     "Rolling a VM back needs it shut off, runs zfs rollback -r on its disk, and the warning tells you how many newer snapshots will be removed before you commit to it."],
+    ["No images", "Different data, different datasets",
+     "VM disks live under rpool/vms with lz4 compression, while installer ISOs sit on a dataset of their own with zstd, because the two are written and read in completely different ways."],
+    ["No images", "Windows, cloned like Linux",
+     "kvm-win builds Windows 11 or Server goldens unattended on q35 with Secure Boot firmware and a software TPM 2.0, then sysprep. Every Windows VM after that is a zfs clone."],
+    ["No images", "Windows reads the same seed",
+     "Cloudbase-Init in the Windows golden consumes the same NoCloud seed that Linux clones use, so hostname, admin password and network arrive the way cloud-init delivers them."],
+    ["No images", "No Windows bits on the media",
+     "Windows media is fetched only when you build a golden: evaluation images through Mido, or your own ISO with --iso. The kldload image itself carries nothing from Microsoft."],
+    ["MicroVMs", "kfire, the microVM verb set",
+     "golden, clone, list, stop, start, destroy, ssh and console: the same lifecycle as a full VM, so there is never a microVM running that the estate cannot see or remove."],
+    ["MicroVMs", "Jailed, not root",
+     "When the Firecracker jailer is present, each instance runs as the unprivileged kfire user in its own chroot under a cgroup, with its tap device owned by that user rather than root."],
+    ["MicroVMs", "Ten clones in under three seconds",
+     "Measured on one desktop (onyx, 2026-09-05): ten Web Stack microVMs cloned in *2.7 seconds*, each serving HTTP about seven seconds later, with 7.6 GB of host memory still free."],
+    ["MicroVMs", "Same disk, same kernel",
+     "A kfire golden takes the kernel and initramfs from the VM's own root filesystem. Nothing inside the guest changes: the microVM boots the same disk libvirt booted, with the same services."],
+    ["MicroVMs", "A clean shutdown first",
+     "Stopping a microVM sends Ctrl-Alt-Del over its API socket and waits for the guest to exit by itself. SIGTERM comes only after the guest has had its chance to shut down properly."],
+    ["MicroVMs", "Identity from a seed, not the image",
+     "Each clone gets a small read-only NoCloud seed with its own instance-id and hostname. cloud-init sees a new machine and rewrites the network for Firecracker's own NIC."],
+    ["MicroVMs", "Counted beside everything else",
+     "Every fifteen seconds the number of microVMs, how many are running and how many came from each golden are written for node_exporter, so Grafana shows the Firecracker estate too."],
+    ["Containers", "Podman layers are datasets",
+     "On KVM installs Podman's storage driver is ZFS, on a dataset created for it. Every image layer is a dataset, so layers share blocks and inherit the pool's compression."],
+    ["Containers", "Docker lands on ZFS too",
+     "The installer writes Docker's daemon config with the ZFS storage driver and creates its dataset in advance, so Docker installed later lands on ZFS without anyone remembering to set it."],
+    ["Containers", "Container state survives a rollback",
+     "Where they are installed, Podman, Docker, containerd, etcd and kubelet data each have their own dataset. Roll the system back and images and cluster state stay exactly where they were."],
+    ["Containers", "Containers by name, storage beside them",
+     "zxplore's Containers tab lists containers and images from Docker or Podman next to the datasets they occupy, and says plainly when the driver in use is overlay rather than ZFS."],
+    ["Containers", "etcd gets 8K records",
+     "Kubernetes' etcd gets a dataset with an 8K record size, and containerd one with lz4 and access times off. Each is tuned for what it actually writes instead of sharing one default."],
+    ["Mesh", "Keys minted after the clone",
+     "A key baked into a golden would be identical on every clone. kvm-mesh generates each private key inside its guest after cloning, and *only the public half* ever leaves the machine."],
+    ["Mesh", "Proven by handshake",
+     "A mesh is not finished because an interface exists. kvm-mesh waits for every pair of peers to complete a handshake, and exits with failure if any one of them has not."],
+    ["Mesh", "The hypervisor joins as .254",
+     "The host takes the .254 address on each mesh it builds and reaches its guests over the libvirt bridge. No physical NIC is involved, so it works with the network cable unplugged."],
+    ["Mesh", "Every appliance on its own plane",
+     "An appliance built on a kldload host gets a WireGuard mesh named after it on a free 10.254 subnet, so a media server and a web stack never share a private network by accident."],
+    ["Mesh", "Alive, quiet, stale or never",
+     "The mesh console grades each peer by its last handshake: under three minutes is alive, under thirty is quiet, anything older is stale, and never means it has not spoken at all."],
+    ["Mesh", "Enrollment is for every VM",
+     "kldload-enroll puts any VM, however it was made, on the mesh and in the inventory. A sweep runs it every ten minutes, and re-running it only adds the peers that are missing."],
+    ["WireGuard", "Two planes for a cluster",
+     "Kubernetes nodes carry two WireGuard interfaces: wg-mgmt on 10.250.0.0/24 for SSH and monitoring, and wg-k8s on 10.251.0.0/24 for the API server, kubelet and pod traffic."],
+    ["WireGuard", "The kubelet is pinned to the tunnel",
+     "kube-network pin-kubelet sets each node's Kubernetes address to its wg-k8s IP, so the traffic between cluster nodes stays inside the encrypted plane instead of the bridge."],
+    ["WireGuard", "A firewall that drops by default",
+     "kube-network nft writes an nftables policy that drops input and forwarding unless traffic arrives on the mesh, belongs to the pod network, or is SSH, the API server or a NodePort."],
+    ["WireGuard", "A key at install time",
+     "Set KLDLOAD_WIREGUARD=1 in the answers file and the installer generates a private and public key for wg0 with mode 600, ready for you to add an address and peers."],
+    ["WireGuard", "Keys scrubbed from a live session",
+     "On the live media, kldload-poof clears WireGuard private keys out of running interfaces before you walk away. An installed system refuses to run it and relies on its own encryption."],
+    ["Apps", "Twelve appliances, born enrolled",
+     "Build > Appliance, or vmx --appliance, turns a VM into a finished service. On a kldload host each one joins its own mesh, gets a certificate from the local CA and lands in the inventory."],
+    ["Apps", "Web Stack",
+     "nginx in front of PHP-FPM, with PostgreSQL and Valkey on their own pool and listening on loopback only. /healthz proves the stack by querying both databases, not by checking that a unit is active."],
+    ["Apps", "LAMP Stack",
+     "Apache serving PHP, MariaDB on loopback with its data on a 16K-record dataset to match InnoDB pages. The example page writes a visit to the database and reads it back on every load."],
+    ["Apps", "Jellyfin on ZFS",
+     "The free-software media server on tuned datasets: one per film or show, a 16K-record library because it is SQLite, and a cache never snapshotted. Fill in the admin fields and setup runs headless."],
+    ["Apps", "Plex on ZFS",
+     "Each title gets its own dataset with 1M records and compression off, the library sits on 8K records, and transcodes stay out of snapshots. Send or quota one film without touching the rest."],
+    ["Apps", "Seedbox",
+     "qBittorrent downloading to an lz4 landing dataset. Give it VPN details and all outbound traffic is forced through WireGuard: if the tunnel drops, torrents stop instead of leaking your address."],
+    ["Apps", "Icecast Stations",
+     "A rack of independent Icecast servers where each station is its own systemd unit, port and dataset. Restarting station seven touches one stream, and add-station creates the next one."],
+    ["Apps", "SDR Station",
+     "OpenWebRX puts a HackRF or RTL-SDR waterfall in the browser, with SoapyRemote for desktop clients. The radio attaches by USB passthrough, and IQ captures get an uncompressed 1M-record dataset."],
+    ["Apps", "Tvheadend DVR",
+     "Over-the-air and satellite TV in, recordings out to a dataset with compression off and a quota, so a season pass cannot fill the pool. A USB tuner on the host attaches automatically."],
+    ["Apps", "AdGuard Home",
+     "Network-wide DNS blocking of ads and trackers, with DoH and DoT. The release is pinned and checked against upstream's SHA-256, and the build fails loudly if anything else still holds port 53."],
+    ["Apps", "Syncthing",
+     "Continuous file sync between your own machines, with no server and no cloud. It runs as its own user on a dataset, installed from Syncthing's repository with the signing key checked first."],
+    ["Apps", "VDI Desktop",
+     "A headless XFCE desktop streamed with sound to any browser over WebRTC, HLS or SRT, with no client to install. Every clone shows its own hostname and address on its panel."],
+    ["Apps", "RDP Desktop",
+     "An XFCE desktop over RDP for mstsc, Remmina or FreeRDP, with keyboard, mouse, clipboard and sound. Clone it five times and you have five desktops, each with its own login."],
+    ["Transparency", "The install keeps its own logs",
+     "Every installed system holds /root/kldload-install-logs: the ZFS, bootloader, security and bootstrap logs from the run that built it. What the installer did is already on the disk."],
+    ["Transparency", "Every setting, secrets redacted",
+     "effective-config.env records every setting the install actually used. Anything named like a password, passphrase, key or token is written as redacted, matched by *pattern*, not by a list."],
+    ["Reproducible", "Which build installed this machine",
+     "/etc/kldload/install.attest records the installer version, the SHA-256 of the root image it came from, the install date, the disk, the distribution and the profile."],
+    ["Reproducible", "What the install was asked for",
+     "/etc/kldload/install-manifest.env keeps the distribution, profile and options this machine was installed with, and first boot reads it to decide what to build."],
+    ["Recovery", "A factory snapshot of every dataset",
+     "Before the bootloader is written, the installer snapshots the whole pool recursively as rpool@install with a timestamp. The machine exactly as it was delivered is never lost."],
+    ["Inside", "First boot tests itself",
+     "On non-core installs the smoke suites ship with the machine, and first boot runs them into /root/kldload-smoke-report.txt. The result of checking this machine lives on this machine."],
+    ["Inside", "Proof that Ansible can reach",
+     "At first boot a unit checks that Ansible reaches the estate and writes /root/kldload-ansible-report.txt, so whether inventory, mesh and SSH line up is answered before you need it."],
+    ["Inside", "What is pinned, in one file",
+     "/var/lib/kldload/platform-holds.list names exactly which packages are held, written after the pins are read back from the package manager. The dashboard reads that file instead of guessing."],
+    ["Inside", "A doctor that prescribes",
+     "kldload-doctor profiles the machine against a known-good baseline, marks each check as passing, drifting or failed, and gives the exact command that fixes each one, as JSON."],
+    ["Inside", "Tests for the installed system",
+     "Beyond the checks run against every ISO, suites cover core, server, desktop and KVM installs, feature checks, a rollback exercise and a disaster-recovery drill that proves a restore by canary."],
+    ["Transparency", "A debug bundle without secrets",
+     "kldload-debug-bundle gathers install logs, journals, pool state, boot entries and module state into one tarball in seconds. The MOK private key and WireGuard keys are deliberately left out."],
+    ["Transparency", "Controllers named, gaps admitted",
+     "kldload-hba reports every storage controller, its driver, firmware and the drives behind it using only redistributable tools. Where only a vendor utility could answer, it says so."],
+    ["Learn", "A gate is proven to fail",
+     "gate-selftest.sh breaks things on purpose and checks that each gate goes red. It exists because two gates had reported green on broken systems for months before anyone noticed."],
+    ["Learn", "Debt that can only shrink",
+     "smoke-build counts silent error swallows and scripts without strict mode against a recorded baseline. The numbers may fall and never rise, so old debt shrinks while new code obeys the rule."],
+    ["Learn", "The machine and the date",
+     "The netboot menu tries more than one network port because on fiend, 2026-09-11, the NIC that booted was not net0. Comments like that one keep the fix and its reason in the same place."],
+    ["Consent", "Every arming is on the record",
+     "Arming, deploying and disarming a machine are written to the system journal with the user who did it. journalctl -t kldload-netboot answers who told a machine to reinstall."],
+    ["Layout", "/tmp cannot run what it holds",
+     "Temporary files get their own dataset with exec, setuid and device nodes switched off. Something dropped into /tmp can sit there, but it cannot be executed from there."],
+    ["Layout", "Metadata on fast disks",
+     "Name one or two fast disks as a special vdev in the answers file and the pool keeps its metadata there, mirrored when you give two. Spinning disks keep the bulk data, flash answers the lookups."],
+    ["The substrate", "Pools built for the distro that reads them",
+     "The installer runs a newer OpenZFS than some targets ship, so the pool is created with a *compatibility profile* for the chosen distribution. Debian or Rocky opens it read-write."],
+    ["The substrate", "Single, mirror, RAIDZ or RAID10",
+     "The root pool can be one disk, a two-disk mirror, RAIDZ1 across three or more, or two mirrored pairs striped. The choice is one line in an answers file, and the EFI partition keeps its own disk."],
+    ["Undo", "apt rollback is a real command",
+     "Plain apt and dnf are wrapped to take a snapshot before any change, and both gained one verb. rollback clones the last pre-transaction snapshot into a new boot environment and reboots into it."],
+    ["Undo", "Rolling back the kernel keeps your files",
+     "Only the root environment moves. /home, /srv and VM disks stay exactly where they are, and a staged rollback can be cancelled before the reboot with nothing destroyed along the way."],
+    ["Snapshots", "Weeks, months and a year back",
+     "Boot environments keep seven dailies, twelve weeklies and twelve monthlies. Home, /srv and /var/lib add a yearly anchor, all pruned automatically so history never fills the pool."],
+    ["Integrity", "Every pool event lands in Loki",
+     "Checksum errors, resilvers, trims and vdev state changes are pushed from the ZFS event daemon into Loki as they happen. The drive that started complaining last week is a search, not a guess."],
+    ["Encryption", "AES-256-GCM before the first file",
+     "Choose encryption and the pool is created with aes-256-gcm and a passphrase before anything is written to it. ZFSBootMenu asks for that passphrase at every boot."],
+    ["Encryption", "A restore does not need the backup's key",
+     "A machine rebuilt from its archive receives the data decrypted and applies its own encryption policy, so it never needs the backup server's passphrase to mount its own filesystem."],
+    ["Recovery", "The boot chain checks itself",
+     "A firmware update that wipes boot entries, or a package that rewrites the fallback loader, is caught on the next boot. kldload-boot-assert recreates the entry, puts it first and logs the repair."],
+    ["Recovery", "What a pool backup does not hold",
+     "The EFI partition, hostid, kernel version and NIC address all live outside replicated data. kldload-boot-manifest records them as JSON, and can keep the EFI partition as a tar, so a rebuild never guesses."],
+    ["Recovery", "A restore is verified, not assumed",
+     "After receiving the pool, kldload-restore-machine checks the kernel is on disk, bootfs is set, the EFI partition is populated and fstab agrees with it. An unbootable result is reported as a failure."],
+    ["Recovery", "Identity stripped before it boots",
+     "A boot environment replicated to twenty machines would give all twenty one machine-id and one set of SSH host keys. kldload-restamp-identity clears them and keeps the hostid the pool expects."],
+    ["zxplore", "Design a pool before you build it",
+     "Tick the disks and the Builder proposes mirrors, RAIDZ and dRAID layouts with usable space and what each survives. It shows the exact zpool create line, and makes you type the pool name to build it."],
+    ["zxplore", "Counters read as sentences",
+     "Observe turns one second of kstats into verdicts: sync writes landing on the main pool, an ARC capped far below RAM, one vdev slower than its siblings. Each names the setting that changes it."],
+    ["zxplore", "Passphrases never reach argv",
+     "Unlocking an encrypted dataset passes the passphrase on standard input. It never appears in a process listing, and it is kept out of every log, zxplore's own audit log included."],
+    ["Observability", "A cockpit on the function keys",
+     "In the kldload terminal, F5 through F12 open themed panes: disk latency, syscalls, TCP, Cilium state, top, ZFS internals, tracing and kernel pressure. Press the same key again and they close."],
+    ["Observability", "ZFS's own debug log, searchable",
+     "The module's internal debug buffer is not a file anything can tail. A small collector turns it into one every ten seconds, so ZFS's own messages sit in Loki beside the rest of the machine."],
+    ["Certificates", "Trusted in the browser, no click",
+     "The local CA root is imported into Chrome's certificate store for every user, and imported again whenever certificates rotate. The web console opens with no warning and no flag to ignore one."],
+    ["Learn", "Ask the documentation a question",
+     "kai sends your question to a local retrieval service along with this machine's health summary, pool status and memory. The answer is drawn from the shipped docs, on hardware you own."],
+    ["Export", "Install straight to an image",
+     "Set an export format in the answers file and the installer seals the finished disk and writes qcow2, raw, VHD, VMDK or OVA instead of leaving a bootable machine, optionally copying it away over scp."],
+    ["Goldens", "Sealed images find any cloud",
+     "Sealing clears identity and drops in a cloud-init config listing every datasource, so the same image picks up its identity on NoCloud, OpenStack, EC2, Azure or OVF without edits."],
+    ["Secure Boot", "One install, one signing key",
+     "Each install generates its own Machine Owner Key, signs the ZFS module and ZFSBootMenu with it, and queues it for enrolment. An answers file can supply a key you already manage instead."],
+    ["Secure Boot", "Stale keys found and cleared",
+     "Reinstalls leave old keys in firmware while the one that matters may never enrol. kldload-mok-repair lists them, flags the stale ones and queues a reset plus the current key, even from the live media."],
+    ["Darksite", "AI without a network",
+     "The Ollama runtime, the Open WebUI container and Whisper speech weights can ride on the media. A carried copy that is present but broken is a failure, never a reason to reach for the internet."],
+    ["Darksite", "Mirrors leave after the install",
+     "Once first boot has used the carried package mirrors, they are removed to give the space back. Mark the machine as a LAN mirror and it keeps them and serves them to its neighbours instead."],
+    ["Reproducible", "The kernel does not move on its own",
+     "Kernel, ZFS, boot chain and NVIDIA packages are pinned at first boot with apt, dnf or pacman's own mechanism, then read back to prove the pins held. The kernel moves when you decide."],
+    ["Workloads", "A lean machine unless you ask",
+     "Kubernetes, AI and the ZFS test lab stay off unless the answers file switches them on, while metrics are on for every profile except core. First boot builds what you asked for and nothing more."],
+    ["Clones", "Running guests come back",
+     "VMs that were running when the host shut down are started again at boot, fifteen seconds apart. Shutdown grants only a short grace, because a clone can be remade from its golden in moments."],
+    ["Kubernetes", "Born able to grow",
+     "Every cluster is initialised with a floating control-plane address, even with one control plane. That is the step that cannot be added later, so a single-node cluster can still grow to three."],
+    ["Kubernetes", "The API address follows the leader",
+     "With more than one control plane, kube-vip holds the API address on whichever node owns the lease. Lose that node and the address moves, and clients keep using the same endpoint."],
+    ["Kubernetes", "Blue/green with a safety check",
+     "kube-bluegreen previews the idle track with real requests, refuses to cut over until every replica is Ready, then moves the Service and confirms the endpoints actually moved."],
+    ["Netboot", "Every network port is tried",
+     "The boot menu probes the first four interfaces and chains the first one that has been armed, so the cable does not have to be in the port the firmware happens to try first."],
+    ["Netboot", "It will not take your office offline",
+     "Standalone DHCP mode refuses the interface that carries the default route unless forced, because a second DHCP server on a production network is how a lab takes an office down."],
+    ["Consent", "A bad batch arms nothing",
+     "arm-all checks a whole directory of answers files first. Two files for one MAC, or two machines sharing a hostname, and nothing is armed at all. A file that fails validation is named."],
+    ["klab", "Blue and green sites of real VMs",
+     "klab deploys its goldens as a blue site and a green one. Test a change in green, promote green to blue when it holds, or roll blue back to its previous snapshot when it does not."],
+    ["Yours", "Small tools you can read",
+     "kdir makes a dataset where you would make a directory, kclone copies one instantly, and kdf shows compression and quotas. Each is a short script over plain zfs you could type yourself."],
+    ["Obsolete", "No sysprep checklist",
+     "No wiki page of files to delete before cloning. Sealing clears machine-id, host keys, hostid, cloud-init state and journals in one step, and leaves a marker saying it was done."]
   ];
 
   // Section colours. The kicker names the section, so one lookup drives the
@@ -12109,7 +12336,8 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     "Recovery": "#4da6ff", "Transparency": "#33e6e6", "Yours": "#3dff88",
     "Obsolete": "#ff5f5f", "Rethink": "#3dff88",
     "Inside": "#33e6e6", "Use it for": "#ffd043", "Why": "#4da6ff",
-    "Workloads": "#ffd043", "Editions": "#4da6ff", "Learn": "#33e6e6"
+    "Workloads": "#ffd043", "Editions": "#4da6ff", "Learn": "#33e6e6",
+    "Your Layer Zero OS": "#3dff88"
   };
   var DEFAULT_ACCENT = "#4da6ff";
 
@@ -12129,7 +12357,7 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
   var wrap = document.getElementById('ishow-slides');
   SLIDES.forEach(function (sl, i) {
     var d = document.createElement('div');
-    d.className = 'ishow-slide' + (i === 0 ? ' on' : '');
+    d.className = 'ishow-slide';
     d.innerHTML = '<div class="ishow-kicker"></div><div class="ishow-title"></div><div class="ishow-body"></div>';
     d.children[0].textContent = sl[0];
     d.children[1].textContent = sl[1];
@@ -12138,31 +12366,91 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
   });
 
   var show = document.getElementById('install-show');
-  var cur = 0, slides = wrap.children;
+  var slides = wrap.children;
 
-  function paint(i) {
-    show.style.setProperty('--ishow-accent', ACCENT[SLIDES[i][0]] || DEFAULT_ACCENT);
-    show.style.setProperty('--ishow-deck', ((i + 1) / SLIDES.length * 100).toFixed(1) + '%');
+  // Play order: the opener (slide 0) first, then every other slide shuffled once,
+  // and the position remembered. The deck used to play in source order from slide
+  // 0 on every page load, so a kiosk restart replayed the same opening slides
+  // (fiend, 2026-09-13: "I'm already seeing duplicate slides on this install").
+  // Stored per browser profile; a missing or unusable store just means a fresh
+  // shuffle, never a broken show.
+  var ORDER_KEY = 'kldload-ishow-order-v1';
+  var order = null, pos = 0;
+  try {
+    var saved = JSON.parse(localStorage.getItem(ORDER_KEY) || 'null');
+    if (saved && saved.n === SLIDES.length && Date.now() - saved.t < 12 * 3600 * 1000 &&
+        Array.isArray(saved.order) && saved.order.length === SLIDES.length) {
+      order = saved.order;
+      pos = (saved.pos + 1) % SLIDES.length;
+    }
+  } catch (e) { order = null; }
+  if (!order) {
+    order = [];
+    for (var k = 1; k < SLIDES.length; k++) order.push(k);
+    for (var m = order.length - 1; m > 0; m--) {
+      var j = Math.floor(Math.random() * (m + 1));
+      var tmp = order[m]; order[m] = order[j]; order[j] = tmp;
+    }
+    order.unshift(0);
+    pos = 0;
   }
-  paint(0);
+  function remember() {
+    try { localStorage.setItem(ORDER_KEY, JSON.stringify({n: SLIDES.length, t: Date.now(), order: order, pos: pos})); }
+    catch (e) { /* private window or no storage: the show plays without resuming */ }
+  }
 
+  function paint(p) {
+    var i = order[p];
+    show.style.setProperty('--ishow-accent', ACCENT[SLIDES[i][0]] || DEFAULT_ACCENT);
+    show.style.setProperty('--ishow-deck', ((p + 1) / SLIDES.length * 100).toFixed(1) + '%');
+  }
+  slides[order[pos]].classList.add('on');
+  paint(pos);
+  remember();
+
+  // 14 s a slide. 10 s was too fast to read a body paragraph on fiend's
+  // screen (operator, 2026-09-13: "they need an extra 3-4 sec"). The deck is
+  // meant to outlast an install: at 14 s a slide, 200 slides run 47 minutes.
+  var SLIDE_MS = 14000;
   setInterval(function () {
     if (show.style.display === 'none') return;
-    slides[cur].classList.remove('on');
-    cur = (cur + 1) % slides.length;
-    slides[cur].classList.add('on');
-    paint(cur);
-  }, 10000);
+    slides[order[pos]].classList.remove('on');
+    pos = (pos + 1) % slides.length;
+    slides[order[pos]].classList.add('on');
+    paint(pos);
+    remember();
+  }, SLIDE_MS);
 
   // Poll the progress the installer publishes. A seeded install is one this
   // page did not start, so window._installStartedHere stays false and the show
   // takes over; an operator installing by hand keeps their panel.
+  // WHERE the show may appear. It used to be every page of the SPA while an
+  // install or a first-boot build was running, and every tool window IS this
+  // page: on fiend's first boot (2026-09-13) the Ansible and Helm tool windows
+  // opened onto the slideshow instead of their tools. A window opened for one
+  // tool (?app= from kldload-chrome-app, or an /app/<tool> path, which nginx
+  // serves as this same page) never shows it, and never even polls for it.
+  var APP_WINDOW = document.documentElement.classList.contains('kld-app') ||
+    location.pathname.indexOf('/app/') === 0;
+  var DISMISS_KEY = 'kld-ishow-dismissed';
+  function dismissed() { try { return sessionStorage.getItem(DISMISS_KEY) === '1'; } catch (e) { return false; } }
+  document.getElementById('ishow-close').addEventListener('click', function () {
+    try { sessionStorage.setItem(DISMISS_KEY, '1'); } catch (e) { /* private window: closes for this view only */ }
+    document.getElementById('install-show').style.display = 'none';
+  });
+
   function poll() {
+    if (APP_WINDOW) return;
     fetch('/api/install-progress', { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (p) {
         if (!p) return;
         var show = document.getElementById('install-show');
+        // First boot (converge) can be dismissed; the live install cannot,
+        // because on the live image there is nothing else on the screen to use.
+        var canClose = p.stage === 'converge';
+        document.getElementById('ishow-close').hidden = !canClose;
+        if (canClose && dismissed()) { show.style.display = 'none'; return; }
         if (p.running && !window._installStartedHere) show.style.display = 'flex';
         if (!p.running) show.style.display = 'none';
         if (p.phase) document.getElementById('ishow-phase').textContent = p.phase;
@@ -12211,8 +12499,10 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
       })
       .catch(function () { /* the route is absent on older images; stay hidden */ });
   }
-  poll();
-  setInterval(poll, 2000);
+  if (!APP_WINDOW) {
+    poll();
+    setInterval(poll, 2000);
+  }
 })();
 </script>
 
