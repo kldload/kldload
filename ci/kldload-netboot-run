@@ -1,0 +1,575 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-netboot-run — one unattended netboot install, end to end, with a report.
+#
+# WHAT IT DOES, IN ORDER (each phase checks its outcome and stops the run with a
+# reason if it fails; --from resumes at a phase):
+#   build      ./deploy.sh build                         (only with --build)
+#   smoke      ./deploy.sh smoke-build; any failure other than the two known
+#              repository ratchets stops the run
+#   stage      copy kernel, initrd, root image and VERSION out of the new ISO
+#              into the netboot payload, verify them, restart kldload-netboot
+#   arm        kldload-netboot-server arm-install <mac> <answers file>
+#   boot       on a reachable target: one-time network boot, reboot
+#              (otherwise it waits for someone to power the machine on)
+#   watch      follow the netboot log: armed snippet, root image, answers file;
+#              DISARM the moment the answers file has been fetched
+#   installed  wait for ssh from the freshly installed system
+#   ready      wait for first-boot convergence to finish
+#   verify     check the installed machine against what the answers file asked
+#              for, and write report.md
+#
+# WHY: every install of the fiend matrix was eight hand-run steps, each one a
+# chance to forget a disarm, stage the wrong ISO or misread a log. Run as its own
+# systemd unit it keeps going when nobody is watching (operator, 2026-09-13:
+# "build that as a service ... to automate it").
+#
+# USAGE
+#   kldload-netboot-run --answers <mac>.env [--build] [--hosts "ip ip"] [--from PHASE] [--until PHASE]
+#                       [--ready-timeout 6h] [--no-smoke] [--iso PATH]
+#   --iso PATH  stage this ISO instead of the newest full kldload-<version>-x86_64.iso
+#               (the net edition: live-build/output/kldload-<version>-x86_64-net.iso)
+#   Run it as a transient service so it outlives the terminal:
+#   sudo systemd-run --unit kldload-netboot-run --collect \
+#        /path/to/kldload-netboot-run --answers live-build/pxe/matrix/6-full-secure/f0-2f-74-cd-27-50.env --build
+#   Follow it:  journalctl -fu kldload-netboot-run     (or tail -f <report dir>/run.log)
+#
+# INPUTS  the answers file (its name is the MAC), the repo it lives in,
+#         /etc/kldload/netboot.env. Target credentials come from the answers file.
+# OUTPUTS /var/log/kldload-netboot-run/<run id>/{run.log,phase,report.md,smoke.out}
+# EXIT    0 verified · 1 a phase failed (see report.md) · 2 usage
+#
+# NOTES
+#   - ssh to the target uses StrictHostKeyChecking=no with a throwaway known_hosts:
+#     every reinstall generates new host keys by design, on a test machine on the
+#     local network. Do not point this at anything durable.
+#   - Encrypted pools stop at the ZFSBootMenu passphrase prompt on every boot and
+#     Secure Boot stops at MokManager once; the run waits and says so in the log.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+# KLDLOAD_REPO overrides where the checkout is (the script normally lives in its ci/).
+REPO="${KLDLOAD_REPO:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+IC="$REPO/live-build/config/includes.chroot"
+PHASES=(build smoke stage arm boot watch installed ready verify)
+
+ANSWERS="" HOSTS="" FROM="" UNTIL="" DO_BUILD=0 DO_SMOKE=1 READY_TIMEOUT="" ISO_ARG=""
+usage() {
+    sed -n '/^# USAGE/,/^# INPUTS/p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+while (($#)); do
+    case "$1" in
+    --answers) ANSWERS="${2:?}" && shift 2 ;;
+    --hosts) HOSTS="${2:?}" && shift 2 ;;
+    --from) FROM="${2:?}" && shift 2 ;;
+    --until) UNTIL="${2:?}" && shift 2 ;;
+    --build) DO_BUILD=1 && shift ;;
+    --no-smoke) DO_SMOKE=0 && shift ;;
+    --ready-timeout) READY_TIMEOUT="${2:?}" && shift 2 ;;
+    --iso) ISO_ARG="${2:?}" && shift 2 ;;
+    -h | --help) usage ;;
+    *) usage ;;
+    esac
+done
+[[ -n "$ANSWERS" && -r "$ANSWERS" ]] || usage
+[[ $EUID -eq 0 ]] || {
+    echo "run as root (it stages the payload and arms the netboot server)" >&2
+    exit 2
+}
+ANSWERS="$(readlink -f "$ANSWERS")"
+MAC="$(basename "$ANSWERS" .env)"
+[[ "$MAC" =~ ^([0-9a-f]{2}-){5}[0-9a-f]{2}$ ]] || {
+    echo "the answers file must be named after the MAC: aa-bb-cc-dd-ee-ff.env" >&2
+    exit 2
+}
+# valid_phase <name> — 0 when it is one of PHASES.
+valid_phase() {
+    local p
+    for p in "${PHASES[@]}"; do [[ "$p" == "$1" ]] && return 0; done
+    return 1
+}
+[[ -z "$FROM" ]] || valid_phase "$FROM" || usage
+[[ -z "$UNTIL" ]] || valid_phase "$UNTIL" || usage
+
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT="/var/log/kldload-netboot-run/${RUN_ID}"
+install -d -m 0700 "$OUT"
+exec > >(tee -a "$OUT/run.log") 2>&1
+START_EPOCH="$(date +%s)"
+declare -A P_START=() P_END=() P_STATE=() P_NOTE=()
+
+log() { printf '[%s] %s\n' "$(date +%T)" "$*"; }
+phase_begin() {
+    P_START[$1]="$(date +%s)"
+    echo "$1 running" >"$OUT/phase"
+    log "=== $1"
+}
+phase_ok() {
+    P_END[$1]="$(date +%s)" P_STATE[$1]=ok P_NOTE[$1]="${2:-}"
+    log "=== $1: ok${2:+ — $2}"
+    if [[ "$1" == "$UNTIL" ]]; then
+        echo "stopped after $1" >"$OUT/phase"
+        log "stopping after $1 (--until)"
+        write_report
+        exit 0
+    fi
+}
+phase_skip() {
+    P_STATE[$1]=skipped P_NOTE[$1]="${2:-}"
+    log "=== $1: skipped${2:+ — $2}"
+}
+# fail_run <phase> <reason> — record, write the report, stop.
+fail_run() {
+    P_END[$1]="$(date +%s)" P_STATE[$1]=FAILED P_NOTE[$1]="$2"
+    echo "$1 FAILED" >"$OUT/phase"
+    log "=== $1: FAILED — $2"
+    write_report
+    exit 1
+}
+
+# ─── the answers file ────────────────────────────────────────────────────────
+# Loaded with the installer's own loader: the run checks exactly what the
+# installer will read. A= associative array of every KLDLOAD_ key.
+declare -A A=()
+while IFS='=' read -r k v; do
+    A[$k]="$v"
+done < <(
+    bash -c 'set -uo pipefail
+        k_die() { echo "LOADER-REFUSED $*" >&2; exit 1; }
+        source "$1"
+        k_answers_load_env_file "$2"
+        for v in $(compgen -v KLDLOAD_); do printf "%s=%s\n" "$v" "${!v}"; done' \
+        _ "$IC/usr/lib/kldload-installer/lib/answers.sh" "$ANSWERS"
+)
+[[ -n "${A[KLDLOAD_DISTRO]:-}" ]] || {
+    echo "the installer's loader refused $ANSWERS" >&2
+    exit 1
+}
+T_USER="${A[KLDLOAD_USERNAME]:-admin}" T_PASS="${A[KLDLOAD_PASSWORD]:-}"
+flag() { [[ "${A[$1]:-0}" == 1 ]]; }
+if [[ -z "$READY_TIMEOUT" ]]; then
+    READY_TIMEOUT=20m
+    { flag KLDLOAD_K8S_BOOTSTRAP || flag KLDLOAD_BUILD_IMAGES; } && READY_TIMEOUT=6h
+fi
+to_seconds() {
+    local t="$1"
+    case "$t" in
+    *h) echo $((${t%h} * 3600)) ;;
+    *m) echo $((${t%m} * 60)) ;;
+    *s) echo "${t%s}" ;;
+    *) echo "$t" ;;
+    esac
+}
+
+# netboot server settings, as the service reads them.
+declare -A NB=()
+if [[ -r /etc/kldload/netboot.env ]]; then
+    while IFS= read -r l || [[ -n "$l" ]]; do
+        [[ "$l" =~ ^[[:space:]]*(NETBOOT_[A-Z_]+)=(.*)$ ]] && NB[${BASH_REMATCH[1]}]="${BASH_REMATCH[2]}"
+    done </etc/kldload/netboot.env
+fi
+PAYLOAD="${NB[NETBOOT_PAYLOAD]:-/var/lib/kldload-netboot}"
+NB_ROOT="${NB[NETBOOT_ROOT]:-/var/lib/kldload/netboot-serve}"
+NB_LOG="$NB_ROOT/nginx-access.log"
+NB_TOOL=/usr/local/sbin/kldload-netboot-server
+
+# ─── ssh to the target ───────────────────────────────────────────────────────
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
+# tssh <ip> <script> — run a script as root on the target; stdout is the result.
+# The first line on stdin is the password and is always consumed by the remote
+# side; it reaches sudo only if sudo asks. HISTORY 2026-09-13: piping it straight to
+# `sudo -S bash -s` on an installed machine with NOPASSWD sudo handed the password
+# to bash as a command ("Passw0rd: command not found") — into the target's logs.
+tssh() {
+    local ip="$1" script="$2"
+    # shellcheck disable=SC2016 # expanded on the target, not here
+    SSHPASS="$T_PASS" sshpass -e ssh "${SSH_OPTS[@]}" "${T_USER}@${ip}" \
+        'IFS= read -r pw; if sudo -n true 2>/dev/null; then exec sudo -n bash -s; else { printf "%s\n" "$pw"; cat; } | sudo -S -p "" bash -s; fi' \
+        < <(printf '%s\n' "$T_PASS" "$script")
+}
+port22() { timeout 3 bash -c "exec 3<>/dev/tcp/$1/22" 2>/dev/null; }
+# known_ips — every address the target might answer on, best guess first.
+#
+# The address the live installer fetched the answers from is NOT the address
+# the installed system comes up on. HISTORY: fiend 2026-09-13: installer and
+# first boot were .111, then br0 came up and took a new lease, .134 (same MAC,
+# different DHCP client id), and the ready phase logged "target not
+# reachable" every minute while the machine was up and converging. So the
+# neighbour table is searched for the MAC, and when nothing there answers, one
+# ping sweep of each subnet already seen fills the table in.
+MAC_COLON="${MAC//-/:}"
+mac_ips() { ip neigh show 2>/dev/null | awk -v m="$MAC_COLON" 'tolower($0) ~ m && $1 ~ /^[0-9.]+$/ {print $1}'; }
+sweep_subnets() {
+    local ip n
+    for n in $(printf '%s\n' "$@" | awk -F. 'NF == 4 {print $1"."$2"."$3}' | sort -u); do
+        for ip in $(seq 1 254); do
+            ping -c1 -W1 "$n.$ip" >/dev/null 2>&1 &
+        done
+        wait
+    done
+}
+known_ips() {
+    local ips="$HOSTS"
+    ips+=" $(mac_ips | tr '\n' ' ')"
+    if [[ -r "$NB_LOG" ]]; then
+        ips+=" $(grep -E "/(armed|answers)/${MAC}\.(ipxe|env) " "$NB_LOG" | cut -d' ' -f1 | sort -u | tr '\n' ' ')"
+    fi
+    printf '%s\n' $ips | awk 'NF && !seen[$0]++'
+}
+# find_target — first known address with ssh open; sweeps once if none answers.
+find_target() {
+    local ip
+    for ip in $(known_ips); do port22 "$ip" && echo "$ip" && return 0; done
+    sweep_subnets $(known_ips)
+    for ip in $(known_ips); do port22 "$ip" && echo "$ip" && return 0; done
+    return 1
+}
+
+# ─── report ──────────────────────────────────────────────────────────────────
+VERIFY_LINES=""
+write_report() {
+    local p d
+    {
+        echo "# kldload netboot run ${RUN_ID}"
+        echo
+        echo "- answers: \`${ANSWERS}\`"
+        echo "- machine: ${A[KLDLOAD_HOSTNAME]:-?} (${MAC}), ${A[KLDLOAD_DISTRO]}/${A[KLDLOAD_PROFILE]}, template ${A[KLDLOAD_TEMPLATE]:-none}"
+        echo "- encryption ${A[KLDLOAD_ZFS_ENCRYPT]:-0}, secure boot ${A[KLDLOAD_ENABLE_SECURE_BOOT]:-?}, k8s ${A[KLDLOAD_K8S_BOOTSTRAP]:-0} (${A[KLDLOAD_K8S_CONTROL_PLANES]:-}+${A[KLDLOAD_K8S_WORKERS]:-}), images ${A[KLDLOAD_BUILD_IMAGES]:-0}, AI ${A[KLDLOAD_ENABLE_AI]:-0}"
+        echo "- started $(date -d "@$START_EPOCH" '+%F %T'), report written $(date '+%F %T')"
+        echo
+        echo "| phase | state | minutes | note |"
+        echo "|---|---|---|---|"
+        for p in "${PHASES[@]}"; do
+            d=""
+            [[ -n "${P_START[$p]:-}" && -n "${P_END[$p]:-}" ]] && d=$(((P_END[$p] - P_START[$p] + 59) / 60))
+            echo "| $p | ${P_STATE[$p]:-not reached} | ${d} | ${P_NOTE[$p]:-} |"
+        done
+        if [[ -n "$VERIFY_LINES" ]]; then
+            echo
+            echo "## Verification"
+            echo
+            echo "| result | check | detail |"
+            echo "|---|---|---|"
+            while IFS='|' read -r r c dd; do
+                [[ -n "$r" ]] && echo "| $r | $c | $dd |"
+            done <<<"$VERIFY_LINES"
+        fi
+    } >"$OUT/report.md"
+    log "report: $OUT/report.md"
+}
+
+should_run() {
+    local p="$1" i
+    [[ -z "$FROM" ]] && return 0
+    for i in "${PHASES[@]}"; do
+        [[ "$i" == "$FROM" ]] && return 0
+        [[ "$i" == "$p" ]] && return 1
+    done
+}
+
+log "run ${RUN_ID}: ${A[KLDLOAD_HOSTNAME]} ${MAC} from $ANSWERS; report dir $OUT"
+
+# ─── build ───────────────────────────────────────────────────────────────────
+BUILD_T0="$START_EPOCH"
+if should_run build && ((DO_BUILD)); then
+    phase_begin build
+    (cd "$REPO" && ./deploy.sh build) >"$OUT/build.out" 2>&1 || fail_run build "deploy.sh build exited non-zero — see build.out"
+    phase_ok build
+else
+    phase_skip build "not requested"
+    BUILD_T0=0
+fi
+
+# The newest full ISO. A loop, not `sort | head`: under pipefail head closing the
+# pipe makes sort fail and the assignment with it (2026-09-13, first service run).
+ISO="" _iso_t=0
+for _f in "$REPO"/live-build/output/kldload-*-x86_64.iso; do
+    [[ -f "$_f" && "$(basename "$_f")" =~ ^kldload-[0-9.]+-x86_64\.iso$ ]] || continue
+    _t="$(stat -c %Y "$_f")"
+    ((_t >= BUILD_T0 && _t > _iso_t)) && ISO="$_f" _iso_t="$_t"
+done
+if [[ -n "$ISO_ARG" ]]; then
+    [[ -f "$ISO_ARG" && "$ISO_ARG" == *.iso ]] || fail_run stage "--iso $ISO_ARG is not an ISO file"
+    ISO="$(readlink -f "$ISO_ARG")"
+fi
+
+# ─── smoke ───────────────────────────────────────────────────────────────────
+if should_run smoke && ((DO_SMOKE)); then
+    phase_begin smoke
+    [[ -n "$ISO" ]] || fail_run smoke "no full ISO (kldload-<version>-x86_64.iso) in live-build/output${BUILD_T0:+ newer than the build}"
+    # swallow: smoke-build exits non-zero on the two known repository ratchets; the
+    # verdict is read from its output just below, not from the exit code.
+    # Run as the checkout's owner, with that user's HOME, exactly as an operator
+    # runs it by hand. As root under systemd it failed twice over (2026-09-13):
+    # git refused a checkout owned by someone else and smoke-build died at "Git
+    # State"; with that patched, every Go gate failed because systemd gives the
+    # unit no HOME, so go has no build or module cache. Neither was a defect in
+    # the tree, and the second read like one.
+    repo_owner="$(stat -c %U "$REPO")"
+    repo_home="$(getent passwd "$repo_owner" | cut -d: -f6)"
+    [[ -n "$repo_home" && -d "$repo_home" ]] || fail_run smoke "cannot find the home directory of $repo_owner, who owns $REPO"
+    (cd "$REPO" && runuser -u "$repo_owner" -- env HOME="$repo_home" USER="$repo_owner" \
+        PATH="$repo_home/go/bin:$repo_home/.local/bin:/usr/local/bin:/usr/bin:/usr/sbin" \
+        ./deploy.sh smoke-build) >"$OUT/smoke.out" 2>&1 || true
+    sed 's/\x1b\[[0-9;]*m//g' "$OUT/smoke.out" >"$OUT/smoke.txt"
+    # A smoke run is complete only if it reached its own summary. Absence of FAIL
+    # lines in a run that stopped halfway is not a pass — the first service run
+    # read it as one.
+    grep -q 'Build Smoke Test Results' "$OUT/smoke.txt" ||
+        fail_run smoke "smoke-build stopped before its summary — see smoke.out (last line: $(tail -n 1 "$OUT/smoke.txt"))"
+    fails="$(grep -E '^\s*(✗ )?FAIL ' "$OUT/smoke.txt" | grep -vE 'silent-failure ratchet|strict-mode ratchet' || true)"
+    [[ -z "$fails" ]] || fail_run smoke "smoke-build failures beyond the known ratchets: $(sed -n 1,3p <<<"$fails" | tr '\n' ' ')"
+    phase_ok smoke "$(basename "$ISO")"
+else
+    phase_skip smoke
+fi
+
+# ─── stage ───────────────────────────────────────────────────────────────────
+if should_run stage; then
+    phase_begin stage
+    [[ -n "$ISO" ]] || fail_run stage "no ISO to stage"
+    mnt="$(mktemp -d)"
+    mount -o loop,ro "$ISO" "$mnt" || fail_run stage "could not mount $ISO"
+    install -d "$PAYLOAD"
+    declare -A SRC=([vmlinuz]=images/pxeboot/vmlinuz [initrd.img]=images/pxeboot/initrd.img [VERSION]=VERSION [squashfs.img]=LiveOS/squashfs.img)
+    for f in vmlinuz initrd.img VERSION squashfs.img; do
+        install -m 0644 "$mnt/${SRC[$f]}" "$PAYLOAD/.$f.new" && mv -f "$PAYLOAD/.$f.new" "$PAYLOAD/$f" ||
+            {
+                umount "$mnt"
+                fail_run stage "copy of $f failed"
+            }
+        [[ "$(stat -c %s "$mnt/${SRC[$f]}")" == "$(stat -c %s "$PAYLOAD/$f")" ]] ||
+            {
+                umount "$mnt"
+                fail_run stage "$f size mismatch after copy"
+            }
+    done
+    last=$(($(stat -c %s "$mnt/LiveOS/squashfs.img") / 1048576 - 64))
+    for off in 0 "$last"; do
+        [[ "$(dd if="$mnt/LiveOS/squashfs.img" bs=1M skip="$off" count=64 status=none | sha256sum)" == "$(dd if="$PAYLOAD/squashfs.img" bs=1M skip="$off" count=64 status=none | sha256sum)" ]] ||
+            {
+                umount "$mnt"
+                fail_run stage "root image differs from the ISO at ${off} MiB"
+            }
+    done
+    built="$(grep -m1 built_at "$mnt/VERSION" | awk '{print $3}')"
+    umount "$mnt" && rmdir "$mnt"
+    # Capture, then search: `lsinitrd | grep -q` is false on a match under pipefail.
+    _listing="$(lsinitrd "$PAYLOAD/initrd.img" 2>/dev/null)" || fail_run stage "lsinitrd could not read the staged initrd"
+    grep -q 'usr/bin/kldload-initrd-show' <<<"$_listing" || fail_run stage "staged initrd has no install show"
+    systemctl restart kldload-netboot || fail_run stage "kldload-netboot did not restart"
+    sleep 3
+    _status="$("$NB_TOOL" status 2>&1)" || true # status of a running server; the content is checked next
+    grep -qF "$built" <<<"$_status" || fail_run stage "netboot status does not show built_at $built"
+    phase_ok stage "built_at $built"
+fi
+
+# ─── arm ─────────────────────────────────────────────────────────────────────
+if should_run arm; then
+    phase_begin arm
+    # The server tool and the loader must be the repo's, or arming checks and
+    # writes boot lines from an older release than the image it serves.
+    if ! cmp -s "$IC/usr/local/sbin/kldload-netboot-server" "$NB_TOOL"; then
+        install -m 0755 "$IC/usr/local/sbin/kldload-netboot-server" "$NB_TOOL"
+        log "installed the repo's kldload-netboot-server"
+    fi
+    install -D -m 0644 "$IC/usr/lib/kldload-installer/lib/answers.sh" /usr/lib/kldload-installer/lib/answers.sh
+    "$NB_TOOL" arm-install "${MAC//-/:}" "$ANSWERS" </dev/null || fail_run arm "arm-install refused the answers file"
+    grep -q 'fbcon=nodefer' "$NB_ROOT/armed/${MAC}.ipxe" || fail_run arm "armed boot line lacks fbcon=nodefer"
+    grep -q '^KLDLOAD_ZFS_ENCRYPT=' "$NB_ROOT/answers/${MAC}.env" || fail_run arm "served answers file did not land"
+    phase_ok arm
+fi
+
+# ─── boot ────────────────────────────────────────────────────────────────────
+LOG_OFFSET=0
+[[ -r "$NB_LOG" ]] && LOG_OFFSET="$(stat -c %s "$NB_LOG")"
+if should_run boot; then
+    phase_begin boot
+    booted=""
+    for ip in $(known_ips); do
+        port22 "$ip" || continue
+        entry="$(tssh "$ip" 'efibootmgr | grep -iE "PXE IPv4" | head -n 1 | sed -n "s/^Boot\([0-9A-F]\{4\}\).*/\1/p"' 2>/dev/null)" || entry=""
+        [[ "$entry" =~ ^[0-9A-F]{4}$ ]] || continue
+        # Firmware Secure Boot on + an answers file without it = an unattended run
+        # that cannot finish: the iPXE loader is refused, and each install's fresh
+        # MOK needs someone at MokManager. fiend had it on after the 2026-09-13
+        # full-secure install; stop here, with the machine still up, not after.
+        sb="$(tssh "$ip" 'mokutil --sb-state 2>/dev/null | head -n 1' 2>/dev/null)" || sb=""
+        if [[ "$sb" == *"SecureBoot enabled"* ]] && ! flag KLDLOAD_ENABLE_SECURE_BOOT; then
+            fail_run boot "Secure Boot is ON in ${ip}'s firmware and this answers file does not enable it — turn it off in the BIOS for an unattended run"
+        fi
+        log "target reachable at $ip, network boot entry Boot$entry — setting one-time network boot and rebooting"
+        tssh "$ip" "efibootmgr -n $entry >/dev/null && (sleep 2; systemctl reboot) >/dev/null 2>&1 &" || true # the connection drops as it reboots
+        booted="$ip"
+        break
+    done
+    if [[ -n "$booted" ]]; then
+        phase_ok boot "rebooted from $booted"
+    else
+        log "no reachable target with a network boot entry: power the machine on and choose network boot"
+        phase_ok boot "waiting for a manual power-on"
+    fi
+fi
+
+# wait_log <regex> <seconds> — wait for a new netboot log line; prints it.
+wait_log() {
+    local re="$1" limit="$2" t0 line
+    t0="$(date +%s)"
+    while (($(date +%s) - t0 < limit)); do
+        line="$(tail -c +"$((LOG_OFFSET + 1))" "$NB_LOG" 2>/dev/null | grep -E "$re" | tail -n 1)" || line=""
+        [[ -n "$line" ]] && {
+            printf '%s\n' "$line"
+            return 0
+        }
+        sleep 5
+    done
+    return 1
+}
+
+# ─── watch ───────────────────────────────────────────────────────────────────
+if should_run watch; then
+    phase_begin watch
+    wait_log "GET /armed/${MAC}\\.ipxe " 1800 >/dev/null || fail_run watch "no network boot from ${MAC} within 30 minutes"
+    log "network boot seen; kernel and initramfs next, then the root image (about 10 minutes on 1 GbE)"
+    wait_log "GET /kldload/squashfs\\.img HTTP/[0-9.]+\" 200 " 3600 >/dev/null || fail_run watch "root image download did not complete within 60 minutes"
+    log "root image downloaded"
+    line="$(wait_log "GET /answers/${MAC}\\.env HTTP/[0-9.]+\" 200 " 1200)" || fail_run watch "the installer never fetched its answers file"
+    LIVE_IP="${line%% *}"
+    "$NB_TOOL" disarm "${MAC//-/:}" </dev/null || log "WARN: disarm failed — disarm by hand: $NB_TOOL disarm ${MAC//-/:}"
+    phase_ok watch "answers fetched by $LIVE_IP; disarmed at once"
+fi
+
+# ─── installed ───────────────────────────────────────────────────────────────
+TARGET_IP=""
+if should_run installed; then
+    phase_begin installed
+    flag KLDLOAD_ZFS_ENCRYPT && log "encrypted pool: someone must type the passphrase at the boot menu on every boot"
+    flag KLDLOAD_ENABLE_SECURE_BOOT && log "secure boot: MokManager asks to enroll the key on the first reboot (password: ${A[KLDLOAD_MOK_PASSWORD]:-kldload})"
+    t0="$(date +%s)" _sweeps=0
+    while (($(date +%s) - t0 < 7200)); do
+        ((++_sweeps % 15 == 0)) && sweep_subnets $(known_ips)
+        for ip in $(known_ips); do
+            port22 "$ip" || continue
+            d="$(tssh "$ip" 'sed -n "s/^KLDLOAD_INSTALL_DATE=\"\{0,1\}\([^\"]*\).*/\1/p" /etc/kldload/install-manifest.env 2>/dev/null' 2>/dev/null)" || d=""
+            [[ -n "$d" ]] || continue
+            if (($(date -d "$d" +%s 2>/dev/null || echo 0) >= START_EPOCH)); then
+                TARGET_IP="$ip"
+                break 2
+            fi
+        done
+        sleep 20
+    done
+    [[ -n "$TARGET_IP" ]] || fail_run installed "no freshly installed system answered on ssh within 2 hours"
+    phase_ok installed "$TARGET_IP"
+fi
+if [[ -z "$TARGET_IP" ]]; then
+    TARGET_IP="$(find_target)" || TARGET_IP=""
+fi
+
+# ─── ready ───────────────────────────────────────────────────────────────────
+if should_run ready; then
+    phase_begin ready
+    limit="$(to_seconds "$READY_TIMEOUT")"
+    t0="$(date +%s)"
+    state=""
+    while (($(date +%s) - t0 < limit)); do
+        ip=""
+        if [[ -n "$TARGET_IP" ]] && port22 "$TARGET_IP"; then ip="$TARGET_IP"; else ip="$(find_target)" || ip=""; fi
+        if [[ -n "$ip" ]]; then
+            [[ "$ip" != "$TARGET_IP" ]] && log "target answers on $ip"
+            TARGET_IP="$ip"
+            state="$(tssh "$ip" 'for u in kldload-firstboot kldload-autodeploy; do printf "%s=%s " "$u" "$(systemctl is-active "$u" 2>/dev/null)"; done' 2>/dev/null)" || state=""
+        fi
+        if [[ -n "$state" && "$state" != *activating* && "$state" != *"=active "* ]]; then
+            break
+        fi
+        log "converging: ${state:-target not reachable (rebooting, or waiting at a passphrase prompt)}"
+        state=""
+        sleep 60
+    done
+    [[ -n "$state" ]] || fail_run ready "first boot did not finish within $READY_TIMEOUT"
+    phase_ok ready "$state"
+fi
+
+# ─── verify ──────────────────────────────────────────────────────────────────
+if should_run verify; then
+    phase_begin verify
+    if [[ -z "$TARGET_IP" ]] || ! port22 "$TARGET_IP"; then TARGET_IP="$(find_target)" || TARGET_IP=""; fi
+    [[ -n "$TARGET_IP" ]] || fail_run verify "no reachable target"
+    want_cp="${A[KLDLOAD_K8S_CONTROL_PLANES]:-3}" want_w="${A[KLDLOAD_K8S_WORKERS]:-0}"
+    VERIFY_LINES="$(tssh "$TARGET_IP" "$(
+        cat <<VERIFY
+H='${A[KLDLOAD_HOSTNAME]}' P='${A[KLDLOAD_PROFILE]}' ENC='${A[KLDLOAD_ZFS_ENCRYPT]:-0}' SB='${A[KLDLOAD_ENABLE_SECURE_BOOT]:-0}'
+K8S='${A[KLDLOAD_K8S_BOOTSTRAP]:-0}' IMG='${A[KLDLOAD_BUILD_IMAGES]:-0}' AI='${A[KLDLOAD_ENABLE_AI]:-0}' DEV='${A[KLDLOAD_ENABLE_DEVOPS]:-0}'
+WG='${A[KLDLOAD_WIREGUARD]:-0}' KEEP='${A[KLDLOAD_KEEP_NETBOOT]:-0}' NODES=$((want_cp + want_w))
+VERIFY
+        cat <<'VERIFY'
+r() { printf '%s|%s|%s\n' "$1" "$2" "$3"; }
+v="$(findmnt -no SOURCE /)"; [[ "$v" == "rpool/ROOT/$H" ]] && r PASS "root on its boot environment" "$v" || r FAIL "root on its boot environment" "$v"
+v="$(cat /etc/kldload/profile 2>/dev/null)"; [[ "$v" == "$P" ]] && r PASS "profile" "$v" || r FAIL "profile" "want $P, have ${v:-none}"
+v="$(zpool status -x 2>&1)"; [[ "$v" == "all pools are healthy" ]] && r PASS "pool health" "$v" || r FAIL "pool health" "$v"
+v="$(zfs get -H -o value encryption rpool/ROOT 2>&1)"
+if [[ "$ENC" == 1 ]]; then [[ "$v" != off ]] && r PASS "pool encrypted" "$v" || r FAIL "pool encrypted" "$v"; else r INFO "pool encryption" "$v"; fi
+v="$(mokutil --sb-state 2>&1 | head -n 1)"
+if [[ "$SB" == 1 ]]; then
+    # THIS install's key, not any kldload key: fiend's NVRAM still holds four
+    # enrolled keys from August installs, so a name match passed on its own.
+    e="$(mokutil --test-key /var/lib/dkms/mok.der 2>&1 | head -n 1)"
+    [[ "$e" == *"already enrolled"* ]] && r PASS "this install's MOK enrolled" "$e; $v" || r FAIL "this install's MOK enrolled" "${e:-no /var/lib/dkms/mok.der} ($v)"
+    [[ "$v" == *enabled* ]] && r PASS "secure boot on" "$v" || r FAIL "secure boot on" "$v"
+else r INFO "secure boot" "$v"; fi
+v="$(dnf versionlock list 2>/dev/null | grep -c 'Package name' || true)"; ((v > 0)) && r PASS "kernel/ZFS held" "$v packages" || r FAIL "kernel/ZFS held" "0 packages held"
+logger -t kldload-verify "probe-$$"; sleep 2
+journalctl -t kldload-verify --no-pager 2>/dev/null | grep -q "probe-$$" && r PASS "journal records" "" || r FAIL "journal records" "probe not returned"
+v="$(systemctl --failed --no-legend 2>/dev/null | awk '{print $2}' | tr '\n' ' ')"; [[ -z "${v// /}" ]] && r PASS "no failed units" "" || r FAIL "no failed units" "$v"
+[[ -f /etc/wireguard/wg0.pub || "$WG" != 1 ]] && r PASS "wireguard key" "$( [[ "$WG" == 1 ]] && echo present || echo not requested)" || r FAIL "wireguard key" "/etc/wireguard/wg0.pub missing"
+if [[ "$KEEP" == 1 ]]; then [[ -s /var/lib/kldload-netboot/squashfs.img ]] && r PASS "netboot payload kept" "$(du -h /var/lib/kldload-netboot/squashfs.img | cut -f1)" || r FAIL "netboot payload kept" "missing"; fi
+if [[ "$K8S" == 1 ]]; then
+    v="$(kubectl get nodes --no-headers 2>/dev/null | grep -cw Ready || true)"
+    [[ -z "$v" || "$v" == 0 ]] && v="$(KUBECONFIG=/root/.kube/config kubectl get nodes --no-headers 2>/dev/null | grep -cw Ready || true)"
+    ((v == NODES)) && r PASS "kubernetes nodes Ready" "$v of $NODES" || r FAIL "kubernetes nodes Ready" "${v:-0} of $NODES"
+fi
+if [[ "$IMG" == 1 ]]; then
+    v="$(zfs list -H -t snapshot -o name 2>/dev/null | grep -E '@golden$' | sed 's/@golden$//; s#.*/##' | sort | tr '\n' ' ')"
+    [[ -n "${v// /}" ]] && r PASS "golden images sealed" "$(wc -w <<<"$v"): $v" || r FAIL "golden images sealed" "no @golden snapshots"
+fi
+v="$(grep -E '\] \[[a-z0-9-]+\] FAILED|PHASE .* FAILED' /var/log/kldload/autodeploy.log 2>/dev/null | cut -c1-160 | tr '\n' ';')"
+[[ -z "$v" ]] && r PASS "autodeploy phases" "no FAILED lines" || r FAIL "autodeploy phases" "$v"
+if lspci 2>/dev/null | grep -qiE '(vga|3d|display).*nvidia'; then
+    [[ -d /sys/module/nvidia ]] && r PASS "nvidia driver loaded" "$(nvidia-smi -L 2>&1 | head -n 1)" || r FAIL "nvidia driver loaded" "$(lsmod | grep -oE '^(nouveau|nvidia)' | tr '\n' ' ')in use; $(ls /var/cache/akmods/nvidia/*.failed.log 2>/dev/null | head -n 1)"
+fi
+if [[ -d /sys/firmware/efi ]]; then
+    v="$(efibootmgr 2>&1)"; k="$(grep -ioE '^Boot[0-9A-F]{4}\*? kldload' <<<"$v" | head -n 1 | cut -c5-8)"
+    n="$(sed -n 's/^BootNext: //p' <<<"$v")"; o="$(sed -n 's/^BootOrder: \([0-9A-Fa-f]\{4\}\).*/\1/p' <<<"$v")"
+    [[ -n "$k" && -z "$n" && "$o" == "$k" ]] && r PASS "firmware boots kldload next" "entry $k first, no BootNext" || r FAIL "firmware boots kldload next" "entry=${k:-none} BootOrder first=${o:-?} BootNext=${n:-none}"
+fi
+if [[ "$AI" == 1 ]]; then v="$(systemctl is-active ollama 2>&1)"; [[ "$v" == active ]] && r PASS "ollama" "$v" || r FAIL "ollama" "$v"; fi
+if [[ "$DEV" == 1 ]]; then v="$(systemctl is-active grafana-server prometheus 2>/dev/null | tr '\n' ' ')"; [[ "$v" == *active* && "$v" != *inactive*inactive* ]] && r PASS "metrics stack" "$v" || r FAIL "metrics stack" "grafana-server/prometheus: $v"; fi
+# The report carries a summary per sub-suite and one FINAL REPORT; only the last
+# PASS:/FAIL: pair is the verdict (the first match read "39 passed" of 225, 2026-09-13).
+if [[ -r /root/kldload-smoke-report.txt ]]; then
+    sr="$(sed 's/\x1b\[[0-9;]*m//g' /root/kldload-smoke-report.txt)"
+    sp="$(grep -E '^[[:space:]]+PASS: [0-9]+' <<<"$sr" | tail -n 1 | grep -oE '[0-9]+')" || sp=""
+    sf="$(grep -E '^[[:space:]]+FAIL: [0-9]+' <<<"$sr" | tail -n 1 | grep -oE '[0-9]+')" || sf=""
+    if [[ -z "$sp" || -z "$sf" ]]; then r FAIL "first-boot smoke report" "no final PASS/FAIL summary in /root/kldload-smoke-report.txt"
+    elif ((sf == 0)); then r PASS "first-boot smoke report" "$sp passed, 0 failed"
+    else r FAIL "first-boot smoke report" "$sp passed, $sf failed"; fi
+elif [[ "$IMG" == 1 || "$K8S" == 1 ]]; then
+    r FAIL "first-boot smoke report" "/root/kldload-smoke-report.txt missing"
+fi
+exit 0
+VERIFY
+    )" 2>&1)" || fail_run verify "the verification script did not run on $TARGET_IP"
+    printf '%s\n' "$VERIFY_LINES" | awk -F'|' '{printf "  %-5s %-28s %s\n", $1, $2, $3}'
+    nfail="$(grep -c '^FAIL|' <<<"$VERIFY_LINES" || true)"
+    if ((nfail > 0)); then
+        fail_run verify "$nfail check(s) failed on $TARGET_IP"
+    fi
+    phase_ok verify "$(grep -c '^PASS|' <<<"$VERIFY_LINES") passed on $TARGET_IP"
+fi
+
+echo "done" >"$OUT/phase"
+write_report
+exit 0

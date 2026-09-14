@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-netboot-matrix — install every edition on one machine, one after the
+# other, each through kldload-netboot-run, with one summary at the end.
+#
+# WHAT IT DOES, IN ORDER
+#   for each edition directory under live-build/pxe/matrix (in the order given):
+#     1. kldload-netboot-run --answers <dir>/<mac>.env --from stage --no-smoke
+#        (the net edition stages the net ISO, every other edition the full one)
+#     2. record the run id, its exit status, the phase it stopped in and its
+#        verify lines
+#     3. carry on, unless the run died before the machine came back up on its
+#        new install: then there is nothing reachable to reboot into the next
+#        edition, and every later run would only wait out its timeouts
+#   write summary.md with one table row per edition
+#
+# WHY: the operator wants all seven editions proven unattended overnight
+# (2026-09-13: "deploy all 7, checking each one separately as it's done").
+# Each run stays a separate report so a failure in one edition is read on its
+# own, not as noise in a combined log.
+#
+# USAGE
+#   kldload-netboot-matrix [--mac aa-bb-cc-dd-ee-ff] [--editions "1-core 2-server ..."]
+#   Run it as a transient service so it outlives the terminal:
+#   sudo systemd-run --unit kldload-netboot-matrix --collect /path/to/ci/kldload-netboot-matrix
+#
+# INPUTS  live-build/pxe/matrix/<edition>/<mac>.env, live-build/output/*.iso
+# OUTPUTS /var/log/kldload-netboot-run/matrix-<id>/{matrix.log,summary.md};
+#         each edition's own report under /var/log/kldload-netboot-run/<run id>/
+# EXIT    0 every edition verified · 1 at least one did not · 2 usage
+#
+# NOTES
+#   - Editions run with encryption and Secure Boot OFF in their answers files; the
+#     run refuses to reboot a machine whose firmware still has Secure Boot on.
+#   - 6-full-secure is not in the default list: it needs someone at the console.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+REPO="${KLDLOAD_REPO:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+RUN="$REPO/ci/kldload-netboot-run"
+MAC="f0-2f-74-cd-27-50"
+EDITIONS=(1-core 2-server 5-desktop 7-net 3-kvm 4-k8s 6-full)
+
+usage() {
+    sed -n '/^# USAGE/,/^# INPUTS/p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+while (($#)); do
+    case "$1" in
+    --mac) MAC="${2:?}" && shift 2 ;;
+    --editions) read -r -a EDITIONS <<<"${2:?}" && shift 2 ;;
+    *) usage ;;
+    esac
+done
+[[ $EUID -eq 0 ]] || {
+    echo "run as root" >&2
+    exit 2
+}
+[[ -x "$RUN" ]] || {
+    echo "missing $RUN" >&2
+    exit 2
+}
+
+ID="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT="/var/log/kldload-netboot-run/matrix-${ID}"
+install -d -m 0700 "$OUT"
+exec > >(tee -a "$OUT/matrix.log") 2>&1
+log() { printf '[%s] %s\n' "$(date +%T)" "$*"; }
+
+FULL_ISO="" NET_ISO=""
+for f in "$REPO"/live-build/output/kldload-*-x86_64.iso; do
+    [[ "$(basename "$f")" =~ ^kldload-[0-9.]+-x86_64\.iso$ ]] && FULL_ISO="$f"
+done
+for f in "$REPO"/live-build/output/kldload-*-x86_64-net.iso; do
+    [[ -f "$f" ]] && NET_ISO="$f"
+done
+[[ -n "$FULL_ISO" ]] || {
+    log "no full ISO in live-build/output"
+    exit 1
+}
+
+# Every answers file must exist and load before the first machine is touched.
+for e in "${EDITIONS[@]}"; do
+    [[ -r "$REPO/live-build/pxe/matrix/$e/$MAC.env" ]] || {
+        log "missing answers file live-build/pxe/matrix/$e/$MAC.env"
+        exit 2
+    }
+    if [[ "$e" == *-net ]] && [[ -z "$NET_ISO" ]]; then
+        log "$e needs live-build/output/kldload-<version>-x86_64-net.iso and there is none"
+        exit 2
+    fi
+done
+
+log "matrix $ID: ${#EDITIONS[@]} edition(s) on $MAC: ${EDITIONS[*]}"
+log "full ISO $(basename "$FULL_ISO")${NET_ISO:+, net ISO $(basename "$NET_ISO")}"
+
+declare -A RC=() RID=() STOP=() NOTE=()
+failed=0
+for e in "${EDITIONS[@]}"; do
+    iso="$FULL_ISO"
+    [[ "$e" == *-net ]] && iso="$NET_ISO"
+    extra=()
+    case "$e" in
+    # Light editions converge in minutes; an hour is a hang, not patience. The
+    # heavy ones keep the run's own 6 h (k8s, goldens, AI).
+    1-core | 2-server | 5-desktop | 7-net) extra=(--ready-timeout 1h) ;;
+    esac
+    log "════ $e — staging $(basename "$iso")"
+    t0="$(date +%s)"
+    # swallow: the run's verdict is its exit status, captured on the next line.
+    "$RUN" --answers "$REPO/live-build/pxe/matrix/$e/$MAC.env" --from stage --no-smoke --iso "$iso" "${extra[@]}" \
+        >"$OUT/$e.out" 2>&1 && rc=0 || rc=$?
+    RC[$e]="$rc"
+    RID[$e]="$(sed -n 's/^\[[0-9:]*\] run \([0-9TZ]*\):.*/\1/p' "$OUT/$e.out" | head -n 1)"
+    STOP[$e]="$(cat "/var/log/kldload-netboot-run/${RID[$e]}/phase" 2>/dev/null)" || STOP[$e]="unknown"
+    NOTE[$e]="$(grep -E '=== [a-z]+: FAILED' "$OUT/$e.out" | tail -n 1 | sed 's/^.*FAILED — //' | cut -c1-160)" || NOTE[$e]=""
+    mins=$((($(date +%s) - t0 + 59) / 60))
+    if ((rc == 0)); then
+        log "════ $e: VERIFIED in ${mins} min (run ${RID[$e]})"
+    else
+        failed=$((failed + 1))
+        log "════ $e: FAILED in ${STOP[$e]} after ${mins} min — ${NOTE[$e]} (run ${RID[$e]})"
+    fi
+    grep -E '^  (PASS|FAIL|WARN|INFO) ' "$OUT/$e.out" | sed "s/^/  [$e] /" || true # no verify lines when the run stopped early
+    case "${STOP[$e]}" in
+    "stage FAILED" | "arm FAILED" | "boot FAILED" | "watch FAILED" | "installed FAILED")
+        log "stopping the matrix: $e never came up on its new install, so nothing is left to reboot into the next edition"
+        break
+        ;;
+    esac
+done
+
+{
+    echo "# kldload netboot matrix ${ID}"
+    echo
+    echo "machine ${MAC}; full ISO \`$(basename "$FULL_ISO")\`${NET_ISO:+; net ISO \`$(basename "$NET_ISO")\`}"
+    echo
+    echo "| edition | result | stopped in | run | note |"
+    echo "|---|---|---|---|---|"
+    for e in "${EDITIONS[@]}"; do
+        if [[ -z "${RC[$e]:-}" ]]; then
+            echo "| $e | not run | | | matrix stopped earlier |"
+        elif [[ "${RC[$e]}" == 0 ]]; then
+            echo "| $e | verified | ${STOP[$e]} | ${RID[$e]} | |"
+        else
+            echo "| $e | FAILED | ${STOP[$e]} | ${RID[$e]} | ${NOTE[$e]} |"
+        fi
+    done
+} >"$OUT/summary.md"
+log "summary: $OUT/summary.md"
+cat "$OUT/summary.md"
+# Editions that never ran count as not verified.
+ran=${#RC[@]}
+((failed == 0 && ran == ${#EDITIONS[@]})) && exit 0
+exit 1
