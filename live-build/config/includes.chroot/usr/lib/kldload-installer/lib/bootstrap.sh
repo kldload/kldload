@@ -3077,11 +3077,32 @@ CUSTOMREPO
             #    fully offline; otherwise dnf falls through to the upstream RPM
             #    Fusion mirrors. Either way dnf will be happy with the .repo
             #    files this installs.
-            chroot "${target}" /usr/bin/dnf install -y --nogpgcheck --skip-unavailable \
-                "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${release}.noarch.rpm" \
-                "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${release}.noarch.rpm" \
-                >>"$log" 2>&1 ||
-                k_log_to "$log" "WARNING: RPM Fusion repo install failed — akmod-nvidia path unavailable"
+            #
+            # One release package per transaction, each with a second source, then
+            # checked on the target. HISTORY: 7-net (net edition), fiend 2026-09-13:
+            # free and nonfree went in ONE transaction from mirrors.rpmfusion.org,
+            # the redirector sent nonfree to muug.ca (refusing 443), the whole
+            # transaction failed, neither repo existed, and akmod-nvidia was "No
+            # package found". download1.rpmfusion.org is the master: slower, never
+            # a volunteer mirror that is down.
+            local _rf
+            for _rf in free nonfree; do
+                if chroot "${target}" rpm -q "rpmfusion-${_rf}-release" >/dev/null 2>&1; then
+                    continue
+                fi
+                chroot "${target}" /usr/bin/dnf install -y --nogpgcheck \
+                    "https://mirrors.rpmfusion.org/${_rf}/fedora/rpmfusion-${_rf}-release-${release}.noarch.rpm" \
+                    >>"$log" 2>&1 ||
+                    chroot "${target}" /usr/bin/dnf install -y --nogpgcheck \
+                        "https://download1.rpmfusion.org/${_rf}/fedora/rpmfusion-${_rf}-release-${release}.noarch.rpm" \
+                        >>"$log" 2>&1 ||
+                    k_log_to "$log" "  rpmfusion-${_rf}-release: mirror and master both failed"
+                if chroot "${target}" rpm -q "rpmfusion-${_rf}-release" >/dev/null 2>&1; then
+                    k_log_to "$log" "  rpmfusion-${_rf}-release installed"
+                else
+                    k_log_to "$log" "WARNING: RPM Fusion ${_rf} repo NOT installed — akmod-nvidia (nonfree) cannot come from the network"
+                fi
+            done
 
             # 2. Drop the NVIDIA container-toolkit repo (distro-agnostic; always
             #    current; ships nvidia-container-toolkit + libnvidia-container).
@@ -3281,7 +3302,14 @@ CUDAREPO
         fi
         # DKMS build — dnf only registers the module ('added'), it doesn't build in chroot
         local _nv_ver
-        _nv_ver=$(rpm --root="${target}" -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
+        # rpm prints "package X is not installed" on STDOUT, so its output is read
+        # only when it succeeded. HISTORY: 7-net, fiend 2026-09-13: that sentence,
+        # cut at the first dash, became the version "package kmod" and the installer
+        # tried to build /usr/src/nvidia-package kmod.
+        _nv_ver=""
+        if rpm --root="${target}" -q kmod-nvidia-open-dkms >/dev/null 2>&1; then
+            _nv_ver=$(rpm --root="${target}" -q --qf '%{VERSION}' kmod-nvidia-open-dkms)
+        fi
         if [[ -n "$_nv_ver" && -n "$kver" ]]; then
             k_log_to "$log" "Building NVIDIA DKMS ${_nv_ver} for kernel ${kver}..."
             # `dkms build` requires the module to be present in the DKMS tree

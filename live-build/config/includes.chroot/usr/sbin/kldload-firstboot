@@ -1705,6 +1705,26 @@ _fb_retire_darksite_repo() {
 #
 # bootstrap.sh's _k_nvidia_will_load already knew about updates/dkms; this file
 # did not. Same question, two answers, which is the shape of the bug.
+# _fb_rpmfusion <dnf> <fedora-version> — make sure both RPM Fusion repos are
+# installed, one release package at a time, mirror first and the master second.
+# Returns 0 only when both release packages are on the system afterwards.
+#
+# HISTORY: 7-net, fiend 2026-09-13. Both releases went in one transaction from
+# mirrors.rpmfusion.org; nonfree was redirected to muug.ca, which refuses 443, the
+# transaction failed, and this healing net gave up two seconds in with the desktop
+# on nouveau. The installer had failed the same way an hour earlier.
+_fb_rpmfusion() {
+    local dnf="$1" ver="$2" rf
+    for rf in free nonfree; do
+        rpm -q "rpmfusion-${rf}-release" >/dev/null 2>&1 && continue
+        "$dnf" install -y "https://mirrors.rpmfusion.org/${rf}/fedora/rpmfusion-${rf}-release-${ver}.noarch.rpm" >>"$LOG" 2>&1 ||
+            "$dnf" install -y "https://download1.rpmfusion.org/${rf}/fedora/rpmfusion-${rf}-release-${ver}.noarch.rpm" >>"$LOG" 2>&1 ||
+            log "WARNING: rpmfusion-${rf}-release: mirror and master both failed"
+        rpm -q "rpmfusion-${rf}-release" >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+
 _fb_nvidia_ko_present() {
     local kver="${1:-$(uname -r)}"
     compgen -G "/lib/modules/${kver}/extra/nvidia.ko"* >/dev/null 2>&1 && return 0
@@ -2023,10 +2043,7 @@ ZRAMCONF
         elif ! curl -fsS -m 8 -o /dev/null https://mirrors.rpmfusion.org/ 2>/dev/null; then
             log "WARNING: no network to RPM Fusion — NVIDIA driver NOT installed. Pack rpmfusion+akmod-nvidia into the darksite for offline; desktop runs on nouveau at reduced resolution until fixed."
             _queue_nvidia_heal
-        elif "$_dnf" install -y \
-            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${_fedver}.noarch.rpm" \
-            "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${_fedver}.noarch.rpm" \
-            >>"$LOG" 2>&1 &&
+        elif _fb_rpmfusion "$_dnf" "$_fedver" &&
             "$_dnf" install -y akmod-nvidia xorg-x11-drv-nvidia "kernel-devel-$(uname -r)" >>"$LOG" 2>&1; then
             log "akmod-nvidia installed — building kernel module"
             command -v akmods >/dev/null 2>&1 &&

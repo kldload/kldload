@@ -1763,11 +1763,23 @@ cmd_seed_disk() {
 
     [[ -n "$answers" ]] || die "seed-disk: --answers <file> is required (see /etc/kldload/answers/)"
     [[ -f "$answers" ]] || die "seed-disk: no such answers file: $answers"
-    # An answers file that is not valid shell would be sourced by the installer
-    # under `set -a` and fail halfway through a wipe. Check it here, on a
-    # machine with a keyboard attached.
-    bash -n "$answers" || die "seed-disk: $answers is not valid shell"
-    grep -q '^KLDLOAD_DISTRO=' "$answers" ||
+    # Load it with the installer's own reader (k_answers_load_env_file), on a machine
+    # with a keyboard attached, so a file the installer would refuse is refused here
+    # and not halfway through a wipe. HISTORY: this used `bash -n`, from when answers
+    # files were sourced. The installer reads them line by line now and refuses a
+    # comment after a value, which `bash -n` accepts, so a stick could pass here and
+    # stop at boot (found 2026-09-13; kldload-netboot-server arm-install already
+    # checked with the loader).
+    local _loader="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/answers.sh"
+    [[ -r "$_loader" ]] || die "seed-disk: cannot find the installer's answers loader at $_loader"
+    local _loaded
+    _loaded="$(bash -c 'set -uo pipefail
+        k_die() { echo "REFUSED: $*"; exit 1; }
+        source "$1"
+        k_answers_load_env_file "$2"
+        printf "DISTRO=%s\n" "${KLDLOAD_DISTRO:-}"' _ "$_loader" "$answers" 2>&1)" ||
+        die "seed-disk: the installer would refuse $answers: $(tail -n 1 <<<"$_loaded")"
+    grep -q '^DISTRO=.\+' <<<"$_loaded" ||
         die "seed-disk: $answers sets no KLDLOAD_DISTRO — the installer would have nothing to install"
 
     [[ -n "$device" || -n "$image" ]] || die "seed-disk: one of --device or --image is required"
