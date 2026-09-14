@@ -176,6 +176,34 @@ phase_close_all() {
 #               clones only), 0/absent to leave it running with a warning.
 # Returns: 0 always. Powering a build VM down is a courtesy, never a reason to
 #          fail an install that otherwise succeeded.
+# _await_mesh_handshakes — wait until every peer on a WireGuard interface has
+# completed at least one handshake, or the time runs out, and say which ones did not.
+#
+# Args:    $1 interface (klab-blue, klab-green), $2 seconds to wait.
+# Returns: 0 always. A peer that never answers is logged by public key and endpoint
+#          as a real mesh failure; it is not a reason to fail the install here.
+#          No interface or no wg: nothing to wait for.
+_await_mesh_handshakes() {
+    local _if="$1" _wait="${2:-90}" _i _hs _never
+    command -v wg >/dev/null 2>&1 || return 0
+    ip link show "$_if" >/dev/null 2>&1 || return 0
+    for ((_i = 0; _i <= _wait; _i += 3)); do
+        # latest-handshakes prints "<pubkey>\t<epoch>", 0 for a peer never handshaken.
+        _hs="$(wg show "$_if" latest-handshakes 2>/dev/null)" || _hs=""
+        _never="$(awk -F'\t' '$2 == 0 {print $1}' <<<"$_hs")"
+        if [[ -n "$_hs" && -z "$_never" ]]; then
+            log "[quiesce] ${_if}: every peer has handshaked ($(grep -c . <<<"$_hs") peers, ${_i}s)"
+            return 0
+        fi
+        sleep 3
+    done
+    local _k
+    for _k in $_never; do
+        log "[quiesce] WARN: ${_if} peer ${_k:0:16}... ($(wg show "$_if" endpoints 2>/dev/null | awk -v k="$_k" '$1 == k {print $2}')) never handshaked within ${_wait}s — its mesh link does not work"
+    done
+    return 0
+}
+
 power_off_vm() {
     local _vm="$1" _force="${2:-0}"
     [[ -n "$_vm" ]] || return 0
@@ -1288,6 +1316,13 @@ if [[ "${WANT[klab]}" == "1" ]]; then
                 # re-made by `klab deploy` in seconds. Nothing later reads
                 # from them, so a straggler that ignores ACPI is stopped
                 # rather than left holding RAM for the rest of the install.
+                # A site's mesh is configured seconds before this line; powering its
+                # VMs off at once can stop a peer before its first handshake, and
+                # that peer then reads as never-worked forever. HISTORY: 6-full,
+                # fiend 2026-09-14: green mesh configured 06:15:55, VMs off at
+                # 06:16:07, one of five peers never handshook, smoke FAILed it.
+                _await_mesh_handshakes klab-blue 90
+                _await_mesh_handshakes klab-green 90
                 power_off_group 'klab-blue-*' 1
                 power_off_group 'klab-green-*' 1
             else

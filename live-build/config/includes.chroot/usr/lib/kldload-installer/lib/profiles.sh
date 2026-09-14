@@ -3824,11 +3824,9 @@ Type=oneshot
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 12); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/12)..."; sleep 5; done; echo "no internet after 60s — skipping golden image builds (run: klab golden all)" >&2; exit 1'
 # Build #49+: webui no longer stores RHEL creds (no Dashboard panel).
 # Creds are entered once in the install form, used to (a) register the
-# host, (b) fetch the RHEL Cloud Image, (c) build the 6th klab golden
+# host, (b) fetch the RHEL Cloud Image, (c) build the RHEL golden
 # (rpool/vms/klab-golden-rhel@golden), then shredded. So this service
-# does NOT need to bridge creds — the RHEL golden is already on disk
-# before first boot, and `klab golden rhel` below will see the existing
-# @golden snapshot and skip naturally.
+# does NOT need to bridge creds, and does not build RHEL at all (below).
 # Per-distro `-` prefix makes systemd ignore non-zero exits — without it,
 # the first failing distro aborts the unit and the rest never run. Caught
 # 2026-05-12 on the first RHEL 10 install: rocky golden failed silently
@@ -3842,21 +3840,17 @@ ExecStart=-/usr/local/bin/klab golden rocky
 ExecStart=-/usr/local/bin/klab golden fedora
 ExecStart=-/usr/local/bin/klab golden debian
 ExecStart=-/usr/local/bin/klab golden ubuntu
-# RHEL 10 golden: pre-built during install (rpool/vms/klab-golden-rhel
-# @golden). klab's build_golden_single checks for the existing snapshot
-# and returns 0 cleanly. Left in the list as a safety net -- if the
-# install-time build didn't run (e.g. activation-key auth flow where
-# the RH API path isn't available), this gives the operator a chance
-# to drop a qcow2 at /var/lib/klab/images/rhel-10-cloud.qcow2 and let
-# firstboot finish what install couldn't.
-ExecStart=-/usr/local/bin/klab golden rhel
+# No RHEL line. klab's golden builder takes centos rocky fedora debian ubuntu
+# and nothing else; `klab golden rhel` ended in "[FATAL] Unknown distro: rhel"
+# on every klab install (6-full, fiend 2026-09-14). The RHEL golden, when an
+# install asks for it, is built at install time by kldload-rhel-composer.
 # ── Blue/green playground spawn (the "spit clones" demo) ─────────────────
-# After all 6 goldens land (above), klab deploy blue + deploy green clone
+# After the five goldens land (above), klab deploy blue + deploy green clone
 # each @golden into a live VM via ZFS instant-clone (~75ms per clone) +
-# virt-install --import. Result: 12 small VMs running side-by-side
+# virt-install --import. Result: 10 small VMs running side-by-side
 # (klab-blue-<distro> + klab-green-<distro>) on static IPs:
-#   blue:  192.168.122.101-106
-#   green: 192.168.122.201-206
+#   blue:  192.168.122.101-105
+#   green: 192.168.122.201-205
 # Operator on .121 b640: "spawn 1 test vm for each distro .. one blue and
 # 1 green .. so people can 'see' how easy this is now". The cattle pattern
 # was previously aspirational ("blue-green ready" was logged but no clones

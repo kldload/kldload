@@ -834,6 +834,24 @@ else
     _fail "smoke-kvm Secure Boot checks" "MOK and shim files are required on installs that did not request Secure Boot"
 fi
 
+# Lab sites are powered off only after their WireGuard mesh has handshaked (6-full,
+# 2026-09-14: a peer stopped 12 s after the mesh came up read as never-worked).
+_ad2="${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-autodeploy"
+if grep -qE '^_await_mesh_handshakes\(\) \{' "$_ad2" &&
+    awk '/_await_mesh_handshakes klab-green/{w=NR} /power_off_group .klab-green-\*. 1/{if (w && w < NR) ok=1} END{exit !ok}' "$_ad2"; then
+    _pass "autodeploy waits for each lab mesh to handshake before powering its VMs off"
+else
+    _fail "lab mesh power-off" "klab-blue/green VMs are powered off without waiting for their mesh handshakes"
+fi
+
+# klab builds goldens for centos rocky fedora debian ubuntu only; asking it for rhel
+# is a FATAL on every klab install.
+if grep -qE '^ExecStart=.*klab golden rhel' "${ROOT}/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"; then
+    _fail "klab-firstboot distros" "klab-firstboot runs 'klab golden rhel', which klab rejects (Unknown distro: rhel)"
+else
+    _pass "klab-firstboot asks klab only for distros it builds"
+fi
+
 _section "Install slides"
 
 # The kiosk deck is a JS array in the canonical SPA. Each slide is [kicker, title,
