@@ -1204,25 +1204,39 @@ if [[ -n "$ZFS_VER" ]]; then
 fi
 
 # ── Sign ZFS modules with MOK key for Secure Boot ────────────────────────
-# Generate a MOK key pair, sign all ZFS kernel modules, and embed the key
-# in the live ISO. This allows the live environment to load ZFS even with
-# Secure Boot enabled (the kernel lockdown check validates the signature).
+# Generate a MOK key pair, sign all ZFS kernel modules, and ship ONLY THE
+# PUBLIC HALF in the live ISO, so the live environment can load ZFS with
+# Secure Boot enabled once that certificate is enrolled.
+#
+# SECURITY / HISTORY: from 2026-04-10 (df812431) until 2026-09-13 the key pair
+# was generated INSIDE the rootfs, at /var/lib/dkms/mok.key, and nothing removed
+# it, so every published ISO carried its private signing key. shim trusts an
+# enrolled MOK for the whole boot chain: anyone who pulled mok.key out of a
+# download could sign a bootloader or kernel that any machine which enrolled
+# "kldload Live ISO MOK" would boot. Found by scanning the 16:35Z build for PEM
+# private keys. The private key now lives in a build-private directory OUTSIDE
+# the rootfs, is used for signing, and is destroyed before anything is packed.
+# Two guards make a regression fatal: the assertion right after signing, and
+# the private-key scan immediately before mksquashfs. Installed systems were
+# never affected: they use BYOK or a per-install key (k_generate_mok_keys).
 log "Generating MOK key for Secure Boot module signing..."
 MOK_DIR="${ROOTFS}/var/lib/dkms"
 mkdir -p "$MOK_DIR"
-openssl req -new -x509 -newkey rsa:2048 \
-    -keyout "${MOK_DIR}/mok.key" \
+_mok_priv_dir="$(mktemp -d /tmp/kldload-mok.XXXXXX)"
+chmod 0700 "$_mok_priv_dir"
+_mok_key="${_mok_priv_dir}/mok.key"
+(umask 077 && openssl req -new -x509 -newkey rsa:2048 \
+    -keyout "$_mok_key" \
     -out "${MOK_DIR}/mok.pub" \
     -days 3650 -nodes \
-    -subj "/CN=kldload Live ISO MOK/" 2>&1 | tee -a "$LOG_FILE" || true
+    -subj "/CN=kldload Live ISO MOK/") 2>&1 | tee -a "$LOG_FILE" || true
 openssl x509 -in "${MOK_DIR}/mok.pub" -out "${MOK_DIR}/mok.der" -outform DER 2>/dev/null || true
-chmod 0600 "${MOK_DIR}/mok.key" 2>/dev/null || true
 
 # Sign all ZFS kernel modules with the MOK key.
 # Modules may be compressed (.ko.xz) — decompress, sign, recompress.
 # sign-file is in the kernel-devel package under scripts/.
 SIGN_FILE="${ROOTFS}/usr/src/kernels/${KVER}/scripts/sign-file"
-if [[ -x "$SIGN_FILE" && -f "${MOK_DIR}/mok.key" ]]; then
+if [[ -x "$SIGN_FILE" && -f "$_mok_key" ]]; then
     log "Signing ZFS kernel modules with MOK key..."
     _signed=0 || true
     while IFS= read -r _ko; do
@@ -1237,7 +1251,7 @@ if [[ -x "$SIGN_FILE" && -f "${MOK_DIR}/mok.key" ]]; then
             xz -d "$_ko" 2>/dev/null || true
             _ko_plain="${_ko%.xz}"
             if [[ -f "$_ko_plain" ]]; then
-                "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
+                "$SIGN_FILE" sha256 "$_mok_key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
                 xz --check=crc32 "$_ko_plain" 2>/dev/null || true
                 log "  Signed: $(basename "$_ko")"
                 ((_signed++)) || true
@@ -1246,13 +1260,13 @@ if [[ -x "$SIGN_FILE" && -f "${MOK_DIR}/mok.key" ]]; then
             zstd -d "$_ko" 2>/dev/null || true
             _ko_plain="${_ko%.zst}"
             if [[ -f "$_ko_plain" ]]; then
-                "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
+                "$SIGN_FILE" sha256 "$_mok_key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
                 zstd --rm "$_ko_plain" 2>/dev/null || true
                 log "  Signed: $(basename "$_ko")"
                 ((_signed++)) || true
             fi
         else
-            "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko" 2>/dev/null &&
+            "$SIGN_FILE" sha256 "$_mok_key" "${MOK_DIR}/mok.pub" "$_ko" 2>/dev/null &&
                 log "  Signed: $(basename "$_ko")" && ((_signed++)) || true || true
         fi
     done < <(find "${ROOTFS}/lib/modules/${KVER}/extra" "${ROOTFS}/lib/modules/${KVER}/weak-updates" \
@@ -1267,6 +1281,17 @@ else
     log "WARNING: sign-file not found at ${SIGN_FILE} — ZFS modules unsigned"
     log "  Secure Boot will block ZFS module loading on the live ISO"
 fi
+# Destroy the private key whatever happened above, then prove it is not in the
+# rootfs. shred where it exists; rm is the fallback, and the directory is
+# outside the rootfs either way.
+if [[ -f "$_mok_key" ]]; then
+    shred -u "$_mok_key" 2>/dev/null || rm -f "$_mok_key"
+fi
+rm -rf "$_mok_priv_dir"
+[[ ! -e "${MOK_DIR}/mok.key" ]] ||
+    die "FATAL: ${MOK_DIR}/mok.key is in the rootfs — the ISO would ship its Secure Boot signing key"
+[[ ! -e "$_mok_key" ]] || die "FATAL: the MOK private key was not destroyed after signing"
+log "MOK private key destroyed after signing; only mok.pub/mok.der are in the image"
 
 chroot "$ROOTFS" depmod -a "$KVER" 2>/dev/null || true
 
@@ -2147,26 +2172,44 @@ HELMCHARTS
             log "  WARNING PAM module ${_pm}.so is not in the live rootfs — the install kiosk session will fail"
     done
 
-    # The unit itself, plus its enable symlink. multi-user.target.wants by hand
-    # because `systemctl enable` in a chroot with no running systemd is a
-    # coin toss, and the autoinstall service two hundred lines down does the
-    # same thing for the same reason.
-    install -d -m 0755 "${ROOTFS}/etc/systemd/system/multi-user.target.wants"
+    # The unit, its fallback login, and the GENERATOR that decides whether
+    # either runs. The unit is deliberately NOT enabled: kldload-kiosk-generator
+    # adds it to multi-user.target at the start of boot, and only on a boot that
+    # wants the kiosk, masking tty1's other owners at the same moment.
+    #
+    # HISTORY: this block used to write multi-user.target.wants by hand, with the
+    # decision in the unit's ExecCondition=. That decision ran too late to hand
+    # tty1 over, twice (USB boots lost GDM; netboot never got tty1 at all —
+    # fiend, 2026-09-13). The unit no longer has an ExecCondition, so an enable
+    # symlink here would start a full-screen kiosk on EVERY boot of the image.
+    # The assertion below makes that symlink's presence fatal, not just unmade.
+    install -d -m 0755 "${ROOTFS}/etc/systemd/system" "${ROOTFS}/usr/lib/systemd/system-generators"
     install -m 0644 /build/live-build/config/includes.chroot/etc/systemd/system/kldload-install-kiosk.service \
         "${ROOTFS}/etc/systemd/system/kldload-install-kiosk.service" ||
         die "FATAL: kldload-install-kiosk.service missing from the source tree"
-    ln -sf /etc/systemd/system/kldload-install-kiosk.service \
-        "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-install-kiosk.service"
-    # Installed and ENABLED are one operation (five units in this codebase were
-    # once found shipped-but-dead). Check the symlink, not the copy.
-    [[ -L "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-install-kiosk.service" ]] ||
-        die "FATAL: the install kiosk unit is not enabled — it would never run"
-    # And the tool the unit executes. It reaches the rootfs through the
-    # usr/local/sbin glob further down, but the unit names an absolute path, so
-    # a miss here is a 203/EXEC on every unattended boot.
+    install -m 0644 /build/live-build/config/includes.chroot/etc/systemd/system/kldload-install-kiosk-fallback.service \
+        "${ROOTFS}/etc/systemd/system/kldload-install-kiosk-fallback.service" ||
+        die "FATAL: kldload-install-kiosk-fallback.service missing from the source tree"
+    # The system-generators directory is reached by no glob in this script;
+    # without this explicit copy the generator never lands and the kiosk never
+    # starts, silently. 0755 because systemd skips a generator it cannot exec.
+    install -m 0755 /build/live-build/config/includes.chroot/usr/lib/systemd/system-generators/kldload-kiosk-generator \
+        "${ROOTFS}/usr/lib/systemd/system-generators/kldload-kiosk-generator" ||
+        die "FATAL: kldload-kiosk-generator missing from the source tree"
+    rm -f "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-install-kiosk.service"
+    # Verify the outcome in the rootfs, not the copy commands.
+    [[ -x "${ROOTFS}/usr/lib/systemd/system-generators/kldload-kiosk-generator" ]] ||
+        die "FATAL: the kiosk generator is not executable in the rootfs — the kiosk would never start"
+    [[ ! -e "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-install-kiosk.service" ]] ||
+        die "FATAL: kldload-install-kiosk.service is enabled — it would take the screen on every boot"
+    ! grep -qE '^(ExecCondition|WantedBy)=' "${ROOTFS}/etc/systemd/system/kldload-install-kiosk.service" ||
+        die "FATAL: the kiosk unit carries ExecCondition= or WantedBy= — the generator is the only thing allowed to start it"
+    # And the tool the unit and the generator execute. It reaches the rootfs
+    # through the usr/local/sbin glob further down, but both name an absolute
+    # path, so a miss here is a kiosk that never decides and never starts.
     [[ -f /build/live-build/config/includes.chroot/usr/local/sbin/kldload-install-kiosk ]] ||
         die "FATAL: kldload-install-kiosk is missing from includes.chroot/usr/local/sbin"
-    log "Install kiosk: unit installed and enabled (cage + kldload-install-kiosk)"
+    log "Install kiosk: unit + fallback + generator installed; unit left un-enabled for the generator"
 
     # ebpf_exporter (Cloudflare) — per-device block I/O latency histograms.
     # BPF programs + yaml configs ship via includes.chroot/etc/ebpf_exporter.
@@ -3582,12 +3625,41 @@ done
 # CDLABEL and over the network by URL — the netboot path the installer already
 # expects, since kldload-autoinstall reads kldload.seed= from the cmdline
 # before it looks for a seed disk.
-chroot "$ROOTFS" dracut --force --add "dmsquash-live livenet" \
+# ── The install show in the initramfs ───────────────────────────────────────
+# A netboot spends 2.5-10 minutes in the initramfs pulling the 14.7 GB root image,
+# and until 2026-09-13 the screen was blank for all of it (fiend, twice that
+# morning: read as a hang). Module 95kldload-show fills tty1 with a live panel of
+# the download (a hex stream of the arriving bytes, transmissions, stage strip,
+# bar) and exits at once on a USB boot. The slides are the kiosk's alone.
+_show_src=/build/live-build/config/includes.chroot/usr/lib/dracut/modules.d/95kldload-show
+_show_dst="${ROOTFS}/usr/lib/dracut/modules.d/95kldload-show"
+install -d -m 0755 "$_show_dst"
+install -m 0755 "${_show_src}/module-setup.sh" "${_show_src}/kldload-initrd-show.sh" \
+    "${_show_src}/kldload-show-generator" "$_show_dst/" ||
+    die "kldload-show: could not install the dracut module"
+install -m 0644 "${_show_src}/kldload-initrd-show.service" "$_show_dst/" ||
+    die "kldload-show: could not install the unit"
+
+chroot "$ROOTFS" dracut --force --add "dmsquash-live livenet kldload-show" \
     --no-hostonly \
     "${DRACUT_INSTALL[@]}" \
     --force-drivers "xhci_pci xhci_hcd ehci_pci ehci_hcd ohci_pci ohci_hcd uhci_hcd usb_storage uas usbhid hid_generic cdc_ether usbnet r8152 ax88179_178a thunderbolt typec_ucsi ucsi_acpi nvme nvme_core ahci virtio_blk virtio_scsi virtio_net virtio_pci sdhci sdhci_pci mmc_block" \
     --kver "$KVER" "/boot/initramfs-${KVER}.img" 2>&1 | tee -a "$LOG_FILE" ||
     die "dracut failed"
+
+# The outcome, not dracut's exit code: a module dracut skipped (a missing
+# dependency, a check() refusal) still exits 0.
+_show_have="$(chroot "$ROOTFS" lsinitrd "/boot/initramfs-${KVER}.img")" ||
+    die "lsinitrd could not read the initramfs it just built"
+for _f in usr/bin/kldload-initrd-show \
+    usr/lib/systemd/system/kldload-initrd-show.service \
+    usr/lib/systemd/system-generators/kldload-show-generator \
+    usr/bin/od usr/bin/dd \
+    etc/systemd/system/sysinit.target.wants/kldload-initrd-show.service; do
+    grep -qF -- " ${_f}" <<<"$_show_have" ||
+        die "kldload-show: ${_f} is not in the initramfs"
+done
+log "Initramfs install show: present"
 
 # ---------------------------------------------------------------------------
 # Step 4: Create squashfs
@@ -3614,6 +3686,37 @@ SQFS_BCJ=(-Xbcj x86)
 
 # ─── Leave the operator a machine ───────────────────────────────────────────
 #
+# ── No private keys in the image ────────────────────────────────────────────
+# The last point where the rootfs is still a directory. A PEM private key in a
+# text file here ships in every download. HISTORY: the live ISO's Secure Boot
+# MOK private key shipped this way for five months (2026-04-10 to 2026-09-13).
+#
+# Scope, from scanning the real image: the upstream package and container
+# mirrors under root/darksite are excluded (third-party artifacts, e.g. test
+# certificates inside the argocd and cilium images), and binaries are skipped
+# by grep -I (ttyd embeds example keys; zxplore holds a placeholder string).
+# A key that genuinely belongs in the image goes in KLDLOAD_ALLOWED_PRIVATE_KEYS
+# (space-separated rootfs paths) with a reason in the build config, never by
+# weakening this pattern.
+log "Scanning the rootfs for private keys before packing..."
+_pk_found=()
+while IFS= read -r _pk; do
+    _rel="/${_pk#"${ROOTFS}"/}"
+    case " ${KLDLOAD_ALLOWED_PRIVATE_KEYS:-} " in
+    *" ${_rel} "*) log "  allowed private key: ${_rel}" ;;
+    *) _pk_found+=("$_rel") ;;
+    esac
+done < <(for _d in etc var root usr/local opt home srv; do
+    [[ -d "${ROOTFS}/${_d}" ]] || continue
+    # WHY || true: grep exits 1 when nothing matches, which is the passing case.
+    grep -rlIE --exclude-dir=darksite -- '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' "${ROOTFS}/${_d}" || true
+done)
+if ((${#_pk_found[@]} > 0)); then
+    printf '  %s\n' "${_pk_found[@]}" >&2
+    die "FATAL: ${#_pk_found[@]} private key file(s) in the rootfs — refusing to pack an ISO that ships them"
+fi
+log "Private-key scan: none found"
+
 # mksquashfs with no -processors takes EVERY core, and -comp xz keeps them all
 # at 100% for the length of the compress — on a 24-core box that is the whole
 # machine, unusable, for the longest single step of the build.

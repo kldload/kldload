@@ -1,0 +1,37 @@
+# kldload-install-kiosk-fallback.service — a login on tty1 when the kiosk gives up.
+#
+# Role: the failsafe behind kldload-install-kiosk.service. Started ONLY by that
+# unit's OnFailure=, which (with RestartMode=direct) fires once its restarts
+# are exhausted, never on an ordinary crash-and-restart.
+# Read by: systemd, on the live image.
+#
+# WHY NOT getty@tty1.service: on a kiosk boot kldload-kiosk-generator masks
+# getty@tty1, so the kiosk owns tty1 from the start instead of losing it to the
+# console login (fiend, 2026-09-13: "Failed to set up standard input:
+# Operation not permitted"). A masked unit cannot be pulled back in by
+# OnFailure=, so the failsafe has to be a unit of its own.
+#
+# Consequence if missing: a kiosk that can never start (no DRM device, a broken
+# payload) leaves tty1 black. The install still runs underneath, and Ctrl+Alt+F2
+# still reaches a login, but the screen someone is looking at says nothing.
+
+[Unit]
+Description=kldload install kiosk fallback login on tty1
+After=systemd-user-sessions.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+# The leading '-' is agetty's own convention in getty@.service: exiting at
+# logout is normal, not a failure, and Restart= brings the prompt back.
+ExecStart=-/sbin/agetty --noclear tty1 $TERM
+Type=idle
+Restart=always
+RestartSec=0
+UtmpIdentifier=tty1
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+Environment=TERM=linux

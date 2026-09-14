@@ -30,9 +30,9 @@
 # target needs no ssh identity and the server needs no delegation. That is the
 # whole reason the golden transport is HTTP and not ssh.
 #
-# SUBCOMMANDS: serve | arm-install <mac> <answers> | arm-deploy <mac> --golden N
-#              --disk D [--hostname H] | golden <dataset> [as <name>]
-#              | disarm <mac> | status
+# SUBCOMMANDS: serve | arm-install <mac> <answers> | arm-all <dir> [--dry-run]
+#              | arm-deploy <mac> --golden N --disk D [--hostname H]
+#              | golden <dataset> [as <name>] | disarm <mac> | disarm-all | status
 #
 # Inputs : /var/lib/kldload-netboot/{vmlinuz,initrd.img,squashfs.img}
 #          iPXE images: /usr/share/ipxe (Fedora, ipxe-bootimgs-x86) or
@@ -60,6 +60,19 @@ trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 # NOT /var/lib/kldload/netboot: rpool/kldload/state mounts at /var/lib/kldload
 # and would shadow the payload written during the install (fiend, 2026-09-11 --
 # 5.1G written, invisible after reboot).
+# The unit reads /etc/kldload/netboot.env through EnvironmentFile=; a command run
+# by hand did not, so `kldload-netboot-server status` on onyx reported the default
+# payload (built 09-06) while the service was serving the one the file names
+# (2026-09-13). Loaded here with the unit's precedence: a variable already in the
+# environment wins. Parsed, never sourced — only NETBOOT_* KEY=VALUE lines.
+if [[ -r /etc/kldload/netboot.env ]]; then
+    while IFS= read -r _nl || [[ -n "$_nl" ]]; do
+        [[ "$_nl" =~ ^[[:space:]]*(NETBOOT_[A-Z_]+)=(.*)$ ]] || continue
+        _nk="${BASH_REMATCH[1]}" _nv="${BASH_REMATCH[2]}"
+        [[ "$_nv" =~ ^\"(.*)\"$ || "$_nv" =~ ^\'(.*)\'$ ]] && _nv="${BASH_REMATCH[1]}"
+        [[ -n "${!_nk+set}" ]] || export "$_nk=$_nv"
+    done </etc/kldload/netboot.env
+fi
 PAYLOAD="${NETBOOT_PAYLOAD:-/var/lib/kldload-netboot}"
 ROOT="${NETBOOT_ROOT:-/var/lib/kldload/netboot-serve}"
 
@@ -101,7 +114,15 @@ DHCP_RANGE="${NETBOOT_DHCP_RANGE:-}"
 # Kernel args every entry shares — the ISO's own hard-won line (selinux=0 or
 # the live system dies with "Failed to allocate manager object", plus the USB
 # blacklists and overlay size), followed by the netboot additions.
-ISO_ARGS='rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1 ip=dhcp rd.neednet=1 console=tty0'
+#
+# fbcon=nodefer: the initramfs install show (dracut module 95kldload-show) draws
+# on tty1 while the root image downloads. Fedora's kernel defers the framebuffer
+# console's takeover until the KERNEL prints something, and under `quiet` it never
+# does, so tty1 stays bound to the dummy console and nothing written to it reaches
+# the screen. Found in a UEFI qemu on 2026-09-13: the show ran, painted every
+# second, and the screen kept the firmware logo for the whole download. nodefer
+# only changes WHEN fbcon takes the screen, never whether.
+ISO_ARGS='rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1 ip=dhcp rd.neednet=1 console=tty0 fbcon=nodefer'
 
 # Args for an UNATTENDED install specifically: no desktop, just the show.
 #
@@ -119,7 +140,12 @@ ISO_ARGS='rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enfo
 # Install only, not deploy: a golden restore would benefit the same way, but it
 # drives a different tool and publishes no progress, so it keeps the desktop
 # until that is wired up.
-KIOSK_ARGS='kldload.kiosk=1 systemd.unit=multi-user.target'
+#
+# quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3: an unattended
+# install has nobody reading boot messages, and every one printed lands on top of
+# the initramfs show. The messages still reach the journal; kldload.kiosk=0 or
+# removing these from the armed snippet gives a verbose boot back.
+KIOSK_ARGS='kldload.kiosk=1 systemd.unit=multi-user.target quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3'
 
 log() { printf '[kldload-netboot] %s\n' "$*" >&2; }
 die() {
@@ -439,13 +465,93 @@ k_audit() {
 # ── arm-install ──────────────────────────────────────────────────────────────
 # Writes the seed the installer fetches AND a snippet whose kernel line points
 # at it. Same install as before, expressed as a per-MAC snippet.
+# _check_answers <file> — the refusals an answers file must pass before it is
+# served to a machine that will wipe its disk on it. Prints the reason and
+# returns 1; never exits, so arm-all can report every bad file in one pass
+# instead of stopping at the first. arm-install and arm-all share it: one list
+# of refusals, not two that drift.
+# _answers_lib — path of the installer's own answers loader, or nothing.
+# The installed tool looks where a kldload system keeps it; a repo checkout finds
+# it beside itself (usr/local/sbin -> usr/lib/kldload-installer/lib).
+_answers_lib() {
+    local here c
+    here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+    for c in "${KLDLOAD_ANSWERS_LIB:-}" /usr/lib/kldload-installer/lib/answers.sh \
+        "${here}/../../lib/kldload-installer/lib/answers.sh"; do
+        [[ -n "$c" && -r "$c" ]] && {
+            printf '%s\n' "$c"
+            return 0
+        }
+    done
+    return 1
+}
+
+# _check_answers <file> — refuse a file the installer would refuse or misread.
+#
+# Loads it with the INSTALLER'S loader (k_answers_load_env_file) in a subshell and
+# checks the values that loader produces, instead of `bash -n`. HISTORY 2026-09-13:
+# `bash -n` passed the shipped TEMPLATE.env, which the loader rejects at its first
+# indented comment, so arm-install armed a machine that could not install; and the
+# CHANGE-ME test was a grep for the unquoted spelling, so "CHANGE-ME" in quotes got
+# through while the loader strips the quotes and installs with it.
+_check_answers() {
+    local answers="$1" lib out
+    [[ -f "$answers" ]] || {
+        log "no such answers file: $answers"
+        return 1
+    }
+    if ! lib="$(_answers_lib)"; then
+        log "WARN: the installer's answers loader (answers.sh) is not on this host —"
+        log "      $answers was NOT checked the way the installer will read it."
+        log "      Install it at /usr/lib/kldload-installer/lib/answers.sh or set KLDLOAD_ANSWERS_LIB."
+        bash -n "$answers" 2>/dev/null || {
+            log "$answers is not valid shell"
+            return 1
+        }
+        grep -qE '^KLDLOAD_DISTRO=.' "$answers" || {
+            log "$answers sets no KLDLOAD_DISTRO"
+            return 1
+        }
+        return 0
+    fi
+    # stdout of the subshell is the verdict; the loader's k_die message comes back on it.
+    out="$(
+        k_die() {
+            printf 'REFUSED: %s\n' "$*"
+            exit 1
+        }
+        # shellcheck source=/dev/null
+        source "$lib"
+        k_answers_load_env_file "$answers"
+        [[ -n "${KLDLOAD_DISTRO:-}" ]] || {
+            echo "REFUSED: sets no KLDLOAD_DISTRO"
+            exit 1
+        }
+        [[ -n "${KLDLOAD_PROFILE:-}" ]] || {
+            echo "REFUSED: sets no KLDLOAD_PROFILE"
+            exit 1
+        }
+        for v in KLDLOAD_PASSWORD KLDLOAD_ZFS_PASSPHRASE KLDLOAD_DISK; do
+            [[ "${!v:-}" == *CHANGE-ME* ]] && {
+                echo "REFUSED: ${v} still holds the CHANGE-ME placeholder"
+                exit 1
+            }
+        done
+        if [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == 1 && -z "${KLDLOAD_ZFS_PASSPHRASE:-}" ]]; then
+            echo "REFUSED: KLDLOAD_ZFS_ENCRYPT=1 needs KLDLOAD_ZFS_PASSPHRASE"
+            exit 1
+        fi
+        echo "OK ${KLDLOAD_DISTRO}/${KLDLOAD_PROFILE}"
+    )" || {
+        log "$answers: ${out#REFUSED: }"
+        return 1
+    }
+    return 0
+}
+
 cmd_arm_install() {
     local mac="${1:?usage: arm-install <mac> <answers-file>}" answers="${2:?usage: arm-install <mac> <answers-file>}"
-    [[ -f "$answers" ]] || die "no such answers file: $answers"
-    bash -n "$answers" || die "$answers is not valid shell"
-    grep -q '^KLDLOAD_DISTRO=' "$answers" || die "$answers sets no KLDLOAD_DISTRO"
-    ! grep -qE '^KLDLOAD_(PASSWORD|ZFS_PASSPHRASE)=CHANGE-ME' "$answers" ||
-        die "$answers still holds the CHANGE-ME placeholder password — set a real one"
+    _check_answers "$answers" || die "refusing to arm $mac"
     install -d -m 0755 "$ROOT/answers" "$ROOT/armed"
     local m
     m="$(_mac_norm "$mac")"
@@ -575,6 +681,152 @@ cmd_disarm() {
     fi
 }
 
+# ── arm-all / disarm-all ─────────────────────────────────────────────────────
+# arm-all <dir> [--dry-run] — arm every machine that has an answers file.
+#
+# The directory is the estate: one <mac>.env per machine, kept in git, and
+# re-arming it is how a rack is rebuilt. Files are selected by NAME — a MAC in
+# either spelling (f0-2f-74-cd-27-50.env or f0:2f:74:cd:27:50.env) — so
+# TEMPLATE.env, notes and backups sitting beside them are skipped, and each skip
+# is said out loud rather than silently ignored.
+#
+# Refused as a WHOLE batch, before anything is armed:
+#   - two files naming the same MAC under different spellings: which one would
+#     win depends on glob order, and the loser is a machine installed wrong;
+#   - two machines with the same KLDLOAD_HOSTNAME: they install fine and then
+#     collide in DNS, the estate inventory and the Ansible host list.
+# Per machine, a file that fails _check_answers is reported and NOT armed; the
+# rest still are. Each machine is armed through cmd_arm_install itself, in a
+# subshell so its die() ends only that machine.
+#
+# Output: one line per file on stderr and a closing count that is checked
+# against the number of files given. Exit 0 only when every MAC-named file was
+# armed; 1 if any failed, if the batch was refused, or if there was nothing to
+# arm — "0 armed, 0 failed" from an empty or mistyped directory is not success.
+cmd_arm_all() {
+    local dir="" dry=0
+    while (($#)); do
+        case "$1" in
+        --dry-run) dry=1 ;;
+        -*)
+            log "arm-all: unknown option $1 (usage: arm-all <dir> [--dry-run])"
+            exit 2
+            ;;
+        *)
+            [[ -z "$dir" ]] || {
+                log "arm-all: one directory only (usage: arm-all <dir> [--dry-run])"
+                exit 2
+            }
+            dir="$1"
+            ;;
+        esac
+        shift
+    done
+    [[ -n "$dir" ]] || {
+        log "usage: arm-all <answers-dir> [--dry-run]"
+        exit 2
+    }
+    [[ -d "$dir" ]] || die "arm-all: no such directory: $dir"
+
+    local -a macs=() files=()
+    local -A seen_mac=() seen_host=()
+    local f base m host skipped=0 batch_bad=0
+    shopt -s nullglob
+    for f in "$dir"/*.env; do
+        base="$(basename "$f" .env)"
+        if ! m="$(_mac_norm "$base" 2>/dev/null)"; then
+            log "  skip   $(basename "$f") — not named for a MAC address"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        if [[ -n "${seen_mac[$m]:-}" ]]; then
+            log "  REFUSE $(basename "$f") and $(basename "${seen_mac[$m]}") name the same machine ($m)"
+            batch_bad=1
+            continue
+        fi
+        seen_mac[$m]="$f"
+        host="$(sed -n 's/^KLDLOAD_HOSTNAME=//p' "$f" | tail -1 | tr -d "\"'")"
+        if [[ -n "$host" ]]; then
+            if [[ -n "${seen_host[$host]:-}" ]]; then
+                log "  REFUSE $(basename "$f") and $(basename "${seen_host[$host]}") both use hostname '$host'"
+                batch_bad=1
+            else
+                seen_host[$host]="$f"
+            fi
+        fi
+        macs+=("$m")
+        files+=("$f")
+    done
+    shopt -u nullglob
+
+    if ((batch_bad)); then
+        die "arm-all: batch refused — nothing was armed. Fix the duplicates above and run it again."
+    fi
+    if ((${#files[@]} == 0)); then
+        die "arm-all: no <mac>.env files in $dir (${skipped} other file(s) skipped) — nothing to arm"
+    fi
+
+    local i armed=0 failed=0
+    local -a failed_list=()
+    for i in "${!files[@]}"; do
+        if ((dry)); then
+            if _check_answers "${files[$i]}"; then
+                log "  ok     ${macs[$i]}  $(basename "${files[$i]}") (dry run — not armed)"
+                armed=$((armed + 1))
+            else
+                log "  FAIL   ${macs[$i]}  $(basename "${files[$i]}")"
+                failed=$((failed + 1))
+                failed_list+=("${macs[$i]}")
+            fi
+            continue
+        fi
+        # </dev/null: nothing inside may eat the loop's input (the 2026-08-22
+        # while-read lesson), even though this loop does not read stdin today.
+        if (cmd_arm_install "${macs[$i]}" "${files[$i]}") </dev/null; then
+            armed=$((armed + 1))
+        else
+            log "  FAIL   ${macs[$i]}  $(basename "${files[$i]}") — not armed (reason above)"
+            failed=$((failed + 1))
+            failed_list+=("${macs[$i]}")
+        fi
+    done
+
+    local given=${#files[@]}
+    ((armed + failed == given)) ||
+        die "arm-all: accounted for $((armed + failed)) of ${given} machines — refusing to report success"
+    if ((dry)); then
+        log "arm-all (dry run): ${armed} of ${given} would arm, ${failed} would fail, ${skipped} file(s) skipped"
+    else
+        log "arm-all: ${armed} of ${given} armed, ${failed} failed, ${skipped} file(s) skipped"
+        k_audit "ARM-ALL $dir: ${armed}/${given} armed, ${failed} failed, by uid=$(id -u)"
+    fi
+    # exit, not return: under set -E a function returning 1 fires the ERR trap,
+    # which printed "FAIL at line N: return 1" beneath a report that had already
+    # said exactly what failed (caught under test, 2026-09-13).
+    if ((failed > 0)); then
+        log "failed: ${failed_list[*]}"
+        exit 1
+    fi
+}
+
+# disarm-all — remove every consent token and served answers file.
+cmd_disarm_all() {
+    local a n=0 total=0
+    shopt -s nullglob
+    local -a tokens=("$ROOT"/armed/*.ipxe)
+    shopt -u nullglob
+    total=${#tokens[@]}
+    for a in "${tokens[@]}"; do
+        cmd_disarm "$(basename "$a" .ipxe)"
+        n=$((n + 1))
+    done
+    shopt -s nullglob
+    local -a left=("$ROOT"/armed/*.ipxe "$ROOT"/answers/*.env)
+    shopt -u nullglob
+    log "disarm-all: ${n} of ${total} disarmed"
+    ((${#left[@]} == 0)) || die "disarm-all: ${#left[@]} armed or answers file(s) still present: ${left[*]}"
+}
+
 cmd_status() {
     # The tree may not exist before `serve` has run: a bare `find` on a missing
     # dir exits non-zero and trips set -e, so every listing is guarded on the
@@ -621,6 +873,11 @@ disarm)
     shift
     cmd_disarm "$@"
     ;;
+arm-all)
+    shift
+    cmd_arm_all "$@"
+    ;;
+disarm-all) cmd_disarm_all ;;
 status) cmd_status ;;
 *)
     cat >&2 <<'USAGE'
@@ -628,13 +885,17 @@ usage: kldload-netboot-server <command>
 
   serve                      run the PXE server (HTTP + TFTP + proxyDHCP)
   arm-install <mac> <answers>  next netboot of <mac> INSTALLS from the mirror
+  arm-all <dir> [--dry-run]  arm every <mac>.env in <dir>; refuses duplicate
+                             MACs or hostnames; exit 1 unless all armed
   arm-deploy <mac> --golden <name> --disk <d> [--hostname <h>]
                              next netboot of <mac> CLONES a golden over HTTP
   golden <dataset> [as <name>]  stage a dataset as a golden stream
   disarm <mac>               remove the consent token; that MAC boots locally
+  disarm-all                 disarm every armed machine
   status                     payload, service, goldens, armed machines
 
-environment (the unit reads /etc/kldload/netboot.env):
+environment (read from /etc/kldload/netboot.env by the unit AND by every command
+run by hand; a variable already set in the environment wins):
   NETBOOT_PORT   HTTP port (default 8080)
   NETBOOT_IFACE  interface to serve on (default: the one holding the default
                  route). Set this when provisioning runs on its own NIC, which

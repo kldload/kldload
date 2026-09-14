@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-kiosk-generator — decide, BEFORE the boot transaction exists, whether
+# this boot runs the install show in a cage kiosk.
+#
+# WHAT IT DOES, IN ORDER:
+#   1. Asks `kldload-install-kiosk check` whether this boot wants the kiosk. The
+#      decision logic lives there and only there (cmdline flags, live-medium
+#      probe, install-done); this file never re-implements it.
+#   2. If no: writes nothing at all, and the boot is exactly what it would have
+#      been without this file.
+#   3. If yes: into the generator dirs,
+#        normal/multi-user.target.wants/kldload-install-kiosk.service  (start it)
+#        early/getty@tty1.service          -> /dev/null                (mask)
+#        early/kldload-live-tui.service    -> /dev/null                (mask)
+#        early/gdm.service, display-manager.service -> /dev/null       (mask)
+#
+# WHY THIS EXISTS — two failures, one lesson:
+#   The kiosk unit first carried Conflicts= for tty1's other owners with the
+#   decision in ExecCondition=. systemd resolves Conflicts= while BUILDING the
+#   transaction and runs ExecCondition= much later, so every hands-on USB boot
+#   lost GDM and the text installer to a kiosk that then skipped itself
+#   (2026-09-13, morning).
+#   The fix for that dropped Conflicts= and had the run path stop getty itself.
+#   That could never execute: systemd acquires StandardInput=tty-fail for the
+#   ExecCondition process too, getty@tty1 already held tty1, and the unit died
+#   "Failed to set up standard input: Operation not permitted" before any of
+#   its code ran (fiend netboot, 2026-09-13, build 14:54Z). Proven by stopping
+#   getty by hand: the kiosk started in one second.
+#   Both times the decision was made too late. A generator runs before systemd
+#   has a transaction at all, so what it masks is simply never started and
+#   there is nothing left to fight over tty1.
+#
+# INPUTS:   $1 normal dir, $2 early dir, $3 late dir (systemd.generator(7));
+#           /proc/cmdline and the live-medium markers, via the check.
+# OUTPUTS:  symlinks in $1 and $2 only when the kiosk is wanted.
+# EXIT:     always 0. A generator that fails is logged by systemd and the boot
+#           carries on; a failure here must degrade to "no kiosk", which is the
+#           desktop or the text installer, never a boot with nothing on tty1.
+#
+# Notes:
+#   - Generators run very early, before the journal is writable: diagnostics
+#     go to /dev/kmsg, which lands in `journalctl -b -k`.
+#   - Masks written to the EARLY dir outrank /etc/systemd/system, which is where
+#     getty.target.wants and the live-tui enable symlink live.
+#   - Test hook: KLDLOAD_KIOSK_TOOL points at the check tool; the check tool's
+#     own KLDLOAD_KIOSK_* hooks pass straight through the environment.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+# Every command that can fail below is guarded with its own || branch, so -e
+# never fires on a handled failure. No ERR trap: a generator must not print a
+# scary trace for a path it already logged, and the masks are only written
+# after the wants link is known to exist.
+
+TOOL="${KLDLOAD_KIOSK_TOOL:-/usr/local/sbin/kldload-install-kiosk}"
+UNIT=/etc/systemd/system/kldload-install-kiosk.service
+
+_log() {
+    local _m="kldload-kiosk-generator: $*"
+    if [[ -w /dev/kmsg ]]; then
+        printf '<6>%s\n' "$_m" >/dev/kmsg 2>/dev/null || printf '%s\n' "$_m" >&2
+    else
+        printf '%s\n' "$_m" >&2
+    fi
+}
+
+normal="${1:-}"
+early="${2:-}"
+if [[ -z "$normal" || -z "$early" ]]; then
+    _log "called without generator directories — nothing written (usage: generator <normal> <early> <late>)"
+    exit 0
+fi
+
+if [[ ! -x "$TOOL" ]]; then
+    _log "no ${TOOL} — install kiosk disabled for this boot"
+    exit 0
+fi
+
+# The check explains its own answer on stderr; keep that reason for the log.
+if ! _why="$("$TOOL" check 2>&1)"; then
+    _log "kiosk not wanted: ${_why##*kldload-install-kiosk: }"
+    exit 0
+fi
+
+# Everything below writes into directories systemd hands us fresh on every boot
+# and every daemon-reload, so there is no stale state to clean up first.
+_ok=1
+mkdir -p "${normal}/multi-user.target.wants" || _ok=0
+ln -sf "$UNIT" "${normal}/multi-user.target.wants/kldload-install-kiosk.service" || _ok=0
+if ((_ok == 0)); then
+    # Without the wants link nothing starts the kiosk, and masking the text
+    # installer anyway would leave tty1 empty. Stop before masking anything.
+    _log "WARNING: could not write the kiosk wants link into ${normal} — leaving tty1 to its usual owners"
+    exit 0
+fi
+
+mkdir -p "$early" || {
+    _log "WARNING: cannot create ${early}; the kiosk may fight getty for tty1"
+    exit 0
+}
+for _u in getty@tty1.service kldload-live-tui.service gdm.service display-manager.service; do
+    ln -sf /dev/null "${early}/${_u}" ||
+        _log "WARNING: could not mask ${_u}; the kiosk may fight it for tty1"
+done
+
+_log "kiosk wanted (${_why##*kldload-install-kiosk: }) — kldload-install-kiosk.service enabled; getty@tty1, kldload-live-tui and the display manager masked for this boot"
+exit 0

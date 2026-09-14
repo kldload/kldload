@@ -1,0 +1,34 @@
+#!/usr/bin/bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-show-generator — keep the initqueue's chatter off the install show.
+#
+# Runs as a systemd generator inside the initramfs, before any unit starts. On an
+# http(s) live boot only, it writes a drop-in that sends dracut-initqueue's stderr
+# to the journal instead of journal+console.
+#
+# WHY: livenet's curl prints its progress meter on stderr, and dracut-initqueue
+# routes stderr to the console, so on a netboot the meter lands on tty1 on top of
+# the slides (qemu screendump, 2026-09-13). Nothing is lost: the same lines are in
+# the journal, and a failed download still ends in dracut's emergency shell.
+# A USB or ISO boot writes nothing here and keeps every console message.
+#
+# Input: /proc/cmdline (KLDLOAD_SHOW_CMDLINE for tests). Output: $1 (the normal
+# generator directory). EXIT: always 0; a generator that fails is logged by systemd
+# and must never be the reason a machine does not boot.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+out="${1:-}"
+[[ -n "$out" && -d "$out" ]] || exit 0
+read -ra toks <"${KLDLOAD_SHOW_CMDLINE:-/proc/cmdline}" || exit 0
+for t in "${toks[@]}"; do
+    case "$t" in
+    root=live:http://* | root=live:https://*)
+        mkdir -p "$out/dracut-initqueue.service.d" || exit 0
+        printf '%s\n' '# written by kldload-show-generator: http live boot, the install show owns tty1' \
+            '[Service]' 'StandardError=journal' >"$out/dracut-initqueue.service.d/50-kldload-show.conf"
+        exit 0
+        ;;
+    esac
+done
+exit 0

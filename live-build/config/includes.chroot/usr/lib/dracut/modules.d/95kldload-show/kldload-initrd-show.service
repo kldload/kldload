@@ -1,0 +1,31 @@
+# kldload-initrd-show.service — the install show in the initramfs, during a netboot.
+#
+# Role: runs kldload-initrd-show on tty1 from the first moments of the initramfs,
+# so a netbooting machine shows the teaser slides and the image download instead
+# of a blank screen. Read by: systemd inside the initramfs only (dracut module
+# 95kldload-show). The script exits at once on anything that is not an http(s)
+# live-image boot, so a USB boot pays nothing.
+#
+# Consequence if missing: a netboot shows nothing until the live system's kiosk
+# starts, 2.5-10 minutes later. The install is unaffected.
+
+[Unit]
+Description=kldload install show (initramfs, during the image download)
+DefaultDependencies=no
+# After the console is set up so the font and size are final; before the initqueue
+# that runs the download, so the show is already up when the transfer starts.
+After=systemd-vconsole-setup.service
+Before=dracut-initqueue.service
+# Stop cleanly when the initramfs hands over; the live system's kiosk carries on.
+Conflicts=initrd-switch-root.target shutdown.target
+Before=initrd-switch-root.target shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kldload-initrd-show
+# Never let the show hold up the boot or the switch-root.
+TimeoutStopSec=2s
+KillMode=mixed
+StandardInput=null
+StandardOutput=null
+StandardError=journal

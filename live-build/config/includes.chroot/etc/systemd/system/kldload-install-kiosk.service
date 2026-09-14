@@ -9,61 +9,35 @@
 # gnome-shell was 530 MB RSS and 326-407% CPU while the installer was writing
 # 1678 packages to ZFS — all of it for a screen with nothing to click on. cage
 # measured 56 MB RSS and 0.6% CPU showing the same SPA (onyx, 2026-09-12).
-# Chrome itself costs the same either way -- it is the session under it that
-# goes away.
 #
-# Consequence if missing: an unattended boot falls back to GDM + GNOME and the
-# show still appears, just expensively. Nothing breaks.
+# WHO STARTS IT: nothing in this file. There is deliberately no [Install]
+# section and no ExecCondition=. kldload-kiosk-generator decides at the very
+# start of boot, before systemd has built a transaction, and only when the
+# answer is yes does it add this unit to multi-user.target and mask tty1's
+# other owners (getty@tty1, kldload-live-tui, the display manager).
 #
-# Consequence if it starts when it should not: a full-screen browser replaces
-# the operator's desktop. That is why the decision lives in an ExecCondition
-# that requires positive evidence of a live boot, and not in this file.
+# HISTORY — the decision was made too late, twice, on 2026-09-13:
+#   1. Conflicts= on tty1's owners plus ExecCondition=. Conflicts are resolved
+#      when the transaction is built; ExecCondition runs much later. Every
+#      hands-on USB boot lost GDM and the text installer to a kiosk that then
+#      skipped itself.
+#   2. No Conflicts=, and the run path stopped getty itself. That never ran:
+#      StandardInput=tty-fail is acquired for the ExecCondition process too,
+#      getty@tty1 already held tty1, and the unit died with "Failed to set up
+#      standard input: Operation not permitted" before any of its code executed
+#      (fiend netboot, build 14:54Z). Stopping getty by hand made it start in
+#      one second, which is what proved the cause.
+# A generator cannot have either fault: what it masks is never started, and a
+# boot it says no to is byte-for-byte the boot without this unit.
+#
+# Consequence if missing: an unattended boot shows the text installer on tty1.
+# The install itself is unaffected; only the show is gone.
 
 [Unit]
 Description=kldload install show (cage kiosk, no desktop)
 Documentation=https://kldload.com/
 Documentation=man:cage(1)
-
-# NO Conflicts= HERE, and that is the whole point of this comment.
-#
-# This unit used to carry Conflicts= for getty@tty1, kldload-live-tui and
-# gdm.service, copying gdm's own shape, with the kiosk/desktop decision in
-# ExecCondition= below. That is broken, and it broke every hands-on live boot
-# on the 2026-09-13 ISO.
-#
-# systemd resolves Conflicts= when it BUILDS the transaction, at boot. It runs
-# ExecCondition= much later, when the job actually executes. So the order on a
-# plain USB boot was: enqueue this unit (WantedBy=multi-user.target), drop
-# gdm.service's and kldload-live-tui's start jobs because this unit conflicts
-# with them, open a PAM session, and only THEN ask ExecCondition whether to run
-# — which correctly answered "no, this is a hands-on boot, leave the desktop
-# alone". Too late. The journal reads:
-#
-#   Starting kldload-install-kiosk.service...
-#   pam_unix(kldload-kiosk:session): session opened for user live
-#   kldload-install-kiosk.service: Skipped due to 'exec-condition'.
-#
-# and gdm has NO entries for that boot at all. The operator got a text console,
-# no desktop, and no text installer either, because live-tui was in the same
-# list. A Condition= instead of ExecCondition= has the identical fault; the
-# conflict jobs are already gone by the time any condition is evaluated.
-#
-# So the unit declares no conflicts and `kldload-install-kiosk run` stops the
-# other owners of tty1 itself, which happens only once the decision has
-# actually come out yes. The netboot path pins systemd.unit=multi-user.target
-# anyway, so GDM is never started there and the conflicts were never doing the
-# work I thought they were.
-After=plymouth-quit.service
-
-# Ordering ONLY — no Conflicts, no Wants. After= neither starts a unit nor
-# stops one; it just says "not before". Without it there is a real race on the
-# netboot path: multi-user.target wants both this and kldload-live-tui, so the
-# kiosk could run its stop of live-tui BEFORE live-tui had started, and then
-# agetty would come up and take tty1 out from under cage. Ordering after them
-# means whatever is there is there before the kiosk goes looking for it.
-After=getty@tty1.service kldload-live-tui.service
-
-After=systemd-user-sessions.service systemd-logind.service
+After=plymouth-quit.service systemd-user-sessions.service systemd-logind.service
 
 # The show is served by nginx over a unix socket from kldload-webui. Wants, not
 # Requires: if the backend is late or broken, cage should still paint and let
@@ -72,38 +46,37 @@ After=systemd-user-sessions.service systemd-logind.service
 Wants=nginx.service kldload-webui.service
 After=nginx.service kldload-webui.service
 
-# Live only, twice over: this condition AND the live-medium probe inside
-# `kldload-install-kiosk check`. Belt and braces because the failure mode is
-# hijacking an installed machine's desktop.
+# Never on an installed machine, whatever enabled the unit.
 ConditionPathExists=!/var/lib/kldload-installer/install-done
 
-# A genuine crash loop has to end somewhere visible rather than spinning on the
-# VT forever: five failures in a minute and the unit stays failed, which fires
-# the OnFailure below and hands tty1 to a login prompt.
-#
-# These two keys are [Unit], not [Service]. `systemd-analyze verify` called that
-# out as "Unknown key 'StartLimitIntervalSec' in section [Service], ignoring"
-# when I first wrote them next to Restart= where they read more naturally
-# (2026-09-12) -- a rate limit that silently does nothing is worse than none.
+# A genuine crash loop has to end somewhere visible: five failures in a minute
+# and the unit stays failed. These are [Unit] keys; `systemd-analyze verify`
+# ignores them in [Service] (2026-09-12).
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
-# Failsafe. If cage cannot start — no DRM device, a serial-only box, a missing
-# package — something still has to own tty1, or the operator is left with a
-# black screen and no way in.
-OnFailure=getty@tty1.service
+# Failsafe once the restarts above are exhausted: a plain login on tty1. Not
+# getty@tty1.service, which the generator has masked for this boot and which
+# OnFailure= therefore cannot start.
+#
+# HISTORY: this used to be OnFailure=getty@tty1.service with the default
+# restart mode. A unit passes through "failed" on every crash before it
+# restarts, so the FIRST cage crash on fiend (nouveau, no GL renderer) started
+# getty, getty took tty1, and every restart after that died on the terminal
+# again: one crash turned into a permanent skip (2026-09-13).
+OnFailure=kldload-install-kiosk-fallback.service
 
 [Service]
 Type=simple
-# ExecCondition, NOT ExecStartPre: "this boot wants the desktop" is a normal
-# answer, and ExecStartPre would record it as a failed unit on every hands-on
-# live boot.
-ExecCondition=/usr/local/sbin/kldload-install-kiosk check
 ExecStart=/usr/local/sbin/kldload-install-kiosk run
 
 # A kiosk comes back. Closing the window is not a way out of an install.
 Restart=always
 RestartSec=2
+# direct: an automatic restart does not enter the failed state, so OnFailure=
+# fires only when StartLimitBurst gives up, not on the first crash.
+RestartMode=direct
+
 User=live
 # PAMName is what makes this work at all as a non-root user. The PAM session
 # stack (see /etc/pam.d/kldload-kiosk) runs pam_systemd, which registers a
@@ -112,14 +85,6 @@ User=live
 # backend" and Chrome would be left with nowhere to draw.
 PAMName=kldload-kiosk
 TTYPath=/dev/tty1
-# TTYReset and TTYVHangup are NOT set, and that is the same lesson as the
-# missing Conflicts= above. systemd applies the TTY settings when it builds the
-# exec context, and ExecCondition= runs inside that context — so a unit that
-# hangs up tty1 does it even on the boots where it goes on to skip itself. With
-# the conflicts gone, kldload-live-tui legitimately owns tty1 on a hands-on
-# boot, and a vhangup from a kiosk that is about to stand down would kick it
-# off its own terminal. gdm.service sets none of these either; cage takes the
-# VT through logind, which is what PAMName plus TTYPath is for.
 StandardInput=tty-fail
 StandardOutput=journal
 # journal+console for errors only: a fatal line has to reach the screen the
@@ -138,6 +103,3 @@ Environment=HOME=/home/live
 # already passes --password-store=basic, which is the flag that stops Chrome
 # popping a blocking "create a password for your keyring" dialog on a session
 # with no keyring daemon.
-
-[Install]
-WantedBy=multi-user.target
