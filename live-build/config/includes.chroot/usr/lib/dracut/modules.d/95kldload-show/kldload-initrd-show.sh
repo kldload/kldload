@@ -48,6 +48,7 @@
 #     KLDLOAD_SHOW_ONCE (draw one frame and exit).
 # EXIT: always 0.
 # ─────────────────────────────────────────────────────────────────────────────
+# strict-mode: exempt — a display loop beside the install: a failed read or draw must skip a frame, never end the show
 set -uo pipefail
 export LC_ALL=C
 # No -e: a failed stat or curl mid-download is an ordinary moment, not a reason to
@@ -246,43 +247,53 @@ current_size() {
 
 # ─── animation ───────────────────────────────────────────────────────────────
 # Three effects. The first two are drawn from real state, nothing canned:
-#   the bar   green fill, a blue pulse sweeping through it, and a violet/blue/white
-#             spark flickering at the leading edge while bytes are arriving;
+#   the bar   green fill with a soft scanner light gliding end to end and back, a
+#             fading tail behind it, only while bytes are arriving;
 #   the wire  a hexdump -C view of the last bytes that actually landed in the image
 #             file, with magenta offsets, blue bytes and zero bytes dimmed;
 #   the tx    one short line typed out now and then above the wire: dry, ominous
 #             lines about machines provisioning machines. The only invented text on
 #             the screen, and it is plainly a voice, never a status.
 # Operator, fiend 2026-09-13: "something cool like electricity ... the spark ...
-# maybe blue or purple ... hex messages would be cooler."
-BAR_ROW=0 BAR_CELLS=0 BAR_N=0 BAR_PCT=0 BAR_LIVE=0 FX_POS=-6 TICK=0
+# maybe blue or purple ... hex messages would be cooler." Later the same night, of
+# the bar: "the progress blink thing is a bit much .. if anything a soft knightrider
+# would be cooler": the random spark became one scanner, no randomness.
+BAR_ROW=0 BAR_CELLS=0 BAR_N=0 BAR_PCT=0 BAR_LIVE=0 FX_POS=0 FX_DIR=1 TICK=0
 HAVE_HEX=0
 command -v od >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 && HAVE_HEX=1
-PULSE=("${E}[34m" "${E}[1;34m" "${E}[1;36m" "${E}[1;37m" "${E}[1;36m" "${E}[1;34m")
-SPARK_C=("${E}[1;35m" "${E}[1;34m" "${E}[1;37m" "${E}[1;36m" "${E}[35m")
-SPARK_G=("█" "▓" "▒" "▓")
+# The scanner's light and its tail: the head, then the cells it just left. On the fill
+# the tail is intensity only (bold green, then normal); on the empty track it is
+# shading, so it reads as light passing over, not as progress.
+SCAN_FILL=("${GREEN}█" "${GREEN}▓" "${GRN}▓")
+SCAN_TRACK=("${GREEN}▓" "${GRN}▒" "${GRN}░")
 
-# draw_fx — the bar row: fill, pulse, spark, track, percent. One write.
+# draw_fx — the bar row: fill, scanner, track, percent. One write.
+# The scanner moves one cell a tick (ten a second) across the whole bar and bounces
+# at both ends, so a 60-cell bar is a six-second sweep: slow enough to be calm, and
+# still visibly alive at 0% before the fill has anything to show.
 draw_fx() {
     ((BAR_ROW > 0 && BAR_CELLS > 0)) || return 0
     local c k out
     out="${E}[${BAR_ROW};$((margin + 1))H"
     if ((BAR_LIVE)); then
-        FX_POS=$((FX_POS + 3))
-        ((FX_POS > BAR_N + 6)) && FX_POS=-6
+        FX_POS=$((FX_POS + FX_DIR))
+        if ((FX_POS >= BAR_CELLS - 1)); then
+            FX_POS=$((BAR_CELLS - 1)) FX_DIR=-1
+        elif ((FX_POS <= 0)); then
+            FX_POS=0 FX_DIR=1
+        fi
     fi
     for ((c = 0; c < BAR_CELLS; c++)); do
-        if ((c < BAR_N)); then
-            k=$((c - FX_POS))
-            if ((BAR_LIVE && k >= 0 && k < ${#PULSE[@]})); then
-                out+="${PULSE[k]}█"
+        # k: how many cells behind the head this one is (0 = the head itself).
+        k=$(((FX_POS - c) * FX_DIR))
+        if ((BAR_LIVE && k >= 0 && k < ${#SCAN_FILL[@]})); then
+            if ((c < BAR_N)); then
+                out+="${SCAN_FILL[k]}"
             else
-                out+="${GREEN}█"
+                out+="${SCAN_TRACK[k]}"
             fi
-        elif ((BAR_LIVE && c == BAR_N)); then
-            out+="${SPARK_C[RANDOM % ${#SPARK_C[@]}]}${SPARK_G[RANDOM % ${#SPARK_G[@]}]}"
-        elif ((BAR_LIVE && c == BAR_N + 1 && RANDOM % 2)); then
-            out+="${SPARK_C[RANDOM % ${#SPARK_C[@]}]}░"
+        elif ((c < BAR_N)); then
+            out+="${GRN}█"
         else
             out+="${RESET}${DIM}░"
         fi

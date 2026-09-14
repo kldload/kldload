@@ -1,4 +1,5 @@
 #!/usr/bin/bash
+# strict-mode: exempt — dracut sources this file into its own shell; set -e here would change how dracut itself handles errors
 # dracut module 95kldload-show — the install show during a netboot image download.
 #
 # Installed by builder/build-iso.sh (dracut --add kldload-show) into the live
