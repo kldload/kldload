@@ -72,7 +72,12 @@ test_service_enabled "kldload-webui enabled" "kldload-webui"
 # Check if webui responds (may be inactive on server profile but should be enabled)
 if systemctl is-active kldload-webui >/dev/null 2>&1; then
     _pass "kldload-webui running"
-    test_succeeds "WebUI responds on :8080" "curl -sf http://localhost:8080 >/dev/null 2>&1"
+    # The web UI listens on a unix socket and nginx fronts it on :8443. This check
+    # curled :8080 for months after that move and failed on every server edition
+    # where the service is active (7-net, fiend 2026-09-13), while both the socket and
+    # :8443 answered 200. :8080 is Open WebUI's port, checked further down.
+    test_succeeds "WebUI responds on its socket" "curl -sf --max-time 5 --unix-socket /run/kldload/webui.sock http://localhost/ >/dev/null 2>&1"
+    test_succeeds "WebUI responds through nginx on :8443" "curl -skf --max-time 5 https://localhost:8443/ >/dev/null 2>&1"
 else
     _warn "kldload-webui running" "service not active (may need manual start)"
 fi

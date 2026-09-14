@@ -310,6 +310,7 @@ if should_run smoke && ((DO_SMOKE)); then
     repo_owner="$(stat -c %U "$REPO")"
     repo_home="$(getent passwd "$repo_owner" | cut -d: -f6)"
     [[ -n "$repo_home" && -d "$repo_home" ]] || fail_run smoke "cannot find the home directory of $repo_owner, who owns $REPO"
+    # swallow: the known ratchets make smoke-build exit 2; the verdict is read from smoke.txt below
     (cd "$REPO" && runuser -u "$repo_owner" -- env HOME="$repo_home" USER="$repo_owner" \
         PATH="$repo_home/go/bin:$repo_home/.local/bin:/usr/local/bin:/usr/bin:/usr/sbin" \
         ./deploy.sh smoke-build) >"$OUT/smoke.out" 2>&1 || true
@@ -319,6 +320,7 @@ if should_run smoke && ((DO_SMOKE)); then
     # read it as one.
     grep -q 'Build Smoke Test Results' "$OUT/smoke.txt" ||
         fail_run smoke "smoke-build stopped before its summary — see smoke.out (last line: $(tail -n 1 "$OUT/smoke.txt"))"
+    # swallow: grep -v exits 1 when every FAIL line is a known ratchet, which is the passing case
     fails="$(grep -E '^\s*(✗ )?FAIL ' "$OUT/smoke.txt" | grep -vE 'silent-failure ratchet|strict-mode ratchet' || true)"
     [[ -z "$fails" ]] || fail_run smoke "smoke-build failures beyond the known ratchets: $(sed -n 1,3p <<<"$fails" | tr '\n' ' ')"
     phase_ok smoke "$(basename "$ISO")"
@@ -361,7 +363,8 @@ if should_run stage; then
     grep -q 'usr/bin/kldload-initrd-show' <<<"$_listing" || fail_run stage "staged initrd has no install show"
     systemctl restart kldload-netboot || fail_run stage "kldload-netboot did not restart"
     sleep 3
-    _status="$("$NB_TOOL" status 2>&1)" || true # status of a running server; the content is checked next
+    # swallow: status exits non-zero for some healthy states; the built_at line is checked next
+    _status="$("$NB_TOOL" status 2>&1)" || true
     grep -qF "$built" <<<"$_status" || fail_run stage "netboot status does not show built_at $built"
     phase_ok stage "built_at $built"
 fi
@@ -390,7 +393,11 @@ if should_run boot; then
     booted=""
     for ip in $(known_ips); do
         port22 "$ip" || continue
-        entry="$(tssh "$ip" 'efibootmgr | grep -iE "PXE IPv4" | head -n 1 | sed -n "s/^Boot\([0-9A-F]\{4\}\).*/\1/p"' 2>/dev/null)" || entry=""
+        # The PXE entry for THIS MAC, not the first one listed: with the onboard port
+        # and a 10G card both present (fiend, 2026-09-13), the first IPv4 entry can be
+        # the port the answers file was not armed for, and the netboot would never ask
+        # for the armed snippet. efibootmgr -v prints MAC(f02f74cd2750,0) per entry.
+        entry="$(tssh "$ip" "efibootmgr -v | grep -iE 'IPv4' | grep -i 'MAC(${MAC//-/}' | head -n 1 | sed -n 's/^Boot\\([0-9A-Fa-f]\\{4\\}\\).*/\\1/p'" 2>/dev/null)" || entry=""
         [[ "$entry" =~ ^[0-9A-F]{4}$ ]] || continue
         # Firmware Secure Boot on + an answers file without it = an unattended run
         # that cannot finish: the iPXE loader is refused, and each install's fresh
@@ -401,7 +408,8 @@ if should_run boot; then
             fail_run boot "Secure Boot is ON in ${ip}'s firmware and this answers file does not enable it — turn it off in the BIOS for an unattended run"
         fi
         log "target reachable at $ip, network boot entry Boot$entry — setting one-time network boot and rebooting"
-        tssh "$ip" "efibootmgr -n $entry >/dev/null && (sleep 2; systemctl reboot) >/dev/null 2>&1 &" || true # the connection drops as it reboots
+        # swallow: the ssh connection drops as the target reboots, which is the success case
+        tssh "$ip" "efibootmgr -n $entry >/dev/null && (sleep 2; systemctl reboot) >/dev/null 2>&1 &" || true
         booted="$ip"
         break
     done
@@ -480,9 +488,29 @@ if should_run ready; then
         if [[ -n "$ip" ]]; then
             [[ "$ip" != "$TARGET_IP" ]] && log "target answers on $ip"
             TARGET_IP="$ip"
-            state="$(tssh "$ip" 'for u in kldload-firstboot kldload-autodeploy; do printf "%s=%s " "$u" "$(systemctl is-active "$u" 2>/dev/null)"; done' 2>/dev/null)" || state=""
+            # Judged from what the system records, not from unit states. HISTORY,
+            # 7-net 2026-09-13: ssh answered at 22:35:34, kldload-firstboot was
+            # still "inactive" because it had not STARTED yet (it began at 22:35:37),
+            # the old check read that as finished, and verify failed a metrics stack
+            # first boot had not installed. The old check also could never pass an
+            # edition with autodeploy: that unit is a oneshot with RemainAfterExit,
+            # so it stays "active" after it finishes.
+            #   firstboot  done when /var/lib/kldload/firstboot-done exists, or the
+            #              unit is not enabled at all (core has none)
+            #   autodeploy done when its phase file says ready or partial, or the
+            #              unit failed, or it is not enabled
+            state="$(tssh "$ip" '
+                fb=pending
+                { [ -f /var/lib/kldload/firstboot-done ] || ! systemctl is-enabled --quiet kldload-firstboot 2>/dev/null; } && fb=done
+                ph="$(cat /var/lib/kldload/current-phase 2>/dev/null)"
+                ad=pending
+                if ! systemctl is-enabled --quiet kldload-autodeploy 2>/dev/null; then ad=none
+                elif [ "$ph" = ready ] || [ "$ph" = partial ] || [ "$ph" = nothing-requested ] || [ -f /var/lib/kldload/autodeploy-skipped ] ||
+                    [ "$(systemctl is-active kldload-autodeploy 2>/dev/null)" = failed ]; then ad=done
+                fi
+                echo "firstboot=$fb autodeploy=$ad phase=${ph:-none}"' 2>/dev/null)" || state=""
         fi
-        if [[ -n "$state" && "$state" != *activating* && "$state" != *"=active "* ]]; then
+        if [[ "$state" == *firstboot=done* && "$state" != *autodeploy=pending* ]]; then
             break
         fi
         log "converging: ${state:-target not reachable (rebooting, or waiting at a passphrase prompt)}"
@@ -502,7 +530,7 @@ if should_run verify; then
     VERIFY_LINES="$(tssh "$TARGET_IP" "$(
         cat <<VERIFY
 H='${A[KLDLOAD_HOSTNAME]}' P='${A[KLDLOAD_PROFILE]}' ENC='${A[KLDLOAD_ZFS_ENCRYPT]:-0}' SB='${A[KLDLOAD_ENABLE_SECURE_BOOT]:-0}'
-K8S='${A[KLDLOAD_K8S_BOOTSTRAP]:-0}' IMG='${A[KLDLOAD_BUILD_IMAGES]:-0}' AI='${A[KLDLOAD_ENABLE_AI]:-0}' DEV='${A[KLDLOAD_ENABLE_DEVOPS]:-0}'
+K8S='${A[KLDLOAD_K8S_BOOTSTRAP]:-0}' IMG='${A[KLDLOAD_BUILD_IMAGES]:-0}' AI='${A[KLDLOAD_ENABLE_AI]:-0}' DEV='${A[KLDLOAD_ENABLE_DEVOPS]:-0}' KVM='${A[KLDLOAD_ENABLE_KVM]:-0}' K8SE='${A[KLDLOAD_ENABLE_K8S]:-0}'
 WG='${A[KLDLOAD_WIREGUARD]:-0}' KEEP='${A[KLDLOAD_KEEP_NETBOOT]:-0}' NODES=$((want_cp + want_w))
 VERIFY
         cat <<'VERIFY'
@@ -520,6 +548,7 @@ if [[ "$SB" == 1 ]]; then
     [[ "$e" == *"already enrolled"* ]] && r PASS "this install's MOK enrolled" "$e; $v" || r FAIL "this install's MOK enrolled" "${e:-no /var/lib/dkms/mok.der} ($v)"
     [[ "$v" == *enabled* ]] && r PASS "secure boot on" "$v" || r FAIL "secure boot on" "$v"
 else r INFO "secure boot" "$v"; fi
+# swallow: grep -c prints 0 and exits 1 when nothing is held; the count is judged next
 v="$(dnf versionlock list 2>/dev/null | grep -c 'Package name' || true)"; ((v > 0)) && r PASS "kernel/ZFS held" "$v packages" || r FAIL "kernel/ZFS held" "0 packages held"
 logger -t kldload-verify "probe-$$"; sleep 2
 journalctl -t kldload-verify --no-pager 2>/dev/null | grep -q "probe-$$" && r PASS "journal records" "" || r FAIL "journal records" "probe not returned"
@@ -527,7 +556,9 @@ v="$(systemctl --failed --no-legend 2>/dev/null | awk '{print $2}' | tr '\n' ' '
 [[ -f /etc/wireguard/wg0.pub || "$WG" != 1 ]] && r PASS "wireguard key" "$( [[ "$WG" == 1 ]] && echo present || echo not requested)" || r FAIL "wireguard key" "/etc/wireguard/wg0.pub missing"
 if [[ "$KEEP" == 1 ]]; then [[ -s /var/lib/kldload-netboot/squashfs.img ]] && r PASS "netboot payload kept" "$(du -h /var/lib/kldload-netboot/squashfs.img | cut -f1)" || r FAIL "netboot payload kept" "missing"; fi
 if [[ "$K8S" == 1 ]]; then
+    # swallow: grep -c exits 1 at zero Ready nodes, and kubectl fails before the cluster exists; both are judged next
     v="$(kubectl get nodes --no-headers 2>/dev/null | grep -cw Ready || true)"
+    # swallow: same as above, with root's kubeconfig
     [[ -z "$v" || "$v" == 0 ]] && v="$(KUBECONFIG=/root/.kube/config kubectl get nodes --no-headers 2>/dev/null | grep -cw Ready || true)"
     ((v == NODES)) && r PASS "kubernetes nodes Ready" "$v of $NODES" || r FAIL "kubernetes nodes Ready" "${v:-0} of $NODES"
 fi
@@ -537,7 +568,20 @@ if [[ "$IMG" == 1 ]]; then
 fi
 v="$(grep -E '\] \[[a-z0-9-]+\] FAILED|PHASE .* FAILED' /var/log/kldload/autodeploy.log 2>/dev/null | cut -c1-160 | tr '\n' ';')"
 [[ -z "$v" ]] && r PASS "autodeploy phases" "no FAILED lines" || r FAIL "autodeploy phases" "$v"
-if lspci 2>/dev/null | grep -qiE '(vga|3d|display).*nvidia'; then
+# Every profile installs the driver when it detects the card (operator, 2026-09-13), so a
+# card with no driver package is a FAIL, not a skip. HISTORY: 7-net that night had no
+# akmod-nvidia at all (RPM Fusion never set up) and an earlier version of this check,
+# gated on the package being installed, passed it silently. The wait covers core, which
+# has no first boot: verify reached this check 20 s after boot while akmods.service was
+# still activating (1-core, same night).
+if lspci 2>/dev/null | grep -qiE '(vga|3d|display).*nvidia' && ! rpm -q akmod-nvidia >/dev/null 2>&1 && ! compgen -G '/usr/src/nvidia-*' >/dev/null; then
+    r FAIL "nvidia driver installed" "NVIDIA GPU present, no akmod-nvidia and no DKMS source: $(ls /etc/yum.repos.d/ | grep -c rpmfusion) RPM Fusion repo file(s)"
+elif lspci 2>/dev/null | grep -qiE '(vga|3d|display).*nvidia'; then
+    for _w in $(seq 1 60); do
+        [[ "$(systemctl is-active akmods.service 2>/dev/null)" != activating && -d /sys/module/nvidia ]] && break
+        [[ "$(systemctl is-active akmods.service 2>/dev/null)" != activating ]] && ((_w > 6)) && break
+        sleep 5
+    done
     [[ -d /sys/module/nvidia ]] && r PASS "nvidia driver loaded" "$(nvidia-smi -L 2>&1 | head -n 1)" || r FAIL "nvidia driver loaded" "$(lsmod | grep -oE '^(nouveau|nvidia)' | tr '\n' ' ')in use; $(ls /var/cache/akmods/nvidia/*.failed.log 2>/dev/null | head -n 1)"
 fi
 if [[ -d /sys/firmware/efi ]]; then
@@ -546,7 +590,10 @@ if [[ -d /sys/firmware/efi ]]; then
     [[ -n "$k" && -z "$n" && "$o" == "$k" ]] && r PASS "firmware boots kldload next" "entry $k first, no BootNext" || r FAIL "firmware boots kldload next" "entry=${k:-none} BootOrder first=${o:-?} BootNext=${n:-none}"
 fi
 if [[ "$AI" == 1 ]]; then v="$(systemctl is-active ollama 2>&1)"; [[ "$v" == active ]] && r PASS "ollama" "$v" || r FAIL "ollama" "$v"; fi
-if [[ "$DEV" == 1 ]]; then v="$(systemctl is-active grafana-server prometheus 2>/dev/null | tr '\n' ' ')"; [[ "$v" == *active* && "$v" != *inactive*inactive* ]] && r PASS "metrics stack" "$v" || r FAIL "metrics stack" "grafana-server/prometheus: $v"; fi
+# The metrics plane is installed by first boot's KVM-host section, gated on KVM or K8s:
+# a server edition gets none, whatever DEVOPS says (7-net, 2026-09-13: DEVOPS=1, no
+# KVM, no Grafana). Checked where the installer actually puts it.
+if [[ "$KVM" == 1 || "$K8SE" == 1 ]]; then v="$(systemctl is-active grafana-server prometheus 2>/dev/null | tr '\n' ' ')"; [[ "$v" == *active* && "$v" != *inactive*inactive* ]] && r PASS "metrics stack" "$v" || r FAIL "metrics stack" "grafana-server/prometheus: $v"; fi
 # The report carries a summary per sub-suite and one FINAL REPORT; only the last
 # PASS:/FAIL: pair is the verdict (the first match read "39 passed" of 225, 2026-09-13).
 if [[ -r /root/kldload-smoke-report.txt ]]; then
@@ -563,6 +610,7 @@ exit 0
 VERIFY
     )" 2>&1)" || fail_run verify "the verification script did not run on $TARGET_IP"
     printf '%s\n' "$VERIFY_LINES" | awk -F'|' '{printf "  %-5s %-28s %s\n", $1, $2, $3}'
+    # swallow: grep -c exits 1 when there are no FAIL lines, which is the passing case
     nfail="$(grep -c '^FAIL|' <<<"$VERIFY_LINES" || true)"
     if ((nfail > 0)); then
         fail_run verify "$nfail check(s) failed on $TARGET_IP"

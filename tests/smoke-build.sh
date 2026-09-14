@@ -152,6 +152,28 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             _pass "console launcher replaced by Web UI"
         fi
 
+        # ── Voice models ────────────────────────────────────────────────────
+        # Downloaded at build time from HuggingFace. 2026-09-13 builds 9 full
+        # and net each lost one or both to a transient failure logged only as
+        # a WARNING, and both ISOs passed this suite. They now come from
+        # live-build/download-cache (build-iso.sh fetch_cached); an image
+        # without them fails here instead of shipping without voice.
+        _vm_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" \
+            opt/whisper.cpp/models/ggml-base.en.bin \
+            opt/piper/models/en_US-lessac-medium.onnx \
+            opt/piper/models/en_US-lessac-medium.onnx.json 2>/dev/null)" || _vm_list=""
+        _vm_bad=""
+        for _vm in opt/whisper.cpp/models/ggml-base.en.bin opt/piper/models/en_US-lessac-medium.onnx opt/piper/models/en_US-lessac-medium.onnx.json; do
+            # -lls: "<mode> <owner> <size> <date> <time> squashfs-root/<path>"; size > 0
+            awk -v p="squashfs-root/$_vm" '$NF == p && $3 + 0 > 0 {f = 1} END {exit !f}' <<<"$_vm_list" ||
+                _vm_bad+=" $_vm"
+        done
+        if [[ -z "$_vm_bad" ]]; then
+            _pass "voice models in the image (whisper base.en, piper lessac-medium)"
+        else
+            _fail "voice models in the image" "missing or empty:${_vm_bad} — the build could not fetch them and they are not in live-build/download-cache"
+        fi
+
         # ── Every tool in includes.chroot/usr/local/{bin,sbin} must ship ────
         # The builder copies bin/ by glob and, since 2026-09-05, sbin/ too.
         # Before that sbin/ was an allow-list, and the list dropped a new tool
@@ -741,6 +763,46 @@ if [[ "${_adh% *}" -gt 0 && "${_adh#* }" -gt 0 ]] && ((${_adh% *} < ${_adh#* }))
     _pass "AI GPU probe does not load nvidia under a running desktop"
 else
     _fail "AI GPU probe" "kldload-autodeploy probes nvidia-smi without the display-manager hold — a first-boot driver rebuild hot-loads nvidia-drm under the desktop"
+fi
+
+# RPM Fusion is installed one release at a time with the master as a second source,
+# in the installer and in first boot's NVIDIA healing net. 7-net, fiend 2026-09-13:
+# one transaction from the redirector, nonfree sent to a dead mirror, no repo, no
+# driver; the healing net failed the same way two seconds into first boot.
+_rf_bs="$(grep -c 'https://download1.rpmfusion.org/${_rf}/fedora' "${_zc_dir}/lib/bootstrap.sh" || true)"
+# swallow: grep -c exits 1 at a zero count, and zero is the failing answer judged below
+_rf_fb="$(grep -c 'https://download1.rpmfusion.org/${rf}/fedora' "${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-firstboot" || true)"
+if grep -qE 'rpmfusion-free-release-\$\{release\}\.noarch\.rpm" \\$' "${_zc_dir}/lib/bootstrap.sh" &&
+    grep -A1 -E 'rpmfusion-free-release-\$\{release\}\.noarch\.rpm" \\$' "${_zc_dir}/lib/bootstrap.sh" | grep -q 'rpmfusion-nonfree-release'; then
+    _fail "RPM Fusion install" "bootstrap.sh installs free and nonfree release packages in one transaction again — one dead mirror loses both repos"
+elif [[ "$_rf_bs" -ge 1 && "$_rf_fb" -ge 1 ]]; then
+    _pass "RPM Fusion repos: per-release install with the download1 master fallback (installer and first boot)"
+else
+    _fail "RPM Fusion install" "no download1.rpmfusion.org fallback (installer ${_rf_bs}, first boot ${_rf_fb}) — a dead mirror means no NVIDIA driver on net installs"
+fi
+
+# rpm -q prints "package X is not installed" on stdout; its output must not be used
+# as data without checking the exit status (7-net: version "package kmod").
+if grep -qE "_nv_ver=\\\$\(rpm .*-q --qf '%\{VERSION\}' kmod-nvidia-open-dkms.*\|\| echo" "${_zc_dir}/lib/bootstrap.sh"; then
+    _fail "NVIDIA DKMS version probe" "bootstrap.sh reads rpm -q --qf output without checking that the package is installed"
+else
+    _pass "NVIDIA DKMS version probe checks rpm -q before trusting its output"
+fi
+
+# state.db lands group-writable by kldload (non-root tools deregister through it).
+if grep -qF 'chgrp kldload /var/lib/kldload /var/lib/kldload/state.db' "${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-install-target"; then
+    _pass "installer gives state.db to the kldload group"
+else
+    _fail "state.db permissions" "kldload-install-target copies state.db without giving it to the kldload group — server editions fail the permissions smoke check"
+fi
+
+# The kiosk opens the page as the install show, so the dashboard never flashes.
+if grep -qF 'export KLDLOAD_KIOSK_SHOW=1' "${ROOT}/live-build/config/includes.chroot/usr/local/sbin/kldload-install-kiosk" &&
+    grep -qF 'exec /usr/local/bin/kldload-chrome-app "$_app_id" "$page_url"' "${ROOT}/live-build/config/includes.chroot/usr/local/bin/kldload-webui-launch" &&
+    grep -qF "html.ishow-boot::after" "${ROOT}/live-build/config/includes.chroot/usr/local/share/kldload-webui/free/index.html"; then
+    _pass "kiosk opens the page as the install show (no dashboard flash)"
+else
+    _fail "kiosk dashboard flash" "the kiosk marker (KLDLOAD_KIOSK_SHOW -> ?show=1 -> html.ishow-boot cover) is incomplete"
 fi
 
 _section "Install slides"
@@ -2452,7 +2514,15 @@ else
     _sm_baseline="$(tr -cd '0-9' <"$_sm_baseline_file")"
     _sm_now=0
     _sm_list=()
+    _sm_exempt=()
     for f in "${SHELL_SCRIPTS[@]}"; do
+        # A script may opt out only by saying why, in a greppable line with a real
+        # reason (a dracut hook sourced into dracut's shell, a generator that must
+        # always exit 0). An exemption without a reason still counts.
+        if grep -qE '^# strict-mode: exempt — .{30,}' "$ROOT/$f"; then
+            _sm_exempt+=("$f")
+            continue
+        fi
         if ! grep -qE '^[[:space:]]*set -E?euo pipefail' "$ROOT/$f"; then
             _sm_now=$((_sm_now + 1))
             _sm_list+=("$f")
@@ -2466,6 +2536,7 @@ else
     else
         _pass "strict-mode ratchet: ${_sm_now} scripts without strict mode (at baseline, not rising)"
     fi
+    ((${#_sm_exempt[@]} == 0)) || _pass "strict-mode exemptions with a stated reason: ${_sm_exempt[*]}"
 fi
 
 # ── systemd drop-ins reach the ISO ──────────────────────────────────────────

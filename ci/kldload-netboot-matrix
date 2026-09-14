@@ -122,7 +122,8 @@ for e in "${EDITIONS[@]}"; do
         failed=$((failed + 1))
         log "════ $e: FAILED in ${STOP[$e]} after ${mins} min — ${NOTE[$e]} (run ${RID[$e]})"
     fi
-    grep -E '^  (PASS|FAIL|WARN|INFO) ' "$OUT/$e.out" | sed "s/^/  [$e] /" || true # no verify lines when the run stopped early
+    # swallow: a run that stopped before verify has no PASS/FAIL lines to copy, and grep exits 1
+    grep -E '^  (PASS|FAIL|WARN|INFO) ' "$OUT/$e.out" | sed "s/^/  [$e] /" || true
     case "${STOP[$e]}" in
     "stage FAILED" | "arm FAILED" | "boot FAILED" | "watch FAILED" | "installed FAILED")
         log "stopping the matrix: $e never came up on its new install, so nothing is left to reboot into the next edition"
