@@ -98,6 +98,36 @@ die() {
     exit 1
 }
 
+# fetch_cached <url> <dest> — put a download at <dest>, from the build cache when
+# it is there, otherwise fetched with retries into the cache first.
+#
+# Returns 0 only when <dest> exists and is non-empty afterwards. Callers decide
+# whether a miss is fatal.
+#
+# HISTORY: 2026-09-13, builds 9 full and net, a few minutes apart: a transient
+# HuggingFace failure dropped ggml-base.en.bin (141 MB) and the Piper voice
+# (60 MB) from the full image and the Piper voice from the net image. One
+# un-retried curl each, logged as a WARNING nobody reads, and an "offline" ISO
+# that silently lost voice. Cached under live-build/, the models survive the
+# next outage as well: only the first build ever needs the network for them.
+FETCH_CACHE=/build/live-build/download-cache
+fetch_cached() {
+    local url="$1" dest="$2" key
+    key="$(printf '%s' "$url" | sha256sum | cut -c1-16)-$(basename "$url")"
+    mkdir -p "$FETCH_CACHE" "$(dirname "$dest")"
+    if [[ ! -s "$FETCH_CACHE/$key" ]]; then
+        if curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors -o "$FETCH_CACHE/$key.partial" "$url" >>"$LOG_FILE" 2>&1 &&
+            [[ -s "$FETCH_CACHE/$key.partial" ]]; then
+            mv -f "$FETCH_CACHE/$key.partial" "$FETCH_CACHE/$key"
+        else
+            rm -f "$FETCH_CACHE/$key.partial"
+            log "fetch: $url failed after retries and is not cached"
+            return 1
+        fi
+    fi
+    cp -f "$FETCH_CACHE/$key" "$dest" && [[ -s "$dest" ]]
+}
+
 log "Starting kldload ISO build."
 log "Profile:    $PROFILE"
 log "Edition:    $EDITION"
@@ -1907,11 +1937,12 @@ if [[ "$EDITION" != "core" ]]; then
         umount "${ROOTFS}/dev" 2>/dev/null || true
         # Download base.en model (~150 MB)
         mkdir -p "${ROOTFS}/opt/whisper.cpp/models"
-        curl -fsSL -o "${ROOTFS}/opt/whisper.cpp/models/ggml-base.en.bin" \
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
-            >>"$LOG_FILE" 2>&1 &&
-            log "Bob: whisper model downloaded" ||
-            log "Bob: WARNING — whisper model download failed"
+        if fetch_cached "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
+            "${ROOTFS}/opt/whisper.cpp/models/ggml-base.en.bin"; then
+            log "Bob: whisper model staged ($(du -h "${ROOTFS}/opt/whisper.cpp/models/ggml-base.en.bin" | cut -f1))"
+        else
+            log "Bob: WARNING — whisper model unavailable (not cached, download failed): voice input will be absent from this image"
+        fi
     else
         log "Bob: WARNING — whisper.cpp clone failed (offline build?)"
     fi
@@ -2618,12 +2649,16 @@ HELMCHARTS
         >>"$LOG_FILE" 2>&1; then
         tar xf "${_piper_tmp}/piper.tar.gz" -C "${ROOTFS}/opt/" >>"$LOG_FILE" 2>&1
         mkdir -p "${ROOTFS}/opt/piper/models"
-        curl -fsSL -o "${ROOTFS}/opt/piper/models/en_US-lessac-medium.onnx" \
-            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" \
-            >>"$LOG_FILE" 2>&1 || log "Bob: WARNING piper voice onnx download failed"
-        curl -fsSL -o "${ROOTFS}/opt/piper/models/en_US-lessac-medium.onnx.json" \
-            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" \
-            >>"$LOG_FILE" 2>&1 || true
+        # The .onnx and its .json are one voice: piper refuses a model without
+        # its config, so a half-fetched pair is reported as missing.
+        if fetch_cached "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" \
+            "${ROOTFS}/opt/piper/models/en_US-lessac-medium.onnx" &&
+            fetch_cached "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" \
+                "${ROOTFS}/opt/piper/models/en_US-lessac-medium.onnx.json"; then
+            log "Bob: piper voice staged ($(du -h "${ROOTFS}/opt/piper/models/en_US-lessac-medium.onnx" | cut -f1))"
+        else
+            log "Bob: WARNING — piper voice unavailable (not cached, download failed): voice output will be absent from this image"
+        fi
         [[ -x "${ROOTFS}/opt/piper/piper" ]] &&
             log "Bob: piper TTS installed" ||
             log "Bob: WARNING piper binary not found after extract"
