@@ -377,7 +377,8 @@ _gate_log="$(mktemp)"
 # Gate the realistic desktop install set (same scope as the closure pass above),
 # NOT the full PKGS_AVAILABLE union — that union is intentionally un-installable
 # in one transaction (nvidia akmods + every profile's packages together), which
-# would be a false positive. kubernetes/nvidia get their own validation.
+# would be a false positive. nvidia is gated separately just below; kubernetes
+# still has no offline gate of its own (known gap).
 dnf install --installroot="${_gate_root}" --releasever="${RELEASE}" \
     --forcearch="${ARCH}" --disablerepo='*' \
     --repofrompath="dsgate,file://${REPO_DIR}" --enablerepo=dsgate \
@@ -393,3 +394,58 @@ if grep -qiE 'nothing provides|none of the providers can be installed|no match f
 fi
 log "Completeness gate PASSED — the full offline install set resolves against the darksite alone."
 rm -rf "${_gate_root}" "${_gate_log}"
+
+# ── NVIDIA gate ────────────────────────────────────────────────────────────
+# The desktop gate above deliberately leaves NVIDIA out, and for months its
+# comment said NVIDIA "gets its own validation". It did not: nothing checked it.
+# fiend, 2026-09-13: the mirror carried akmod-nvidia and xorg-x11-drv-nvidia but
+# not xorg-x11-drv-nvidia-xorg-libs, a rich dep that only fires when Xorg is
+# present. The offline install could not resolve the driver, fell back to
+# nouveau, logged a WARNING, and the build that produced it had been green.
+#
+# So resolve exactly what an NVIDIA desktop install asks for, kernel and Xorg
+# included so the conditional deps fire, against ONLY this mirror. Same error
+# text judgement as the desktop gate, and the same reason: --assumeno exits
+# non-zero even when the transaction resolves.
+# NVIDIA_GATE_BEGIN
+declare -a _nv_set=(kernel-core xorg-x11-server-Xorg)
+_nv_file="${PKG_SETS_DIR_FED}/target-nvidia.txt"
+[[ -f "$_nv_file" ]] || _nv_file="${PKG_SETS_DIR_EL}/target-nvidia.txt"
+[[ -f "$_nv_file" ]] || {
+    log "FATAL: NVIDIA gate cannot run — target-nvidia.txt not found" >&2
+    exit 1
+}
+while IFS= read -r _nl; do
+    [[ "$_nl" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${_nl//[[:space:]]/}" ]] && continue
+    _nv_set+=("$_nl")
+done <"$_nv_file"
+log "NVIDIA gate: resolving ${#_nv_set[@]} packages (driver + kernel + Xorg) against the darksite alone..."
+_nv_root="$(mktemp -d)"
+_nv_log="$(mktemp)"
+# --assumeno always exits 1, so the status is captured, not judged; the verdict
+# is the grep below.
+_nv_rc=0
+dnf install --installroot="${_nv_root}" --releasever="${RELEASE}" \
+    --forcearch="${ARCH}" --disablerepo='*' \
+    --repofrompath="nvgate,file://${REPO_DIR}" --enablerepo=nvgate \
+    --nogpgcheck --assumeno \
+    "${_nv_set[@]}" \
+    >"${_nv_log}" 2>&1 || _nv_rc=$?
+log "NVIDIA gate: dnf --assumeno exited ${_nv_rc} (1 is normal; the transaction text decides)"
+if grep -qiE 'nothing provides|none of the providers can be installed|no match for argument|cannot install the best|conflicting requests|unable to resolve' "${_nv_log}"; then
+    log "FATAL: NVIDIA set does NOT install from the darksite — an NVIDIA machine would land on nouveau. Unresolved:" >&2
+    grep -iE 'nothing provides|none of the providers can be installed|no match for argument|conflicting requests' \
+        "${_nv_log}" | sort -u | sed 's/^/    /' >&2
+    rm -rf "${_nv_root}" "${_nv_log}"
+    exit 1
+fi
+if ! grep -qE '^ akmod-nvidia ' "${_nv_log}"; then
+    # A resolve that silently dropped the driver is not a pass.
+    log "FATAL: NVIDIA gate resolved, but akmod-nvidia is not in the transaction" >&2
+    rm -rf "${_nv_root}" "${_nv_log}"
+    exit 1
+fi
+log "NVIDIA gate PASSED — akmod-nvidia and its full closure install from the darksite alone."
+rm -rf "${_nv_root}" "${_nv_log}"
+# NVIDIA_GATE_END
