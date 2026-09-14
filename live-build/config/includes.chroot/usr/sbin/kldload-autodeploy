@@ -44,7 +44,13 @@ set -uo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANIFEST=/etc/kldload/install-manifest.env
-EFFECTIVE=/var/log/installer/effective-config.env
+# The installer computes this on the LIVE system and copies its logs to
+# /root/kldload-install-logs/ on the target; /var/log/installer/ exists only on
+# the live image (fiend, 2026-09-13: autodeploy read a file that was never
+# there). The installed path first; the live path kept for a manual re-run
+# from the installer environment.
+EFFECTIVE=/root/kldload-install-logs/effective-config.env
+[[ -r "$EFFECTIVE" ]] || EFFECTIVE=/var/log/installer/effective-config.env
 STATE_DIR=/var/lib/kldload
 LOG_FILE=/var/log/kldload/autodeploy.log
 PHASE_FILE="${STATE_DIR}/current-phase"
@@ -595,7 +601,24 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         _saved_err_trap=$(trap -p ERR 2>/dev/null)
         trap - ERR
         set +e
-        if lspci 2>/dev/null | grep -qi nvidia; then
+        # WARN: `nvidia-smi` LOADS the driver when it is not loaded (through
+        # nvidia-modprobe). With a desktop already running on the boot
+        # framebuffer, nvidia-drm then takes that framebuffer away from it.
+        # HISTORY: fiend 2026-09-13: nvidia.ko was rebuilt by hand at 14:37
+        # after the akmods key fix, this probe loaded it, gnome-shell logged
+        # "Failed to hotplug secondary gpu", drew on a vanished simpledrm
+        # device for six hours and died at 20:32 with "DRM_IOCTL_MODE_CREATE_DUMB
+        # failed: No such device" and SIGSEGV. On a normal boot akmods builds
+        # and loads the driver before display-manager (akmods.service is
+        # Before=display-manager), so when a display manager is up and the
+        # module is still absent, it is not coming this boot: leave it for the
+        # reboot and run the AI setup without the GPU rather than kill the desktop.
+        if lspci 2>/dev/null | grep -qi nvidia && [[ ! -d /sys/module/nvidia ]] &&
+            systemctl is-active --quiet display-manager.service 2>/dev/null; then
+            log "[ai] NVIDIA hardware detected but the driver is not loaded and a desktop is running — NOT probing nvidia-smi (it would load nvidia-drm under the live session); the driver loads on the next boot, AI setup continues without the GPU"
+            touch "${STATE_DIR}/nvidia-reboot-pending"
+            _nv_hold=1
+        elif lspci 2>/dev/null | grep -qi nvidia; then
             log "[ai] NVIDIA hardware detected — waiting up to 3 min for nvidia-smi (akmod-nvidia build)"
             for _i in $(seq 1 36); do
                 command -v nvidia-smi >/dev/null 2>&1 &&
@@ -608,7 +631,9 @@ if [[ "${WANT[ai]}" == "1" ]]; then
                 log "[ai] WARN: nvidia-smi never appeared — akmod-nvidia may have failed; treating as no-GPU"
             fi
         fi
-        if command -v nvidia-smi >/dev/null 2>&1; then
+        # _nv_hold: the driver is deliberately left unloaded (above); asking
+        # nvidia-smi for VRAM would load it, so this boot takes the no-GPU path.
+        if [[ "${_nv_hold:-0}" != 1 ]] && command -v nvidia-smi >/dev/null 2>&1; then
             # Retry memory.total until it returns a positive number (up to ~30s).
             # Right after the akmod loads, `nvidia-smi -L` already lists the card
             # but `--query-gpu=memory.total` can transiently return 0 or a
@@ -684,8 +709,13 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             log "[ai] no darksite weights for ${_chat_model} — will pull if requested"
         fi
         log "[ai] installing ollama runtime"
-        command -v ollama >/dev/null 2>&1 ||
-            curl -fsSL https://ollama.com/install.sh | sh >>"$LOG_FILE" 2>&1
+        # From the image first; the network only when the image carries no
+        # runtime. HISTORY: this was `command -v ollama || curl ... | sh`, which
+        # never looked at the darksite tarball: fiend's "offline" klab install
+        # (2026-09-13) piped ollama.com into sh, install.sh exited 2, and AI was
+        # marked failed. kldload-ollama-install is the one implementation, shared
+        # with kldload-firstboot, and it judges by whether ollama runs.
+        /usr/local/sbin/kldload-ollama-install --allow-network >>"$LOG_FILE" 2>&1
         # ZFS-backed model store: pre-create /srv/ollama/models with the
         # right ownership BEFORE ollama starts. The systemd override (see
         # kldload-firstboot) sets OLLAMA_MODELS=/srv/ollama/models, and
@@ -1543,9 +1573,22 @@ if [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && command -v vmx >/dev/null 2>&1; 
         ((_vmx_jobs < 1)) && _vmx_jobs=1
         ((_vmx_jobs > 4)) && _vmx_jobs=4
         log "[apps] VMX_BUILD_JOBS=${_vmx_jobs} (from MemAvailable)"
-        if VMX_BUILD_JOBS="$_vmx_jobs" vmx --build-all >>"$LOG_FILE" 2>&1; then
+        # SAFETY: build-all ends by printing every tile's logins, including the
+        # generated database and cache passwords ("database password
+        # (WS_DB_PASS): ..."). This log is 0644 and read by kldload-follow, so
+        # on fiend 2026-09-13 the Web Stack's PostgreSQL and Valkey passwords
+        # were world-readable. The full summary goes to a root-only file; the
+        # log gets the same text with every *PASS/*SECRET/*TOKEN/*KEY value
+        # masked. pipefail keeps vmx's exit status (the failed-tile count).
+        _apps_summary=/root/kldload-appliances.txt
+        (
+            umask 077
+            : >"$_apps_summary"
+        )
+        if VMX_BUILD_JOBS="$_vmx_jobs" vmx --build-all 2>&1 | tee "$_apps_summary" |
+            sed -uE 's/^([[:space:]]+[^()]*\([A-Z0-9_]*(PASS|PASSWORD|PASSPHRASE|SECRET|TOKEN|KEY)\): ).+$/\1(redacted; root can read it in \/root\/kldload-appliances.txt)/' >>"$LOG_FILE"; then
             touch "${STATE_DIR}/appliances-ready"
-            log "[apps] appliance goldens ready — list: kfire goldens · clone: kfire clone <golden>"
+            log "[apps] appliance goldens ready — list: kfire goldens · clone: kfire clone <golden> · logins: /root/kldload-appliances.txt"
         else
             log "[apps] WARNING: appliance build incomplete — see $LOG_FILE; rerun with: vmx --build-all (built tiles are skipped)"
         fi

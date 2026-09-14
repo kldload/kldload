@@ -1956,9 +1956,27 @@ ZRAMCONF
             groupadd -r akmods 2>/dev/null || true
         fi
         if [[ -f "$_ak_key" ]] && [[ "$(stat -c '%G' "$_ak_key" 2>/dev/null)" != "akmods" ]]; then
-            chgrp akmods "$_ak_key" 2>/dev/null && chmod 0640 "$_ak_key" 2>/dev/null &&
-                ok "akmods signing key ownership corrected (was $(stat -c '%U:%G' "$_ak_key" 2>/dev/null)) — akmod builds can sign again" ||
+            # The old owner is read BEFORE the chgrp: the message used to stat
+            # after it and reported "was root:akmods" (fiend, 2026-09-13).
+            _ak_was="$(stat -c '%U:%G' "$_ak_key" 2>/dev/null)"
+            if chgrp akmods "$_ak_key" 2>/dev/null && chmod 0640 "$_ak_key" 2>/dev/null; then
+                ok "akmods signing key ownership corrected (was ${_ak_was}) — akmod builds can sign again"
+                # akmods.service runs before this unit and has already given up
+                # on this boot. HISTORY: fiend 2026-09-13: the key was fixed at
+                # 14:34:36, the build had failed at 14:34:26, and the desktop sat
+                # on nouveau until a manual `akmods --force` (which then built and
+                # signed nvidia.ko with the enrolled MOK in 44 s). Rebuild now.
+                if command -v akmods >/dev/null 2>&1 && rpm -q akmod-nvidia >/dev/null 2>&1 &&
+                    ! _fb_nvidia_ko_present; then
+                    if akmods --force --kernels "$(uname -r)" >>"$LOG" 2>&1 && _fb_nvidia_ko_present; then
+                        ok "nvidia.ko rebuilt and signed after the key fix — it loads on the next boot"
+                    else
+                        log "WARNING: akmods rebuild after the key ownership fix did not produce nvidia.ko — see $LOG and /var/cache/akmods/nvidia/*.failed.log"
+                    fi
+                fi
+            else
                 log "WARNING: could not fix akmods key ownership — akmod modules will build unsigned and be refused under Secure Boot"
+            fi
         fi
 
         if ! cmp -s /var/lib/dkms/mok.der "$_ak_cert" 2>/dev/null; then
@@ -2766,31 +2784,15 @@ SALT
             # into sh on first boot. The darksite now carries the official
             # release tarball, so an offline machine gets a working runtime and
             # the network path is only for images built without it.
-            _ollama_installed=0
-            _rt=/root/darksite/ollama/runtime/ollama-linux-amd64.tar.zst
-            if [[ -s "$_rt" ]]; then
-                log "Installing Ollama from darksite runtime (offline)..."
-                mkdir -p /usr/local/bin /usr/local/lib/ollama
-                # --zstd first; older tar needs the explicit filter. Either
-                # extraction failing falls through to the network path rather
-                # than leaving a half-unpacked runtime.
-                if tar --zstd -xf "$_rt" -C /usr/local/ >>"${LOG}" 2>&1 ||
-                    tar -I zstd -xf "$_rt" -C /usr/local/ >>"${LOG}" 2>&1; then
-                    if [[ -x /usr/local/bin/ollama ]]; then
-                        chmod +x /usr/local/bin/ollama
-                        useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama 2>/dev/null || true
-                        # swallow: the user already existing is the re-run case
-                        _ollama_installed=1
-                        ok "Ollama installed from darksite (no network needed)"
-                    else
-                        log "WARNING: darksite runtime extracted but no ollama binary — falling back to network"
-                    fi
-                else
-                    log "WARNING: darksite runtime failed to extract — falling back to network"
-                fi
-            fi
-            if ((_ollama_installed == 1)) ||
-                curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >>"${LOG}" 2>&1; then
+            # The install itself is kldload-ollama-install, shared with
+            # kldload-autodeploy: darksite first, staged and proven before it
+            # lands, network only when the image carries no runtime, and it
+            # writes ollama.service. HISTORY: the copy that lived here unpacked
+            # the tarball but wrote no unit (the tarball ships none), so an
+            # air-gapped machine reached `systemctl enable --now ollama` below
+            # with no such unit; and autodeploy had its own curl|sh copy that
+            # never looked at the darksite at all (fiend, 2026-09-13).
+            if /usr/local/sbin/kldload-ollama-install --allow-network >>"${LOG}" 2>&1; then
                 ok "Ollama installed"
                 _status "Downloading AI model (~4.9 GB)..."
 
@@ -3580,7 +3582,7 @@ AIMOTD
                 ) # end AI subshell — errors above don't kill firstboot
                 ok "AI setup complete"
             else
-                log "WARNING: Ollama install failed (no internet?) — run 'curl -fsSL https://ollama.com/install.sh | sh' manually"
+                log "WARNING: Ollama install failed — see the kldload-ollama-install lines above in ${LOG}; re-run it with: kldload-ollama-install --allow-network"
             fi
         fi
 

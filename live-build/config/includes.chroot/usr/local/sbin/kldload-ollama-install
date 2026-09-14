@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-ollama-install — install the Ollama runtime, from the image first.
+#
+# WHAT IT DOES, IN ORDER:
+#   1. If a working /usr/local/bin/ollama is already there, skip to step 4.
+#   2. If the image carries the runtime (/root/darksite/ollama/runtime/), unpack
+#      it into a staging directory, prove the binary runs, then move it into
+#      /usr/local. A darksite copy that is present but broken is a FAILURE,
+#      never a reason to reach the internet, and leaves nothing installed.
+#   3. Only if the image carries no runtime at all, and --allow-network was
+#      given, fall back to Ollama's own install.sh.
+#   4. Make sure the pieces install.sh would have made exist anyway: the
+#      'ollama' system user, and ollama.service. It does NOT enable or start
+#      the service; callers write their drop-ins first and start it themselves.
+#
+# WHY THIS EXISTS:
+#   Two scripts installed Ollama, and they disagreed. kldload-firstboot unpacked
+#   the darksite tarball; kldload-autodeploy ran `curl ... install.sh | sh` and
+#   never looked at the tarball. On fiend (2026-09-13, klab template, an
+#   "offline" install) firstboot's branch did not fire, autodeploy piped
+#   ollama.com into sh, install.sh then exited 2 trying to add NVIDIA's repo,
+#   and AI was marked failed. With no internet it would simply have failed.
+#   And firstboot's darksite path had a hole of its own: the tarball carries no
+#   systemd unit — install.sh writes that — so an actually air-gapped machine got
+#   a binary and then "Unit ollama.service not found" at enable time.
+#   One implementation, called by both, closes both.
+#
+# INPUTS:   /root/darksite/ollama/runtime/ollama-linux-<arch>.tar.zst
+#           KLDLOAD_OLLAMA_RUNTIME  override the tarball path (tests)
+#           KLDLOAD_OLLAMA_PREFIX   override /usr/local (tests)
+#           KLDLOAD_OLLAMA_UNIT_DIR override /etc/systemd/system (tests)
+# OUTPUTS:  /usr/local/bin/ollama, /usr/local/lib/ollama/, ollama.service,
+#           the ollama user. Diagnostics on stderr only.
+# EXIT:     0 runtime installed and runs · 1 failed · 2 usage
+#
+# Notes:
+#   - Safe to run twice; the second run changes nothing.
+#   - Run as root.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kldload-ollama-install: FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+PREFIX="${KLDLOAD_OLLAMA_PREFIX:-/usr/local}"
+UNIT_DIR="${KLDLOAD_OLLAMA_UNIT_DIR:-/etc/systemd/system}"
+BIN="${PREFIX}/bin/ollama"
+ALLOW_NETWORK=0
+
+_say() { printf 'kldload-ollama-install: %s\n' "$*" >&2; }
+
+usage() {
+    cat <<'USAGE'
+usage: kldload-ollama-install [--allow-network]
+
+Install the Ollama runtime from the image's darksite copy, create the ollama
+user and ollama.service. Does not enable or start the service.
+
+  --allow-network   if (and only if) the image carries no Ollama runtime,
+                    fetch Ollama's install.sh from ollama.com instead
+
+Exit: 0 installed and runs, 1 failed, 2 usage.
+USAGE
+}
+
+while (($#)); do
+    case "$1" in
+    --allow-network) ALLOW_NETWORK=1 ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+    esac
+    shift
+done
+
+case "$(uname -m)" in
+x86_64) _arch=amd64 ;;
+aarch64) _arch=arm64 ;;
+*)
+    _say "unsupported architecture $(uname -m)"
+    exit 1
+    ;;
+esac
+RUNTIME="${KLDLOAD_OLLAMA_RUNTIME:-/root/darksite/ollama/runtime/ollama-linux-${_arch}.tar.zst}"
+
+# The binary answering --version is the outcome that matters; a file that
+# exists but cannot execute (wrong arch, truncated extract) is not installed.
+_runs() {
+    [[ -x "$BIN" ]] && "$BIN" --version >/dev/null 2>&1
+}
+
+# ─── 1-3. the runtime ────────────────────────────────────────────────────────
+if _runs; then
+    _say "runtime already present: $("$BIN" --version 2>&1 | tail -1)"
+elif [[ -e "$RUNTIME" ]]; then
+    _say "installing from the image: ${RUNTIME} (no network)"
+    [[ -s "$RUNTIME" ]] || {
+        _say "FATAL: ${RUNTIME} is empty — the image's copy is broken; not falling back to the internet"
+        exit 1
+    }
+    # Unpack into a staging directory and move into place only once the staged
+    # binary runs. HISTORY: extracting straight into /usr/local left a truncated
+    # ollama binary behind when the tarball was corrupt; it segfaulted on every
+    # later probe (caught under test with a cut-off copy, 2026-09-13). A
+    # half-installed runtime must never be the thing on PATH.
+    _stage="$(mktemp -d "${PREFIX}/.ollama-stage.XXXXXX")"
+    trap 'rm -rf "$_stage"' EXIT
+    # --zstd needs tar 1.31+; -I zstd covers older ones.
+    if ! tar --zstd -xf "$RUNTIME" -C "$_stage" 2>/dev/null; then
+        rm -rf "${_stage:?}"/*
+        tar -I zstd -xf "$RUNTIME" -C "$_stage" || {
+            _say "FATAL: could not unpack ${RUNTIME} — not falling back to the internet on an image that carries its own copy"
+            exit 1
+        }
+    fi
+    [[ -x "${_stage}/bin/ollama" ]] && "${_stage}/bin/ollama" --version >/dev/null 2>&1 || {
+        _say "FATAL: ${RUNTIME} unpacked but its ollama binary does not run — nothing was installed"
+        exit 1
+    }
+    install -d -m 0755 "${PREFIX}/bin" "${PREFIX}/lib"
+    if [[ -d "${_stage}/lib/ollama" ]]; then
+        rm -rf "${PREFIX}/lib/ollama"
+        mv "${_stage}/lib/ollama" "${PREFIX}/lib/ollama"
+    fi
+    mv -f "${_stage}/bin/ollama" "$BIN"
+    _runs || {
+        _say "FATAL: moved the runtime into ${PREFIX} but ${BIN} does not run"
+        exit 1
+    }
+    _say "installed from the image: $("$BIN" --version 2>&1 | tail -1)"
+elif ((ALLOW_NETWORK == 1)); then
+    _say "the image carries no Ollama runtime — fetching install.sh from ollama.com (--allow-network)"
+    _sh="$(mktemp)"
+    trap 'rm -f "$_sh"' EXIT
+    curl -fsSL --connect-timeout 30 https://ollama.com/install.sh -o "$_sh" || {
+        _say "FATAL: could not download install.sh"
+        exit 1
+    }
+    # install.sh can exit non-zero after installing the binary (2026-09-13 on
+    # fiend: exit 2 while adding NVIDIA's repo, AFTER "Install complete").
+    # Judge by the outcome, not its status.
+    sh "$_sh" >&2 || _say "WARNING: install.sh exited $? — checking whether the runtime landed anyway"
+    _runs || {
+        _say "FATAL: install.sh did not leave a working ${BIN}"
+        exit 1
+    }
+else
+    _say "FATAL: no Ollama runtime in the image (${RUNTIME}) and --allow-network not given"
+    exit 1
+fi
+
+# ─── 4. user and unit ────────────────────────────────────────────────────────
+if ! getent passwd ollama >/dev/null; then
+    useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama
+    _say "created system user ollama"
+fi
+for _g in render video; do
+    # Not every machine has these groups; GPU access needs them where they exist.
+    if getent group "$_g" >/dev/null && ! id -nG ollama | tr ' ' '\n' | grep -qx "$_g"; then
+        usermod -aG "$_g" ollama
+    fi
+done
+
+# Written only when absent, so an operator's edits and install.sh's own unit
+# both survive a re-run. Same shape as the unit install.sh writes.
+if [[ ! -f "${UNIT_DIR}/ollama.service" ]]; then
+    install -d -m 0755 "$UNIT_DIR"
+    cat >"${UNIT_DIR}/ollama.service.tmp" <<UNIT
+# Written by kldload-ollama-install when Ollama came from the image's darksite
+# copy, which ships no unit of its own. Mirrors the unit Ollama's install.sh
+# writes. Drop-ins (models on ZFS, keep-alive) live in ollama.service.d/.
+[Unit]
+Description=Ollama Service
+After=network-online.target
+
+[Service]
+ExecStart=${BIN} serve
+User=ollama
+Group=ollama
+Restart=always
+RestartSec=3
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    mv "${UNIT_DIR}/ollama.service.tmp" "${UNIT_DIR}/ollama.service"
+    _say "wrote ${UNIT_DIR}/ollama.service"
+fi
+if [[ -z "${KLDLOAD_OLLAMA_UNIT_DIR:-}" ]] && command -v systemctl >/dev/null; then
+    systemctl daemon-reload
+fi
+grep -qF "ExecStart=" "${UNIT_DIR}/ollama.service" || {
+    _say "FATAL: ${UNIT_DIR}/ollama.service has no ExecStart"
+    exit 1
+}
+_say "ready: ${BIN} and ollama.service (not started)"
+exit 0

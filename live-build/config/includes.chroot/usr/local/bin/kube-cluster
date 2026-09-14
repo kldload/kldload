@@ -964,15 +964,28 @@ find_cloud_image() {
         # 2026-05-04 on the prior `fedora)` branch: hardcoded -44-1.6
         # silently 404'd after Fedora published -1.7, kube-cluster bootstrap
         # dead in the water.
-        local _ver _latest _base="https://download.fedoraproject.org/pub/fedora/linux/releases"
+        #
+        # Each release is asked of the redirector AND the Fedora master before
+        # the loop gives up on it. HISTORY: fiend 2026-09-13: the redirector sent
+        # the F44 listing to muug.ca (refusing 443), the listing came back
+        # empty, and the loop moved on to F43, whose listing went to a live
+        # mirror, so it quietly built Fedora 43 nodes under a Fedora 44 host,
+        # the exact skew the paragraph above exists to prevent. A version is
+        # skipped only when neither server lists it.
+        local _ver _latest _base _list
         url=""
         for _ver in 44 43 42; do
-            _latest=$(curl -sfL --max-time 10 "${_base}/${_ver}/Cloud/${_arch_rpm}/images/" 2>/dev/null |
-                grep -oE "Fedora-Cloud-Base-Generic-${_ver}-[0-9.]+\.${_arch_rpm}\.qcow2" |
-                sort -V -u | tail -1)
+            for _base in https://download.fedoraproject.org/pub/fedora/linux/releases \
+                https://dl.fedoraproject.org/pub/fedora/linux/releases; do
+                _list=$(curl -sfL --max-time 15 "${_base}/${_ver}/Cloud/${_arch_rpm}/images/" 2>/dev/null) || _list=""
+                _latest=$(grep -oE "Fedora-Cloud-Base-Generic-${_ver}-[0-9.]+\.${_arch_rpm}\.qcow2" <<<"$_list" |
+                    sort -V -u | tail -1) || _latest=""
+                [[ -n "$_latest" ]] && break
+            done
             if [[ -n "$_latest" ]]; then
                 url="${_base}/${_ver}/Cloud/${_arch_rpm}/images/${_latest}"
                 dest="/var/lib/libvirt/isos/Fedora-Cloud-Base-${_ver}-${_arch_rpm}.qcow2"
+                [[ "$_ver" == 44 ]] || warn "Fedora 44 cloud image is not listed on the mirror or the master — falling back to Fedora ${_ver}; nodes will not match a Fedora 44 host"
                 warn "No cloud image found. Downloading: ${_latest}"
                 break
             fi
@@ -986,11 +999,27 @@ find_cloud_image() {
     esac
     # Atomic rename — same race fix as klab. Readers must only see completed
     # files, otherwise qemu-img hits "Input/output error" past the download head.
-    curl -fSL -o "${dest}.partial" "$url" ||
-        {
-            rm -f "${dest}.partial"
+    #
+    # download.fedoraproject.org is a redirector, and it hands out the same
+    # nearby mirror every time. HISTORY: fiend 2026-09-13, full-edition first
+    # boot: the redirector sent it to muug.ca, muug.ca refused port 443, and
+    # the one-shot curl killed the whole k8s bootstrap four seconds in. So
+    # retry like klab does, then go to dl.fedoraproject.org, the master, which
+    # is slower but is not a volunteer mirror that can be down.
+    if ! curl -fSL --retry 3 --retry-delay 5 --retry-all-errors -o "${dest}.partial" "$url"; then
+        rm -f "${dest}.partial"
+        if [[ "$url" == https://download.fedoraproject.org/* ]]; then
+            url="https://dl.fedoraproject.org/${url#https://download.fedoraproject.org/}"
+            warn "Mirror download failed — retrying from the Fedora master: ${url}"
+            curl -fSL --retry 3 --retry-delay 5 --retry-all-errors -o "${dest}.partial" "$url" ||
+                {
+                    rm -f "${dest}.partial"
+                    die "Failed to download cloud image (mirror and Fedora master both failed)"
+                }
+        else
             die "Failed to download cloud image"
-        }
+        fi
+    fi
     mv -f "${dest}.partial" "$dest"
     echo "$dest"
 }
