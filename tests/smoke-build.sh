@@ -1756,6 +1756,28 @@ else
         "hostid resolves from two sources that can disagree — import fails and drops to initramfs"
 fi
 
+# Plymouth must be switched off on BOTH cmdlines, not just left out of the
+# package list. The desktop set pulls plymouth in and dracut packs it into the
+# initramfs (122 files), and the old comment in bootloader.sh swore it was
+# absent. fiend 2026-09-14, 5-desktop netboot: plymouthd hung in
+# plymouth-read-write.service and the box sat before sysinit.target from 09:46
+# to 16:45 until the operator pressed Enter -- seven hours, and the matrix
+# stopped with four editions untested.
+if ! grep -q '^k_splash_args() {' "$_cm" 2>/dev/null ||
+    ! bash -c 'eval "$(sed -n "/^k_splash_args() {/,/^}/p" "$1")"; k_splash_args' _ "$_cm" 2>/dev/null |
+    grep -q 'plymouth.enable=0'; then
+    _fail "plymouth disabled on the kernel cmdline" \
+        "k_splash_args is gone or no longer emits plymouth.enable=0 — a hung splash stalls boot until someone presses Enter"
+elif ! grep -q '_zbm_args=.*\$(k_splash_args)' "$_sz" 2>/dev/null; then
+    _fail "plymouth disabled on the kernel cmdline" \
+        "the ZBM cmdline does not carry k_splash_args — the path every normal boot takes"
+elif [[ "$(grep -c '_direct_bootargs=.*\$(k_splash_args)' "$_bl" 2>/dev/null)" != "$(grep -c '_direct_bootargs=' "$_bl" 2>/dev/null)" ]]; then
+    _fail "plymouth disabled on the kernel cmdline" \
+        "a GRUB direct-entry cmdline was assigned without k_splash_args"
+else
+    _pass "plymouth disabled on both the ZBM and GRUB direct cmdlines"
+fi
+
 # The /usr/local/sbin compat symlink must be guarded against usrmerge.
 #
 # kldload-install-target links /usr/local/sbin/kldload-* -> /usr/local/bin/... so

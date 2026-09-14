@@ -666,7 +666,7 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     # shown, passphrase not echoed, 386 kernel messages generated in the 5-15s
     # window and none on screen. Leaving `quiet` off was costing every encrypted
     # install a boot full of log spam for no remaining benefit.
-    local _zbm_args="rw $(k_console_args)"
+    local _zbm_args="rw $(k_console_args) $(k_splash_args)"
     if [[ "${KLDLOAD_ZFS_ENCRYPT}" != "1" ]] || k_prompt_extension_applies; then
         _zbm_args+=" quiet loglevel=3"
     else

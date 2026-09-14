@@ -1130,15 +1130,17 @@ EOFSTAB
     #   encrypted    quiet -> same, plus the boxed prompt the initramfs extension
     #                draws (it lowers printk itself, so quiet cannot hide it)
     #
-    # rhgb is gone from the default. It asks for a plymouth splash, plymouth is
-    # not installed and not in the initramfs, so it bought nothing and only
-    # suggested to the next reader that a splash owned the console.
+    # rhgb is gone from the default, and plymouth is switched off outright
+    # (k_splash_args). The desktop package set does install plymouth and dracut
+    # does put it in the initramfs; an earlier version of this comment said it was
+    # in neither, and plymouthd then hung a desktop boot for 7 hours (5-desktop,
+    # fiend 2026-09-14).
     #
     # loglevel=3 alongside quiet: quiet sets the console level to 4, which still
     # lets KERN_ERR through. 3 keeps genuine errors visible while dropping the
     # warning chatter -- an error during boot is something the operator should
     # see even on a quiet boot.
-    local _direct_bootargs="$(k_console_args) quiet loglevel=3"
+    local _direct_bootargs="$(k_console_args) $(k_splash_args) quiet loglevel=3"
     if [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]]; then
         # DROP `quiet` — do not merely add console args alongside it.
         #
@@ -1184,10 +1186,10 @@ EOFSTAB
         # would hide the passphrase prompt and the machine would look hung,
         # which is the 2026-08-18 bug all over again.
         if k_prompt_extension_applies; then
-            _direct_bootargs="$(k_console_args) quiet loglevel=3"
+            _direct_bootargs="$(k_console_args) $(k_splash_args) quiet loglevel=3"
             k_log "encrypted + initramfs-tools: quiet boot (prompt extension makes it visible)"
         else
-            _direct_bootargs="$(k_console_args)"
+            _direct_bootargs="$(k_console_args) $(k_splash_args)"
             k_log "encrypted + ${KLDLOAD_DISTRO:-?}: dropping quiet — no prompt extension on this initramfs"
         fi
     fi

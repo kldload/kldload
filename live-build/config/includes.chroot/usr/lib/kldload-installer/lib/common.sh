@@ -95,6 +95,20 @@ k_console_args() {
     printf 'console=tty1 console=ttyS0,115200'
 }
 
+# k_splash_args — kernel arguments that keep plymouth from running at all.
+#
+# kldload boots without a splash on purpose (bootloader.sh), but the desktop package
+# set pulls plymouth in and dracut then puts it in the initramfs, so plymouthd ran
+# anyway. HISTORY: 5-desktop, build 15, fiend 2026-09-14: plymouthd stopped answering
+# during plymouth-read-write.service, boot sat before sysinit.target for 7 hours with
+# no sshd, and resumed the moment someone pressed Enter on the console. Fedora's
+# plymouth units skip themselves on plymouth.enable=0; rd.plymouth=0 does the same in
+# the initramfs. Passphrase prompts do not need it: ZFSBootMenu asks before the
+# kernel starts, and systemd-ask-password falls back to the console without plymouth.
+k_splash_args() {
+    printf 'rd.plymouth=0 plymouth.enable=0'
+}
+
 k_run() {
     k_debug "RUN: $*"
     "$@"
