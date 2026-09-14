@@ -54,9 +54,18 @@ if command -v mokutil >/dev/null 2>&1; then
 else
     _warn "mokutil" "not installed"
 fi
-test_file "MOK key (DER)" "/var/lib/dkms/mok.der"
-test_file "MOK key (private)" "/var/lib/dkms/mok.key"
-test_file "MOK key (public)" "/var/lib/dkms/mok.pub"
+# The MOK pair and the shim chain on the ESP exist only when the install asked for
+# Secure Boot. Checked unconditionally, six FAILs landed on every Secure-Boot-off kvm
+# install (4-k8s, fiend 2026-09-14: 235 passed, 7 failed, six of them these).
+_sb_requested=0
+grep -qE '^KLDLOAD_ENABLE_SECURE_BOOT="?1"?$' /etc/kldload/install-manifest.env 2>/dev/null && _sb_requested=1
+if ((_sb_requested)); then
+    test_file "MOK key (DER)" "/var/lib/dkms/mok.der"
+    test_file "MOK key (private)" "/var/lib/dkms/mok.key"
+    test_file "MOK key (public)" "/var/lib/dkms/mok.pub"
+else
+    _pass "MOK keys not expected: this install did not request Secure Boot"
+fi
 if command -v sbsign >/dev/null 2>&1; then
     _pass "sbsigntool installed"
 else
@@ -72,9 +81,11 @@ if [[ -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]]; then
         _warn "BOOT/BOOTX64.EFI" "same as ZFSBootMenu — shim may not be installed"
     fi
 fi
-test_file "MokManager" "/boot/efi/EFI/BOOT/mmx64.efi"
-test_file "MOK cert on EFI" "/boot/efi/EFI/BOOT/mok.der"
-test_file "grubx64.efi (ZBM for shim)" "/boot/efi/EFI/BOOT/grubx64.efi"
+if ((_sb_requested)); then
+    test_file "MokManager" "/boot/efi/EFI/BOOT/mmx64.efi"
+    test_file "MOK cert on EFI" "/boot/efi/EFI/BOOT/mok.der"
+    test_file "grubx64.efi (ZBM for shim)" "/boot/efi/EFI/BOOT/grubx64.efi"
+fi
 
 # ── Profile & Edition ────────────────────────────────────────────────────────
 _section "Profile Markers"
@@ -206,7 +217,9 @@ test_file "SB repair launcher" "/usr/share/applications/kldload-mok-repair.deskt
 # ── WG networks console (prototype) ───────────────────────────────────────────
 _section "WG Networks"
 test_cmd "wgx" "wgx"
-if wgx --help 2>/dev/null | grep -q 'WireGuard networks'; then
+# "WireGuard networks" was the prototype's tagline; wgxplore 0.2.0 prints "the
+# WireGuard estate console", and this FAILed on a working tool (4-k8s, 2026-09-14).
+if wgx --help 2>/dev/null | grep -qE 'WireGuard (estate|networks)'; then
     _pass "wgx --help reports"
 else
     _fail "wgx --help" "no usage output"

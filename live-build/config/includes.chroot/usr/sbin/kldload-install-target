@@ -2947,20 +2947,21 @@ ConditionPathExists=!/var/lib/kldload/smoke-firstboot-done
 
 [Service]
 Type=oneshot
-# Marker-gated wait: even with After=, oneshot units report "active (exited)"
-# as soon as their main ExecStart returns, but the WORK they kicked off in
-# the background (kube-cluster bootstrap, ollama pull) is still running.
-# Block here until the actual readiness markers appear OR a generous
-# timeout elapses (90 min covers a slow box with klab golden builds).
+# Wait for autodeploy to FINISH, as autodeploy itself records it: its final phase
+# file says ready, partial or nothing-requested (or it was skipped). HISTORY: this
+# waited for k8s-ready AND ai-ready, so every edition without AI waited the full
+# timeout, and 90 min is shorter than a klab edition's golden builds: on 4-k8s
+# (fiend 2026-09-14) smoke ran in the middle of the desktop goldens. 6 h covers the
+# full edition; the unit's TimeoutStartSec below is sized to it.
 ExecStartPre=/bin/bash -c '\
-    deadline=$(($(date +%%s) + 5400)); \
+    deadline=$(($(date +%%s) + 21600)); \
     while (( $(date +%%s) < deadline )); do \
-        [[ -f /var/lib/kldload/k8s-ready ]] && \
-        [[ -f /var/lib/kldload/ai-ready ]] && exit 0; \
+        ph=$(cat /var/lib/kldload/current-phase 2>/dev/null); \
+        case "$ph" in ready|partial|nothing-requested) exit 0 ;; esac; \
         [[ -f /var/lib/kldload/autodeploy-skipped ]] && exit 0; \
         sleep 30; \
     done; \
-    echo "smoke: readiness markers not present after 90 min — running anyway"'
+    echo "smoke: autodeploy did not finish within 6 h — running anyway"'
 ExecStart=/bin/bash -c 'if [[ -x /usr/local/share/kldload/tests/smoke-all.sh ]]; then /usr/local/share/kldload/tests/smoke-all.sh > /root/kldload-smoke-report.txt 2>&1; fi'
 # Run once, whatever the outcome.
 #
@@ -2979,7 +2980,8 @@ ExecStartPost=/bin/bash -c 'systemctl disable kldload-smoke-firstboot.service'
 ExecStopPost=/bin/bash -c 'touch /var/lib/kldload/smoke-firstboot-done; systemctl disable kldload-smoke-firstboot.service 2>/dev/null || true'
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=6000
+# 6.5 h: the ExecStartPre wait above is up to 6 h, plus the suite itself.
+TimeoutStartSec=23400
 
 [Install]
 WantedBy=multi-user.target

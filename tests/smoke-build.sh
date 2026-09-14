@@ -810,6 +810,30 @@ else
     _fail "kiosk dashboard flash" "the kiosk marker (KLDLOAD_KIOSK_SHOW -> ?show=1 -> html.ishow-boot cover) is incomplete"
 fi
 
+# First-boot smoke waits for autodeploy's own final phase, long enough for the full
+# edition, not for k8s-ready AND ai-ready (4-k8s, 2026-09-14: no AI requested, so
+# it waited out 90 min and ran in the middle of the golden builds).
+_it="${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-install-target"
+_sm_wait="$(awk '/kldload-smoke-firstboot/{f=1} f && /^ExecStartPre=/{g=1} g{print} g && /running anyway/{exit}' "$_it")"
+_sm_tmo="$(awk '/kldload-smoke-firstboot/{f=1} f && /^TimeoutStartSec=/{sub(/TimeoutStartSec=/, ""); print; exit}' "$_it")"
+if grep -q 'ai-ready' <<<"$_sm_wait"; then
+    _fail "first-boot smoke wait" "still waits for ai-ready — editions without AI wait out the whole timeout"
+elif ! grep -q 'current-phase' <<<"$_sm_wait" || ! grep -q 'nothing-requested' <<<"$_sm_wait"; then
+    _fail "first-boot smoke wait" "does not wait on autodeploy's final phase (ready|partial|nothing-requested)"
+elif [[ "$(grep -oE '\+ [0-9]+' <<<"$_sm_wait" | head -1 | tr -dc 0-9)" -ge "${_sm_tmo:-0}" ]]; then
+    _fail "first-boot smoke wait" "TimeoutStartSec=${_sm_tmo:-unset} is not longer than the wait — systemd kills the unit first"
+else
+    _pass "first-boot smoke waits for autodeploy to finish (TimeoutStartSec=${_sm_tmo})"
+fi
+
+# Secure Boot artefacts are checked only on installs that asked for Secure Boot.
+if grep -qF '_sb_requested=1' "${ROOT}/tests/smoke-kvm.sh" &&
+    awk '/_sb_requested\)\); then/{f=1} f && /MOK key \(DER\)/{ok=1} END{exit !ok}' "${ROOT}/tests/smoke-kvm.sh"; then
+    _pass "smoke-kvm checks MOK keys and the shim chain only when Secure Boot was requested"
+else
+    _fail "smoke-kvm Secure Boot checks" "MOK and shim files are required on installs that did not request Secure Boot"
+fi
+
 _section "Install slides"
 
 # The kiosk deck is a JS array in the canonical SPA. Each slide is [kicker, title,
