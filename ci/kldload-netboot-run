@@ -499,6 +499,11 @@ if should_run ready; then
             #              unit is not enabled at all (core has none)
             #   autodeploy done when its phase file says ready or partial, or the
             #              unit failed, or it is not enabled
+            #   smoke      done when /var/lib/kldload/smoke-firstboot-done exists (its
+            #              ExecStopPost writes it) or the install has no smoke unit.
+            #              5-desktop, build 13: verify ran while the smoke unit was
+            #              still waiting to start, and the edition was "verified"
+            #              with no smoke result in its report.
             state="$(tssh "$ip" '
                 fb=pending
                 { [ -f /var/lib/kldload/firstboot-done ] || ! systemctl is-enabled --quiet kldload-firstboot 2>/dev/null; } && fb=done
@@ -508,9 +513,11 @@ if should_run ready; then
                 elif [ "$ph" = ready ] || [ "$ph" = partial ] || [ "$ph" = nothing-requested ] || [ -f /var/lib/kldload/autodeploy-skipped ] ||
                     [ "$(systemctl is-active kldload-autodeploy 2>/dev/null)" = failed ]; then ad=done
                 fi
-                echo "firstboot=$fb autodeploy=$ad phase=${ph:-none}"' 2>/dev/null)" || state=""
+                sm=done
+                if systemctl cat kldload-smoke-firstboot.service >/dev/null 2>&1 && [ ! -f /var/lib/kldload/smoke-firstboot-done ]; then sm=pending; fi
+                echo "firstboot=$fb autodeploy=$ad smoke=$sm phase=${ph:-none}"' 2>/dev/null)" || state=""
         fi
-        if [[ "$state" == *firstboot=done* && "$state" != *autodeploy=pending* ]]; then
+        if [[ "$state" == *firstboot=done* && "$state" != *autodeploy=pending* && "$state" != *smoke=pending* ]]; then
             break
         fi
         log "converging: ${state:-target not reachable (rebooting, or waiting at a passphrase prompt)}"
@@ -613,6 +620,19 @@ VERIFY
     # swallow: grep -c exits 1 when there are no FAIL lines, which is the passing case
     nfail="$(grep -c '^FAIL|' <<<"$VERIFY_LINES" || true)"
     if ((nfail > 0)); then
+        # Keep the evidence. The next edition wipes this disk, so a failure is
+        # debuggable only from what is copied off now. HISTORY: 3-kvm, build 13:
+        # autodeploy ended partial with klab-golden-rocky unsealed, and the golden
+        # build log was gone before anyone could read it. The report directory is
+        # 0700 root; the appliance logins file is deliberately not collected.
+        # swallow: tar exits 1 when a listed path does not exist on this edition,
+        # which is normal (core has no klab); the archive is checked below.
+        tssh "$TARGET_IP" 'tar czf - --ignore-failed-read /var/log/kldload /root/kldload-install-logs /root/klab/goldens /root/kldload-smoke-report.txt /var/lib/kldload/phases /var/lib/kldload/current-phase 2>/dev/null; true' >"$OUT/target-logs.tgz" 2>/dev/null || true
+        if tar tzf "$OUT/target-logs.tgz" >/dev/null 2>&1; then
+            log "target logs saved: $OUT/target-logs.tgz ($(tar tzf "$OUT/target-logs.tgz" | wc -l) files)"
+        else
+            log "WARNING: could not copy the target's logs — the evidence for this failure is lost with the next install"
+        fi
         fail_run verify "$nfail check(s) failed on $TARGET_IP"
     fi
     phase_ok verify "$(grep -c '^PASS|' <<<"$VERIFY_LINES") passed on $TARGET_IP"
