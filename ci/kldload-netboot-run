@@ -336,7 +336,20 @@ if should_run stage; then
     mount -o loop,ro "$ISO" "$mnt" || fail_run stage "could not mount $ISO"
     install -d "$PAYLOAD"
     declare -A SRC=([vmlinuz]=images/pxeboot/vmlinuz [initrd.img]=images/pxeboot/initrd.img [VERSION]=VERSION [squashfs.img]=LiveOS/squashfs.img)
+    # Skip the copy when the payload is already this ISO: VERSION, kernel and initrd
+    # identical, root image the same size (the head/tail hash check below still
+    # runs either way). HISTORY: the matrix re-staged the same 14.7 GB image before
+    # every edition on build 15 (2026-09-14); each fresh copy left the file cold in
+    # onyx's cache and the next netboot read it at ~24 MB/s, 10 minutes a download
+    # instead of 2.5.
+    _same=1
+    for f in VERSION vmlinuz initrd.img; do
+        cmp -s "$mnt/${SRC[$f]}" "$PAYLOAD/$f" || _same=0
+    done
+    [[ "$(stat -c %s "$mnt/LiveOS/squashfs.img")" == "$(stat -c %s "$PAYLOAD/squashfs.img" 2>/dev/null)" ]] || _same=0
+    ((_same)) && log "payload already holds this image — not copying it again"
     for f in vmlinuz initrd.img VERSION squashfs.img; do
+        ((_same)) && break
         install -m 0644 "$mnt/${SRC[$f]}" "$PAYLOAD/.$f.new" && mv -f "$PAYLOAD/.$f.new" "$PAYLOAD/$f" ||
             {
                 umount "$mnt"
