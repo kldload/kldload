@@ -1815,7 +1815,19 @@ main() {
         # before the FIRST dnf call; keep it only while the mount really exists
         # (live session, or a LAN-mirror host that serves it).
         [[ -d /run/kldload-darksite ]] || _fb_retire_darksite_repo
-        local _retry_pkgs=(nethogs iftop iotop-c htop bcc-tools bpftrace osbuild-composer weldr-client)
+        # Retry only what the install was asked to put there. This list used to
+        # name the eBPF tools and the composer pair on every dnf host, so an
+        # install that never requested them pulled them off the internet at
+        # first boot and printed "missing optional packages" on the console:
+        # fiend 2026-09-14, 5-desktop netboot, eBPF off in the manifest, Fedora
+        # (composer is only in the EL bootstrap transaction, and only a
+        # registered RHEL host ever builds with it).
+        local _retry_pkgs=(nethogs iftop iotop-c htop)
+        [[ "${KLDLOAD_ENABLE_EBPF:-0}" == "1" ]] && _retry_pkgs+=(bcc-tools bpftrace)
+        case "${KLDLOAD_DISTRO:-}" in
+        centos | rocky | rhel) _retry_pkgs+=(osbuild-composer weldr-client) ;;
+        *) : ;; # fedora/debian/ubuntu/arch: the installer never lists composer
+        esac
         local _missing=()
         for _p in "${_retry_pkgs[@]}"; do
             rpm -q "$_p" >/dev/null 2>&1 || _missing+=("$_p")
@@ -2478,9 +2490,11 @@ ZRAMCONF
                 log "WARNING: no network to RPM Fusion — gamescope will miss below and be queued for the network-up heal hook"
             fi
         fi
-        for _pkg in vim-X11 gamescope \
-            libbpf-tools bpftrace bcc-tools \
-            libvirt-daemon-driver-network libvirt-daemon-config-network; do
+        # The eBPF tools are healed only when the manifest asked for them; see
+        # the optional-package retry above for what doing it anyway cost.
+        local _desk_heal=(vim-X11 gamescope libvirt-daemon-driver-network libvirt-daemon-config-network)
+        [[ "${KLDLOAD_ENABLE_EBPF:-0}" == "1" ]] && _desk_heal+=(libbpf-tools bpftrace bcc-tools)
+        for _pkg in "${_desk_heal[@]}"; do
             rpm -q "$_pkg" >/dev/null 2>&1 && continue
             # Retry up to 3x: steam drags RPM Fusion + i686 multilib and the big
             # transaction occasionally fails mid-way (10.100.10.x) — a retry
