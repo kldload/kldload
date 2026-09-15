@@ -585,6 +585,22 @@ fi
 if [[ "$IMG" == 1 ]]; then
     v="$(zfs list -H -t snapshot -o name 2>/dev/null | grep -E '@golden$' | sed 's/@golden$//; s#.*/##' | sort | tr '\n' ' ')"
     [[ -n "${v// /}" ]] && r PASS "golden images sealed" "$(wc -w <<<"$v"): $v" || r FAIL "golden images sealed" "no @golden snapshots"
+    # Every golden the plan asked for, not just "some are sealed". HISTORY: 3-kvm,
+    # fiend 2026-09-14 — the fedora lean golden was powered off mid-build and
+    # never sealed, and this check still passed listing the nine that were.
+    # Expected = each golden phase autodeploy declared x klab's own DISTROS.
+    ds="$(sed -n 's/^DISTROS=(\(.*\))$/\1/p' /usr/local/bin/klab 2>/dev/null | head -n 1)"
+    miss="" want=0
+    for ph in klab-goldens:golden klab-desktop-goldens:desktop klab-ztest-goldens:ztest; do
+        compgen -G "/var/lib/kldload/phases/[0-9][0-9]-${ph%%:*}" >/dev/null || continue
+        for d in $ds; do
+            want=$((want + 1))
+            grep -qw -- "klab-${ph##*:}-$d" <<<"$v" || miss+=" klab-${ph##*:}-$d"
+        done
+    done
+    if [[ -z "$ds" ]]; then r FAIL "requested goldens sealed" "could not read DISTROS from /usr/local/bin/klab"
+    elif [[ -n "$miss" ]]; then r FAIL "requested goldens sealed" "not sealed:$miss"
+    else r PASS "requested goldens sealed" "all $want the plan declared"; fi
 fi
 v="$(grep -E '\] \[[a-z0-9-]+\] FAILED|PHASE .* FAILED' /var/log/kldload/autodeploy.log 2>/dev/null | cut -c1-160 | tr '\n' ';')"
 [[ -z "$v" ]] && r PASS "autodeploy phases" "no FAILED lines" || r FAIL "autodeploy phases" "$v"
