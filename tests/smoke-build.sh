@@ -1816,6 +1816,18 @@ else
         "the wait no longer checks the timer and the unit's start time — it will skip the lean goldens again"
 fi
 
+# The build refuses to pack an image with a PEM private-key header anywhere under
+# etc, var, root, usr/local, opt, home or srv, and the repo's tests are copied to
+# usr/local/share/kldload/tests. A literal header in a test fixture failed build 17
+# ten minutes in (2026-09-14); this finds it in a second, before a build starts.
+_pk_src="$(grep -rlIE --exclude-dir=darksite -- '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' \
+    "$ROOT/tests" "$ROOT/live-build/config/includes.chroot" 2>/dev/null || true)" # grep exits 1 when nothing matches: the passing case
+if [[ -z "$_pk_src" ]]; then
+    _pass "no private-key headers in files the image carries (tests, includes.chroot)"
+else
+    _fail "no private-key headers in files the image carries" "$(tr '\n' ' ' <<<"$_pk_src")— the build's key scan will refuse to pack the ISO"
+fi
+
 # Part 2 of the show needs, from the source tree: cage in the offline package
 # sets it is installed from (Firefox is already there for the desktop), and the
 # loopback listener the kiosk browser reads over plain HTTP. Either missing turns

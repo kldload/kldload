@@ -368,7 +368,12 @@ else
         _fail "kldload-firstboot-show status" "wrong outcome:${_fbad}"
     fi
 
-    printf 'meter 10%%\e[A\e[1Gmeter 90%%\e[K\nreset \ec\e]2;owned\a here\npassword=Passw0rd token: abc123\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsecret\n-----END OPENSSH PRIVATE KEY-----\n' >"${_ft}/log/autodeploy.log"
+    # The key header is assembled at run time. Written out literally, this file
+    # carries a PEM private-key header, the image's private-key scan finds it in
+    # /usr/local/share/kldload/tests and refuses to pack the ISO (build 17,
+    # 2026-09-14) — which is the scan doing its job.
+    _pkw="PRIVATE KEY"
+    printf 'meter 10%%\e[A\e[1Gmeter 90%%\e[K\nreset \ec\e]2;owned\a here\npassword=Passw0rd token: abc123\n-----BEGIN OPENSSH %s-----\nAAAAsecret\n-----END OPENSSH %s-----\n' "${_pkw}" "${_pkw}" >"${_ft}/log/autodeploy.log"
     env "${_fenv[@]}" bash "${_fbs}" frame 2>/dev/null
     if grep -q 'Passw0rd\|abc123\|AAAAsecret\|owned' "${_ft}/tty"; then
         _fail "kldload-firstboot-show log panel" "a credential or an injected title reached the console"
