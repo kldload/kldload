@@ -321,7 +321,8 @@ else
     _fenv=(KLDLOAD_FBSHOW_STATE="${_ft}/state" KLDLOAD_FBSHOW_LOGDIR="${_ft}/log"
         KLDLOAD_FBSHOW_CMDLINE="${_ft}/cmdline" KLDLOAD_FBSHOW_ROOT="${_ft}/root"
         KLDLOAD_FBSHOW_VT=none KLDLOAD_FBSHOW_TTY="${_ft}/tty"
-        KLDLOAD_FBSHOW_UNITSTATE='echo active' KLDLOAD_FBSHOW_COLS=100 KLDLOAD_FBSHOW_ROWS=30)
+        KLDLOAD_FBSHOW_UNITSTATE='echo active' KLDLOAD_FBSHOW_COLS=100 KLDLOAD_FBSHOW_ROWS=30
+        KLDLOAD_FBSHOW_JOURNAL=true)
     _fcheck() { env "${_fenv[@]}" KLDLOAD_FBSHOW_WANT="$1" bash "${_fbs}" check 2>/dev/null; }
     _fbad=""
     _fcheck 'echo k8s=1 klab=0 ai=0' || _fbad+=" k8s-install-not-shown"
@@ -388,9 +389,9 @@ else
     # 2026-09-14: following autodeploy.log alone showed "waiting for
     # klab-firstboot" for 36 minutes while three goldens built in klab's logs.
     mkdir -p "${_ft}/inst" "${_ft}/klab" "${_ft}/run"
-    _ftail() {
+    _ftail() { # KLDLOAD_FBSHOW_JOURNAL defaults to an empty journal: the file fallback
         env "${_fenv[@]}" KLDLOAD_FBSHOW_INSTLOGDIR="${_ft}/inst" KLDLOAD_FBSHOW_INSTPHASE="${_ft}/run/install-phase" \
-            KLDLOAD_FBSHOW_KLABLOGDIR="${_ft}/klab" bash "${_fbs}" logtail 5 2>/dev/null
+            KLDLOAD_FBSHOW_KLABLOGDIR="${_ft}/klab" KLDLOAD_FBSHOW_JOURNAL="${_fjournal:-true}" bash "${_fbs}" logtail 5 2>/dev/null
     }
     echo storage >"${_ft}/inst/storage.log"
     touch -d '-5 min' "${_ft}/inst/storage.log"
@@ -405,8 +406,18 @@ else
     touch -d '+1 min' "${_ft}/klab/fedora-latest.log" 2>/dev/null
     [[ "$(_ftail | head -1)" == "${_ft}/klab/fedora-1.log" ]] || _fbad+=" part2-not-klab-log"
     _ftail | grep -q 'admin / kldload' && _fbad+=" guest-login-shown"
+    # Part 2 reads the build units' journal first: klab's log files hold only a
+    # banner while the real output goes to stdout (fiend, 3-kvm on build 18).
+    _fjout="$(_fjournal="printf 'Downloading debian cloud image\\nStarting install...\\npassword=hunter2\\n'" _ftail)"
+    [[ "$(head -1 <<<"${_fjout}")" == "journal: first boot, autodeploy, klab" ]] || _fbad+=" part2-not-journal"
+    grep -q 'Starting install' <<<"${_fjout}" || _fbad+=" journal-lines-missing"
+    grep -q hunter2 <<<"${_fjout}" && _fbad+=" journal-not-redacted"
+    echo Storage >"${_ft}/run/install-phase"
+    _fjout="$(_fjournal="printf 'journal line\\n'" _ftail)"
+    [[ "$(head -1 <<<"${_fjout}")" == "${_ft}/inst/bootstrap.log" ]] || _fbad+=" part1-read-the-journal"
+    rm -f "${_ft}/run/install-phase"
     if [[ -z "${_fbad}" ]]; then
-        _pass "kldload-firstboot-show logtail: follows the newest build log in each part, redacts logins"
+        _pass "kldload-firstboot-show logtail: installer log in part 1, build journal in part 2, redacted"
     else
         _fail "kldload-firstboot-show logtail" "${_fbad}"
     fi

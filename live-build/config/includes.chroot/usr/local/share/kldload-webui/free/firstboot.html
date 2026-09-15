@@ -1461,7 +1461,22 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   var LAB = Q.get("lab") === "1", MIN = LAB ? 40 : 240, MAX = LAB ? 70 : 540;
   if (LAB) document.getElementById("lab").hidden = false;
   var bag = [], cur = -1, curAt = 0, curDur = 0, wipe = 0, nextBeat = 1;
-  function refill() { bag = SCENES.map(function (_, i) { return i; }); for (var i = bag.length - 1; i > 0; i--) { var j = Math.random() * (i + 1) | 0, x = bag[i]; bag[i] = bag[j]; bag[j] = x; } if (bag[bag.length - 1] === cur && bag.length > 1) { var y = bag[0]; bag[0] = bag[bag.length - 1]; bag[bag.length - 1] = y; } }
+  // Every scene plays once before any plays again (operator, 2026-09-15: "it should
+  // go through all of the screen types before going back to the same one"). The bag
+  // is kept in localStorage, which lives in the kiosk's Firefox profile, so a kiosk
+  // restart carries on through the same round instead of reshuffling. HISTORY: the
+  // guard against a round opening with the scene that just closed the last one
+  // checked the END of the new bag, but scenes are taken from the FRONT, so the same
+  // scene could play twice in a row across rounds.
+  var BAG_KEY = "kldload-part2-bag";
+  function saveBag() { try { localStorage.setItem(BAG_KEY, JSON.stringify({ n: SCENES.length, bag: bag, cur: cur })); } catch (e) { /* storage blocked: the bag lives for this page only */ } }
+  function loadBag() {
+    try {
+      var j = JSON.parse(localStorage.getItem(BAG_KEY) || "null");
+      if (j && j.n === SCENES.length && Array.isArray(j.bag) && j.bag.every(function (x) { return x >= 0 && x < SCENES.length; })) { bag = j.bag; cur = typeof j.cur === "number" ? j.cur : -1; }
+    } catch (e) { /* storage blocked or a stale value: start a fresh round */ }
+  }
+  function refill() { bag = SCENES.map(function (_, i) { return i; }); for (var i = bag.length - 1; i > 0; i--) { var j = Math.random() * (i + 1) | 0, x = bag[i]; bag[i] = bag[j]; bag[j] = x; } if (bag[0] === cur && bag.length > 1) { var y = bag[0]; bag[0] = bag[bag.length - 1]; bag[bag.length - 1] = y; } }
   // Five compositions; each scene start takes a different one than the last, so
   // the text, the output window and the action never sit in the same places twice
   // running (operator, 2026-09-14: "don't use the same placement spots").
@@ -1473,10 +1488,24 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     { cls: "lay-e", area: [.35, .1, .65, .86] }
   ], lay = -1;
   var stageEl = document.getElementById("stage");
+  var layBag = [];
   function applyLook(n) {
     // A scene may name the layouts it needs (a console wants a big area).
     var allowed = SCENES[n].layouts || LAYOUTS.map(function (_, i) { return i; });
-    var nl, tries = 0; do { nl = pick(allowed); } while (nl === lay && allowed.length > 1 && ++tries < 20);
+    // Layouts cycle the same way: all five before one repeats, taking the first one
+    // left in the round that this scene allows. A scene that allows none of what is
+    // left borrows one it does allow (not the last used) and leaves the round alone,
+    // so the leftover layout still comes up with the next scene that can take it.
+    var nl = -1, k;
+    if (!layBag.length) {
+      layBag = LAYOUTS.map(function (_, i) { return i; }).sort(function () { return Math.random() - .5; });
+      if (layBag[0] === lay) layBag.push(layBag.shift());
+    }
+    for (k = 0; k < layBag.length; k++) if (allowed.indexOf(layBag[k]) >= 0) { nl = layBag.splice(k, 1)[0]; break; }
+    if (nl < 0) {
+      var others = allowed.filter(function (x) { return x !== lay; });
+      nl = others.length ? pick(others) : allowed[0];
+    }
     if (Q.get("layout")) nl = Math.max(0, Math.min(LAYOUTS.length - 1, +Q.get("layout")));
     lay = nl; var L = LAYOUTS[lay];
     stageEl.className = L.cls; A.x0 = L.area[0]; A.y0 = L.area[1]; A.x1 = L.area[2]; A.y1 = L.area[3];
@@ -1502,7 +1531,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   function labNext() { var n = 0; try { n = (parseInt(localStorage.getItem(LAB_KEY), 10) + 1) % SCENES.length; if (!(n >= 0)) n = 0; } catch (e) { n = cur < 0 ? 0 : (cur + 1) % SCENES.length; } return n; }
   function advance() {
     if (LAB) { var n = labNext(); try { localStorage.setItem(LAB_KEY, String(n)); } catch (e) { /* storage blocked: order still steps within this page */ } start(n); return; }
-    if (!bag.length) refill(); start(bag.shift());
+    if (!bag.length) refill(); start(bag.shift()); saveBag();
   }
   var sel = document.getElementById("pick");
   SCENES.forEach(function (s, i) { var o = document.createElement("option"); o.value = i; o.textContent = pad(i + 1, 2) + " " + s.card; sel.appendChild(o); });
@@ -2314,7 +2343,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
 
   addEventListener("resize", function () { size(); if (cur >= 0) buildBack(cur); }); size();
   var want = parseInt(Q.get("scene"), 10);
-  if (want >= 1 && want <= SCENES.length) start(want - 1); else advance();
+  if (want >= 1 && want <= SCENES.length) start(want - 1); else { if (!LAB) loadBag(); advance(); }
   // ?still=N: run N seconds of the scene at a fixed 30 fps before the first paint.
   // For screenshots: a headless browser barely advances animation frames.
   var still = parseFloat(Q.get("still"));

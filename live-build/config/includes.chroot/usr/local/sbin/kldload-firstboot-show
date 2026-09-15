@@ -23,12 +23,12 @@
 #   status  Print building | ok | problem for the current state, and exit 0.
 #   frame   Draw one frame to the terminal and exit (for tests and a quick look).
 #   logtail [N]
-#           Print the source path, then the last N cleaned lines of whichever
-#           build log is being written right now: the newest of
-#           /var/log/installer/*.log during a live install (part 1 of the show),
-#           else the newest of firstboot.log, autodeploy.log and the klab golden
-#           logs (part 2). kldload-webui serves this to the graphical show, so
-#           the console screen and the slides show the same, equally redacted text.
+#           Print the source, then the last N cleaned lines of the build output:
+#           the newest of /var/log/installer/*.log during a live install (part 1
+#           of the show), else the journal of kldload-firstboot, kldload-autodeploy
+#           and klab-firstboot (part 2), falling back to the newest of their log
+#           files. kldload-webui serves this to the graphical show, so the console
+#           screen and the slides show the same, equally redacted text.
 #
 # WHY THIS EXISTS:
 #   An install that asks for Kubernetes or golden images spends its first boot
@@ -295,14 +295,54 @@ _log_path() {
     printf '%s\n' "${best:-${LOGDIR}/firstboot.log}"
 }
 
-# logtail [N] — see the header.
-log_tail() {
-    local n="${1:-40}" src
-    [[ "${n}" =~ ^[0-9]+$ ]] && ((n >= 1 && n <= 400)) || n=40
+# _build_journal — the raw stdout of the units doing first boot's work, oldest first.
+#
+# WHY the journal and not the log files: klab writes a banner to each golden's log
+# file when it starts (host, cores, NVIDIA) and the real work -- the cloud image
+# download, virt-install, waiting for the guest -- goes to klab-firstboot's stdout.
+# Part 2's output window sat on that banner while the build ran underneath (fiend,
+# 3-kvm on build 18, 2026-09-15: "it just says the host and nvidia and memory
+# instead of the actual output"). The journal of these units is also exactly what
+# tty1 shows. KLDLOAD_FBSHOW_JOURNAL (a command printing lines) is the test hook.
+FB_UNITS=(kldload-firstboot.service kldload-autodeploy.service klab-firstboot.service)
+_build_journal() {
+    if [[ -n "${KLDLOAD_FBSHOW_JOURNAL:-}" ]]; then
+        bash -c "${KLDLOAD_FBSHOW_JOURNAL}"
+        return
+    fi
+    command -v journalctl >/dev/null 2>&1 || return 0
+    # -q: without it an empty result prints "-- No entries --" on stdout, which would
+    # become the only line in the window.
+    local -a args=(-q -b -o cat -n 400 --no-pager)
+    local u
+    for u in "${FB_UNITS[@]}"; do args+=(-u "${u}"); done
+    journalctl "${args[@]}" 2>/dev/null
+}
+
+# _log_lines N — the source on the first line, then the last N cleaned lines of the
+# build output: during a live install the newest installer log (part 1), after it
+# the build units' journal (part 2), and the newest log file only if the journal
+# has nothing (no journalctl, or the units have not written a line yet).
+_log_lines() {
+    local n="$1" src lines=""
+    if [[ ! -e "${INSTPHASE}" ]]; then
+        lines="$(_build_journal | clean_log | grep -v '^[[:space:]]*$' | tail -n "${n}")"
+        if [[ -n "${lines}" ]]; then
+            printf 'journal: first boot, autodeploy, klab\n%s\n' "${lines}"
+            return 0
+        fi
+    fi
     src="$(_log_path)"
     printf '%s\n' "${src}"
     [[ -r "${src}" ]] || return 0
     tail -c 131072 "${src}" 2>/dev/null | clean_log | grep -v '^[[:space:]]*$' | tail -n "${n}"
+}
+
+# logtail [N] — see the header.
+log_tail() {
+    local n="${1:-40}"
+    [[ "${n}" =~ ^[0-9]+$ ]] && ((n >= 1 && n <= 400)) || n=40
+    _log_lines "${n}"
 }
 
 # ─── drawing ─────────────────────────────────────────────────────────────────
@@ -387,21 +427,23 @@ frame() {
     *) out+="  ${C_DIM}Do not power off. Alt+F1 raw output | Alt+F2 login | this screen hands over when the build is done.${C_RST}"$'\n' ;;
     esac
 
-    # Log tail fills what is left.
-    log_path="$(_log_path)"
-    local used rows_left
+    # Log tail fills what is left: the same source and cleaning as part 2's window.
+    local used rows_left block line first=1 got=0
     used="$(printf '%s' "${out}" | tr -cd '\n' | wc -c)"
     rows_left=$((ROWS - used - 3))
     ((rows_left < 3)) && rows_left=3
-    out+=$'\n'"  ${C_DIM}-- ${log_path} $(printf '%*s' $((w - ${#log_path} - 4)) '' | tr ' ' '-')${C_RST}"$'\n'
-    if [[ -r "${log_path}" ]]; then
-        local line
-        while IFS= read -r line; do
-            out+="  ${C_DIM}${line:0:w}${C_RST}"$'\n'
-        done < <(tail -c 131072 "${log_path}" 2>/dev/null | clean_log | grep -v '^[[:space:]]*$' | tail -n "${rows_left}")
-    else
-        out+="  ${C_DIM}(waiting for the log)${C_RST}"$'\n'
-    fi
+    block="$(_log_lines "${rows_left}")"
+    while IFS= read -r line; do
+        if ((first)); then
+            first=0
+            log_path="${line}"
+            out+=$'\n'"  ${C_DIM}-- ${log_path} $(printf '%*s' $((w - ${#log_path} - 4)) '' | tr ' ' '-')${C_RST}"$'\n'
+            continue
+        fi
+        got=1
+        out+="  ${C_DIM}${line:0:w}${C_RST}"$'\n'
+    done <<<"${block}"
+    ((got)) || out+="  ${C_DIM}(waiting for the log)${C_RST}"$'\n'
     printf '%s' "${out}"
 }
 
