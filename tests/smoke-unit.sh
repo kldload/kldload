@@ -303,6 +303,98 @@ for _pd in fedora:OpenIPMI,sg3_utils,iotop-c:openipmi,sg3-utils \
     fi
 done
 
+_section "first-boot build screen (kldload-firstboot-show)"
+# The operator's rule (fiend 2026-09-14): an install that builds Kubernetes or
+# images keeps the show until the build settles; core/server/plain desktop come
+# straight up. Exercise the real script: the decision, every settle outcome, and
+# that log text reaching the console is stripped of control sequences and
+# credentials.
+_fbs="${CHROOT}/usr/local/sbin/kldload-firstboot-show"
+if [[ ! -f "${_fbs}" ]]; then
+    _fail "kldload-firstboot-show" "script missing from includes.chroot/usr/local/sbin"
+else
+    _ft="$(mktemp -d)"
+    mkdir -p "${_ft}/state/phases" "${_ft}/log" "${_ft}/root"
+    echo 'root=zfs:rpool/ROOT/x quiet' >"${_ft}/cmdline"
+    _fenv=(KLDLOAD_FBSHOW_STATE="${_ft}/state" KLDLOAD_FBSHOW_LOGDIR="${_ft}/log"
+        KLDLOAD_FBSHOW_CMDLINE="${_ft}/cmdline" KLDLOAD_FBSHOW_ROOT="${_ft}/root"
+        KLDLOAD_FBSHOW_VT=none KLDLOAD_FBSHOW_TTY="${_ft}/tty"
+        KLDLOAD_FBSHOW_UNITSTATE='echo active' KLDLOAD_FBSHOW_COLS=100 KLDLOAD_FBSHOW_ROWS=30)
+    _fcheck() { env "${_fenv[@]}" KLDLOAD_FBSHOW_WANT="$1" bash "${_fbs}" check 2>/dev/null; }
+    _fbad=""
+    _fcheck 'echo k8s=1 klab=0 ai=0' || _fbad+=" k8s-install-not-shown"
+    _fcheck 'echo k8s=0 klab=1 ai=0' || _fbad+=" klab-install-not-shown"
+    _fcheck 'echo k8s=0 klab=0 ai=1' && _fbad+=" plain-install-shown"
+    _fcheck 'exit 3' && _fbad+=" shown-when-want-failed"
+    echo 'root=zfs kldload.firstboot_show=0' >"${_ft}/cmdline"
+    _fcheck 'echo k8s=1 klab=1 ai=0' && _fbad+=" escape-hatch-ignored"
+    echo 'root=zfs quiet' >"${_ft}/cmdline"
+    mkdir -p "${_ft}/root/run/live/medium"
+    _fcheck 'echo k8s=1 klab=1 ai=0' && _fbad+=" shown-on-live"
+    rm -r "${_ft}/root/run"
+    if [[ -z "${_fbad}" ]]; then
+        _pass "kldload-firstboot-show check: shows for k8s/klab, not for plain installs, live or kldload.firstboot_show=0"
+    else
+        _fail "kldload-firstboot-show check" "wrong decision:${_fbad}"
+    fi
+
+    _fstatus() { env "${_fenv[@]}" bash "${_fbs}" status 2>/dev/null; }
+    _fbad=""
+    [[ "$(_fstatus)" == building ]] || _fbad+=" fresh!=building"
+    printf 'done 1\n' >"${_ft}/state/phases/10-prereqs"
+    printf 'running 2' >"${_ft}/state/phases/20-k8s"
+    [[ "$(_fstatus)" == building ]] || _fbad+=" running!=building"
+    printf 'failed 3\n' >"${_ft}/state/phases/20-k8s"
+    [[ "$(_fstatus)" == problem ]] || _fbad+=" failed-phase!=problem"
+    # partial on its own, with nothing failed on disk, or the failed-phase rule
+    # above would answer for it.
+    printf 'done 3\n' >"${_ft}/state/phases/20-k8s"
+    printf 'pending 0\n' >"${_ft}/state/phases/30-ready"
+    echo partial >"${_ft}/state/current-phase"
+    [[ "$(_fstatus)" == problem ]] || _fbad+=" partial!=problem"
+    echo ready >"${_ft}/state/current-phase"
+    [[ "$(_fstatus)" == ok ]] || _fbad+=" ready!=ok"
+    rm -f "${_ft}/state/current-phase" "${_ft}/state/phases/"*
+    touch "${_ft}/state/firstboot-done" "${_ft}/state/autodeploy-skipped"
+    [[ "$(_fstatus)" == ok ]] || _fbad+=" skipped!=ok"
+    if [[ -z "${_fbad}" ]]; then
+        _pass "kldload-firstboot-show status: building / problem / ok for each settle case"
+    else
+        _fail "kldload-firstboot-show status" "wrong outcome:${_fbad}"
+    fi
+
+    printf 'meter 10%%\e[A\e[1Gmeter 90%%\e[K\nreset \ec\e]2;owned\a here\npassword=Passw0rd token: abc123\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsecret\n-----END OPENSSH PRIVATE KEY-----\n' >"${_ft}/log/autodeploy.log"
+    env "${_fenv[@]}" bash "${_fbs}" frame 2>/dev/null
+    if grep -q 'Passw0rd\|abc123\|AAAAsecret\|owned' "${_ft}/tty"; then
+        _fail "kldload-firstboot-show log panel" "a credential or an injected title reached the console"
+    elif grep -q $'\ec' "${_ft}/tty"; then
+        _fail "kldload-firstboot-show log panel" "a terminal reset from the log reached the console"
+    elif ! grep -q 'meter 90%' "${_ft}/tty" || grep -q 'meter 10%' "${_ft}/tty"; then
+        _fail "kldload-firstboot-show log panel" "a progress meter was not flattened to its last frame"
+    else
+        _pass "kldload-firstboot-show log panel: meters flattened, control sequences and credentials removed"
+    fi
+    # The decision's input: autodeploy --want, run against fixture manifests.
+    # It must answer from autodeploy's own rules and do none of the work.
+    _fad="${CHROOT}/usr/sbin/kldload-autodeploy"
+    _fwant() {
+        printf '%s\n' "$@" >"${_ft}/m.env"
+        AUTODEPLOY_TEST_MANIFEST="${_ft}/m.env" AUTODEPLOY_TEST_EFFECTIVE="${_ft}/none" bash "${_fad}" --want 2>/dev/null
+    }
+    _fbad=""
+    [[ "$(_fwant KLDLOAD_PROFILE=server)" == "k8s=0 klab=0 ai=0" ]] || _fbad+=" server"
+    [[ "$(_fwant KLDLOAD_PROFILE=kvm)" == "k8s=0 klab=1 ai=0" ]] || _fbad+=" kvm"
+    [[ "$(_fwant KLDLOAD_TEMPLATE=k8s KLDLOAD_BUILD_IMAGES=1)" == "k8s=1 klab=1 ai=0" ]] || _fbad+=" k8s+images"
+    [[ "$(_fwant KLDLOAD_PROFILE=desktop KLDLOAD_ENABLE_AI=1)" == "k8s=0 klab=0 ai=1" ]] || _fbad+=" desktop+ai"
+    [[ "$(_fwant KLDLOAD_TEMPLATE=zfslab KLDLOAD_BUILD_IMAGES=0)" == "k8s=1 klab=0 ai=0" ]] || _fbad+=" zfslab-no-images"
+    if [[ -z "${_fbad}" ]]; then
+        _pass "kldload-autodeploy --want: answers from its own rules for server, kvm, k8s, desktop+AI, zfslab"
+    else
+        _fail "kldload-autodeploy --want" "wrong answer for:${_fbad}"
+    fi
+    rm -rf "${_ft}"
+fi
+
 # ─── summary ─────────────────────────────────────────────────────────────────
 printf "\n  \e[1m%d passed\e[0m, %s\n" "${PASS}" \
     "$([[ ${FAILN} -gt 0 ]] && printf '\e[1;31m%d failed\e[0m' "${FAILN}" || printf '0 failed')"

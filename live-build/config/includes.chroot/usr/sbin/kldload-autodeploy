@@ -34,6 +34,11 @@
 # Idempotent — safe to re-run. Won't redo phases that already have markers.
 # Manual trigger: `sudo kldload-autodeploy`
 #
+# `kldload-autodeploy --want` prints what this install asked for, as
+# "k8s=0|1 klab=0|1 ai=0|1" on stdout, and exits 0 without doing any of it.
+# kldload-firstboot-show uses it to decide whether first boot holds the screen,
+# so the decision is made by this file's own rules and nowhere else.
+#
 # Environment overrides (beyond the install manifest read below):
 #   KLDLOAD_AUTODEPLOY_PARALLEL_AI=1 — let the model download run alongside the
 #     k8s bootstrap again (the pre-2026-08-11 behaviour). Faster on a host with
@@ -42,24 +47,45 @@
 
 set -uo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+WANT_ONLY=0
+case "${1:-}" in
+"") : ;;
+--want) WANT_ONLY=1 ;;
+*)
+    printf 'usage: kldload-autodeploy [--want]\n' >&2
+    exit 2
+    ;;
+esac
 
-MANIFEST=/etc/kldload/install-manifest.env
+# The two AUTODEPLOY_TEST_* overrides exist so --want can be tested against
+# fixture manifests; a real run never sets them.
+MANIFEST="${AUTODEPLOY_TEST_MANIFEST:-/etc/kldload/install-manifest.env}"
 # The installer computes this on the LIVE system and copies its logs to
 # /root/kldload-install-logs/ on the target; /var/log/installer/ exists only on
 # the live image (fiend, 2026-09-13: autodeploy read a file that was never
 # there). The installed path first; the live path kept for a manual re-run
 # from the installer environment.
-EFFECTIVE=/root/kldload-install-logs/effective-config.env
-[[ -r "$EFFECTIVE" ]] || EFFECTIVE=/var/log/installer/effective-config.env
+EFFECTIVE="${AUTODEPLOY_TEST_EFFECTIVE:-/root/kldload-install-logs/effective-config.env}"
+[[ -r "$EFFECTIVE" || -n "${AUTODEPLOY_TEST_EFFECTIVE:-}" ]] || EFFECTIVE=/var/log/installer/effective-config.env
 STATE_DIR=/var/lib/kldload
 LOG_FILE=/var/log/kldload/autodeploy.log
 PHASE_FILE="${STATE_DIR}/current-phase"
 
-mkdir -p "$STATE_DIR" "$(dirname "$LOG_FILE")"
-touch "$LOG_FILE"
-chmod 644 "$LOG_FILE"
+if ((!WANT_ONLY)); then
+    mkdir -p "$STATE_DIR" "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
+    chmod 644 "$LOG_FILE"
+fi
 
-log() { printf '[%(%F %T)T] [autodeploy] %s\n' -1 "$*" | tee -a "$LOG_FILE" >&2; }
+log() {
+    # --want is a question, not a run: its notes go to stderr, never into the log
+    # of the real run.
+    if ((WANT_ONLY)); then
+        printf '[autodeploy --want] %s\n' "$*" >&2
+        return 0
+    fi
+    printf '[%(%F %T)T] [autodeploy] %s\n' -1 "$*" | tee -a "$LOG_FILE" >&2
+}
 # ── Phase state, as DATA ─────────────────────────────────────────────────────
 # current-phase alone answers "what is running" but not "how much is left", so
 # anything rendering progress could only ever show a spinner and an elapsed
@@ -389,6 +415,11 @@ if [[ "${KLDLOAD_BUILD_IMAGES+isset}" == "isset" && "${KLDLOAD_BUILD_IMAGES}" ==
         log "KLDLOAD_BUILD_IMAGES=0 set explicitly — skipping the golden builds the template would have run"
     fi
     WANT[klab]=0
+fi
+
+if ((WANT_ONLY)); then
+    printf 'k8s=%s klab=%s ai=%s\n' "${WANT[k8s]}" "${WANT[klab]}" "${WANT[ai]}"
+    exit 0
 fi
 
 # K8s cluster sizing — klab and k8s templates both land with a fully

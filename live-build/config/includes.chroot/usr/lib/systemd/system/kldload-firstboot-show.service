@@ -1,0 +1,43 @@
+# kldload-firstboot-show.service — the build screen on first boot, for installs
+# that asked for Kubernetes or golden images.
+#
+# Role: runs kldload-firstboot-show, which draws the build on VT8 until
+# first boot and autodeploy settle, then switches back to tty1 and exits.
+# Read by: systemd on an installed system. Enabled by the installer next to
+# kldload-autodeploy.service; on the live image nothing enables it.
+#
+# WHY Type=oneshot and Before= the display manager: "started" for a oneshot means
+# its process has EXITED, so a desktop's login screen waits until the build has
+# settled instead of inviting someone into a half-built machine (operator,
+# fiend 2026-09-14). multi-user.target waits for it too, as a target does for the
+# units it wants. Nothing the build itself needs is ordered after that target:
+# kldload-firstboot and kldload-autodeploy are Before=multi-user.target, and
+# klab-firstboot is started by its own timer. sshd is not ordered after it either,
+# so the machine is reachable the whole time.
+#
+# Consequence if missing or skipped: the machine comes up to its login or desktop
+# while first boot is still building, exactly as it did before 2026-09-14.
+
+[Unit]
+Description=kldload first-boot build screen (while requested images and Kubernetes build)
+Documentation=man:systemd.service(5)
+After=local-fs.target zfs-mount.service systemd-vconsole-setup.service systemd-user-sessions.service
+Before=display-manager.service gdm.service
+# Already built on an earlier boot. The script checks the same two, after the
+# state dataset is mounted; these just skip the fork.
+ConditionPathExists=!/var/lib/kldload/all-ready
+ConditionPathExists=!/var/lib/kldload/firstboot-show-done
+
+[Service]
+Type=oneshot
+# 0 = this install builds something, show it; 1 = skip the unit, not a failure.
+ExecCondition=/usr/local/sbin/kldload-firstboot-show check
+ExecStart=/usr/local/sbin/kldload-firstboot-show run
+StandardOutput=journal
+StandardError=journal
+# The script hands over by itself after 6 h; this is the backstop if it cannot.
+# SIGTERM makes it switch back to tty1 before it exits.
+TimeoutStartSec=6h30min
+
+[Install]
+WantedBy=multi-user.target

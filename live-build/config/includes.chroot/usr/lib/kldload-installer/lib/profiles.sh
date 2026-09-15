@@ -1027,7 +1027,7 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer; do
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service kldload-firstboot-show.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -1182,7 +1182,7 @@ k_install_system_files() {
         # kfire — Firecracker microVMs from an appliance golden (2026-09-05).
         #   vmxplore on the installed system calls it; without this entry the
         #   Firecracker branch offers clones the host cannot make.
-        for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-session kldload-headlamp-install kldload-secure-boot kldload-debug-bundle kldload-rhel-composer-build kfire; do
+        for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-session kldload-headlamp-install kldload-secure-boot kldload-debug-bundle kldload-rhel-composer-build kfire kldload-firstboot-show; do
             [[ -f "/usr/local/sbin/${bin}" ]] &&
                 cp "/usr/local/sbin/${bin}" "${target}/usr/local/sbin/${bin}" &&
                 chmod +x "${target}/usr/local/sbin/${bin}" &&
@@ -1418,6 +1418,21 @@ k_install_system_files() {
         # markers the UI reads to turn the Lab Ready banner green.
         ln -sf "/usr/lib/systemd/system/kldload-autodeploy.service" \
             "${target}/etc/systemd/system/multi-user.target.wants/kldload-autodeploy.service" || true
+        # The first-boot build screen. Enabled on every install; it decides at
+        # boot, from `kldload-autodeploy --want`, whether there is anything to
+        # show, so core, server and a plain desktop skip it in one fork and come
+        # straight up (operator, fiend 2026-09-14). Enable and verify together:
+        # an installed-but-dead unit here means the machine opens mid-build.
+        if [[ -f "${target}/usr/lib/systemd/system/kldload-firstboot-show.service" &&
+            -x "${target}/usr/local/sbin/kldload-firstboot-show" ]]; then
+            ln -sf "/usr/lib/systemd/system/kldload-firstboot-show.service" \
+                "${target}/etc/systemd/system/multi-user.target.wants/kldload-firstboot-show.service"
+            [[ -L "${target}/etc/systemd/system/multi-user.target.wants/kldload-firstboot-show.service" ]] &&
+                k_log "enabled kldload-firstboot-show.service (build screen while first boot builds)" ||
+                k_log "WARNING: kldload-firstboot-show.service NOT enabled — a building install will open to its login mid-build"
+        else
+            k_log "WARNING: kldload-firstboot-show unit or script missing on the target — no build screen at first boot"
+        fi
         # ttyd — browser terminal (k9s + shell + logs inside a tmux session),
         # iframe'd from the Kubernetes tab. Enable at boot so the console panel
         # works as soon as the webui is reachable.

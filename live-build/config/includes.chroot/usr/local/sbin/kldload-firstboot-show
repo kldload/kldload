@@ -1,0 +1,412 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-firstboot-show — hold the screen while first boot builds what the
+# install asked for, then hand over a finished machine.
+#
+# WHAT IT DOES, IN ORDER:
+#   check   1. Decide whether this boot gets the show. Exit 0 yes, 1 no.
+#   run     2. Switch the console to its own virtual terminal and draw, once a
+#              second: the stages (first boot, then autodeploy's phase plan),
+#              a progress bar, and the tail of the live log.
+#           3. When the build settles, show the outcome — a short "complete"
+#              screen, or what failed and where its log is — switch back to
+#              tty1 and exit 0, which releases the login prompt or the display
+#              manager that were ordered after this unit.
+#   status  Print building | ok | problem for the current state, and exit 0.
+#   frame   Draw one frame to the terminal and exit (for tests and a quick look).
+#
+# WHY THIS EXISTS:
+#   An install that asks for Kubernetes or golden images spends its first boot
+#   building them, for up to an hour. The machine used to come up to a login or
+#   a desktop in the middle of that, and the operator was invited to start using
+#   a half-built system. The operator's rule (fiend, 2026-09-14): core, server
+#   and a plain desktop come straight up, because they are ready; anything that
+#   builds images, Kubernetes or KVM keeps the show on screen all the way
+#   through, and "it reinforces to the user that they literally did not press a
+#   button". Build editions stay lean, so this is a console screen, not a browser.
+#
+# THE DECISION (check), in order:
+#   kldload.firstboot_show=0 on the kernel cmdline   -> no (the escape hatch)
+#   a live medium is mounted                          -> no (not an installed system)
+#   firstboot-show-done or all-ready exists           -> no (already built)
+#   `kldload-autodeploy --want` reports k8s=1 or klab=1 -> yes
+#   anything else                                     -> no
+#   autodeploy's own rules decide what was requested; this file never
+#   re-derives them from the manifest.
+#
+# SETTLED (status) — the same rule the build monitor uses (buildmon 7f63caf4):
+#   ok       all-ready, or current-phase "ready", or first boot done with
+#            autodeploy skipped / "nothing-requested"
+#   problem  current-phase "partial"; kldload-firstboot or kldload-autodeploy
+#            failed; or a plan whose phases have all stopped with one failed
+#   building anything else
+#
+# INPUTS:   /var/lib/kldload/{firstboot-done,all-ready,current-phase,phases/,
+#           autodeploy-skipped}, /var/log/kldload/{firstboot,autodeploy}.log,
+#           /proc/cmdline, kldload-autodeploy --want, systemctl
+# OUTPUTS:  the screen (VT8, then back to VT1); /var/lib/kldload/firstboot-show-done
+#           when it hands over, so a later boot never shows it again
+# EXIT:     check: 0 show, 1 no show. run/status/frame: 0. usage: 2.
+#
+# Notes:
+#   - Draws on its own VT so the units that write journal+console (firstboot,
+#     autodeploy, klab) keep printing to tty1 underneath, unseen. Alt+F1 shows
+#     that raw output; the operator wants it one keypress away because it is the
+#     visible proof of the work.
+#   - Log text is untrusted on its way to a terminal: control sequences are
+#     stripped (a log line must not be able to reprogram the console), redraws
+#     from progress meters are flattened to their last frame, and anything that
+#     looks like a credential is redacted.
+#   - No ERR trap and no -e in the draw loop: a failed read or draw skips a
+#     frame; it must never end the show early or, worse, leave the console on a
+#     VT nobody is drawing.
+#   - Test hooks: KLDLOAD_FBSHOW_STATE, _LOGDIR, _CMDLINE, _ROOT (prefix for the
+#     live-medium probe), _TTY, _VT (none: do
+#     not switch), _WANT (command printing the want line), _UNITSTATE (command
+#     taking a unit name and printing its ActiveState), _INTERVAL, _MAXSEC,
+#     _HOLD_OK, _HOLD_PROBLEM, _COLS, _ROWS.
+#   - SEE ALSO: kldload-firstboot-show.service, kldload-autodeploy,
+#     kldload-initrd-show (the netboot console show this one follows),
+#     kldload-buildmon (the same settle rule, in a window).
+# ─────────────────────────────────────────────────────────────────────────────
+# strict-mode: exempt — a display loop beside the build: a failed read or draw must skip a frame, never end the show
+set -uo pipefail
+export LC_ALL=C
+
+STATE="${KLDLOAD_FBSHOW_STATE:-/var/lib/kldload}"
+LOGDIR="${KLDLOAD_FBSHOW_LOGDIR:-/var/log/kldload}"
+CMDLINE="${KLDLOAD_FBSHOW_CMDLINE:-/proc/cmdline}"
+VT="${KLDLOAD_FBSHOW_VT:-8}"
+TTY="${KLDLOAD_FBSHOW_TTY:-/dev/tty${VT}}"
+INTERVAL="${KLDLOAD_FBSHOW_INTERVAL:-1}"
+MAXSEC="${KLDLOAD_FBSHOW_MAXSEC:-21600}"
+HOLD_OK="${KLDLOAD_FBSHOW_HOLD_OK:-8}"
+HOLD_PROBLEM="${KLDLOAD_FBSHOW_HOLD_PROBLEM:-60}"
+ROOT="${KLDLOAD_FBSHOW_ROOT:-}"
+
+_say() { printf 'kldload-firstboot-show: %s\n' "$*" >&2; }
+
+_want_line() {
+    if [[ -n "${KLDLOAD_FBSHOW_WANT:-}" ]]; then
+        bash -c "${KLDLOAD_FBSHOW_WANT}"
+    else
+        /usr/sbin/kldload-autodeploy --want
+    fi
+}
+
+_unit_state() {
+    if [[ -n "${KLDLOAD_FBSHOW_UNITSTATE:-}" ]]; then
+        bash -c "${KLDLOAD_FBSHOW_UNITSTATE}" _ "$1"
+    else
+        systemctl show -p ActiveState --value "$1" 2>/dev/null
+    fi
+}
+
+# ─── check ───────────────────────────────────────────────────────────────────
+show_wanted() {
+    local _tok _want
+    local -a _toks=()
+    if read -ra _toks <"${CMDLINE}"; then
+        for _tok in "${_toks[@]}"; do
+            case "${_tok}" in
+            kldload.firstboot_show=0 | kldload.firstboot_show=no | kldload.firstboot_show=off)
+                _say "${_tok} on the cmdline — no show"
+                return 1
+                ;;
+            esac
+        done
+    fi
+    for _tok in /run/live/medium /run/initramfs/live /lib/live/mount/medium; do
+        if [[ -d "${ROOT}${_tok}" ]]; then
+            _say "live medium at ${_tok} — not an installed system"
+            return 1
+        fi
+    done
+    if [[ -e "${STATE}/firstboot-show-done" || -e "${STATE}/all-ready" ]]; then
+        _say "this machine has already finished its first-boot build"
+        return 1
+    fi
+    if ! _want="$(_want_line)"; then
+        _say "kldload-autodeploy --want failed — no show, the boot goes on as usual"
+        return 1
+    fi
+    case " ${_want} " in
+    *" k8s=1 "* | *" klab=1 "*)
+        _say "requested: ${_want} — first boot builds, the show holds the screen"
+        return 0
+        ;;
+    esac
+    _say "requested: ${_want} — nothing to build, the system comes straight up"
+    return 1
+}
+
+# ─── state ───────────────────────────────────────────────────────────────────
+# Globals filled by read_state: PH_NAME[] PH_STATE[] PH_START[], FB_DONE, CUR.
+read_state() {
+    PH_NAME=() PH_STATE=() PH_START=()
+    FB_DONE=0
+    [[ -e "${STATE}/firstboot-done" ]] && FB_DONE=1
+    CUR=""
+    [[ -r "${STATE}/current-phase" ]] && CUR="$(tr -d '[:space:]' <"${STATE}/current-phase")"
+    local _f _b _s _t _body
+    for _f in "${STATE}"/phases/[0-9][0-9]-*; do
+        [[ -f "${_f}" ]] || continue
+        _b="${_f##*/}"
+        # Through a here-string, so a body with no trailing newline still reads.
+        _body="$(<"${_f}")" || _body=""
+        _s="" _t=""
+        read -r _s _t <<<"${_body}"
+        case "${_s}" in done | running | failed) : ;; *) _s=pending ;; esac
+        [[ "${_t:-}" =~ ^[0-9]+$ ]] || _t=0
+        PH_NAME+=("${_b#??-}")
+        PH_STATE+=("${_s}")
+        PH_START+=("${_t}")
+    done
+}
+
+# Prints ok | problem | building.
+settle() {
+    local _st _i _open=0 _failed=0
+    read_state
+    [[ -e "${STATE}/all-ready" ]] && {
+        echo ok
+        return
+    }
+    case "${CUR}" in
+    ready)
+        echo ok
+        return
+        ;;
+    partial)
+        echo problem
+        return
+        ;;
+    esac
+    if ((FB_DONE)) && [[ "${CUR}" == nothing-requested || -e "${STATE}/autodeploy-skipped" ]]; then
+        echo ok
+        return
+    fi
+    for _st in kldload-firstboot.service kldload-autodeploy.service; do
+        [[ "$(_unit_state "${_st}")" == failed ]] && {
+            echo problem
+            return
+        }
+    done
+    for _i in "${!PH_STATE[@]}"; do
+        case "${PH_STATE[_i]}" in
+        running | pending) _open=1 ;;
+        failed) _failed=1 ;;
+        esac
+    done
+    if ((${#PH_STATE[@]} > 0 && !_open && _failed)); then
+        echo problem
+        return
+    fi
+    echo building
+}
+
+# ─── log text on its way to a terminal ───────────────────────────────────────
+# 1. a progress meter's redraw (CR, cursor-up, column move) starts the line over;
+# 2. every other escape sequence and control byte is dropped;
+# 3. credentials are redacted, and a private key block is replaced whole.
+clean_log() {
+    sed -E \
+        -e $'s/\x1b\\[[0-9;?]*[ -\\/]*[AG]/\r/g' \
+        -e $'s/\x1b\\[[0-9;?]*[ -\\/]*[@-~]//g' \
+        -e $'s/\x1b\\][^\a]*(\a|\x1b\\\\)//g' \
+        -e $'s/.*\r(.)/\\1/' \
+        -e '/BEGIN [A-Z ]*PRIVATE KEY/,/END [A-Z ]*PRIVATE KEY/c\[redacted private key]' \
+        -e 's/((pass(word|wd|phrase)?|secret|token|api[_-]?key|private[_-]?key|psk)["'"'"']?[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1[redacted]/Ig' |
+        tr -d '\000-\010\013-\037\177'
+}
+
+_log_path() {
+    if ((FB_DONE)) && [[ -s "${LOGDIR}/autodeploy.log" ]]; then
+        printf '%s\n' "${LOGDIR}/autodeploy.log"
+    else
+        printf '%s\n' "${LOGDIR}/firstboot.log"
+    fi
+}
+
+# ─── drawing ─────────────────────────────────────────────────────────────────
+C_RST=$'\e[0m' C_DIM=$'\e[2m' C_B=$'\e[1m'
+C_CYAN=$'\e[36m' C_MAG=$'\e[35m' C_GRN=$'\e[32m' C_YEL=$'\e[33m' C_RED=$'\e[31m' C_WHT=$'\e[37m'
+
+_dur() {
+    local s=$1
+    ((s < 0)) && s=0
+    if ((s >= 3600)); then
+        printf '%dh%02dm' $((s / 3600)) $((s % 3600 / 60))
+    else
+        printf '%dm%02ds' $((s / 60)) $((s % 60))
+    fi
+}
+
+_size() {
+    COLS="${KLDLOAD_FBSHOW_COLS:-}" ROWS="${KLDLOAD_FBSHOW_ROWS:-}"
+    if [[ -z "${COLS}" || -z "${ROWS}" ]]; then
+        local _sz
+        _sz="$(stty -F "${TTY}" size 2>/dev/null)" || _sz=""
+        ROWS="${_sz% *}" COLS="${_sz#* }"
+    fi
+    [[ "${COLS}" =~ ^[0-9]+$ ]] && ((COLS >= 40)) || COLS=80
+    [[ "${ROWS}" =~ ^[0-9]+$ ]] && ((ROWS >= 16)) || ROWS=25
+}
+
+# frame <verdict> <started-epoch> — the whole screen as one string on stdout.
+frame() {
+    local verdict=$1 t0=$2 now i n=0 done_n=0 w bar fill host ip log_path
+    now="$(printf '%(%s)T' -1)"
+    _size
+    w=$((COLS - 4))
+    host="$(hostname 2>/dev/null)" || host=""
+    ip="$(ip -o -4 addr show scope global 2>/dev/null | sed -n 's/.* inet \([0-9.]*\)\/.*/\1/p' | head -n 2 | tr '\n' ' ')" || ip=""
+    read_state
+
+    local out=""
+    out+=$'\e[H\e[2J'
+    out+="  ${C_B}${C_MAG}kldload${C_RST}${C_WHT} - building this system${C_RST}"$'\n'
+    out+="  ${C_DIM}${host}  ${ip}  |  running $(_dur $((now - t0)))  |  nobody pressed a button${C_RST}"$'\n\n'
+
+    # Stages: first boot, then autodeploy's plan.
+    local fb_state=running
+    ((FB_DONE)) && fb_state="done"
+    [[ "$(_unit_state kldload-firstboot.service)" == failed ]] && fb_state=failed
+    local -a names=("first boot") states=("${fb_state}") starts=(0)
+    for i in "${!PH_NAME[@]}"; do
+        names+=("${PH_NAME[i]}") states+=("${PH_STATE[i]}") starts+=("${PH_START[i]}")
+    done
+    for i in "${!names[@]}"; do
+        n=$((n + 1))
+        local mark col right=""
+        case "${states[i]}" in
+        done) mark="[ok]" col="${C_GRN}" done_n=$((done_n + 1)) ;;
+        running)
+            mark="[>>]" col="${C_YEL}"
+            ((starts[i] > 0)) && right="$(_dur $((now - starts[i])))"
+            ;;
+        failed) mark="[!!]" col="${C_RED}" ;;
+        *) mark="[  ]" col="${C_DIM}" ;;
+        esac
+        out+="  ${col}${mark}${C_RST} $(printf '%-32.32s' "${names[i]}") ${C_DIM}${right}${C_RST}"$'\n'
+    done
+    ((${#PH_NAME[@]} == 0)) && out+="  ${C_DIM}[  ] the build plan is declared when first boot finishes${C_RST}"$'\n'
+
+    # Bar: stages done of stages known. Honest about an undeclared plan.
+    local bw=$((w - 20))
+    ((bw < 10)) && bw=10
+    fill=$((n > 0 ? done_n * bw / n : 0))
+    bar="$(printf '%*s' "${fill}" '' | tr ' ' '#')$(printf '%*s' $((bw - fill)) '' | tr ' ' '.')"
+    out+=$'\n'"  ${C_CYAN}${bar}${C_RST} ${done_n}/${n} stages"$'\n\n'
+
+    # Verdict line.
+    case "${verdict}" in
+    ok) out+="  ${C_B}${C_GRN}Build complete.${C_RST} Handing the machine over."$'\n' ;;
+    problem)
+        out+="  ${C_B}${C_RED}The build did not finish cleanly.${C_RST}"
+        for i in "${!PH_NAME[@]}"; do [[ "${PH_STATE[i]}" == failed ]] && out+=" failed: ${PH_NAME[i]}"; done
+        out+=$'\n'"  Logs: ${LOGDIR}/firstboot.log  ${LOGDIR}/autodeploy.log  -  handing over in ${HOLD_PROBLEM}s"$'\n'
+        ;;
+    *) out+="  ${C_DIM}Do not power off. Alt+F1 raw output | Alt+F2 login | this screen hands over when the build is done.${C_RST}"$'\n' ;;
+    esac
+
+    # Log tail fills what is left.
+    log_path="$(_log_path)"
+    local used rows_left
+    used="$(printf '%s' "${out}" | tr -cd '\n' | wc -c)"
+    rows_left=$((ROWS - used - 3))
+    ((rows_left < 3)) && rows_left=3
+    out+=$'\n'"  ${C_DIM}-- ${log_path} $(printf '%*s' $((w - ${#log_path} - 4)) '' | tr ' ' '-')${C_RST}"$'\n'
+    if [[ -r "${log_path}" ]]; then
+        local line
+        while IFS= read -r line; do
+            out+="  ${C_DIM}${line:0:w}${C_RST}"$'\n'
+        done < <(tail -c 131072 "${log_path}" 2>/dev/null | clean_log | grep -v '^[[:space:]]*$' | tail -n "${rows_left}")
+    else
+        out+="  ${C_DIM}(waiting for the log)${C_RST}"$'\n'
+    fi
+    printf '%s' "${out}"
+}
+
+# ─── run ─────────────────────────────────────────────────────────────────────
+_vt_switch() {
+    [[ "${VT}" == none ]] && return 0
+    command -v chvt >/dev/null 2>&1 || return 0
+    chvt "$1" 2>/dev/null || true # a VT switch that fails leaves the show drawn where it is; nothing to recover
+}
+
+_hand_over() {
+    printf '\e[?25h\e[0m' >>"${TTY}" 2>/dev/null
+    if [[ "${VT}" != none ]]; then
+        _vt_switch 1
+        # Redraw the login prompt tty1's getty printed an hour ago, under the
+        # post-installer output that has scrolled past it since.
+        if [[ -z "${KLDLOAD_FBSHOW_UNITSTATE:-}" ]] &&
+            [[ "$(_unit_state getty@tty1.service)" == active ]]; then
+            systemctl restart getty@tty1.service 2>/dev/null || true # no getty on tty1 (a desktop's display manager owns it): nothing to redraw
+        fi
+    fi
+}
+
+run_show() {
+    local t0 v held=0 hold
+    t0="$(printf '%(%s)T' -1)"
+    [[ -w "${TTY}" ]] || {
+        _say "cannot write ${TTY} — no show, the boot goes on as usual"
+        return 0
+    }
+    trap '_hand_over; exit 0' TERM INT
+    printf '\e[?25l' >>"${TTY}" 2>/dev/null
+    _vt_switch "${VT}"
+    while :; do
+        v="$(settle)"
+        frame "${v}" "${t0}" >"${TTY}" 2>/dev/null
+        if [[ "${v}" != building ]]; then
+            hold="${HOLD_OK}"
+            [[ "${v}" == problem ]] && hold="${HOLD_PROBLEM}"
+            if ((held >= hold)); then
+                _say "build settled: ${v}"
+                break
+            fi
+            held=$((held + INTERVAL))
+        fi
+        if (($(printf '%(%s)T' -1) - t0 > MAXSEC)); then
+            _say "still building after ${MAXSEC}s — handing the machine over anyway"
+            break
+        fi
+        sleep "${INTERVAL}"
+    done
+    : >"${STATE}/firstboot-show-done" 2>/dev/null || _say "WARNING: could not write ${STATE}/firstboot-show-done — the show may run again next boot"
+    _hand_over
+    return 0
+}
+
+usage() {
+    cat <<'USAGE'
+usage: kldload-firstboot-show <check|run|status|frame>
+
+  check    Exit 0 if this boot should hold the screen while first boot builds
+           what the install asked for (kldload-autodeploy --want reports k8s=1
+           or klab=1), 1 if not. Prints its reason on stderr.
+  run      Draw the build screen on VT8 until the build settles, show the
+           outcome, switch back to tty1 and exit 0.
+  status   Print building, ok or problem for the current state.
+  frame    Draw one frame on the terminal and exit.
+
+Kernel cmdline: kldload.firstboot_show=0 turns the show off for that boot.
+While it runs: Alt+F1 shows the raw post-installer output, Alt+F2 a login.
+Exit: check 0/1; run, status and frame 0; usage 2.
+USAGE
+}
+
+case "${1:-}" in
+check) show_wanted ;;
+run) run_show ;;
+status) settle ;;
+frame) frame "$(settle)" "$(printf '%(%s)T' -1)" >"${TTY}" ;;
+-h | --help | help) usage ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac
