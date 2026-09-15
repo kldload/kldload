@@ -437,12 +437,15 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
 
   // 3. ASSIMILATE — a formation, converted row by row
   (function () {
-    var fleet = [], sweep = -.15, doneAt = 0;
+    // The cannon at the bottom: it slides under a living invader and fires up, and a hit
+    // assimilates that one (operator on fiend, 2026-09-15: "space invaders need a ship
+    // at the bottom shooting up").
+    var fleet = [], sweep = -.15, doneAt = 0, gun = { x: 0, tx: 0, cool: 1.2 }, bolts = [], sparks = [];
     for (var r = 0; r < 5; r++) for (var c = 0; c < 9; c++) fleet.push({ r: r, c: c, borg: false, flash: 0, warp: 1 });
     SCENES.push({
       pal: ["#3dff88", "#b6ff4d", "#d7ffe6"], card: "assimilate", label: "assimilated",
       count: function () { return pad(fleet.filter(function (s) { return s.borg; }).length, 2) + "/" + fleet.length; },
-      init: function () { sweep = -.15; doneAt = 0; fleet.forEach(function (s) { s.borg = false; s.warp = 1; }); },
+      init: function () { sweep = -.15; doneAt = 0; bolts = []; sparks = []; fleet.forEach(function (s) { s.borg = false; s.warp = 1; }); },
       event: function () { var n = fleet.filter(function (s) { return !s.borg; }); if (n.length) { var s = pick(n); s.borg = true; s.flash = 1; } },
       beat: [3, 5],
       draw: function (t, dt) {
@@ -454,8 +457,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
         cx.save(); cx.globalCompositeOperation = "lighter";
         var by = top - gy * .6 + Math.max(0, sweep) * gy * 6.2;
         if (sweep > 0 && !doneAt) { cx.fillStyle = "rgba(61,255,136,.08)"; cx.fillRect(mid - gx * 5.5, by - 20, gx * 11, 40); cx.strokeStyle = "rgba(61,255,136,.85)"; cx.lineWidth = 2; line(mid - gx * 5.5, by, mid + gx * 5.5, by); }
+        var alive = [];
         fleet.forEach(function (s) {
           var x = mid + (s.c - 4) * gx + sway, y = top + s.r * gy + Math.sin(t * 1.3 + s.c * .5) * 4;
+          s.px = x; s.py = y; if (!s.borg) alive.push(s);
           if (!s.borg && sweep > 0 && y < by) { s.borg = true; s.flash = 1; }
           if (s.flash) s.flash = Math.max(0, s.flash - dt * 2.5);
           if (s.warp) { s.warp = Math.max(0, s.warp - dt * 1.4); cx.strokeStyle = "rgba(233,255,242," + s.warp.toFixed(3) + ")"; cx.lineWidth = 1; line(x, y - 90 * s.warp, x, y); }
@@ -464,6 +469,36 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
           else { cx.strokeStyle = s.r < 2 ? "rgba(255,59,92,.9)" : (s.r < 4 ? "rgba(255,207,77,.9)" : "rgba(33,230,255,.9)"); cx.lineWidth = 1.4; var fl = Math.sin(t * 6 + s.c) * 3;
             poly([[x - 12, y + 2 + fl], [x - 5, y - 6], [x, y - 1], [x + 5, y - 6], [x + 12, y + 2 + fl]]); cx.stroke(); poly([[x - 5, y + 5], [x, y - 1], [x + 5, y + 5]]); cx.stroke(); }
         });
+        // the cannon: pick the lowest living invader in some column, slide under it, fire
+        // just above the NO COIN REQUIRED line the HUD blinks at the foot of the area
+        // (operator on fiend, 2026-09-15); same arithmetic as hud() uses to place it
+        var hpx = Math.max(2, Math.round(Math.min(W, H) / 330)), coinY = Math.min(H * .9, AY(1) - 8 * hpx);
+        var gy0 = coinY - 6 * hpx, gxMin = AX(.06), gxMax = AX(.94);
+        if (!gun.x) gun.x = gun.tx = mid;
+        gun.cool -= dt;
+        if (alive.length && (gun.cool <= 0 || Math.abs(gun.tx - gun.x) < 1)) {
+          if (gun.cool <= 0 && Math.abs(gun.tx - gun.x) < 6 && bolts.length < 3) { bolts.push({ x: gun.x, y: gy0 - 16 * Math.max(1.2, gx / 45) }); gun.cool = rand(.45, 1.1); }
+          if (Math.abs(gun.tx - gun.x) < 6) { var tg = pick(alive); gun.tx = tg.px; }
+        }
+        gun.x += Math.max(-1, Math.min(1, (gun.tx - gun.x) / 40)) * dt * 260;
+        gun.x = Math.max(gxMin, Math.min(gxMax, gun.x));
+        cx.strokeStyle = C.beam; cx.fillStyle = "rgba(33,230,255,.18)"; cx.lineWidth = 1.5;
+        var gs = Math.max(1.2, gx / 45); // the cannon grows with the formation
+        poly([[gun.x - 18 * gs, gy0], [gun.x - 18 * gs, gy0 - 7 * gs], [gun.x - 5 * gs, gy0 - 7 * gs], [gun.x - 3 * gs, gy0 - 14 * gs], [gun.x + 3 * gs, gy0 - 14 * gs], [gun.x + 5 * gs, gy0 - 7 * gs], [gun.x + 18 * gs, gy0 - 7 * gs], [gun.x + 18 * gs, gy0]], 1); cx.fill(); cx.stroke();
+        bolts = bolts.filter(function (b) {
+          b.y -= dt * 560;
+          cx.strokeStyle = "rgba(233,255,242,.95)"; cx.lineWidth = 2; line(b.x, b.y, b.x, b.y + 12);
+          for (var i = 0; i < alive.length; i++) {
+            var a = alive[i];
+            if (Math.abs(a.px - b.x) < 13 && Math.abs(a.py - b.y) < 10) {
+              a.borg = true; a.flash = 1; alive.splice(i, 1);
+              for (var q = 0; q < 10; q++) sparks.push({ x: b.x, y: b.y, vx: rand(-90, 90), vy: rand(-90, 60), life: rand(.3, .6) });
+              return false;
+            }
+          }
+          return b.y > AY(0);
+        });
+        sparks = sparks.filter(function (p) { p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; cx.fillStyle = "rgba(182,255,77," + Math.max(0, p.life * 1.6).toFixed(3) + ")"; cx.fillRect(p.x - 1, p.y - 1, 2, 2); return p.life > 0; });
         cx.restore();
       }
     });
@@ -1369,13 +1404,16 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
         } else {
           // ENHANCE: a grainy frame of a rack, zooming in steps onto node 23's label
           cx.fillStyle = "#0a0806"; cx.fillRect(x0, y0, w, h);
-          var steps = [1, 1.8, 3.2, 5.5, 9], k = Math.min(steps.length - 1, Math.floor(mt / 1.6)); zoomStep = k + 1;
+          // Tops out at 6x, with a dark backlit tag: at 9x a light beige label filled the
+          // whole area and read as a grey screen between scenes (operator on fiend,
+          // 2026-09-15; confirmed by screenshots of the kiosk).
+          var steps = [1, 1.6, 2.6, 4, 6], k = Math.min(steps.length - 1, Math.floor(mt / 1.6)); zoomStep = k + 1;
           var z = steps[k], fx = x0 + w * .62, fy = y0 + h * .44;
           cx.save(); cx.translate(fx, fy); cx.scale(z, z); cx.translate(-fx, -fy);
-          cx.fillStyle = "#2a241c"; cx.fillRect(x0 + w * .15, y0 + h * .08, w * .7, h * .84);
-          for (var u = 0; u < 12; u++) { var uy = y0 + h * (.1 + u * .066); cx.fillStyle = u === 5 ? "#3d3426" : "#1c1812"; cx.fillRect(x0 + w * .18, uy, w * .64, h * .058);
+          cx.fillStyle = "#140d1a"; cx.fillRect(x0 + w * .15, y0 + h * .08, w * .7, h * .84);
+          for (var u = 0; u < 12; u++) { var uy = y0 + h * (.1 + u * .066); cx.fillStyle = u === 5 ? "#24162c" : "#0d0911"; cx.fillRect(x0 + w * .18, uy, w * .64, h * .058);
             cx.fillStyle = (u + (t * 2 | 0)) % 4 ? "#7aff9a" : "#20301f"; cx.fillRect(x0 + w * .78, uy + h * .02, 3, 3);
-            if (u === 5) { cx.fillStyle = "#d8cbb0"; cx.fillRect(x0 + w * .58, uy + h * .014, w * .09, h * .03); ptext("NODE 23", x0 + w * .585, uy + h * .018, Math.max(1, h / 700), "#2a241c"); } }
+            if (u === 5) { cx.fillStyle = "rgba(39,225,255,.10)"; cx.fillRect(x0 + w * .58, uy + h * .014, w * .09, h * .03); cx.strokeStyle = "rgba(255,46,136,.8)"; cx.lineWidth = .6; cx.strokeRect(x0 + w * .58, uy + h * .014, w * .09, h * .03); ptext("NODE 23", x0 + w * .585, uy + h * .018, Math.max(1, h / 700), "#27e1ff"); } }
           cx.restore();
           for (var n = 0; n < 900; n++) { var v = Math.random() * 60 | 0; cx.fillStyle = "rgba(" + (v + 30) + "," + (v + 20) + "," + v + ",.35)"; cx.fillRect(x0 + Math.random() * w, y0 + Math.random() * h, 2, 2); }
           cx.strokeStyle = "rgba(255,210,140,.8)"; cx.lineWidth = 1; cx.strokeRect(fx - 60, fy - 40, 120, 80); line(fx, y0, fx, fy - 40); line(fx, fy + 40, fx, y0 + h); line(x0, fy, fx - 60, fy); line(fx + 60, fy, x0 + w, fy);
@@ -1493,6 +1531,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   // the real show: 4 to 9 minutes a scene, shuffled.
   var LAB = Q.get("lab") === "1", MIN = LAB ? 40 : 240, MAX = LAB ? 70 : 540;
   if (LAB) document.getElementById("lab").hidden = false;
+  // No pointer on the machine: cage shows the cursor wherever a mouse left it, and the
+  // kiosk screenshots on fiend had an arrow parked over the scene (2026-09-15).
+  else document.documentElement.style.cursor = "none";
   var bag = [], cur = -1, curAt = 0, curDur = 0, wipe = 0, nextBeat = 1;
   // Every scene plays once before any plays again (operator, 2026-09-15: "it should
   // go through all of the screen types before going back to the same one"). The bag
