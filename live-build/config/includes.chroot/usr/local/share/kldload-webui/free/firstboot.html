@@ -72,7 +72,36 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   text-shadow: 0 0 2px #fff, 0 0 14px var(--vec), 0 0 42px color-mix(in srgb, var(--vec) 45%, transparent); }
 .body { font-size: clamp(1.1rem, 1.55vw, 1.5rem); line-height: 1.6; color: color-mix(in srgb, var(--vec) 14%, #d6dbe1); max-width: 44rem;
   clip-path: inset(0 100% 0 0); transition: clip-path 1.1s steps(22); }
+.slide.b-down .body { clip-path: inset(0 0 100% 0); }
+.slide.b-fade .body { clip-path: none; opacity: 0; transform: translateY(10px); transition: opacity .9s ease, transform .9s ease; }
 .slide.typed .body { clip-path: inset(0 0 0 0); }
+.slide.typed.b-fade .body { opacity: 1; transform: none; }
+/* Title entrances. arrive() picks one per slide and never the same twice running
+   (operator, 2026-09-15: "more variation of the heading, like the first set of
+   slides"). Part 1's glitch slices, signal tear and chroma settle, plus part 2's
+   own: type-on, decode from noise, letters dropping in, a CRT scan-down, a zoom. */
+.title .c { display: inline-block; }
+.title.e-slice { animation: e-slice .5s steps(1) both; }
+@keyframes e-slice { 0% { clip-path: inset(8% 0 62% 0); transform: translate(-18px, 0); } 14% { clip-path: inset(48% 0 22% 0); transform: translate(14px, 0); }
+  28% { clip-path: inset(70% 0 4% 0); transform: translate(-8px, 0); } 42% { clip-path: inset(20% 0 50% 0); transform: translate(10px, 0); }
+  56% { clip-path: inset(0 0 0 0); transform: translate(-3px, 0); } 70%, 100% { clip-path: inset(0 0 0 0); transform: none; } }
+.title.e-tear { animation: e-tear .65s cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes e-tear { 0% { transform: skewX(-22deg) translateX(-38px) scaleY(1.04); filter: brightness(1.8) blur(1.5px); }
+  18% { transform: skewX(14deg) translateX(22px); filter: brightness(1.35) blur(.6px); } 34% { transform: skewX(-7deg) translateX(-10px); filter: brightness(1.15); }
+  52% { transform: skewX(3deg) translateX(4px); filter: none; } 68%, 100% { transform: none; filter: none; } }
+.title.e-drop .c.on { animation: e-drop .55s cubic-bezier(.3, 1.6, .5, 1) both; }
+@keyframes e-drop { from { transform: translateY(-120%); opacity: 0; } to { transform: none; opacity: 1; } }
+.title.e-scan { animation: e-scan .9s steps(18) both; }
+@keyframes e-scan { from { clip-path: inset(0 0 100% 0); } to { clip-path: inset(0 0 0 0); } }
+.title.e-zoom { transform-origin: 0 50%; animation: e-zoom .7s cubic-bezier(.16, .84, .24, 1) both; }
+@keyframes e-zoom { from { transform: scale(1.35); filter: blur(8px); opacity: 0; } to { transform: none; filter: none; opacity: 1; } }
+.title.e-chroma { position: relative; }
+.title.e-chroma::before, .title.e-chroma::after { content: attr(data-text); position: absolute; inset: 0; pointer-events: none;
+  mix-blend-mode: screen; text-shadow: none; animation: 1.6s cubic-bezier(.16, .84, .24, 1) both; }
+.title.e-chroma::before { color: #ff2a6d; animation-name: chroma-a; }
+.title.e-chroma::after { color: var(--beam); animation-name: chroma-b; }
+@keyframes chroma-a { 0% { opacity: .85; transform: translate(-10px, 0); } 100% { opacity: 0; transform: none; } }
+@keyframes chroma-b { 0% { opacity: .85; transform: translate(10px, 0); } 100% { opacity: 0; transform: none; } }
 /* title arrival: every letter is laid out from the start (so nothing reflows) and
    revealed in turn, flickering through a few glyphs before it settles */
 .title .w { display: inline-block; white-space: nowrap; }
@@ -2265,7 +2294,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   SLIDES.forEach(function (s) {
     var d = document.createElement("div"); d.className = "slide";
     var k = document.createElement("div"); k.className = "kick"; k.textContent = s[0];
-    var ti = document.createElement("div"); ti.className = "title";
+    var ti = document.createElement("div"); ti.className = "title"; ti.dataset.text = s[1];
     s[1].split(" ").forEach(function (word, wn) {
       if (wn) ti.appendChild(document.createTextNode(" "));
       var w = document.createElement("span"); w.className = "w";
@@ -2283,26 +2312,65 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   // newest letter. When the title is done the body wipes in. Monospace keeps every
   // glyph the same width, so the flicker never moves the layout.
   var GLYPHS = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789#$%&*+=/<>", typer = null;
+  var ENTRANCES = ["type", "decode", "slice", "tear", "drop", "scan", "zoom", "chroma"], BODIES = ["wipe", "down", "fade"];
+  var lastEntrance = "", lastBody = "", arriveTimers = [];
+  // CSS-driven entrances and how long each runs before the body is let in.
+  var ENTRANCE_MS = { slice: 520, tear: 680, scan: 950, zoom: 720, chroma: 450 };
   function arrive(el) {
-    var kc = el.querySelectorAll(".kick .c"), tc = el.querySelectorAll(".title .c");
-    el.classList.remove("typed");
+    var kc = el.querySelectorAll(".kick .c"), tc = el.querySelectorAll(".title .c"), ti = el.querySelector(".title");
+    el.classList.remove("typed", "b-down", "b-fade");
+    ti.className = "title";
     Array.prototype.forEach.call(kc, function (c) { c.classList.remove("on"); });
     Array.prototype.forEach.call(tc, function (c) { c.className = "c"; c.textContent = c.dataset.ch; });
-    if (reduce) { Array.prototype.forEach.call(kc, function (c) { c.classList.add("on"); }); Array.prototype.forEach.call(tc, function (c) { c.classList.add("on"); }); el.classList.add("typed"); return; }
-    var t = 0, ki = 0, ti = 0, flick = 0, prev = null;
-    clearInterval(typer);
-    typer = setInterval(function () {
-      t += 30;
-      if (ki < kc.length) { kc[ki++].classList.add("on"); return; }
-      if (ti < tc.length) {
-        var c = tc[ti];
-        if (!flick) { if (prev) prev.classList.remove("tail"); c.classList.add("on", "scr", "tail"); prev = c; flick = 2 + (Math.random() * 2 | 0); }
-        if (c.dataset.ch === " " || --flick <= 0) { c.textContent = c.dataset.ch; c.classList.remove("scr"); flick = 0; ti++; }
-        else c.textContent = GLYPHS[Math.random() * GLYPHS.length | 0];
-        return;
-      }
-      clearInterval(typer); el.classList.add("typed");
-    }, 30);
+    clearInterval(typer); arriveTimers.forEach(clearTimeout); arriveTimers = [];
+    function all(list) { Array.prototype.forEach.call(list, function (c) { c.classList.add("on"); }); }
+    function finish() { el.classList.add("typed"); if (tc.length) tc[tc.length - 1].classList.add("tail"); }
+    if (reduce) { all(kc); all(tc); el.classList.add("typed"); return; }
+    var mode, body;
+    do { mode = pick(ENTRANCES); } while (mode === lastEntrance);
+    do { body = pick(BODIES); } while (body === lastBody);
+    lastEntrance = mode; lastBody = body;
+    if (body !== "wipe") el.classList.add("b-" + body);
+    if (mode === "type") {
+      var ki = 0, tix = 0, flick = 0, prev = null;
+      typer = setInterval(function () {
+        if (ki < kc.length) { kc[ki++].classList.add("on"); return; }
+        if (tix < tc.length) {
+          var c = tc[tix];
+          if (!flick) { if (prev) prev.classList.remove("tail"); c.classList.add("on", "scr", "tail"); prev = c; flick = 2 + (Math.random() * 2 | 0); }
+          if (c.dataset.ch === " " || --flick <= 0) { c.textContent = c.dataset.ch; c.classList.remove("scr"); flick = 0; tix++; }
+          else c.textContent = GLYPHS[Math.random() * GLYPHS.length | 0];
+          return;
+        }
+        clearInterval(typer); el.classList.add("typed");
+      }, 30);
+      return;
+    }
+    all(kc);
+    if (mode === "decode") {
+      // every letter on screen as noise at once, resolving left to right (part 1's decode)
+      all(tc);
+      var t0 = performance.now(), n = tc.length;
+      typer = setInterval(function () {
+        var k = Math.min(1, (performance.now() - t0) / 850);
+        for (var i = 0; i < n; i++) {
+          var c = tc[i];
+          if (i / n < k * 1.15 - .12) { if (c.classList.contains("scr")) { c.textContent = c.dataset.ch; c.classList.remove("scr"); } }
+          else { c.textContent = GLYPHS[Math.random() * GLYPHS.length | 0]; c.classList.add("scr"); }
+        }
+        if (k >= 1) { clearInterval(typer); Array.prototype.forEach.call(tc, function (c) { c.textContent = c.dataset.ch; c.classList.remove("scr"); }); finish(); }
+      }, 30);
+      return;
+    }
+    if (mode === "drop") {
+      ti.classList.add("e-drop");
+      Array.prototype.forEach.call(tc, function (c, i) { arriveTimers.push(setTimeout(function () { c.classList.add("on"); }, i * 28)); });
+      arriveTimers.push(setTimeout(finish, tc.length * 28 + 560));
+      return;
+    }
+    all(tc);
+    ti.classList.add("e-" + mode);
+    arriveTimers.push(setTimeout(finish, ENTRANCE_MS[mode] || 600));
   }
   var si = 0; wrap.children[0].classList.add("on"); arrive(wrap.children[0]);
   setInterval(function () {
