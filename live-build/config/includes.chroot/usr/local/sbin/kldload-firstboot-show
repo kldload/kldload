@@ -532,6 +532,9 @@ user_pref("browser.region.update.enabled", false);
 user_pref("browser.search.update", false);
 user_pref("extensions.getAddons.cache.enabled", false);
 user_pref("app.normandy.enabled", false);
+user_pref("browser.display.background_color", "#02030a");
+user_pref("browser.display.use_system_colors", false);
+user_pref("ui.systemUsesDarkTheme", 1);
 PREFS
 }
 
@@ -666,6 +669,12 @@ run_show() {
                 # starts cage at that same moment.
                 handed=1
                 _say "the page answers — handing tty1 to the kiosk"
+                # Blank tty1 first, so the moment between the switch and cage's first
+                # frame is black instead of an hour of boot and build text.
+                if [[ "${VT}" != none && -w /dev/tty1 ]]; then
+                    printf '\e[0m\e[H\e[2J\e[3J\e[?25l' >/dev/tty1 2>/dev/null ||
+                        _say "WARNING: could not blank tty1 before the kiosk"
+                fi
                 _vt_switch 1
             fi
         fi

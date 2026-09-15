@@ -30,7 +30,10 @@
 }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--mono); overflow: hidden; }
-#stage { position: fixed; inset: 0; overflow: hidden; }
+/* The page fades up from black: whatever was on tty1 before the kiosk is never what
+   the show opens on (operator on fiend, 2026-09-15: "proper transitions"). */
+#stage { position: fixed; inset: 0; overflow: hidden; animation: stage-in 1.6s ease both; }
+@keyframes stage-in { from { opacity: 0; } to { opacity: 1; } }
 /* The words are the prize (operator, 2026-09-14: "the saying and info is the prize,
    everything else should be nicely tucked away and transparent, like the original
    set"). So the scene, the HUD, the output window and the stage list all sit well
@@ -1611,6 +1614,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   SCENES.forEach(function (s, i) { var o = document.createElement("option"); o.value = i; o.textContent = pad(i + 1, 2) + " " + s.card; sel.appendChild(o); });
   sel.onchange = function () { try { localStorage.setItem(LAB_KEY, sel.value); } catch (e) { /* storage blocked */ } start(+sel.value); };
   document.getElementById("next").onclick = advance;
+  // N or the right arrow skips to the next scene, with the normal crossfade: someone at
+  // the machine can look through the scenes without restarting the kiosk, which
+  // flashed tty1's console text between every jump (fiend, 2026-09-15).
+  addEventListener("keydown", function (e) { if (e.key === "n" || e.key === "N" || e.key === "ArrowRight") { e.preventDefault(); advance(); } });
   document.getElementById("event").onclick = function () { SCENES[cur].event(); };
   document.getElementById("pause").onclick = function () { paused = !paused; this.textContent = paused ? "run" : "pause"; };
 
