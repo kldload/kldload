@@ -3584,6 +3584,14 @@ CHROMEPOL
                         log "Profile '${_prof}' is headless/stripped — no browser policy applied"
                         ;;
                     esac
+                    # Name the model firstboot actually picked. Both messages below
+                    # said llama3.1:8b whatever the hardware probe chose; fiend
+                    # 2026-09-14 (RTX 3080) pulled qwen2.5:14b and toasted
+                    # "Model: llama3.1:8b".
+                    local _ai_model=""
+                    [[ -r /etc/kldload/bob-model.env ]] &&
+                        _ai_model="$(sed -n 's/^BOB_GENERATE_MODEL=//p' /etc/kldload/bob-model.env | head -1)"
+                    [[ -n "$_ai_model" ]] || _ai_model="see: ollama list"
                     # Desktop notification
                     if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]]; then
                         local _ip
@@ -3595,7 +3603,7 @@ CHROMEPOL
                             if [[ -n "$_user" ]]; then
                                 sudo -u "$_user" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
                                     notify-send -i dialog-information "kldload AI Ready" \
-                                    "Open WebUI is running at http://${_ip:-localhost}:8080\nModel: llama3.1:8b\nCommands: kai, kai-voice, kai-do, kai-remote" 2>/dev/null || true
+                                    "Open WebUI is running at http://${_ip:-localhost}:8080\nModel: ${_ai_model}\nCommands: kai, kai-voice, kai-do, kai-remote" 2>/dev/null || true
                             fi
                         done
                     fi
@@ -3606,7 +3614,7 @@ CHROMEPOL
   kldload AI Assistant — ready
   Open WebUI:  http://$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1):8080
   Commands:    kai, kai-voice, kai-do, kai-remote
-  Model:       llama3.1:8b ($(curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "import sys,json;m=json.load(sys.stdin)['models'];print(f'{m[0][\"size\"]//1024//1024} MB')" 2>/dev/null || echo "loaded"))
+  Model:       ${_ai_model}
 
 AIMOTD
 
