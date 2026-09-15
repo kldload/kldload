@@ -2424,8 +2424,19 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   // last good text on screen: the show must never go blank because one request
   // raced a restart of the web UI.
   var out = document.getElementById("out-lines"), outSrc = document.getElementById("out-src"), lastLog = "";
+  // Some steps print nothing for minutes (klab waiting for a site's VMs to boot sat
+  // silent for 16 minutes on 6-full), and a still window reads as a stuck install
+  // (operator on fiend, 2026-09-15: "the output window appears to have stopped").
+  // After 30 s without a new line the header says how long it has been quiet.
+  var srcName = "", lastChange = Date.now();
+  function quietLabel() {
+    var q = Math.floor((Date.now() - lastChange) / 1000);
+    var name = srcName || "build log";
+    outSrc.textContent = q < 30 ? name : name + "  \u00b7  quiet " + (q >= 60 ? Math.floor(q / 60) + "m " : "") + (q % 60) + "s, still working";
+  }
+  setInterval(quietLabel, 1000);
   function showLines(lines) {
-    var key = lines.join("\n"); if (key === lastLog) return; lastLog = key;
+    var key = lines.join("\n"); if (key === lastLog) return; lastLog = key; lastChange = Date.now();
     while (out.firstChild) out.removeChild(out.firstChild);
     lines.slice(-8).forEach(function (l) { var d = document.createElement("div"); d.textContent = l; out.appendChild(d); });
   }
@@ -2433,7 +2444,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   function pollLog() {
     fetch("/api/install-log", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
       if (!j) return;
-      if (j.source) outSrc.textContent = j.source;
+      if (j.source) { srcName = j.source; quietLabel(); }
       if (j.lines && j.lines.length) showLines(j.lines);
     }).catch(function () { /* web UI restarting: keep the last lines */ });
   }
