@@ -85,7 +85,14 @@ RHEL_PASSWORD="${RHEL_PASSWORD:-}"
 RHEL_CREDS_FILE="/root/.klab-rhel-creds"
 
 declare -A CLOUD_IMAGES=(
-    [centos]="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+    # CentOS Stream 10, not 9. Stream 9's kernel 5.14.0-745 (September 2026) marks
+    # mutex_lock() GPL-only, and no OpenZFS release builds against it: 2.2.11 and
+    # 2.4.4 both stop in configure. The centos golden failed validation with "ZFS
+    # module NOT LOADED" on fiend (3-kvm, build 19, 2026-09-15) after sealing fine
+    # the night before. Stream 10 (6.12) builds zfs-dkms 2.2.11 cleanly, checked
+    # in quay.io/centos/centos:stream10, and the installer already defaults CentOS
+    # to EL10. Rocky stays on 9 until RHEL 9.8 carries the same kernel change.
+    [centos]="https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-latest.x86_64.qcow2"
     [rocky]="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
     # Fedora 44 — current stable as of 2026-04-28 GA. Kernel 6.19, glibc
     # 2.42+. Change this URL + the os-variant below when moving to F45.
@@ -104,7 +111,7 @@ declare -A CLOUD_IMAGES=(
 )
 
 declare -A OS_VARIANTS=(
-    [centos]="centos-stream9"
+    [centos]="centos-stream10"
     [rocky]="centos-stream9"
     [fedora]="fedora44"
     # debian13, matching the trixie image actually fetched above. This said
@@ -217,7 +224,7 @@ _resolve_os_variants() {
             done
             ;;
         centos-stream*)
-            for _try in centos-stream9 centos-stream8 centos9; do
+            for _try in centos-stream10 centos-stream9 centos-stream8 centos9; do
                 _osvariant_known "$_try" && {
                     _fallback="$_try"
                     break
@@ -1403,9 +1410,19 @@ if [ "$WANT_ZFS" = "1" ] && ! command -v zfs >/dev/null 2>&1; then
     # exactly this; the EL branch never did.
     # HISTORY: fiend, 2026-08-31 22:19 — the rocky golden sealed ZFS-less while
     # the 21:30 build of the same distro was fine. That log carried mirror 404s.
-    if ! dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm"; then
-      echo "WARNING: zfs-release rpm did not install for $(rpm --eval "%{dist}") — ZFS will not install" >&2
-    fi
+    # The newest zfs-release revision published for this EL major, not a pinned one:
+    # EL9 has 2-3, EL10 starts at 2-8 and has no 2-3 at all (404, checked
+    # 2026-09-15), so a pinned 2-3 would give a Stream 10 golden no ZFS repo.
+    _zr_ok=0
+    for _zr in 2-9 2-8 2-7 2-6 2-5 2-4 2-3; do
+      if dnf install -y "https://zfsonlinux.org/epel/zfs-release-${_zr}$(rpm --eval "%{dist}").noarch.rpm" 2>/dev/null; then
+        echo "klab: zfs-release ${_zr}$(rpm --eval "%{dist}")"
+        _zr_ok=1
+        break
+      fi
+    done
+    [ "$_zr_ok" -eq 1 ] ||
+      echo "WARNING: no zfs-release rpm installed for $(rpm --eval "%{dist}") — ZFS will not install" >&2
   fi
   if [ "$KLAB_ZFS_DEV" = "1" ]; then
     dnf install -y zfs zfs-dkms zfs-test 2>/dev/null || true
