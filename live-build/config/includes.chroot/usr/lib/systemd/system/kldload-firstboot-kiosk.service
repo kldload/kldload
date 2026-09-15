@@ -1,0 +1,67 @@
+# kldload-firstboot-kiosk.service — part 2 of the install show, full screen on tty1
+# while first boot builds.
+#
+# Role: runs `kldload-firstboot-show kiosk`, which waits for the page on
+# 127.0.0.1:8099 and then runs cage with Firefox in kiosk mode on firstboot.html:
+# the arcade reel over the live build log, instead of a terminal.
+# Read by: systemd on an installed system.
+#
+# WHO STARTS IT: kldload-firstboot-show.service, with --no-block, and only when its
+# `check` said this install builds something and this machine can draw the page
+# (cage, firefox, a DRM device). There is no [Install] section: enabled on its own
+# it would take tty1 on every boot of every install. The same script stops it when
+# the build settles.
+#
+# WHY a unit of its own and not a child of the show: cage needs a logind session on
+# seat0 to open the DRM and input devices as an unprivileged user, which is what
+# PAMName=, User= and TTYPath= give it. The show is a root oneshot that holds the
+# display manager back; it cannot be that session.
+#
+# Consequence if missing: the show falls back to its console screen on VT8. The
+# build is unaffected.
+
+[Unit]
+Description=kldload first-boot show, part 2 (cage kiosk on tty1)
+Documentation=man:cage(1)
+After=systemd-user-sessions.service systemd-logind.service nginx.service kldload-webui.service getty@tty1.service
+# Wants, not Requires: if the web UI is late the script waits for it, and if it
+# never comes the unit fails and the console screen takes over.
+Wants=nginx.service kldload-webui.service
+# Started after boot's transaction exists, so this Conflicts= is safe: it stops the
+# login prompt on tty1 when the kiosk starts. On the live image the same idea broke
+# GDM because it was part of the boot transaction (kldload-install-kiosk.service
+# HISTORY); here nothing starts this unit until the show has decided.
+Conflicts=getty@tty1.service
+ConditionPathExists=!/var/lib/kldload/firstboot-show-done
+# Four failures in two minutes and the unit stays failed; kldload-firstboot-show
+# sees "failed" and switches the screen to its console view.
+StartLimitIntervalSec=120
+StartLimitBurst=4
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/kldload-firstboot-show kiosk
+Restart=on-failure
+RestartSec=3
+# direct: a restart does not pass through "failed", so the show only falls back
+# once the start limit above has really given up.
+RestartMode=direct
+
+# A system user with no login and no password, created by the installer. Firefox
+# refuses nothing as root, but a browser has no business running as root.
+User=kldload-show
+Group=kldload-show
+PAMName=kldload-kiosk
+TTYPath=/dev/tty1
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+
+# The Firefox profile lives here and is thrown away with the machine's first boot;
+# 0700 because a browser profile is nobody else's business.
+StateDirectory=kldload-show
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/kldload-show
+Environment=XDG_SESSION_TYPE=wayland

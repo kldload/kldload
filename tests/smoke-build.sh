@@ -199,6 +199,26 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             _fail "desktop carry files in the image" "missing:${_desk_bad} — builder/build-iso.sh did not copy them, so no install can carry them"
         fi
 
+        # ── Part 2 of the show: what the installer carries to the target ────
+        # An install that builds reboots into firstboot.html in a cage kiosk
+        # (operator, 2026-09-14). profiles.sh copies the page, the kiosk unit and
+        # the PAM stack from the LIVE rootfs; any one missing and every such
+        # install shows the console fallback instead, with nothing failing loudly.
+        declare -a FB2_FILES=(usr/local/share/kldload-webui/active/firstboot.html
+            usr/lib/systemd/system/kldload-firstboot-kiosk.service
+            etc/pam.d/kldload-kiosk usr/local/sbin/kldload-firstboot-show)
+        _fb2_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${FB2_FILES[@]}" 2>/dev/null)" || _fb2_list="" # absent paths make unsquashfs exit non-zero; the loop below names them
+        _fb2_bad=""
+        for _df in "${FB2_FILES[@]}"; do
+            awk -v p="squashfs-root/$_df" '$NF == p && $1 ~ /^-/ {f = 1} END {exit !f}' <<<"$_fb2_list" ||
+                _fb2_bad+=" $_df"
+        done
+        if [[ -z "$_fb2_bad" ]]; then
+            _pass "first-boot show part 2 in the image (page, kiosk unit, PAM stack, script)"
+        else
+            _fail "first-boot show part 2 in the image" "missing:${_fb2_bad} — installs that build will show the console fallback"
+        fi
+
         # ── Every tool in includes.chroot/usr/local/{bin,sbin} must ship ────
         # The builder copies bin/ by glob and, since 2026-09-05, sbin/ too.
         # Before that sbin/ was an allow-list, and the list dropped a new tool
@@ -1794,6 +1814,21 @@ if grep -q 'InactiveExitTimestampMonotonic --value klab-firstboot.service' "$_ad
 else
     _fail "autodeploy waits for a klab-firstboot whose timer has not fired" \
         "the wait no longer checks the timer and the unit's start time — it will skip the lean goldens again"
+fi
+
+# Part 2 of the show needs, from the source tree: cage in the offline package
+# sets it is installed from (Firefox is already there for the desktop), and the
+# loopback listener the kiosk browser reads over plain HTTP. Either missing turns
+# every building install into the console fallback without an error anywhere.
+_fb2_src_bad=""
+grep -qx 'cage' "$ROOT/build/darksite-fedora/config/package-sets/target-fedora-extras.txt" 2>/dev/null || _fb2_src_bad+=" fedora-package-set-no-cage"
+grep -qx 'cage' "$ROOT/build/darksite-debian/config/package-sets/target-desktop.txt" 2>/dev/null || _fb2_src_bad+=" debian-package-set-no-cage"
+grep -q 'listen      127.0.0.1:8099;' "$ROOT/live-build/config/includes.chroot/etc/nginx/conf.d/kldload.conf" 2>/dev/null || _fb2_src_bad+=" no-loopback-listener"
+grep -q 'KIOSK_URL="http://127.0.0.1:8099/firstboot.html"' "$ROOT/live-build/config/includes.chroot/usr/local/sbin/kldload-firstboot-show" 2>/dev/null || _fb2_src_bad+=" kiosk-url-not-the-listener"
+if [[ -z "$_fb2_src_bad" ]]; then
+    _pass "first-boot kiosk sources: cage in the Fedora and Debian package sets, loopback listener on 127.0.0.1:8099"
+else
+    _fail "first-boot kiosk sources" "${_fb2_src_bad}"
 fi
 
 # Plymouth must be switched off on BOTH cmdlines, not just left out of the

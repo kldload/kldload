@@ -313,7 +313,9 @@ _fbs="${CHROOT}/usr/local/sbin/kldload-firstboot-show"
 if [[ ! -f "${_fbs}" ]]; then
     _fail "kldload-firstboot-show" "script missing from includes.chroot/usr/local/sbin"
 else
-    _ft="$(mktemp -d)"
+    # /var/tmp, not /tmp: the kiosk probe asks `[[ -x ]]` of fake binaries, and
+    # onyx mounts /tmp noexec, where access(X_OK) fails on any file (2026-09-14).
+    _ft="$(mktemp -d -p /var/tmp)"
     mkdir -p "${_ft}/state/phases" "${_ft}/log" "${_ft}/root"
     echo 'root=zfs:rpool/ROOT/x quiet' >"${_ft}/cmdline"
     _fenv=(KLDLOAD_FBSHOW_STATE="${_ft}/state" KLDLOAD_FBSHOW_LOGDIR="${_ft}/log"
@@ -324,7 +326,10 @@ else
     _fbad=""
     _fcheck 'echo k8s=1 klab=0 ai=0' || _fbad+=" k8s-install-not-shown"
     _fcheck 'echo k8s=0 klab=1 ai=0' || _fbad+=" klab-install-not-shown"
-    _fcheck 'echo k8s=0 klab=0 ai=1' && _fbad+=" plain-install-shown"
+    # AI models count as build work since 2026-09-14 ("unless it's core, server or
+    # a desktop with no options").
+    _fcheck 'echo k8s=0 klab=0 ai=1' || _fbad+=" ai-install-not-shown"
+    _fcheck 'echo k8s=0 klab=0 ai=0' && _fbad+=" plain-install-shown"
     _fcheck 'exit 3' && _fbad+=" shown-when-want-failed"
     echo 'root=zfs kldload.firstboot_show=0' >"${_ft}/cmdline"
     _fcheck 'echo k8s=1 klab=1 ai=0' && _fbad+=" escape-hatch-ignored"
@@ -333,7 +338,7 @@ else
     _fcheck 'echo k8s=1 klab=1 ai=0' && _fbad+=" shown-on-live"
     rm -r "${_ft}/root/run"
     if [[ -z "${_fbad}" ]]; then
-        _pass "kldload-firstboot-show check: shows for k8s/klab, not for plain installs, live or kldload.firstboot_show=0"
+        _pass "kldload-firstboot-show check: shows for k8s/klab/ai, not for plain installs, live or kldload.firstboot_show=0"
     else
         _fail "kldload-firstboot-show check" "wrong decision:${_fbad}"
     fi
@@ -399,6 +404,80 @@ else
         _pass "kldload-firstboot-show logtail: follows the newest build log in each part, redacts logins"
     else
         _fail "kldload-firstboot-show logtail" "${_fbad}"
+    fi
+
+    # Part 2 in a kiosk: run starts kldload-firstboot-kiosk.service only where it
+    # can draw, falls back to the console screen when the unit gives up, and hands
+    # tty1 back (a login prompt, unless a display manager takes it). systemctl is
+    # a fake that records its calls.
+    mkdir -p "${_ft}/root/usr/bin" "${_ft}/root/usr/lib/systemd/system" "${_ft}/root/dev/dri"
+    touch "${_ft}/root/usr/bin/cage" "${_ft}/root/usr/bin/firefox" "${_ft}/root/dev/dri/card0" \
+        "${_ft}/root/usr/lib/systemd/system/kldload-firstboot-kiosk.service"
+    chmod +x "${_ft}/root/usr/bin/cage" "${_ft}/root/usr/bin/firefox"
+    # rm -f on the glob hits the phases/ directory and set -e ends the suite
+    # without a word (first run, 2026-09-14); delete the plain files only.
+    find "${_ft}/state" -maxdepth 1 -type f -delete
+    rm -rf "${_ft}/state/phases" && mkdir -p "${_ft}/state/phases"
+    _frun() { # $1 = exit code of `systemctl is-enabled display-manager`, $2 = kiosk ActiveState
+        : >"${_ft}/sysctl"
+        rm -f "${_ft}/state/firstboot-show-done"
+        env "${_fenv[@]}" KLDLOAD_FBSHOW_INTERVAL=0 KLDLOAD_FBSHOW_HOLD_OK=0 KLDLOAD_FBSHOW_MAXSEC=2 \
+            KLDLOAD_FBSHOW_SYSTEMCTL="echo \"\$*\" >>'${_ft}/sysctl'; [[ \$1 == is-enabled ]] && exit $1; exit 0" \
+            KLDLOAD_FBSHOW_UNITSTATE="[[ \$1 == kldload-firstboot-kiosk.service ]] && echo $2 || echo active" \
+            bash "${_fbs}" run 2>&1
+    }
+    _fbad=""
+    touch "${_ft}/state/all-ready"
+    _frun 1 active >/dev/null
+    grep -qx 'start --no-block kldload-firstboot-kiosk.service' "${_ft}/sysctl" || _fbad+=" kiosk-not-started"
+    grep -qx 'stop kldload-firstboot-kiosk.service' "${_ft}/sysctl" || _fbad+=" kiosk-not-stopped"
+    grep -qx 'start --no-block getty@tty1.service' "${_ft}/sysctl" || _fbad+=" no-login-after-kiosk"
+    [[ -e "${_ft}/state/firstboot-show-done" ]] || _fbad+=" done-marker-missing"
+    _frun 0 active >/dev/null
+    grep -q 'getty@tty1' "${_ft}/sysctl" && _fbad+=" getty-started-over-display-manager"
+    rm -f "${_ft}/state/all-ready"
+    # Captured, not piped into grep -q: grep exits at the first match, the run
+    # dies of SIGPIPE, and pipefail reports that as the test failing.
+    _fout="$(_frun 1 failed)"
+    grep -q 'gave up' <<<"${_fout}" || _fbad+=" no-fallback-when-kiosk-failed"
+    touch "${_ft}/state/all-ready"
+    rm "${_ft}/root/dev/dri/card0"
+    _frun 1 active >/dev/null
+    grep -q firstboot-kiosk "${_ft}/sysctl" && _fbad+=" kiosk-started-without-drm"
+    touch "${_ft}/root/dev/dri/card0"
+    echo 'root=zfs kldload.firstboot_show=console' >"${_ft}/cmdline"
+    _frun 1 active >/dev/null
+    grep -q firstboot-kiosk "${_ft}/sysctl" && _fbad+=" console-cmdline-ignored"
+    echo 'root=zfs quiet' >"${_ft}/cmdline"
+    rm "${_ft}/root/usr/bin/firefox"
+    _frun 1 active >/dev/null
+    grep -q firstboot-kiosk "${_ft}/sysctl" && _fbad+=" kiosk-started-without-firefox"
+    rm -f "${_ft}/state/all-ready"
+    if [[ -z "${_fbad}" ]]; then
+        _pass "kldload-firstboot-show run: kiosk only where it can draw, console fallback, tty1 handed back"
+    else
+        _fail "kldload-firstboot-show kiosk" "${_fbad}"
+    fi
+
+    # The installer carries the kiosk's packages only for installs that build, and
+    # only for families whose offline mirror has cage and a real firefox package.
+    _fpk() { # $1 want line, $2 distro
+        KLDLOAD_LOG_DIR="${_ft}" KLDLOAD_STATE_DIR="${_ft}" KLDLOAD_FBSHOW_WANT="echo $1" \
+            KLDLOAD_DISTRO="$2" KLDLOAD_PROFILE=kvm \
+            bash -c 'source "$1" 2>/dev/null; k_profile_optional_packages' _ \
+            "${CHROOT}/usr/lib/kldload-installer/lib/profiles.sh" 2>/dev/null | tr ' ' '\n'
+    }
+    _fbad=""
+    _fpk "k8s=0 klab=1 ai=0" fedora | grep -qx cage || _fbad+=" fedora-build-no-cage"
+    _fpk "k8s=0 klab=1 ai=0" fedora | grep -qx firefox || _fbad+=" fedora-build-no-firefox"
+    _fpk "k8s=0 klab=0 ai=1" debian | grep -qx firefox-esr || _fbad+=" debian-ai-no-firefox-esr"
+    _fpk "k8s=0 klab=0 ai=0" fedora | grep -qx cage && _fbad+=" plain-install-got-cage"
+    _fpk "k8s=1 klab=1 ai=0" rocky | grep -qx cage && _fbad+=" el-claimed-cage"
+    _fpk "k8s=1 klab=1 ai=0" ubuntu | grep -qxE 'cage|firefox' && _fbad+=" ubuntu-claimed-kiosk"
+    if [[ -z "${_fbad}" ]]; then
+        _pass "installer: kiosk packages (cage, firefox) only for installs that build, on Fedora and Debian"
+    else
+        _fail "installer kiosk packages" "${_fbad}"
     fi
 
     # The decision's input: autodeploy --want, run against fixture manifests.

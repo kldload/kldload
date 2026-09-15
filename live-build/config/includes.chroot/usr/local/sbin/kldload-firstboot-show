@@ -8,10 +8,18 @@
 #   run     2. Switch the console to its own virtual terminal and draw, once a
 #              second: the stages (first boot, then autodeploy's phase plan),
 #              a progress bar, and the tail of the live log.
-#           3. When the build settles, show the outcome — a short "complete"
-#              screen, or what failed and where its log is — switch back to
-#              tty1 and exit 0, which releases the login prompt or the display
-#              manager that were ordered after this unit.
+#           3. If this machine can draw part 2 of the show (cage, a browser, a
+#              DRM device), start kldload-firstboot-kiosk.service, which takes
+#              tty1 and puts firstboot.html full screen as soon as the web UI
+#              answers. The console screen keeps drawing on VT8 underneath and
+#              comes back into view if the kiosk fails for good.
+#           4. When the build settles, show the outcome — a short "complete"
+#              screen, or what failed and where its log is — stop the kiosk,
+#              switch back to tty1 and exit 0, which releases the login prompt or
+#              the display manager that were ordered after this unit.
+#   kiosk   Run by kldload-firstboot-kiosk.service as its unprivileged user: wait
+#           for the page on 127.0.0.1:8099, then exec cage with Firefox in kiosk
+#           mode on it (software renderer if cage has no GPU renderer).
 #   status  Print building | ok | problem for the current state, and exit 0.
 #   frame   Draw one frame to the terminal and exit (for tests and a quick look).
 #   logtail [N]
@@ -30,13 +38,16 @@
 #   and a plain desktop come straight up, because they are ready; anything that
 #   builds images, Kubernetes or KVM keeps the show on screen all the way
 #   through, and "it reinforces to the user that they literally did not press a
-#   button". Build editions stay lean, so this is a console screen, not a browser.
+#   button". The first cut was a console screen only; the operator then asked for
+#   part 2 of the slide show instead of the terminal ("after first reboot the slide
+#   show, part 2, should resume ASAP"), so the console screen became the fallback
+#   and the first thing drawn while the kiosk starts.
 #
 # THE DECISION (check), in order:
 #   kldload.firstboot_show=0 on the kernel cmdline   -> no (the escape hatch)
 #   a live medium is mounted                          -> no (not an installed system)
 #   firstboot-show-done or all-ready exists           -> no (already built)
-#   `kldload-autodeploy --want` reports k8s=1 or klab=1 -> yes
+#   `kldload-autodeploy --want` reports k8s=1, klab=1 or ai=1 -> yes
 #   anything else                                     -> no
 #   autodeploy's own rules decide what was requested; this file never
 #   re-derives them from the manifest.
@@ -67,12 +78,21 @@
 #   - No ERR trap and no -e in the draw loop: a failed read or draw skips a
 #     frame; it must never end the show early or, worse, leave the console on a
 #     VT nobody is drawing.
+#   - The kiosk is a separate unit, not a child of this process, because cage
+#     needs a logind session on seat0 (PAMName=, User=, TTYPath=) and this unit
+#     is a root oneshot holding the display manager back. It is started with
+#     --no-block: a blocking start from inside a unit that multi-user.target is
+#     waiting on would wait on jobs ordered behind that same target.
+#   - kldload.firstboot_show=console on the cmdline keeps the console screen and
+#     never starts the kiosk.
 #   - Test hooks: KLDLOAD_FBSHOW_STATE, _LOGDIR, _CMDLINE, _ROOT (prefix for the
-#     live-medium probe), _TTY, _VT (none: do
+#     live-medium and kiosk probes), _TTY, _VT (none: do
 #     not switch), _WANT (command printing the want line), _UNITSTATE (command
-#     taking a unit name and printing its ActiveState), _INTERVAL, _MAXSEC,
-#     _HOLD_OK, _HOLD_PROBLEM, _COLS, _ROWS.
-#   - SEE ALSO: kldload-firstboot-show.service, kldload-autodeploy,
+#     taking a unit name and printing its ActiveState), _SYSTEMCTL (command run
+#     instead of systemctl for start/stop), _INTERVAL, _MAXSEC,
+#     _HOLD_OK, _HOLD_PROBLEM, _COLS, _ROWS, _KIOSK_WAIT.
+#   - SEE ALSO: kldload-firstboot-show.service, kldload-firstboot-kiosk.service,
+#     firstboot.html, kldload-install-kiosk (part 1's kiosk), kldload-autodeploy,
 #     kldload-initrd-show (the netboot console show this one follows),
 #     kldload-buildmon (the same settle rule, in a window).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,6 +113,9 @@ ROOT="${KLDLOAD_FBSHOW_ROOT:-}"
 INSTLOGDIR="${KLDLOAD_FBSHOW_INSTLOGDIR:-/var/log/installer}"
 INSTPHASE="${KLDLOAD_FBSHOW_INSTPHASE:-/run/kldload/install-phase}"
 KLABLOGDIR="${KLDLOAD_FBSHOW_KLABLOGDIR:-/root/klab/goldens}"
+KIOSK_UNIT=kldload-firstboot-kiosk.service
+KIOSK_URL="http://127.0.0.1:8099/firstboot.html"
+KIOSK_WAIT="${KLDLOAD_FBSHOW_KIOSK_WAIT:-180}"
 
 _say() { printf 'kldload-firstboot-show: %s\n' "$*" >&2; }
 
@@ -101,6 +124,14 @@ _want_line() {
         bash -c "${KLDLOAD_FBSHOW_WANT}"
     else
         /usr/sbin/kldload-autodeploy --want
+    fi
+}
+
+_systemctl() {
+    if [[ -n "${KLDLOAD_FBSHOW_SYSTEMCTL:-}" ]]; then
+        bash -c "${KLDLOAD_FBSHOW_SYSTEMCTL}" _ "$@"
+    else
+        systemctl "$@"
     fi
 }
 
@@ -141,7 +172,7 @@ show_wanted() {
         return 1
     fi
     case " ${_want} " in
-    *" k8s=1 "* | *" klab=1 "*)
+    *" k8s=1 "* | *" klab=1 "* | *" ai=1 "*)
         _say "requested: ${_want} — first boot builds, the show holds the screen"
         return 0
         ;;
@@ -365,6 +396,146 @@ frame() {
     printf '%s' "${out}"
 }
 
+# ─── kiosk: part 2 of the show ───────────────────────────────────────────────
+# _kiosk_browser — the browser binary to run, on stdout; 1 if there is none.
+# Firefox, because it is the browser the offline mirrors carry for every target
+# family that has cage (Fedora: firefox, Debian: firefox-esr). Chrome comes from
+# Google's online repo and is not there (audit, 2026-09-14).
+_kiosk_browser() {
+    local b
+    for b in firefox firefox-esr; do
+        if [[ -x "${ROOT}/usr/bin/${b}" ]]; then
+            printf '/usr/bin/%s\n' "${b}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# kiosk_capable — 0 if part 2 can be put on screen here, else 1 with the reason on
+# stderr. Every missing piece falls back to the console screen, never a black one.
+kiosk_capable() {
+    local _tok _c
+    local -a _toks=()
+    if read -ra _toks <"${CMDLINE}"; then
+        for _tok in "${_toks[@]}"; do
+            [[ "${_tok}" == kldload.firstboot_show=console ]] && {
+                _say "${_tok} on the cmdline — console screen only"
+                return 1
+            }
+        done
+    fi
+    [[ -x "${ROOT}/usr/bin/cage" ]] || {
+        _say "no cage — console screen only"
+        return 1
+    }
+    _kiosk_browser >/dev/null || {
+        _say "no firefox — console screen only"
+        return 1
+    }
+    [[ -f "${ROOT}/usr/lib/systemd/system/${KIOSK_UNIT}" ]] || {
+        _say "no ${KIOSK_UNIT} — console screen only"
+        return 1
+    }
+    for _c in "${ROOT}"/dev/dri/card*; do
+        [[ -e "${_c}" ]] && return 0
+    done
+    _say "no DRM device under /dev/dri — nothing for cage to draw on, console screen only"
+    return 1
+}
+
+# Firefox preferences for a profile nobody will ever click in: no first-run pages,
+# no default-browser question, no session restore after a crash (a crash plus a
+# restart must show the page, not a "restore session" prompt), and no network
+# checks against Mozilla or Google from a machine that may be air-gapped. The Safe
+# Browsing lines are there because the first container run of the kiosk logged a
+# fetch to safebrowsing.googleapis.com within a minute (2026-09-14).
+_kiosk_prefs() {
+    cat <<'PREFS'
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("app.update.enabled", false);
+user_pref("extensions.update.enabled", false);
+user_pref("network.captive-portal-service.enabled", false);
+user_pref("network.connectivity-service.enabled", false);
+user_pref("browser.safebrowsing.malware.enabled", false);
+user_pref("browser.safebrowsing.phishing.enabled", false);
+user_pref("browser.safebrowsing.downloads.enabled", false);
+user_pref("browser.safebrowsing.provider.google4.updateURL", "");
+user_pref("browser.safebrowsing.provider.google.updateURL", "");
+user_pref("browser.region.update.enabled", false);
+user_pref("browser.search.update", false);
+user_pref("extensions.getAddons.cache.enabled", false);
+user_pref("app.normandy.enabled", false);
+PREFS
+}
+
+# kiosk_exec — see "kiosk" in the header. Exits non-zero, with the reason, when it
+# cannot start; the unit's Restart= and start limit decide what happens next, and
+# kldload-firstboot-show run notices a unit that has given up.
+KIOSK_RENDERER_ERR='Unable to create the wlroots renderer'
+kiosk_exec() {
+    local browser profile i rc=0 errlog
+    browser="$(_kiosk_browser)" || {
+        _say "FATAL: no firefox to run"
+        return 1
+    }
+    [[ -x /usr/bin/cage ]] || {
+        _say "FATAL: no cage"
+        return 1
+    }
+    profile="${HOME:?HOME must be set by the unit}/firefox-profile"
+    mkdir -p "${profile}" || return 1
+    _kiosk_prefs >"${profile}/user.js" || return 1
+    # The page is served by the web UI behind nginx, both of which are still
+    # starting this early in boot. Until they answer, the console screen on VT8 is
+    # what is on screen, which is why this waits instead of letting Firefox paint
+    # a connection error.
+    for ((i = 0; i < KIOSK_WAIT; i += 2)); do
+        curl -fs -o /dev/null --max-time 2 "${KIOSK_URL}" && break
+        sleep 2
+    done
+    ((i < KIOSK_WAIT)) || {
+        _say "the page at ${KIOSK_URL} did not answer in ${KIOSK_WAIT}s"
+        return 1
+    }
+    export MOZ_ENABLE_WAYLAND=1
+    local -a cmd=(/usr/bin/cage -d -s -- "${browser}" --kiosk --no-remote --profile "${profile}" "${KIOSK_URL}")
+    if [[ "${WLR_RENDERER:-}" == pixman ]]; then
+        exec "${cmd[@]}"
+    fi
+    # Renderer fallback, wider than part 1's (kldload-install-kiosk retries only on
+    # the "no renderer" error). The live image runs nouveau, where that is the one
+    # failure seen (fiend's RTX 3080, 2026-09-13); an installed machine runs the
+    # proprietary NVIDIA driver, where wlroots can also fail on its allocator or
+    # GBM with other words. A slideshow draws fine in software, so ANY failure in
+    # the first 20 seconds retries once with pixman; a cage that ran longer and
+    # then died is a crash, returned for Restart= to handle.
+    # NVIDIA's cursor planes are a known wlroots problem; the kiosk has no pointer.
+    [[ -d /sys/module/nvidia ]] && export WLR_NO_HARDWARE_CURSORS=1
+    local started
+    errlog="$(mktemp -t kldload-fbkiosk.XXXXXX)" || exec "${cmd[@]}"
+    started="$(printf '%(%s)T' -1)"
+    "${cmd[@]}" 2>"${errlog}" || rc=$?
+    cat "${errlog}" >&2
+    if ((rc != 0 && $(printf '%(%s)T' -1) - started < 20)); then
+        if grep -qF "${KIOSK_RENDERER_ERR}" "${errlog}"; then
+            _say "no GPU renderer for cage — retrying with the software renderer"
+        else
+            _say "cage exited ${rc} within 20s — retrying once with the software renderer"
+        fi
+        rm -f "${errlog}"
+        WLR_RENDERER=pixman exec "${cmd[@]}"
+    fi
+    rm -f "${errlog}"
+    return "${rc}"
+}
+
 # ─── run ─────────────────────────────────────────────────────────────────────
 _vt_switch() {
     [[ "${VT}" == none ]] && return 0
@@ -372,8 +543,18 @@ _vt_switch() {
     chvt "$1" 2>/dev/null || true # a VT switch that fails leaves the show drawn where it is; nothing to recover
 }
 
+KIOSK_STARTED=0
 _hand_over() {
     printf '\e[?25h\e[0m' >>"${TTY}" 2>/dev/null
+    if ((KIOSK_STARTED)); then
+        _systemctl stop "${KIOSK_UNIT}" 2>/dev/null || _say "WARNING: could not stop ${KIOSK_UNIT}"
+        # The kiosk Conflicts= with getty@tty1, so its stop leaves tty1 empty. A
+        # display manager takes tty1 when this unit exits; without one, the login
+        # prompt has to be started again or the machine hands over to a blank tty1.
+        if ! _systemctl is-enabled --quiet display-manager.service 2>/dev/null; then
+            _systemctl start --no-block getty@tty1.service 2>/dev/null || _say "WARNING: could not start getty@tty1 after the kiosk"
+        fi
+    fi
     if [[ "${VT}" != none ]]; then
         _vt_switch 1
         # Redraw the login prompt tty1's getty printed an hour ago, under the
@@ -386,7 +567,7 @@ _hand_over() {
 }
 
 run_show() {
-    local t0 v held=0 hold
+    local t0 v held=0 hold kstate fell_back=0
     t0="$(printf '%(%s)T' -1)"
     [[ -w "${TTY}" ]] || {
         _say "cannot write ${TTY} — no show, the boot goes on as usual"
@@ -395,9 +576,27 @@ run_show() {
     trap '_hand_over; exit 0' TERM INT
     printf '\e[?25l' >>"${TTY}" 2>/dev/null
     _vt_switch "${VT}"
+    if kiosk_capable; then
+        if _systemctl start --no-block "${KIOSK_UNIT}"; then
+            KIOSK_STARTED=1
+            _say "part 2 of the show is starting on tty1 (${KIOSK_UNIT})"
+        else
+            _say "WARNING: could not start ${KIOSK_UNIT} — console screen only"
+        fi
+    fi
     while :; do
         v="$(settle)"
+        # The console screen is drawn on VT8 either way: it is what shows while the
+        # kiosk waits for the web UI, and it is already current if the kiosk fails.
         frame "${v}" "${t0}" >"${TTY}" 2>/dev/null
+        if ((KIOSK_STARTED && !fell_back)); then
+            kstate="$(_unit_state "${KIOSK_UNIT}")"
+            if [[ "${kstate}" == failed ]]; then
+                fell_back=1
+                _say "${KIOSK_UNIT} gave up — the console screen takes over"
+                _vt_switch "${VT}"
+            fi
+        fi
         if [[ "${v}" != building ]]; then
             hold="${HOLD_OK}"
             [[ "${v}" == problem ]] && hold="${HOLD_PROBLEM}"
@@ -420,19 +619,24 @@ run_show() {
 
 usage() {
     cat <<'USAGE'
-usage: kldload-firstboot-show <check|run|status|frame|logtail [N]>
+usage: kldload-firstboot-show <check|run|kiosk|status|frame|logtail [N]>
 
   check    Exit 0 if this boot should hold the screen while first boot builds
-           what the install asked for (kldload-autodeploy --want reports k8s=1
-           or klab=1), 1 if not. Prints its reason on stderr.
-  run      Draw the build screen on VT8 until the build settles, show the
-           outcome, switch back to tty1 and exit 0.
+           what the install asked for (kldload-autodeploy --want reports k8s=1,
+           klab=1 or ai=1), 1 if not. Prints its reason on stderr.
+  run      Draw the build screen on VT8, start part 2 of the show on tty1 when
+           this machine can draw it (cage, firefox, a DRM device), and when the
+           build settles show the outcome, stop the kiosk, switch back to tty1
+           and exit 0.
+  kiosk    For kldload-firstboot-kiosk.service only: wait for the page on
+           127.0.0.1:8099, then run cage with Firefox in kiosk mode on it.
   status   Print building, ok or problem for the current state.
   frame    Draw one frame on the terminal and exit.
   logtail  Print the path of the build log being written now, then its last N
            lines (default 40), cleaned and redacted. Used by the graphical show.
 
-Kernel cmdline: kldload.firstboot_show=0 turns the show off for that boot.
+Kernel cmdline: kldload.firstboot_show=0 turns the show off for that boot;
+kldload.firstboot_show=console keeps the console screen and skips the kiosk.
 While it runs: Alt+F1 shows the raw post-installer output, Alt+F2 a login.
 Exit: check 0/1; run, status and frame 0; usage 2.
 USAGE
@@ -441,6 +645,7 @@ USAGE
 case "${1:-}" in
 check) show_wanted ;;
 run) run_show ;;
+kiosk) kiosk_exec ;;
 status) settle ;;
 frame) frame "$(settle)" "$(printf '%(%s)T' -1)" >"${TTY}" ;;
 logtail) log_tail "${2:-40}" ;;

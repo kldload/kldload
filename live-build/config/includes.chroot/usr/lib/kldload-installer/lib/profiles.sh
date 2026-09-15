@@ -512,6 +512,26 @@ k_profile_packages() {
 # These are appended to k_profile_packages output before the install command.
 # Package names differ across distros because upstream projects ship under
 # different names (e.g., bpfcc-tools on Debian/Ubuntu vs. bpftool on RHEL).
+# _fbshow_builds — 0 if this install asks first boot to build something, which is
+# exactly when kldload-firstboot-show holds the screen. Asks kldload-autodeploy,
+# which on the live image reads the installer's effective-config.env, so the rule
+# lives in one file. KLDLOAD_FBSHOW_WANT (a command printing the want line) is the
+# test hook, the same one kldload-firstboot-show honours.
+_fbshow_builds() {
+    local _want
+    if [[ -n "${KLDLOAD_FBSHOW_WANT:-}" ]]; then
+        _want="$(bash -c "${KLDLOAD_FBSHOW_WANT}")" || return 1
+    elif [[ -x /usr/sbin/kldload-autodeploy ]]; then
+        _want="$(/usr/sbin/kldload-autodeploy --want 2>/dev/null)" || return 1
+    else
+        return 1
+    fi
+    case " ${_want} " in
+    *" k8s=1 "* | *" klab=1 "* | *" ai=1 "*) return 0 ;;
+    esac
+    return 1
+}
+
 k_profile_optional_packages() {
     local out=()
     local _distro="${KLDLOAD_DISTRO:-debian}"
@@ -583,6 +603,31 @@ k_profile_optional_packages() {
     debian | ubuntu) out+=(dnsmasq nginx ipxe) ;;
     *) : ;; # alpine/arch: names not audited, so not claimed
     esac
+
+    # ── Part 2 of the install show on first boot ─────────────────────────
+    #
+    # An install that builds something (Kubernetes, golden images, AI models)
+    # reboots into part 2 of the show until the build settles, instead of a
+    # terminal (operator, 2026-09-14: "after first reboot the slide show, part 2,
+    # should resume ASAP, unless it's core, server or a desktop with no options").
+    # That needs a compositor, a browser and the fonts the page names, on
+    # profiles that otherwise have no graphics at all -- so only when the install
+    # builds, and the decision is kldload-autodeploy's own (--want), not a copy.
+    #
+    # Firefox, not Chrome: Chrome comes from Google's online repo and is in no
+    # offline mirror; Firefox is in the Fedora and Debian ones. Names verified
+    # 2026-09-14 in fedora:44 (cage 0.3.1, firefox 155, dejavu-sans-mono-fonts,
+    # mesa-dri-drivers) and debian:trixie (cage 0.2.0, firefox-esr 140,
+    # fonts-dejavu-core, libgl1-mesa-dri). Not claimed: EL (cage is not in its
+    # mirror) and Ubuntu (its firefox is a snap). Those keep the console screen,
+    # which is the designed fallback, not a failure.
+    if _fbshow_builds; then
+        case "$_distro" in
+        fedora) out+=(cage firefox mesa-dri-drivers dejavu-sans-mono-fonts) ;;
+        debian) out+=(cage firefox-esr libgl1-mesa-dri fonts-dejavu-core) ;;
+        *) : ;;
+        esac
+    fi
 
     # ── Swap: a zram runway on every host, whatever the profile ──────────
     #
@@ -1027,7 +1072,7 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service kldload-firstboot-show.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer; do
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service kldload-firstboot-show.service kldload-firstboot-kiosk.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -1432,6 +1477,32 @@ k_install_system_files() {
                 k_log "WARNING: kldload-firstboot-show.service NOT enabled — a building install will open to its login mid-build"
         else
             k_log "WARNING: kldload-firstboot-show unit or script missing on the target — no build screen at first boot"
+        fi
+        # Part 2 of the show on first boot: kldload-firstboot-kiosk.service runs
+        # cage + Firefox as a system user with its own PAM session. The unit is
+        # never enabled — the show starts it — but its user and PAM stack must be
+        # on the target, or the kiosk fails and the console screen is all anyone
+        # sees. Created on every install that has the unit: a user with no login
+        # and no password costs nothing, and the packages that make the kiosk
+        # capable are installed only for installs that build something
+        # (k_profile_optional_packages).
+        if [[ -f "${target}/usr/lib/systemd/system/kldload-firstboot-kiosk.service" ]]; then
+            if [[ -f /etc/pam.d/kldload-kiosk ]]; then
+                install -D -m 0644 /etc/pam.d/kldload-kiosk "${target}/etc/pam.d/kldload-kiosk"
+            else
+                k_log "WARNING: /etc/pam.d/kldload-kiosk missing on the live image — the first-boot kiosk cannot open a session"
+            fi
+            if ! chroot "${target}" getent passwd kldload-show >/dev/null 2>&1; then
+                local _nologin=/usr/sbin/nologin
+                [[ -x "${target}${_nologin}" ]] || _nologin=/sbin/nologin
+                chroot "${target}" useradd --system --user-group --no-create-home \
+                    --home-dir /var/lib/kldload-show --shell "${_nologin}" kldload-show ||
+                    k_log "WARNING: could not create the kldload-show user — the first-boot kiosk will fail and fall back to the console screen"
+            fi
+            chroot "${target}" getent passwd kldload-show >/dev/null 2>&1 &&
+                [[ -f "${target}/etc/pam.d/kldload-kiosk" ]] &&
+                k_log "first-boot kiosk ready: user kldload-show, PAM stack kldload-kiosk" ||
+                k_log "WARNING: first-boot kiosk is missing its user or PAM stack — part 2 of the show will fall back to the console screen"
         fi
         # ttyd — browser terminal (k9s + shell + logs inside a tmux session),
         # iframe'd from the Kubernetes tab. Enable at boot so the console panel
