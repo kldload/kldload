@@ -138,8 +138,9 @@ func printFrame(p painter, s Snapshot) {
 		fmt.Println()
 	}
 
-	if tail := logTail("/var/log/kldload/autodeploy.log", 8); tail != "" {
-		fmt.Println(p.wrap(cDim, "  /var/log/kldload/autodeploy.log"))
+	logPath := buildLog(s.Progress)
+	if tail := logTail(logPath, 8); tail != "" {
+		fmt.Println(p.wrap(cDim, "  "+logPath))
 		for _, l := range strings.Split(strings.TrimRight(tail, "\n"), "\n") {
 			fmt.Println("    " + l)
 		}

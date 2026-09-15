@@ -4,7 +4,8 @@
 // WHAT IT DOES, IN ORDER:
 //   1. reads the phase plan kldload-autodeploy declares in
 //      /var/lib/kldload/phases (NN-<name> files holding "<state> <epoch>");
-//   2. reads the coarse markers — current-phase, firstboot-done, all-ready;
+//   2. reads the coarse markers — current-phase, firstboot-done, all-ready,
+//      autodeploy-skipped;
 //   3. folds both into a Progress value the UI can paint without further logic.
 //
 // WHY IT EXISTS:
@@ -26,6 +27,12 @@
 //   - all-ready alone does NOT mean success. autodeploy writes it only when
 //     every phase finished; a run that gave up leaves it absent while phases
 //     sit in "failed". Done and Ok are therefore separate questions.
+//   - all-ready is not the ONLY way a build ends. When the manifest asks for
+//     nothing (no k8s, no AI, no klab) autodeploy writes current-phase
+//     "nothing-requested" and autodeploy-skipped, and exits without a plan or
+//     all-ready. fiend 2026-09-14, 5-desktop: the window sat on "Building — do
+//     not reboot", 0%, "no phase plan", under a log that said "nothing to do",
+//     and would have said so forever.
 // =============================================================================
 
 package main
@@ -76,6 +83,7 @@ type Progress struct {
 	Current   string // contents of current-phase; "" when absent
 	FirstBoot bool   // firstboot-done exists
 	AllReady  bool   // all-ready exists
+	Skipped   bool   // autodeploy-skipped exists: the manifest asked for nothing
 	HasPlan   bool   // at least one NN-<name> file was found
 }
 
@@ -119,6 +127,10 @@ func (p Progress) Settled() bool {
 	if p.AllReady {
 		return true
 	}
+	// Nothing was requested, and first boot — the only other work — is over.
+	if p.FirstBoot && p.Skipped {
+		return true
+	}
 	if !p.HasPlan {
 		return false
 	}
@@ -148,6 +160,7 @@ func ReadProgress(dir string, now time.Time) Progress {
 		Current:   strings.TrimSpace(readFileString(filepath.Join(dir, "current-phase"))),
 		FirstBoot: fileExists(filepath.Join(dir, "firstboot-done")),
 		AllReady:  fileExists(filepath.Join(dir, "all-ready")),
+		Skipped:   fileExists(filepath.Join(dir, "autodeploy-skipped")),
 	}
 
 	entries, err := os.ReadDir(filepath.Join(dir, "phases"))

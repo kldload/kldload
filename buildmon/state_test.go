@@ -155,6 +155,40 @@ func TestAllReadySettlesEvenWithoutAPlan(t *testing.T) {
 	}
 }
 
+// fiend 2026-09-14, 5-desktop: autodeploy had nothing to do, so it wrote no
+// plan and no all-ready, and the window said "Building — do not reboot"
+// indefinitely. A skipped autodeploy after first boot is a finished build.
+func TestSkippedAutodeploySettlesOnceFirstBootIsDone(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{"autodeploy-skipped", "firstboot-done"} {
+		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "current-phase"), []byte("nothing-requested\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := ReadProgress(dir, time.Unix(1000, 0))
+	if !p.Skipped || !p.Settled() {
+		t.Fatalf("Skipped=%v Settled=%v; want both true", p.Skipped, p.Settled())
+	}
+	if lvl, msg := (Snapshot{Progress: p}).Verdict(); lvl != LevelReady {
+		t.Errorf("Verdict = %v %q; want LevelReady", lvl, msg)
+	}
+}
+
+// ...but not while first boot is still running: the skip marker only speaks
+// for autodeploy.
+func TestSkippedAutodeployDoesNotSettleDuringFirstBoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "autodeploy-skipped"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ReadProgress(dir, time.Unix(1000, 0)).Settled() {
+		t.Error("Settled() = true before firstboot-done")
+	}
+}
+
 func TestMarkersAndCurrentPhase(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "current-phase"), []byte("  goldens \n"), 0o644); err != nil {

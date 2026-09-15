@@ -97,6 +97,7 @@ type gui struct {
 	banner   *canvas.Text
 	sub      *widget.Label
 	bar      *widget.ProgressBar
+	spinner  *widget.ProgressBarInfinite // no plan to measure against yet
 	barLabel *widget.Label
 
 	phaseList *widget.List
@@ -109,6 +110,7 @@ type gui struct {
 	doctorBtn *widget.Button
 	compBox   *fyne.Container
 	logView   *widget.Entry
+	logLabel  *widget.Label
 }
 
 // RunGUI opens the window and blocks until it is closed.
@@ -145,12 +147,14 @@ func RunGUI(opt GatherOpts) error {
 	g.sub.Wrapping = fyne.TextWrapWord
 
 	g.bar = widget.NewProgressBar()
+	g.spinner = widget.NewProgressBarInfinite()
+	g.spinner.Hide()
 	g.barLabel = widget.NewLabel("")
 
 	head := container.NewVBox(
 		g.banner,
 		g.sub,
-		container.NewBorder(nil, nil, nil, g.barLabel, g.bar),
+		container.NewBorder(nil, nil, nil, g.barLabel, container.NewStack(g.bar, g.spinner)),
 		widget.NewSeparator(),
 	)
 
@@ -224,10 +228,10 @@ func (g *gui) buildProgressTab() fyne.CanvasObject {
 	g.logView.TextStyle = fyne.TextStyle{Monospace: true}
 	g.logView.Wrapping = fyne.TextWrapOff
 
+	g.logLabel = widget.NewLabelWithStyle(firstbootLog, fyne.TextAlignLeading,
+		fyne.TextStyle{Bold: true})
 	split := container.NewVSplit(g.phaseList, container.NewBorder(
-		widget.NewLabelWithStyle("/var/log/kldload/autodeploy.log", fyne.TextAlignLeading,
-			fyne.TextStyle{Bold: true}),
-		nil, nil, nil, g.logView))
+		g.logLabel, nil, nil, nil, g.logView))
 	split.SetOffset(0.45)
 	return split
 }
@@ -407,7 +411,8 @@ func (g *gui) refresh(full bool) {
 	o := g.opt
 	o.SkipDoctor = true // never on the 2s path; see the file header
 	snap := Gather(o)
-	tail := logTail("/var/log/kldload/autodeploy.log", 200)
+	logPath := buildLog(snap.Progress)
+	tail := logTail(logPath, 200)
 
 	fyne.Do(func() {
 		lvl, msg := snap.Verdict()
@@ -424,6 +429,19 @@ func (g *gui) refresh(full bool) {
 				"Do not reboot or power off until this finishes.")
 		default:
 			g.sub.SetText("All build phases finished and nothing was flagged.")
+		}
+
+		// A bar at 0% for as long as there is nothing to count against reads
+		// as a hang; a moving bar says "working" without inventing a number.
+		spin := !snap.Complete() && !snap.Progress.HasPlan && lvl == LevelBuilding
+		if spin {
+			g.bar.Hide()
+			g.spinner.Show()
+			g.spinner.Start()
+		} else {
+			g.spinner.Stop()
+			g.spinner.Hide()
+			g.bar.Show()
 		}
 
 		switch {
@@ -443,9 +461,10 @@ func (g *gui) refresh(full bool) {
 				g.bar.SetValue(f)
 				g.barLabel.SetText(fmt.Sprintf("%d of %d phases",
 					snap.Progress.Done(), len(snap.Progress.Phases)))
+			} else if !snap.Progress.FirstBoot {
+				g.barLabel.SetText("first boot setup")
 			} else {
-				g.bar.SetValue(0)
-				g.barLabel.SetText("no phase plan")
+				g.barLabel.SetText("waiting for autodeploy")
 			}
 		}
 
@@ -455,6 +474,7 @@ func (g *gui) refresh(full bool) {
 		g.findings = snap.Findings
 		g.auditList.Refresh()
 
+		g.logLabel.SetText(logPath)
 		if g.logView.Text != tail {
 			g.logView.SetText(tail)
 			g.logView.CursorRow = strings.Count(tail, "\n")
