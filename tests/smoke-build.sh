@@ -206,7 +206,11 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
         # install shows the console fallback instead, with nothing failing loudly.
         declare -a FB2_FILES=(usr/local/share/kldload-webui/active/firstboot.html
             usr/lib/systemd/system/kldload-firstboot-kiosk.service
-            etc/pam.d/kldload-kiosk usr/local/sbin/kldload-firstboot-show)
+            etc/pam.d/kldload-kiosk usr/local/bin/kldload-firstboot-show)
+        # usr/local/bin, not sbin: on the Fedora 44 live rootfs usr/local/sbin is a
+        # symlink to bin, so the listing has the script under bin and the sbin path
+        # is a link line. The first cut probed sbin and failed build 17 on a script
+        # that was there (2026-09-15).
         _fb2_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${FB2_FILES[@]}" 2>/dev/null)" || _fb2_list="" # absent paths make unsquashfs exit non-zero; the loop below names them
         _fb2_bad=""
         for _df in "${FB2_FILES[@]}"; do
@@ -1820,8 +1824,9 @@ fi
 # etc, var, root, usr/local, opt, home or srv, and the repo's tests are copied to
 # usr/local/share/kldload/tests. A literal header in a test fixture failed build 17
 # ten minutes in (2026-09-14); this finds it in a second, before a build starts.
+# swallow: grep exits 1 when nothing matches, which is the passing case
 _pk_src="$(grep -rlIE --exclude-dir=darksite -- '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' \
-    "$ROOT/tests" "$ROOT/live-build/config/includes.chroot" 2>/dev/null || true)" # grep exits 1 when nothing matches: the passing case
+    "$ROOT/tests" "$ROOT/live-build/config/includes.chroot" 2>/dev/null || true)"
 if [[ -z "$_pk_src" ]]; then
     _pass "no private-key headers in files the image carries (tests, includes.chroot)"
 else

@@ -540,7 +540,8 @@ kiosk_exec() {
 _vt_switch() {
     [[ "${VT}" == none ]] && return 0
     command -v chvt >/dev/null 2>&1 || return 0
-    chvt "$1" 2>/dev/null || true # a VT switch that fails leaves the show drawn where it is; nothing to recover
+    # swallow: a VT switch that fails leaves the show drawn where it is; nothing to recover
+    chvt "$1" 2>/dev/null || true
 }
 
 KIOSK_STARTED=0
@@ -561,7 +562,8 @@ _hand_over() {
         # post-installer output that has scrolled past it since.
         if [[ -z "${KLDLOAD_FBSHOW_UNITSTATE:-}" ]] &&
             [[ "$(_unit_state getty@tty1.service)" == active ]]; then
-            systemctl restart getty@tty1.service 2>/dev/null || true # no getty on tty1 (a desktop's display manager owns it): nothing to redraw
+            # swallow: no getty on tty1 (a desktop's display manager owns it): nothing to redraw
+            systemctl restart getty@tty1.service 2>/dev/null || true
         fi
     fi
 }
