@@ -948,6 +948,37 @@ k_install_system_files() {
     k_install_substrate_safety ||
         k_log "WARNING: substrate safety incomplete (see above) — journal, package holds or boot repair may be missing"
 
+    # The drop-in carry runs for EVERY profile, core included, so it sits above
+    # core's early return. It used to live in the non-core branch, and once core
+    # started installing OpenIPMI (the per-family package names, 2026-09-14) every
+    # core install on a box without a BMC booted with ipmi.service failed: the
+    # no-BMC guard below never reached it (fiend, 1-core on build 20, 2026-09-15).
+    # systemd drop-ins kldload ships (ollama keep-alive, the IPMI BMC guard,
+    # the zfs-mount live guard).
+    #
+    # BOTH trees, not just /etc. This loop read /etc/systemd/system/*.d alone
+    # for its whole life, but a vendor drop-in belongs in /usr/lib -- /etc is
+    # the operator's. So the ipmi guard shipped to the live ISO, landed in
+    # /usr/lib/systemd/system/ipmi.service.d, and was never carried to a single
+    # installed system. fiend installed from a 2026-09-02 ISO that contained
+    # the fix and STILL showed `ipmi.service failed` on a box with no BMC,
+    # because the file stopped at the squashfs. Written is not wired.
+    #
+    # Each source tree keeps its own destination: a vendor drop-in stays vendor
+    # so an operator editing /etc still wins.
+    for _droproot in /usr/lib/systemd/system /etc/systemd/system; do
+        for _dropdir in "$_droproot"/*.d; do
+            [[ -d "$_dropdir" ]] || continue
+            _svc=$(basename "$_dropdir")
+            mkdir -p "${target}${_droproot}/${_svc}"
+            for _conf in "$_dropdir"/*.conf; do
+                [[ -f "$_conf" ]] || continue
+                install -m 0644 "$_conf" \
+                    "${target}${_droproot}/${_svc}/$(basename "$_conf")"
+                k_log "carried drop-in: ${_droproot}/${_svc}/$(basename "$_conf")"
+            done
+        done
+    done
     if [[ "$_profile" == "core" ]]; then
         k_log "Core profile — skipping kldload tools, sanoid, webui, snapshot hooks."
         return 0
@@ -2570,32 +2601,6 @@ LOCKS
         [[ -f "$_kf" ]] || continue
         install -m 0644 "$_kf" "${target}/usr/share/konsole/$(basename "$_kf")"
         k_log "carried $(basename "$_kf")"
-    done
-    # systemd drop-ins kldload ships (ollama keep-alive, the IPMI BMC guard,
-    # the zfs-mount live guard).
-    #
-    # BOTH trees, not just /etc. This loop read /etc/systemd/system/*.d alone
-    # for its whole life, but a vendor drop-in belongs in /usr/lib -- /etc is
-    # the operator's. So the ipmi guard shipped to the live ISO, landed in
-    # /usr/lib/systemd/system/ipmi.service.d, and was never carried to a single
-    # installed system. fiend installed from a 2026-09-02 ISO that contained
-    # the fix and STILL showed `ipmi.service failed` on a box with no BMC,
-    # because the file stopped at the squashfs. Written is not wired.
-    #
-    # Each source tree keeps its own destination: a vendor drop-in stays vendor
-    # so an operator editing /etc still wins.
-    for _droproot in /usr/lib/systemd/system /etc/systemd/system; do
-        for _dropdir in "$_droproot"/*.d; do
-            [[ -d "$_dropdir" ]] || continue
-            _svc=$(basename "$_dropdir")
-            mkdir -p "${target}${_droproot}/${_svc}"
-            for _conf in "$_dropdir"/*.conf; do
-                [[ -f "$_conf" ]] || continue
-                install -m 0644 "$_conf" \
-                    "${target}${_droproot}/${_svc}/$(basename "$_conf")"
-                k_log "carried drop-in: ${_droproot}/${_svc}/$(basename "$_conf")"
-            done
-        done
     done
     # environment.d — session-wide environment for the graphical session.
     # Same trip as the drop-ins above: reaching the ISO is only half of it, and

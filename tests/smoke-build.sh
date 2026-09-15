@@ -1833,6 +1833,19 @@ else
     _fail "no private-key headers in files the image carries" "$(tr '\n' ' ' <<<"$_pk_src")— the build's key scan will refuse to pack the ISO"
 fi
 
+# Vendor systemd drop-ins (the no-BMC ipmi guard among them) must reach EVERY
+# install, core included, so their carry has to run before k_install_system_files
+# returns early for core. 1-core on build 20 (fiend, 2026-09-15) booted with
+# ipmi.service failed because the carry sat below that return.
+_pf="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+_carry_ln="$(grep -n 'for _droproot in /usr/lib/systemd/system /etc/systemd/system' "$_pf" | head -n 1 | cut -d: -f1)"
+_core_ln="$(grep -n 'Core profile — skipping kldload tools' "$_pf" | head -n 1 | cut -d: -f1)"
+if [[ -n "$_carry_ln" && -n "$_core_ln" ]] && ((_carry_ln < _core_ln)); then
+    _pass "systemd drop-ins are carried for every profile (before core's early return)"
+else
+    _fail "systemd drop-ins are carried for every profile" "carry at line ${_carry_ln:-missing}, core return at ${_core_ln:-missing} — core installs lose the ipmi no-BMC guard"
+fi
+
 # Part 2 of the show needs, from the source tree: cage in the offline package
 # sets it is installed from (Firefox is already there for the desktop), and the
 # loopback listener the kiosk browser reads over plain HTTP. Either missing turns
