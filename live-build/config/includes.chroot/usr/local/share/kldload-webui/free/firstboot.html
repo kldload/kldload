@@ -1623,7 +1623,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     },
     "brick wall": function (r) { // the cabinet: a bezel round the play area with marquee lights chasing along it
       var pad0 = Math.min(W, H) * .03, x = AX(0) - pad0, y = AY(0) - pad0, w = AW() + pad0 * 2, h = AH() + pad0 * 2;
-      return { traces: [tr(rrPath(x, y, w, h, pad0), { a: .22, pulse: false }), tr(rrPath(x - 10, y - 10, w + 20, h + 20, pad0 + 10), { a: .1, pulse: false })], marquee: { pts: rrPath(x - 5, y - 5, w + 10, h + 10, pad0 + 5), n: 64 } };
+      return { traces: [tr(rrPath(x, y, w, h, pad0), { a: .22, pulse: false }), tr(rrPath(x - 10, y - 10, w + 20, h + 20, pad0 + 10), { a: .1, pulse: false })], marquee: { pts: rrPath(x - 5, y - 5, w + 10, h + 10, pad0 + 5), n: 32 } };
     },
     "waterfall": function (r) { // a frequency axis with its ticks, a carrier running along it, the band plan behind
       var g = { traces: [], rows: [] }, y = AY(1) + Math.min(24, H * .02);
@@ -1726,7 +1726,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
       });
       (g.ripples || []).forEach(function (rp, k) { for (var w = 0; w < 2; w++) { var ph = ((clock + w * 4.5) % 9) / 9; bx.strokeStyle = vec; bx.globalAlpha = life * .5 * (ph < .15 ? ph / .15 : 1 - ph) * .3; bx.beginPath(); bx.arc(rp.x, rp.y, rp.r * (.35 + ph * .9), 0, 6.283); bx.stroke(); } });
       (g.cones || []).forEach(function (cn) { var a = cn.dir + Math.sin(clock * .35 + cn.ph) * .6, fan = .45, R = H * .22, cg = bx.createRadialGradient(cn.x, cn.y, 0, cn.x, cn.y, R); cg.addColorStop(0, beam); cg.addColorStop(1, "rgba(0,0,0,0)"); bx.fillStyle = cg; bx.globalAlpha = life * .1; bx.beginPath(); bx.moveTo(cn.x, cn.y); bx.arc(cn.x, cn.y, R, a - fan / 2, a + fan / 2); bx.closePath(); bx.fill(); });
-      if (g.marquee && reveal >= 1) { var mq = g.marquee, ml = plen(mq.pts); for (var mi = 0; mi < mq.n; mi++) { var on = ((mi + (clock * 8 | 0)) % 4) === 0, pt = ptAt(mq.pts, mi / mq.n * ml); bx.fillStyle = on ? b.col[2] : vec; bx.globalAlpha = life * (on ? .55 : .1); bx.beginPath(); bx.arc(pt[0], pt[1], on ? 2.4 : 1.6, 0, 6.283); bx.fill(); } }
+      // Marquee lights: the first cut (64 lamps, a quarter lit, 8 steps a second) was
+      // too busy around the cabinet (operator, fiend 2026-09-15). Half the lamps, one
+      // in six lit, a slow chase, and all of it barely above the backdrop.
+      if (g.marquee && reveal >= 1) { var mq = g.marquee, ml = plen(mq.pts); for (var mi = 0; mi < mq.n; mi++) { var on = ((mi + (clock * 2.5 | 0)) % 6) === 0, pt = ptAt(mq.pts, mi / mq.n * ml); bx.fillStyle = on ? b.col[2] : vec; bx.globalAlpha = life * (on ? .22 : .05); bx.beginPath(); bx.arc(pt[0], pt[1], on ? 1.8 : 1.2, 0, 6.283); bx.fill(); } }
       // pulses of light along the pulsing traces, drawn as part 1 draws current: a bright head, a tail in the scene colour
       var pulsing = (g.traces || []).filter(function (t) { return t.pulse; });
       if (reveal >= 1 && pulsing.length && g.pulses.length < 8 && Math.random() < dt * 2.4 && !b.dying) g.pulses.push({ t: pulsing[Math.random() * pulsing.length | 0], d: 0, v: 90 + Math.random() * 160 });
