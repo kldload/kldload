@@ -415,8 +415,9 @@ else
     # can draw, falls back to the console screen when the unit gives up, and hands
     # tty1 back (a login prompt, unless a display manager takes it). systemctl is
     # a fake that records its calls.
-    mkdir -p "${_ft}/root/usr/bin" "${_ft}/root/usr/lib/systemd/system" "${_ft}/root/dev/dri"
+    mkdir -p "${_ft}/root/usr/bin" "${_ft}/root/usr/lib/systemd/system" "${_ft}/root/dev/dri" "${_ft}/root/usr/lib64/security"
     touch "${_ft}/root/usr/bin/cage" "${_ft}/root/usr/bin/firefox" "${_ft}/root/dev/dri/card0" \
+        "${_ft}/root/usr/lib64/security/pam_systemd.so" \
         "${_ft}/root/usr/lib/systemd/system/kldload-firstboot-kiosk.service"
     chmod +x "${_ft}/root/usr/bin/cage" "${_ft}/root/usr/bin/firefox"
     # rm -f on the glob hits the phases/ directory and set -e ends the suite
@@ -429,6 +430,7 @@ else
         env "${_fenv[@]}" KLDLOAD_FBSHOW_INTERVAL=0 KLDLOAD_FBSHOW_HOLD_OK=0 KLDLOAD_FBSHOW_MAXSEC=2 \
             KLDLOAD_FBSHOW_SYSTEMCTL="echo \"\$*\" >>'${_ft}/sysctl'; [[ \$1 == is-enabled ]] && exit $1; exit 0" \
             KLDLOAD_FBSHOW_UNITSTATE="[[ \$1 == kldload-firstboot-kiosk.service ]] && echo $2 || echo active" \
+            KLDLOAD_FBSHOW_PAGEUP="${_fpage:-false}" \
             bash "${_fbs}" run 2>&1
     }
     _fbad=""
@@ -441,8 +443,13 @@ else
     _frun 0 active >/dev/null
     grep -q 'getty@tty1' "${_ft}/sysctl" && _fbad+=" getty-started-over-display-manager"
     rm -f "${_ft}/state/all-ready"
+    # tty1 is handed to the kiosk only once its unit is active and the page answers.
     # Captured, not piped into grep -q: grep exits at the first match, the run
     # dies of SIGPIPE, and pipefail reports that as the test failing.
+    _fout="$(_fpage=true _frun 1 active)"
+    grep -q 'handing tty1 to the kiosk' <<<"${_fout}" || _fbad+=" tty1-not-handed-when-page-up"
+    _fout="$(_fpage=false _frun 1 active)"
+    grep -q 'handing tty1' <<<"${_fout}" && _fbad+=" tty1-handed-before-page"
     _fout="$(_frun 1 failed)"
     grep -q 'gave up' <<<"${_fout}" || _fbad+=" no-fallback-when-kiosk-failed"
     touch "${_ft}/state/all-ready"
@@ -457,6 +464,10 @@ else
     rm "${_ft}/root/usr/bin/firefox"
     _frun 1 active >/dev/null
     grep -q firstboot-kiosk "${_ft}/sysctl" && _fbad+=" kiosk-started-without-firefox"
+    touch "${_ft}/root/usr/bin/firefox"
+    rm "${_ft}/root/usr/lib64/security/pam_systemd.so"
+    _frun 1 active >/dev/null
+    grep -q firstboot-kiosk "${_ft}/sysctl" && _fbad+=" kiosk-started-without-pam_systemd"
     rm -f "${_ft}/state/all-ready"
     if [[ -z "${_fbad}" ]]; then
         _pass "kldload-firstboot-show run: kiosk only where it can draw, console fallback, tty1 handed back"
@@ -476,6 +487,8 @@ else
     _fpk "k8s=0 klab=1 ai=0" fedora | grep -qx cage || _fbad+=" fedora-build-no-cage"
     _fpk "k8s=0 klab=1 ai=0" fedora | grep -qx firefox || _fbad+=" fedora-build-no-firefox"
     _fpk "k8s=0 klab=0 ai=1" debian | grep -qx firefox-esr || _fbad+=" debian-ai-no-firefox-esr"
+    _fpk "k8s=0 klab=1 ai=0" fedora | grep -qx systemd-pam || _fbad+=" fedora-build-no-systemd-pam"
+    _fpk "k8s=0 klab=1 ai=0" debian | grep -qx libpam-systemd || _fbad+=" debian-build-no-libpam-systemd"
     _fpk "k8s=0 klab=0 ai=0" fedora | grep -qx cage && _fbad+=" plain-install-got-cage"
     _fpk "k8s=1 klab=1 ai=0" rocky | grep -qx cage && _fbad+=" el-claimed-cage"
     _fpk "k8s=1 klab=1 ai=0" ubuntu | grep -qxE 'cage|firefox' && _fbad+=" ubuntu-claimed-kiosk"

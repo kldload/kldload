@@ -135,6 +135,15 @@ _systemctl() {
     fi
 }
 
+# _page_up — 0 when the kiosk's page answers on the loopback listener.
+_page_up() {
+    if [[ -n "${KLDLOAD_FBSHOW_PAGEUP:-}" ]]; then
+        bash -c "${KLDLOAD_FBSHOW_PAGEUP}"
+    else
+        curl -fs -o /dev/null --max-time 2 "${KIOSK_URL}"
+    fi
+}
+
 _unit_state() {
     if [[ -n "${KLDLOAD_FBSHOW_UNITSTATE:-}" ]]; then
         bash -c "${KLDLOAD_FBSHOW_UNITSTATE}" _ "$1"
@@ -433,6 +442,15 @@ kiosk_capable() {
         _say "no firefox — console screen only"
         return 1
     }
+    # pam_systemd is what turns the unit's PAM session into a logind session on
+    # seat0, which is where cage gets XDG_RUNTIME_DIR and the DRM device from.
+    # Without it cage exits at once ("XDG_RUNTIME_DIR is not set"): fiend, 3-kvm on
+    # build 17 (2026-09-15), where a kvm install had no systemd-pam.
+    [[ -e "${ROOT}/usr/lib64/security/pam_systemd.so" || -e "${ROOT}/usr/lib/x86_64-linux-gnu/security/pam_systemd.so" ||
+        -e "${ROOT}/usr/lib/security/pam_systemd.so" ]] || {
+        _say "no pam_systemd.so — the kiosk could not get a login session, console screen only"
+        return 1
+    }
     [[ -f "${ROOT}/usr/lib/systemd/system/${KIOSK_UNIT}" ]] || {
         _say "no ${KIOSK_UNIT} — console screen only"
         return 1
@@ -569,7 +587,7 @@ _hand_over() {
 }
 
 run_show() {
-    local t0 v held=0 hold kstate fell_back=0
+    local t0 v held=0 hold kstate fell_back=0 handed=0
     t0="$(printf '%(%s)T' -1)"
     [[ -w "${TTY}" ]] || {
         _say "cannot write ${TTY} — no show, the boot goes on as usual"
@@ -597,6 +615,16 @@ run_show() {
                 fell_back=1
                 _say "${KIOSK_UNIT} gave up — the console screen takes over"
                 _vt_switch "${VT}"
+            elif ((!handed)) && [[ "${kstate}" == active ]] && _page_up; then
+                # A logind session is only ACTIVE while its VT is in front, and cage
+                # waits ten seconds for an active session before it gives up. This
+                # screen had put VT8 in front, so every cage timed out with "Timeout
+                # waiting session to become active" (fiend, 3-kvm on build 17,
+                # 2026-09-15). Hand tty1 over once the page answers: the kiosk
+                # starts cage at that same moment.
+                handed=1
+                _say "the page answers — handing tty1 to the kiosk"
+                _vt_switch 1
             fi
         fi
         if [[ "${v}" != building ]]; then

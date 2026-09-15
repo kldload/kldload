@@ -1839,6 +1839,7 @@ fi
 # every building install into the console fallback without an error anywhere.
 _fb2_src_bad=""
 grep -qx 'cage' "$ROOT/build/darksite-fedora/config/package-sets/target-fedora-extras.txt" 2>/dev/null || _fb2_src_bad+=" fedora-package-set-no-cage"
+grep -qx 'systemd-pam' "$ROOT/build/darksite-fedora/config/package-sets/target-fedora-extras.txt" 2>/dev/null || _fb2_src_bad+=" fedora-package-set-no-systemd-pam"
 grep -qx 'cage' "$ROOT/build/darksite-debian/config/package-sets/target-desktop.txt" 2>/dev/null || _fb2_src_bad+=" debian-package-set-no-cage"
 grep -q 'listen      127.0.0.1:8099;' "$ROOT/live-build/config/includes.chroot/etc/nginx/conf.d/kldload.conf" 2>/dev/null || _fb2_src_bad+=" no-loopback-listener"
 grep -q 'KIOSK_URL="http://127.0.0.1:8099/firstboot.html"' "$ROOT/live-build/config/includes.chroot/usr/local/sbin/kldload-firstboot-show" 2>/dev/null || _fb2_src_bad+=" kiosk-url-not-the-listener"

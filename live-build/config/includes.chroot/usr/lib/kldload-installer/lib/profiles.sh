@@ -618,13 +618,17 @@ k_profile_optional_packages() {
     # offline mirror; Firefox is in the Fedora and Debian ones. Names verified
     # 2026-09-14 in fedora:44 (cage 0.3.1, firefox 155, dejavu-sans-mono-fonts,
     # mesa-dri-drivers) and debian:trixie (cage 0.2.0, firefox-esr 140,
-    # fonts-dejavu-core, libgl1-mesa-dri). Not claimed: EL (cage is not in its
+    # fonts-dejavu-core, libgl1-mesa-dri). systemd-pam / libpam-systemd carry
+    # pam_systemd.so, which the kiosk's PAM stack needs to get a logind session:
+    # a desktop pulls it in, a kvm install does not, and without it cage died
+    # four times in eleven seconds with "XDG_RUNTIME_DIR is not set" (fiend,
+    # 3-kvm on build 17, 2026-09-15). Not claimed: EL (cage is not in its
     # mirror) and Ubuntu (its firefox is a snap). Those keep the console screen,
     # which is the designed fallback, not a failure.
     if _fbshow_builds; then
         case "$_distro" in
-        fedora) out+=(cage firefox mesa-dri-drivers dejavu-sans-mono-fonts) ;;
-        debian) out+=(cage firefox-esr libgl1-mesa-dri fonts-dejavu-core) ;;
+        fedora) out+=(cage firefox mesa-dri-drivers dejavu-sans-mono-fonts systemd-pam) ;;
+        debian) out+=(cage firefox-esr libgl1-mesa-dri fonts-dejavu-core libpam-systemd) ;;
         *) : ;;
         esac
     fi
