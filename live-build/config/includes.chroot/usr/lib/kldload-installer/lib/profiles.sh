@@ -537,11 +537,23 @@ k_profile_optional_packages() {
     # installed in its own transaction, after the kernel has been asserted
     # present, so an unavailable one costs only itself (the steam-installer
     # lesson, fiend 2026-08-15).
+    #
+    # The names split by family, and this list used to carry only the Debian
+    # spelling. dnf matches case and punctuation exactly, so every RPM install
+    # logged "No match for argument: openipmi" and "sg3-utils" and shipped with
+    # neither; iotop-c was not named at all, and first boot fetched it off the
+    # internet (fiend 2026-09-14, 3-kvm on build 16). All three are in the
+    # Fedora darksite. Names resolved 2026-09-14 in fedora:44, centos:stream10
+    # (+EPEL), debian:trixie and ubuntu:noble.
     case "$_distro" in
     alpine | arch) : ;; # different names; not audited, so not claimed
+    fedora | centos | rocky | rhel)
+        out+=(smartmontools nvme-cli usbutils ipmitool OpenIPMI
+            sg3_utils lsscsi nethogs iftop iotop-c dmidecode)
+        ;;
     *)
         out+=(smartmontools nvme-cli usbutils ipmitool openipmi
-            sg3-utils lsscsi nethogs iftop dmidecode)
+            sg3-utils lsscsi nethogs iftop iotop-c dmidecode)
         ;;
     esac
 

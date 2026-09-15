@@ -282,6 +282,27 @@ else
     rm -f "${_hba_json}"
 fi
 
+_section "per-family package names (k_profile_optional_packages)"
+# dnf matches names exactly. The diagnostics list carried only Debian spellings
+# (openipmi, sg3-utils), so every RPM install shipped without OpenIPMI and
+# sg3_utils (fiend 2026-09-14, 3-kvm). Run the real function per distro and
+# check the spelling each family's repos resolve.
+_pop_fn="$(sed -n '/^k_profile_optional_packages() {/,/^}/p' "${CHROOT}/usr/lib/kldload-installer/lib/profiles.sh")"
+for _pd in fedora:OpenIPMI,sg3_utils,iotop-c:openipmi,sg3-utils \
+    rocky:OpenIPMI,sg3_utils,iotop-c:openipmi,sg3-utils \
+    debian:openipmi,sg3-utils,iotop-c:OpenIPMI,sg3_utils; do
+    IFS=: read -r _d _want _never <<<"${_pd}"
+    _got=" $(bash -c 'eval "$1"; KLDLOAD_DISTRO=$2 KLDLOAD_PROFILE=server k_profile_optional_packages' _ "${_pop_fn}" "${_d}" 2>/dev/null | tr -s ' \n' ' ') "
+    _miss="" _wrong=""
+    for _n in ${_want//,/ }; do [[ "${_got}" == *" ${_n} "* ]] || _miss+=" ${_n}"; done
+    for _n in ${_never//,/ }; do [[ "${_got}" == *" ${_n} "* ]] && _wrong+=" ${_n}"; done
+    if [[ -z "${_miss}${_wrong}" ]]; then
+        _pass "${_d}: diagnostics use this family's package names"
+    else
+        _fail "${_d} package names" "missing:${_miss:- none}; other family's spelling:${_wrong:- none}"
+    fi
+done
+
 # ─── summary ─────────────────────────────────────────────────────────────────
 printf "\n  \e[1m%d passed\e[0m, %s\n" "${PASS}" \
     "$([[ ${FAILN} -gt 0 ]] && printf '\e[1;31m%d failed\e[0m' "${FAILN}" || printf '0 failed')"
