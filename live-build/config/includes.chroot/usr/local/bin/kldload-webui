@@ -11845,6 +11845,15 @@ async def main_async(args):
             if _stage == "converge":
                 if os.path.exists("/var/lib/kldload/all-ready") or _cphase == "ready":
                     _running = False
+                # A build that ended partial, or had nothing to build, has also
+                # stopped. Neither writes all-ready or "ready", so the show stayed
+                # pinned over a finished machine -- the same gap the build monitor
+                # had (fiend 5-desktop, 2026-09-14). kldload-firstboot-show uses
+                # this rule too.
+                if _cphase in ("partial", "nothing-requested") or (
+                        os.path.exists("/var/lib/kldload/autodeploy-skipped")
+                        and os.path.exists("/var/lib/kldload/firstboot-done")):
+                    _running = False
 
             _body = json.dumps({
                 "stage": _stage,
@@ -11855,6 +11864,31 @@ async def main_async(args):
                 "total": len(_plan),
                 "running": _running,
             }).encode()
+            return WsResponse(200, "OK", WsHeaders([
+                ("Content-Type", "application/json"),
+                ("Cache-Control", "no-store"),
+                ("Content-Length", str(len(_body))),
+            ]), _body)
+
+        # The build output inside the show: part 1 is the live installer's logs,
+        # part 2 the first-boot build's. kldload-firstboot-show picks the log
+        # being written right now and cleans it (control sequences stripped,
+        # meters flattened, credentials and logins redacted), so the slides and
+        # the console build screen show the same text from one implementation.
+        # Fixed argv, no shell; the only input is a clamped integer.
+        if url_path == "/api/install-log":
+            _lines, _src = [], ""
+            try:
+                _res = subprocess.run(
+                    ["/usr/local/sbin/kldload-firstboot-show", "logtail", "40"],
+                    capture_output=True, text=True, timeout=5, check=False)
+                _out = _res.stdout.splitlines()
+                if _out:
+                    _src, _lines = _out[0], _out[1:]
+            except (OSError, subprocess.TimeoutExpired):
+                # no script (an older image) or a stuck read: an empty pane this poll
+                pass
+            _body = json.dumps({"source": _src, "lines": _lines}).encode()
             return WsResponse(200, "OK", WsHeaders([
                 ("Content-Type", "application/json"),
                 ("Cache-Control", "no-store"),

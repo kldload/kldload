@@ -14,6 +14,13 @@
 #              manager that were ordered after this unit.
 #   status  Print building | ok | problem for the current state, and exit 0.
 #   frame   Draw one frame to the terminal and exit (for tests and a quick look).
+#   logtail [N]
+#           Print the source path, then the last N cleaned lines of whichever
+#           build log is being written right now: the newest of
+#           /var/log/installer/*.log during a live install (part 1 of the show),
+#           else the newest of firstboot.log, autodeploy.log and the klab golden
+#           logs (part 2). kldload-webui serves this to the graphical show, so
+#           the console screen and the slides show the same, equally redacted text.
 #
 # WHY THIS EXISTS:
 #   An install that asks for Kubernetes or golden images spends its first boot
@@ -83,6 +90,9 @@ MAXSEC="${KLDLOAD_FBSHOW_MAXSEC:-21600}"
 HOLD_OK="${KLDLOAD_FBSHOW_HOLD_OK:-8}"
 HOLD_PROBLEM="${KLDLOAD_FBSHOW_HOLD_PROBLEM:-60}"
 ROOT="${KLDLOAD_FBSHOW_ROOT:-}"
+INSTLOGDIR="${KLDLOAD_FBSHOW_INSTLOGDIR:-/var/log/installer}"
+INSTPHASE="${KLDLOAD_FBSHOW_INSTPHASE:-/run/kldload/install-phase}"
+KLABLOGDIR="${KLDLOAD_FBSHOW_KLABLOGDIR:-/root/klab/goldens}"
 
 _say() { printf 'kldload-firstboot-show: %s\n' "$*" >&2; }
 
@@ -216,16 +226,43 @@ clean_log() {
         -e $'s/\x1b\\][^\a]*(\a|\x1b\\\\)//g' \
         -e $'s/.*\r(.)/\\1/' \
         -e '/BEGIN [A-Z ]*PRIVATE KEY/,/END [A-Z ]*PRIVATE KEY/c\[redacted private key]' \
-        -e 's/((pass(word|wd|phrase)?|secret|token|api[_-]?key|private[_-]?key|psk)["'"'"']?[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1[redacted]/Ig' |
+        -e 's/((pass(word|wd|phrase)?|secret|token|api[_-]?key|private[_-]?key|psk)["'"'"']?[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1[redacted]/Ig' \
+        -e 's#(login:[[:space:]]*[^[:space:]/]+[[:space:]]*/[[:space:]]*)[^[:space:]]+#\1[redacted]#Ig' |
         tr -d '\000-\010\013-\037\177'
 }
 
+# _log_path — the build log being written right now.
+#
+# The newest by modification time, from a fixed list per part: never a global
+# "newest file", which on a busy first boot is Grafana's log or the AI training
+# corpus. HISTORY: the first cut followed autodeploy.log once first boot was
+# done, and on 4-k8s (fiend 2026-09-14) that pane sat on "waiting for
+# klab-firstboot..." for 36 minutes while three goldens were built, because klab
+# logs each golden to its own file.
 _log_path() {
-    if ((FB_DONE)) && [[ -s "${LOGDIR}/autodeploy.log" ]]; then
-        printf '%s\n' "${LOGDIR}/autodeploy.log"
+    local -a cand=()
+    local f best="" best_t=0 t
+    if [[ -e "${INSTPHASE}" ]]; then
+        cand=("${INSTLOGDIR}"/*.log)
     else
-        printf '%s\n' "${LOGDIR}/firstboot.log"
+        cand=("${LOGDIR}/firstboot.log" "${LOGDIR}/autodeploy.log" "${KLABLOGDIR}"/*.log)
     fi
+    for f in "${cand[@]}"; do
+        [[ -f "${f}" && ! -L "${f}" ]] || continue
+        t="$(stat -c %Y "${f}" 2>/dev/null)" || continue
+        ((t > best_t)) && best="${f}" best_t="${t}"
+    done
+    printf '%s\n' "${best:-${LOGDIR}/firstboot.log}"
+}
+
+# logtail [N] — see the header.
+log_tail() {
+    local n="${1:-40}" src
+    [[ "${n}" =~ ^[0-9]+$ ]] && ((n >= 1 && n <= 400)) || n=40
+    src="$(_log_path)"
+    printf '%s\n' "${src}"
+    [[ -r "${src}" ]] || return 0
+    tail -c 131072 "${src}" 2>/dev/null | clean_log | grep -v '^[[:space:]]*$' | tail -n "${n}"
 }
 
 # ─── drawing ─────────────────────────────────────────────────────────────────
@@ -383,7 +420,7 @@ run_show() {
 
 usage() {
     cat <<'USAGE'
-usage: kldload-firstboot-show <check|run|status|frame>
+usage: kldload-firstboot-show <check|run|status|frame|logtail [N]>
 
   check    Exit 0 if this boot should hold the screen while first boot builds
            what the install asked for (kldload-autodeploy --want reports k8s=1
@@ -392,6 +429,8 @@ usage: kldload-firstboot-show <check|run|status|frame>
            outcome, switch back to tty1 and exit 0.
   status   Print building, ok or problem for the current state.
   frame    Draw one frame on the terminal and exit.
+  logtail  Print the path of the build log being written now, then its last N
+           lines (default 40), cleaned and redacted. Used by the graphical show.
 
 Kernel cmdline: kldload.firstboot_show=0 turns the show off for that boot.
 While it runs: Alt+F1 shows the raw post-installer output, Alt+F2 a login.
@@ -404,6 +443,7 @@ check) show_wanted ;;
 run) run_show ;;
 status) settle ;;
 frame) frame "$(settle)" "$(printf '%(%s)T' -1)" >"${TTY}" ;;
+logtail) log_tail "${2:-40}" ;;
 -h | --help | help) usage ;;
 *)
     usage >&2

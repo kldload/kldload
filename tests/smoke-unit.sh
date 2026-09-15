@@ -374,6 +374,33 @@ else
     else
         _pass "kldload-firstboot-show log panel: meters flattened, control sequences and credentials removed"
     fi
+    # logtail: the output window follows the log being written NOW. 4-k8s, fiend
+    # 2026-09-14: following autodeploy.log alone showed "waiting for
+    # klab-firstboot" for 36 minutes while three goldens built in klab's logs.
+    mkdir -p "${_ft}/inst" "${_ft}/klab" "${_ft}/run"
+    _ftail() {
+        env "${_fenv[@]}" KLDLOAD_FBSHOW_INSTLOGDIR="${_ft}/inst" KLDLOAD_FBSHOW_INSTPHASE="${_ft}/run/install-phase" \
+            KLDLOAD_FBSHOW_KLABLOGDIR="${_ft}/klab" bash "${_fbs}" logtail 5 2>/dev/null
+    }
+    echo storage >"${_ft}/inst/storage.log"
+    touch -d '-5 min' "${_ft}/inst/storage.log"
+    echo 'installing kernel' >"${_ft}/inst/bootstrap.log"
+    echo Storage >"${_ft}/run/install-phase"
+    _fbad=""
+    [[ "$(_ftail | head -1)" == "${_ft}/inst/bootstrap.log" ]] || _fbad+=" part1-not-newest-installer-log"
+    rm -f "${_ft}/run/install-phase"
+    touch -d '-8 min' "${_ft}/log/autodeploy.log"
+    printf 'building fedora\nguest login: admin / kldload\n' >"${_ft}/klab/fedora-1.log"
+    ln -s "${_ft}/klab/fedora-1.log" "${_ft}/klab/fedora-latest.log"
+    touch -d '+1 min' "${_ft}/klab/fedora-latest.log" 2>/dev/null
+    [[ "$(_ftail | head -1)" == "${_ft}/klab/fedora-1.log" ]] || _fbad+=" part2-not-klab-log"
+    _ftail | grep -q 'admin / kldload' && _fbad+=" guest-login-shown"
+    if [[ -z "${_fbad}" ]]; then
+        _pass "kldload-firstboot-show logtail: follows the newest build log in each part, redacts logins"
+    else
+        _fail "kldload-firstboot-show logtail" "${_fbad}"
+    fi
+
     # The decision's input: autodeploy --want, run against fixture manifests.
     # It must answer from autodeploy's own rules and do none of the work.
     _fad="${CHROOT}/usr/sbin/kldload-autodeploy"
