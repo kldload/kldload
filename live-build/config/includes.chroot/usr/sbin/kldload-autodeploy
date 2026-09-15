@@ -1495,8 +1495,25 @@ quiesce_idle_vms() {
     local _vm _cp_seen=0 _w_seen=0 _off=0
 
     log "[quiesce] powering down idle VMs (keeping ${_keep_cp} CP + ${_keep_w} workers)"
+    # A golden is finished when klab snapshots it @golden. One that is running
+    # without that snapshot is still being built, and powering it off leaves it
+    # unsealed for good. HISTORY: 3-kvm, fiend 2026-09-14 — quiesce ran at
+    # 18:54:35, shut down klab-golden-fedora two minutes into its setup, and
+    # the golden failed validation with no kernel and no ZFS. The same timing
+    # is the likeliest cause of the "unsealed rocky golden" seen on build 13.
+    local _sealed
+    # swallow: no pool or no snapshots is an empty list, and then nothing here counts as sealed
+    _sealed="$(zfs list -H -t snapshot -o name 2>/dev/null | grep -E '@golden$' || true)"
     while read -r _vm; do
         [[ -n "$_vm" ]] || continue
+        case "$_vm" in
+        klab-golden-* | klab-desktop-* | klab-ztest-*)
+            if ! grep -qE "/${_vm}@golden\$" <<<"$_sealed"; then
+                log "[quiesce]   skip ${_vm} — no @golden snapshot yet, still being built"
+                continue
+            fi
+            ;;
+        esac
         case "$_vm" in
         *-cp | *-cp-*)
             _cp_seen=$((_cp_seen + 1))
