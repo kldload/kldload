@@ -1680,6 +1680,29 @@ DCONFPROFILE
     done
     unset _src
 
+    # ── GNOME extensions + Firefox policy ─────────────────────────────────────
+    # profiles.sh carries both from the LIVE rootfs onto the target, so they
+    # have to be in the live rootfs first, and nothing here put them there.
+    # Every install since they were added (2026-09-07) logged "enables GNOME
+    # extensions but none were carried" and "no Firefox policy file found":
+    # Super+Arrow and the rest of the workspace keymap were dead keys, and
+    # Firefox opened on its first-run pages. Seen in the install log on fiend
+    # 2026-09-14 (5-desktop netboot, build 16); the squashfs had neither path.
+    # Both are in includes.chroot, so a miss means the copy is broken: die.
+    _ext_src=/build/live-build/config/includes.chroot/usr/share/gnome-shell/extensions
+    compgen -G "${_ext_src}/*@*/extension.js" >/dev/null ||
+        die "FATAL: no GNOME extension under ${_ext_src} — the workspace keymap would be dead keys"
+    mkdir -p "${ROOTFS}/usr/share/gnome-shell/extensions"
+    cp -a "${_ext_src}"/*@* "${ROOTFS}/usr/share/gnome-shell/extensions/"
+    for _ext in "${_ext_src}"/*@*; do
+        [[ -f "${ROOTFS}/usr/share/gnome-shell/extensions/$(basename "$_ext")/extension.js" ]] ||
+            die "FATAL: GNOME extension $(basename "$_ext") did not land in the rootfs"
+    done
+    _ff_src=/build/live-build/config/includes.chroot/etc/firefox/policies/policies.json
+    [[ -f "$_ff_src" ]] || die "FATAL: $_ff_src missing — Firefox would open on its first-run pages"
+    install -D -m 0644 "$_ff_src" "${ROOTFS}/etc/firefox/policies/policies.json"
+    unset _ext_src _ext _ff_src
+
     # ── Third-party RPM repos shipped in /etc/yum.repos.d/ ────────────────────
     # google-chrome.repo lets dnf resolve google-chrome-stable at install
     # time; without it, profiles.sh added Chrome to the dnf install list but

@@ -174,6 +174,31 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             _fail "voice models in the image" "missing or empty:${_vm_bad} — the build could not fetch them and they are not in live-build/download-cache"
         fi
 
+        # ── Desktop files profiles.sh carries from the live rootfs ──────────
+        # The installer copies the GNOME extensions and the Firefox policy
+        # from the LIVE rootfs to the target, and the builder never put either
+        # in the live rootfs: every install from 2026-09-07 logged that it had
+        # nothing to carry, and shipped a dead workspace keymap and Firefox's
+        # first-run pages (fiend 2026-09-14, build 16). Each extension in the
+        # tree must be in the image with its entry point.
+        declare -a DESK_FILES=(etc/firefox/policies/policies.json)
+        for _e in "$ROOT"/live-build/config/includes.chroot/usr/share/gnome-shell/extensions/*@*; do
+            [[ -d "$_e" ]] && DESK_FILES+=("usr/share/gnome-shell/extensions/${_e##*/}/extension.js")
+        done
+        _desk_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${DESK_FILES[@]}" 2>/dev/null)" || _desk_list="" # absent paths make unsquashfs exit non-zero; the loop below names them
+        _desk_bad=""
+        for _df in "${DESK_FILES[@]}"; do
+            awk -v p="squashfs-root/$_df" '$NF == p && $1 ~ /^-/ {f = 1} END {exit !f}' <<<"$_desk_list" ||
+                _desk_bad+=" $_df"
+        done
+        if ((${#DESK_FILES[@]} < 2)); then
+            _fail "desktop carry files in the image" "no GNOME extension found in includes.chroot — the list this gate checks is empty"
+        elif [[ -z "$_desk_bad" ]]; then
+            _pass "desktop carry files in the image (${#DESK_FILES[@]}: Firefox policy + GNOME extensions)"
+        else
+            _fail "desktop carry files in the image" "missing:${_desk_bad} — builder/build-iso.sh did not copy them, so no install can carry them"
+        fi
+
         # ── Every tool in includes.chroot/usr/local/{bin,sbin} must ship ────
         # The builder copies bin/ by glob and, since 2026-09-05, sbin/ too.
         # Before that sbin/ was an allow-list, and the list dropped a new tool
