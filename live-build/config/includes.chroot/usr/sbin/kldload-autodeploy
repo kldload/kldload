@@ -1294,15 +1294,36 @@ if [[ "${WANT[klab]}" == "1" ]]; then
             _deadline=$(($(date +%s) + 7200))
             while (($(date +%s) < _deadline)); do
                 [[ -f /var/lib/kldload/klab-firstboot-done ]] && break
-                # If klab-firstboot.service is no longer activating AND the
-                # done-marker hasn't appeared, the unit must have failed —
-                # don't poll forever. Check unit state every 30s.
-                if ! systemctl is-active --quiet klab-firstboot.service &&
-                    ! systemctl is-failed --quiet klab-firstboot.service &&
-                    [[ "$(systemctl is-active klab-firstboot.service 2>/dev/null)" != "activating" ]]; then
-                    log "[klab] klab-firstboot.service not running — proceeding without it"
+                # Inactive is not finished. klab-firstboot is started by a
+                # timer 3 minutes after boot, and on an install whose first boot
+                # is short this loop gets here first. It read "inactive, not
+                # failed" as done and moved on in the same second, so the lean
+                # goldens built alongside the desktop goldens and the appliance
+                # catalog while the plan said they were finished. HISTORY: 3-kvm,
+                # fiend 2026-09-14, phase checked 18:31:53, timer fired 18:32:28.
+                # The old test also kept polling a FAILED unit for the full two
+                # hours. Now: running waits, failed stops, and inactive stops
+                # only once the unit has actually started at least once, or has
+                # no timer left to start it.
+                _kfb_state="$(systemctl show -p ActiveState --value klab-firstboot.service 2>/dev/null)" || _kfb_state=""
+                _kfb_ran="$(systemctl show -p InactiveExitTimestampMonotonic --value klab-firstboot.service 2>/dev/null)" || _kfb_ran=0
+                case "$_kfb_state" in
+                active | activating | reloading) : ;;
+                failed)
+                    log "[klab] klab-firstboot.service failed — proceeding without it (journalctl -u klab-firstboot)"
                     break
-                fi
+                    ;;
+                *)
+                    if [[ "${_kfb_ran:-0}" != 0 ]]; then
+                        log "[klab] klab-firstboot.service ran and stopped without klab-firstboot-done — proceeding without it"
+                        break
+                    fi
+                    if ! systemctl is-active --quiet klab-firstboot.timer; then
+                        log "[klab] klab-firstboot.service never started and no timer is pending — proceeding without it"
+                        break
+                    fi
+                    ;; # not started yet; its timer is still pending
+                esac
                 sleep 30
             done
             if [[ -f /var/lib/kldload/klab-firstboot-done ]]; then

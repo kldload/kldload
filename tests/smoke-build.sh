@@ -1781,6 +1781,21 @@ else
         "hostid resolves from two sources that can disagree — import fails and drops to initramfs"
 fi
 
+# autodeploy's klab-goldens wait must not read "inactive" as "finished".
+# klab-firstboot is timer-started 3 min after boot; on 3-kvm (fiend 2026-09-14)
+# autodeploy reached the wait 35 s before the timer fired, logged "not running
+# — proceeding without it" and marked the phase done in the same second, so the
+# lean goldens built on top of the desktop goldens and the appliance catalog.
+# The wait has to consult the timer and whether the unit ever started.
+_ad="$ROOT/live-build/config/includes.chroot/usr/sbin/kldload-autodeploy"
+if grep -q 'InactiveExitTimestampMonotonic --value klab-firstboot.service' "$_ad" 2>/dev/null &&
+    grep -q 'is-active --quiet klab-firstboot.timer' "$_ad" 2>/dev/null; then
+    _pass "autodeploy waits for a klab-firstboot whose timer has not fired"
+else
+    _fail "autodeploy waits for a klab-firstboot whose timer has not fired" \
+        "the wait no longer checks the timer and the unit's start time — it will skip the lean goldens again"
+fi
+
 # Plymouth must be switched off on BOTH cmdlines, not just left out of the
 # package list. The desktop set pulls plymouth in and dracut packs it into the
 # initramfs (122 files), and the old comment in bootloader.sh swore it was
