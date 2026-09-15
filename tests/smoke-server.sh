@@ -219,27 +219,36 @@ test_file "zxplore commit breadcrumb" "/etc/kldload/zxplore-commit"
 # ── eBPF / Observability ──────────────────────────────────────────────────────
 _section "eBPF / Observability"
 
-if [[ "$DISTRO" == "deb" ]]; then
-    test_cmd "bpftrace" "bpftrace"
-    test_cmd "bpftool" "bpftool"
-    if [[ -f /usr/sbin/execsnoop-bpfcc ]] || command -v execsnoop-bpfcc >/dev/null 2>&1; then
-        _pass "execsnoop (bpfcc-tools)"
-    elif command -v execsnoop >/dev/null 2>&1; then
-        _pass "execsnoop"
+# The eBPF tools are installed only when the install asked for them
+# (KLDLOAD_ENABLE_EBPF=1); first boot stopped pulling them in regardless on
+# 2026-09-14. So check them only then, the same way Secure Boot is checked.
+_ebpf_requested=0
+grep -qE '^KLDLOAD_ENABLE_EBPF="?1"?$' /etc/kldload/install-manifest.env 2>/dev/null && _ebpf_requested=1
+if ((_ebpf_requested)); then
+    if [[ "$DISTRO" == "deb" ]]; then
+        test_cmd "bpftrace" "bpftrace"
+        test_cmd "bpftool" "bpftool"
+        if [[ -f /usr/sbin/execsnoop-bpfcc ]] || command -v execsnoop-bpfcc >/dev/null 2>&1; then
+            _pass "execsnoop (bpfcc-tools)"
+        elif command -v execsnoop >/dev/null 2>&1; then
+            _pass "execsnoop"
+        else
+            _warn "execsnoop" "not found — install bpfcc-tools"
+        fi
+        test_cmd "perf" "perf"
     else
-        _warn "execsnoop" "not found — install bpfcc-tools"
+        if [[ -d /usr/share/bcc/tools ]]; then
+            _pass "bcc-tools directory"
+            test_file "execsnoop (bcc)" "/usr/share/bcc/tools/execsnoop"
+            test_file "tcplife (bcc)" "/usr/share/bcc/tools/tcplife"
+            test_file "opensnoop (bcc)" "/usr/share/bcc/tools/opensnoop"
+        else
+            _warn "bcc-tools" "not found — install bcc-tools"
+        fi
+        test_cmd "bpftrace" "bpftrace"
     fi
-    test_cmd "perf" "perf"
 else
-    if [[ -d /usr/share/bcc/tools ]]; then
-        _pass "bcc-tools directory"
-        test_file "execsnoop (bcc)" "/usr/share/bcc/tools/execsnoop"
-        test_file "tcplife (bcc)" "/usr/share/bcc/tools/tcplife"
-        test_file "opensnoop (bcc)" "/usr/share/bcc/tools/opensnoop"
-    else
-        _warn "bcc-tools" "not found — install bcc-tools"
-    fi
-    test_cmd "bpftrace" "bpftrace"
+    _pass "eBPF tools not expected: this install did not request eBPF"
 fi
 
 if [[ -f /sys/kernel/btf/vmlinux ]]; then

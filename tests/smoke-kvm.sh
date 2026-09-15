@@ -229,20 +229,29 @@ test_file "wgxplore launcher" "/usr/share/applications/wgxplore.desktop"
 test_file "wgxplore icon" "/usr/share/icons/hicolor/scalable/apps/wgxplore.svg"
 
 _section "eBPF / Observability"
-test_cmd "bpftrace" "bpftrace"
+# The eBPF tools are installed only when the install asked for them
+# (KLDLOAD_ENABLE_EBPF=1); first boot stopped pulling them in regardless on
+# 2026-09-14. So check them only then, the same way Secure Boot is checked.
+_ebpf_requested=0
+grep -qE '^KLDLOAD_ENABLE_EBPF="?1"?$' /etc/kldload/install-manifest.env 2>/dev/null && _ebpf_requested=1
+if ((_ebpf_requested)); then
+    test_cmd "bpftrace" "bpftrace"
 
-if [[ "$DISTRO" == "deb" ]]; then
-    if dpkg -l bpfcc-tools 2>/dev/null | grep -q ^ii; then
-        _pass "bpfcc-tools installed"
+    if [[ "$DISTRO" == "deb" ]]; then
+        if dpkg -l bpfcc-tools 2>/dev/null | grep -q ^ii; then
+            _pass "bpfcc-tools installed"
+        else
+            _warn "bpfcc-tools" "not installed"
+        fi
     else
-        _warn "bpfcc-tools" "not installed"
+        if rpm -q bcc-tools >/dev/null 2>&1 || [[ -d /usr/share/bcc/tools ]]; then
+            _pass "bcc-tools installed"
+        else
+            _warn "bcc-tools" "not installed"
+        fi
     fi
 else
-    if rpm -q bcc-tools >/dev/null 2>&1 || [[ -d /usr/share/bcc/tools ]]; then
-        _pass "bcc-tools installed"
-    else
-        _warn "bcc-tools" "not installed"
-    fi
+    _pass "eBPF tools not expected: this install did not request eBPF"
 fi
 
 if [[ -f /sys/kernel/btf/vmlinux ]]; then
