@@ -2258,6 +2258,10 @@ smoke-test)
     }
     bash "$ROOT/tests/lifecycle.sh" "$@"
     ;;
+smoke-show)
+    # Every scene of the first-boot show, headless, with the console watched.
+    bash "$ROOT/tests/smoke-show.sh"
+    ;;
 smoke-build)
     # Static checks on the just-built ISO (file exists, fresh, sane size).
     bash "$ROOT/tests/smoke-build.sh"
@@ -2303,6 +2307,8 @@ Deploy:
 
 Test:
   smoke-build            Validate the just-built ISO (size, freshness, structure)
+  smoke-show             Drive every scene of the first-boot show (part 2) through
+                         headless Chrome and fail on any console error
   smoke-test <distro> <profile>
                          End-to-end install smoke in KVM: boot ISO →
                          headless install → reboot → run smoke-auto.sh on
