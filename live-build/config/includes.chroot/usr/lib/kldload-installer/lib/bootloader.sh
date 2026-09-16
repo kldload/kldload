@@ -66,9 +66,11 @@ k_zfs_bootloader_write_hostid() {
         # back to zgenhostid in target chroot, but warn loudly.
         k_log "WARNING: live /etc/hostid is empty — falling back to zgenhostid in target"
         if chroot "${target}" command -v zgenhostid >/dev/null 2>&1; then
+            # swallow: the urandom fallback below covers a failed zgenhostid, and the result is checked
             chroot "${target}" zgenhostid -f >&"${log_fd}" 2>&1 || true
         fi
         if [[ ! -s "${target}/etc/hostid" ]]; then
+            # swallow: one of three ways to get a hostid; the file is tested again after each
             dd if=/dev/urandom of="${target}/etc/hostid" bs=4 count=1 status=none 2>&"${log_fd}" || true
         fi
     fi
@@ -76,10 +78,12 @@ k_zfs_bootloader_write_hostid() {
     # Final safety check — hostid MUST exist for ZFS pool imports
     if [[ ! -s "${target}/etc/hostid" ]]; then
         k_log "CRITICAL: Failed to generate /etc/hostid — creating from /dev/urandom"
+        # swallow: last of the three; the k_log below prints what actually landed, or nothing
         head -c4 /dev/urandom >"${target}/etc/hostid" 2>/dev/null || true
     fi
 
-    chmod 0644 "${target}/etc/hostid" || true
+    chmod 0644 "${target}/etc/hostid" ||
+        k_log "WARNING: target /etc/hostid is not world-readable — check it if the pool ever asks to be force-imported"
     k_log "hostid written: $(xxd -p "${target}/etc/hostid" 2>/dev/null)"
 }
 
@@ -470,10 +474,12 @@ k_finalize_zfs_pools() {
 
     k_log "Finalizing ZFS pools for clean first boot"
 
+    # swallow: sync reports failures of writes already made; the export below is the real gate
     sync || true
 
     # Unmount EFI partition
     if mountpoint -q "${target}/boot/efi" 2>/dev/null; then
+        # swallow: busy or already unmounted — the export below fails loudly if this mattered
         umount "${target}/boot/efi" >&"${log_fd}" 2>&1 || true
     fi
 
@@ -482,7 +488,8 @@ k_finalize_zfs_pools() {
 
     # Update zpool.cache in the target before export
     mkdir -p "${target}/etc/zfs"
-    zpool set cachefile="${target}/etc/zfs/zpool.cache" rpool >&"${log_fd}" 2>&1 || true
+    zpool set cachefile="${target}/etc/zfs/zpool.cache" rpool >&"${log_fd}" 2>&1 ||
+        k_log "WARNING: no zpool cachefile before export — first boot will import rpool by scanning"
 
     # Try to export pool — timeout after 5 seconds if it hangs (live system may hold it)
     timeout 5 zpool export rpool >&"${log_fd}" 2>&1 ||
@@ -547,7 +554,8 @@ EOFSTAB
         # zpool.cache
         mkdir -p "${target}/etc/zfs"
         if command -v zpool >/dev/null 2>&1; then
-            zpool set cachefile="${target}/etc/zfs/zpool.cache" rpool >&7 2>&1 || true
+            zpool set cachefile="${target}/etc/zfs/zpool.cache" rpool >&7 2>&1 ||
+                k_log "WARNING: no zpool cachefile written — first boot will import rpool by scanning"
             k_log "zpool.cache written"
         fi
 
@@ -556,9 +564,11 @@ EOFSTAB
 
         # Register with efibootmgr (from the Linux live env)
         local disk
+        # swallow: lsblk on a path that is not a partition gives an empty answer, checked below
         disk="$(lsblk -no PKNAME "${efi_part}" 2>/dev/null | head -n1 || true)"
         [[ -n "$disk" ]] && disk="/dev/$disk"
         local part_num
+        # swallow: as above; an empty partition number is handled by the caller
         part_num="$(lsblk -no PARTN "${efi_part}" 2>/dev/null | head -n1 || true)"
         part_num="${part_num:-1}"
 
@@ -592,6 +602,7 @@ EOFSTAB
 
         # OpenBSD fstab — FFS root
         local efi_uuid
+        # swallow: blkid exits 1 when the partition has no UUID yet; the empty case is handled
         efi_uuid="$(blkid -s UUID -o value "${efi_part}" 2>/dev/null || true)"
         cat >"${target}/etc/fstab" <<EOFSTAB
 # OpenBSD — root filesystem is FFS on the target disk
@@ -600,9 +611,11 @@ EOFSTAB
 
         # Register with efibootmgr
         local disk
+        # swallow: lsblk on a path that is not a partition gives an empty answer, checked below
         disk="$(lsblk -no PKNAME "${efi_part}" 2>/dev/null | head -n1 || true)"
         [[ -n "$disk" ]] && disk="/dev/$disk"
         local part_num
+        # swallow: as above; an empty partition number is handled by the caller
         part_num="$(lsblk -no PARTN "${efi_part}" 2>/dev/null | head -n1 || true)"
         part_num="${part_num:-1}"
 
@@ -941,6 +954,7 @@ EOFSTAB
             # exactly one, so a single call is enough. If sbattach is
             # unavailable, fall through and live with multi-sig.
             if command -v sbattach >/dev/null 2>&1; then
+                # swallow: a kernel with no signature to strip; the comment above explains the multi-sig case
                 sbattach --remove "${zbm_fallback_dir}/vmlinuz" >&7 2>&1 || true
             fi
             # NB: redirect to fd 7 (the bootloader.log), NOT ${log_fd} —
@@ -1297,6 +1311,7 @@ EOFSTAB
     # (half of RAM), which is exactly the coincidence that hid this.
     _direct_bootargs+=" zfs.zfs_txg_timeout=10 zfs.l2arc_noprefetch=0"
     local _grub_cfg=""
+    # swallow: read with -d '' always exits 1 at EOF; the heredoc is fully in _grub_cfg
     read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
 # default boot target depends on FIRMWARE Secure Boot state at install time:
@@ -1664,7 +1679,8 @@ EOFSTAB
 
     mkdir -p "${target}/etc/zfs"
     if command -v zpool >/dev/null 2>&1; then
-        zpool set cachefile="${target}/etc/zfs/zpool.cache" rpool >&7 2>&1 || true
+        zpool set cachefile="${target}/etc/zfs/zpool.cache" rpool >&7 2>&1 ||
+            k_log "WARNING: no zpool cachefile written — first boot will import rpool by scanning"
         k_log "zpool.cache written"
     fi
 
@@ -1676,7 +1692,8 @@ EOFSTAB
 
     for svc in zfs-import-cache.service zfs-mount.service zfs-zed.service \
         zfs.target zfs-import.target; do
-        systemctl --root="${target}" enable "${svc}" >&7 2>&1 || true
+        systemctl --root="${target}" enable "${svc}" >&7 2>&1 ||
+            k_log "WARNING: could not enable ${svc} on the target — ZFS may not come up cleanly at boot"
     done
     k_log "ZFS services enabled"
 
@@ -1846,10 +1863,12 @@ DRACUT
     # ── Register ZFSBootMenu with efibootmgr ──────────────────────────────────
 
     local disk
+    # swallow: lsblk on a path that is not a partition gives an empty answer, checked below
     disk="$(lsblk -no PKNAME "${efi_part}" 2>/dev/null | head -n1 || true)"
     [[ -n "$disk" ]] && disk="/dev/$disk"
 
     local part_num
+    # swallow: as above; an empty partition number is handled by the caller
     part_num="$(lsblk -no PARTN "${efi_part}" 2>/dev/null | head -n1 || true)"
     part_num="${part_num:-1}"
 
@@ -1862,15 +1881,18 @@ DRACUT
         # Pattern includes "Red Hat" (with space) because RHEL's efibootmgr entry
         # is "Red Hat Enterprise Linux" or "RedHat Boot Manager", not "RedHat".
         local _efi_uuid
+        # swallow: as above, and this value is only used to match boot entries
         _efi_uuid=$(blkid -s PARTUUID -o value "${efi_part}" 2>/dev/null || true)
         k_log "Cleaning EFI boot entries for target disk: ${disk} (PARTUUID: ${_efi_uuid:-unknown})"
         efibootmgr -v 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | while read -r _line; do
             local _bnum
             _bnum=$(echo "$_line" | grep -oP 'Boot\K[0-9A-Fa-f]+')
             if echo "$_line" | grep -qi "ZFSBootMenu\|kldload\|Red.Hat\|RedHat\|centos\|rocky\|fedora\|debian\|ubuntu\|UEFI OS\|${disk##*/}\|${_efi_uuid:-NOMATCH}"; then
+                # swallow: an entry another pass already deleted; the k_log below records what went
                 efibootmgr -b "${_bnum}" -B >&7 2>&1 || true
                 k_log "  Removed Boot${_bnum}: $(echo "$_line" | sed 's/Boot[0-9A-Fa-f]*.//')"
             fi
+            # swallow: efibootmgr prints no entries on a machine with none, so the loop ends empty
         done || true
 
         # Remove BOOTX64.CSV files from distro EFI directories. These files tell
@@ -1923,6 +1945,7 @@ DRACUT
             k_log "WARNING: efibootmgr entry creation failed"
 
         local _uefi_bootnum
+        # swallow: grep exits 1 when no kldload entry exists yet; the empty case is handled below
         _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'kldload' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+' || true)
         if [[ -n "$_uefi_bootnum" ]]; then
             efibootmgr -o "${_uefi_bootnum}" >&7 2>&1 ||

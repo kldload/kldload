@@ -60,6 +60,7 @@ k_zfs_cleanup_old() {
     # mountpoint dir for everything downstream. We re-enable on
     # reboot when the new system comes up. Idempotent.
     systemctl stop zfs-zed.service 2>/dev/null || true
+    # swallow: the unit is absent on a live image that never imported a pool
     systemctl stop zfs-import-cache.service 2>/dev/null || true
     # Mask the F44 zfs udev rule too — it auto-runs `zpool import`
     # without altroot when udev sees ZFS module load events, which the
@@ -69,14 +70,20 @@ k_zfs_cleanup_old() {
     # Move the rule out of the way; restore on reboot via tmpfs reset.
     if [[ -f /usr/lib/udev/rules.d/90-zfs.rules ]]; then
         mv -f /usr/lib/udev/rules.d/90-zfs.rules /usr/lib/udev/rules.d/90-zfs.rules.kldload-disabled 2>/dev/null ||
+            # swallow: a read-only or absent /etc/udev/rules.d only means the rules stay live
             ln -sf /dev/null /etc/udev/rules.d/90-zfs.rules 2>/dev/null || true
+        # swallow: no udevd in a container or minimal live shell; nothing to reload
         udevadm control --reload-rules 2>/dev/null || true
     fi
 
+    # swallow: sync reports failures of writes already made; the wipe below is what matters
     sync || true
+    # swallow: no swap in use on a live boot, which is the normal case here
     swapoff -a || true
 
+    # swallow: nothing mounted there on a first run — this is teardown before a wipe
     umount -R "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
+    # swallow: as above; an unmounted target is the expected state
     umount -R "${KLDLOAD_TARGET_MNT}" 2>/dev/null || true
 
     # ── Defensive: release anything holding the target disk ───────────────────
@@ -99,6 +106,7 @@ k_zfs_cleanup_old() {
     lsblk -ln -o NAME,MOUNTPOINT "${KLDLOAD_DISK}" 2>/dev/null |
         awk 'NF==2 && $2!="[SWAP]" {print $2}' |
         while read -r _mp; do
+            # swallow: the partition may not be mounted; this loop only clears what is
             [[ -n "${_mp}" ]] && umount -R "${_mp}" 2>/dev/null || true
         done
 
@@ -113,6 +121,7 @@ k_zfs_cleanup_old() {
         printf '%s\n' "${_pvs_here}" | awk 'NF==2 {print $2}' | sort -u |
             while read -r _vg; do
                 [[ -n "${_vg}" ]] && {
+                    # swallow: an LVM group already inactive, or lvm2 absent on this image
                     vgchange -a n "${_vg}" 2>/dev/null || true
                     k_zfs_log "  Deactivated LVM VG: ${_vg}"
                 }
@@ -124,6 +133,7 @@ k_zfs_cleanup_old() {
         awk '/^md/ {print $1}' /proc/mdstat 2>/dev/null |
             while read -r _md; do
                 if ls "/sys/block/${_md}/slaves/" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
+                    # swallow: the array may already be stopped, or mdadm absent
                     mdadm --stop "/dev/${_md}" 2>/dev/null || true
                     k_zfs_log "  Stopped mdraid array: /dev/${_md}"
                 fi
@@ -136,6 +146,7 @@ k_zfs_cleanup_old() {
             while read -r _dm; do
                 [[ -z "${_dm}" || "${_dm}" == "No" ]] && continue
                 if dmsetup deps -o devname "${_dm}" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
+                    # swallow: two ways to release a mapping; if neither applies it was already gone
                     cryptsetup close "${_dm}" 2>/dev/null || dmsetup remove "${_dm}" 2>/dev/null || true
                     k_zfs_log "  Closed LUKS mapping: ${_dm}"
                 fi
@@ -181,6 +192,7 @@ k_zfs_cleanup_old() {
 
     # Legacy rpool-specific cleanup (redundant with #5 but kept for belt-and-suspenders)
     zpool export rpool 2>/dev/null || true
+    # swallow: no rpool imported is the normal case for a fresh disk
     zpool destroy -f rpool 2>/dev/null || true
 
     # Pools on OTHER disks are deliberately left alone above — but one that
@@ -210,10 +222,15 @@ k_zfs_cleanup_old() {
             # Same for wipefs on a partition that carries no signature.
             wipefs -a -f "${_part}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
         done < <(lsblk -lnpo NAME "${KLDLOAD_DISK}" 2>/dev/null | tail -n +2)
+        # swallow: a disk with no signatures left to wipe exits non-zero, and that is a pass here
         wipefs -a -f "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+        # swallow: zapping a disk with no partition table is the same non-event
         sgdisk --zap-all "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+        # swallow: no ZFS label to clear on a disk that never held a pool
         zpool labelclear -f "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+        # swallow: partprobe complains about the empty table it was just asked to re-read
         partprobe "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+        # swallow: no udevd to settle in a minimal environment
         udevadm settle 2>/dev/null || true
         # wipefs (read-only listing here — no -a) prints nothing when the whole
         # disk carries no FS/partition/RAID signatures. Empty ⇒ genuinely clean.
@@ -239,6 +256,7 @@ k_zfs_cleanup_old() {
         k_zfs_log "${_stale}"
         k_die "Refusing to install: ${KLDLOAD_DISK} still carries an importable ZFS pool after wiping (see ${KLDLOAD_ZFS_LOG}). Run 'zpool labelclear -f' on each partition of it by hand and rerun."
     fi
+    # swallow: an empty target directory matches nothing to remove
     rm -rf "${KLDLOAD_TARGET_MNT:?}/"* 2>/dev/null || true
 
     # For multi-disk topologies, also wipe data and special vdev disks
@@ -246,7 +264,9 @@ k_zfs_cleanup_old() {
     for _extra_disk in ${KLDLOAD_ZFS_DATA_DISKS:-} ${KLDLOAD_ZFS_SPECIAL_DISKS:-}; do
         [[ -b "${_extra_disk}" ]] || continue
         k_zfs_log "Wiping data/special disk: ${_extra_disk}"
+        # swallow: as with the boot disk, nothing to wipe is a pass
         wipefs -a -f "${_extra_disk}" 2>/dev/null || true
+        # swallow: no ZFS label on a disk that never held a pool
         zpool labelclear -f "${_extra_disk}" 2>/dev/null || true
     done
 
@@ -360,6 +380,7 @@ k_zfs_partition_disk() {
         sgdisk -n1:1M:+"${_esp_size}" -t1:EF00 -c1:"EFI System Partition" "${disk}"
     fi
 
+    # swallow: the kernel already has the new table; this is the belt to that braces
     partprobe "${disk}" || true
     sleep 2
 
@@ -395,6 +416,7 @@ k_zfs_create_rpool() {
     # up through v3.5.
     if [[ ! -s /etc/hostid ]]; then
         if command -v zgenhostid >/dev/null 2>&1; then
+            # swallow: the two fallbacks below cover a missing or failed zgenhostid, and /etc/hostid is re-checked after each
             zgenhostid -f 2>/dev/null || true
         fi
         if [[ ! -s /etc/hostid ]]; then
@@ -405,13 +427,16 @@ k_zfs_create_rpool() {
 import struct
 hid = int('${_hex}', 16)
 open('/etc/hostid','wb').write(struct.pack('<I', hid))
+# swallow: no python3, or a hostid that is not hex; the dd fallback below covers it
 " 2>/dev/null || true
             fi
         fi
         if [[ ! -s /etc/hostid ]]; then
-            dd if=/dev/urandom of=/etc/hostid bs=4 count=1 status=none 2>/dev/null || true
+            dd if=/dev/urandom of=/etc/hostid bs=4 count=1 status=none 2>/dev/null ||
+                k_zfs_log "WARNING: could not write /etc/hostid — the pool is about to be created with a hostid the target may not match"
         fi
-        chmod 0644 /etc/hostid 2>/dev/null || true
+        chmod 0644 /etc/hostid 2>/dev/null ||
+            k_zfs_log "WARNING: /etc/hostid is not world-readable — zfs tools run as a user may read a different hostid"
         k_zfs_log "live /etc/hostid pinned for zpool create: $(xxd -p /etc/hostid 2>/dev/null)"
     else
         k_zfs_log "live /etc/hostid already present: $(xxd -p /etc/hostid 2>/dev/null)"
@@ -807,7 +832,9 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
         -o devices=off \
         rpool/tmp
 
+    # swallow: a mode that will not take means the dataset is not mounted yet; first boot sets it again
     chmod 1777 "${KLDLOAD_TARGET_MNT}/tmp" || true
+    # swallow: as /tmp above
     chmod 1777 "${KLDLOAD_TARGET_MNT}/var/tmp" || true
 
     # Set pool bootfs — ZFSBootMenu uses this to select the default BE.
@@ -856,7 +883,8 @@ k_zfs_mount_esp() {
 k_zfs_write_cachefile() {
     k_zfs_log "Writing zpool cachefile into target"
     mkdir -p "${KLDLOAD_TARGET_MNT}/etc/zfs"
-    zpool set cachefile="${KLDLOAD_TARGET_MNT}/etc/zfs/zpool.cache" rpool || true
+    zpool set cachefile="${KLDLOAD_TARGET_MNT}/etc/zfs/zpool.cache" rpool ||
+        k_zfs_log "WARNING: no zpool cachefile written — the installed system will import rpool by scanning, which is slower and can pick the wrong pool"
 }
 
 k_zfs_write_target_hostid() {
@@ -880,7 +908,8 @@ k_zfs_write_target_hostid() {
         k_zfs_log "  WARNING: live /etc/hostid was empty — wrote random hostid (pool may not import on boot)"
     fi
 
-    chmod 0644 "${KLDLOAD_TARGET_MNT}/etc/hostid" || true
+    chmod 0644 "${KLDLOAD_TARGET_MNT}/etc/hostid" ||
+        k_zfs_log "WARNING: target /etc/hostid is not world-readable — check it if the pool ever asks to be force-imported"
 }
 
 k_storage_zfs_install() {
@@ -919,6 +948,7 @@ k_storage_zfs_install() {
         modprobe zfs >>"${KLDLOAD_ZFS_LOG}" 2>&1 ||
             k_zfs_log "WARNING: modprobe zfs failed — the pool commands below will fail loudly if ZFS really is unusable"
     fi
+    # swallow: diagnostics for the log; the pool commands below fail loudly on their own
     zpool --version >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
 
     mkdir -p "${KLDLOAD_TARGET_MNT}"
@@ -933,9 +963,11 @@ k_storage_zfs_install() {
     k_zfs_write_target_hostid
 
     k_zfs_log "Current zpool status:"
+    # swallow: diagnostics for the log only
     zpool status >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
 
     k_zfs_log "Current zfs list:"
+    # swallow: diagnostics for the log only
     zfs list >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
 
     k_zfs_log "==== ZFS install complete ===="
