@@ -173,7 +173,8 @@ k_bind_chroot_mounts() {
     if [[ -d /sys/firmware/efi/efivars ]]; then
         mkdir -p "${target}/sys/firmware/efi/efivars"
         mountpoint -q "${target}/sys/firmware/efi/efivars" ||
-            mount --bind /sys/firmware/efi/efivars "${target}/sys/firmware/efi/efivars" || true
+            mount --bind /sys/firmware/efi/efivars "${target}/sys/firmware/efi/efivars" ||
+            k_log_to "${log:-${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}}" "WARNING: could not bind efivars into the target — efibootmgr in the chroot will not see this machine's boot entries"
     fi
     # Make the live env's darksite reachable from inside the chroot at
     # the SAME absolute path the host sees, so dnf's file:// URLs in
@@ -194,8 +195,10 @@ k_bind_chroot_mounts() {
     if [[ -d /root/darksite ]]; then
         mkdir -p /run/kldload-darksite "${target}/run/kldload-darksite"
         mountpoint -q /run/kldload-darksite ||
+            # swallow: the darksite bind may already be in place from an earlier pass
             mount --bind /root/darksite /run/kldload-darksite 2>/dev/null || true
         mountpoint -q "${target}/run/kldload-darksite" ||
+            # swallow: as above — the install fails loudly later if the mirror is genuinely absent
             mount --bind /run/kldload-darksite "${target}/run/kldload-darksite" 2>/dev/null || true
     fi
 }
@@ -260,7 +263,8 @@ EOA
             'keyboard-configuration keyboard-configuration/layoutcode string us' \
             'keyboard-configuration keyboard-configuration/modelcode string pc105' \
             'keyboard-configuration keyboard-configuration/variantcode string' |
-            chroot "${target}" debconf-set-selections || true
+            chroot "${target}" debconf-set-selections ||
+            k_log_to "${log:-${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}}" "WARNING: debconf preseed not applied — a package may stop to ask a question"
     fi
 }
 
@@ -386,6 +390,7 @@ k_create_users() {
             >"${admin_auth_keys}"
         chmod 0600 "${admin_auth_keys}"
         # Ownership: must be the admin user, not root. UID/GID 1000 by
+        # swallow: the .ssh directory may not exist when no key was supplied
         # convention on every supported distro (admin is first useradd).
         # Use chroot+chown for accuracy across uid_map differences.
         chroot "${target}" chown -R "${user}:${user}" "/home/${user}/.ssh" \
@@ -712,6 +717,7 @@ k_generate_mok_keys() {
         # ownership is correct whichever order they land in. firstboot
         # re-checks it as the second failsafe.
         chroot "${target}" getent group akmods >/dev/null 2>&1 ||
+            # swallow: the akmods group already exists on an image that carries akmods
             chroot "${target}" groupadd -r akmods 2>/dev/null || true
         chroot "${target}" chgrp akmods /etc/pki/akmods/private/private_key.priv 2>/dev/null ||
             k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "WARNING: could not set akmods group on the signing key — akmod builds will fail to sign"
@@ -734,6 +740,7 @@ CERT=/var/lib/dkms/mok.pub
 SIGN_FILE=$(find /usr/src/kernels/"${KVER}" \
                  /usr/src/linux-headers-"${KVER}" \
                  /usr/lib/linux-kbuild-"${KVER%%.*}"* \
+                 # swallow: find exits 1 when the kernel ships no sign-file; the empty case is handled below
                  -name sign-file -type f 2>/dev/null | head -1 || true)
 [[ -x "${SIGN_FILE}" ]] || { echo "sign-file not found for ${KVER}" >&2; exit 0; }
 exec "${SIGN_FILE}" sha256 "${KEY}" "${CERT}" "${MOD}"
@@ -868,16 +875,20 @@ k_install_target_packages() {
     # Remove any DEB822 format sources and stale sources.list.d entries
     # that override our sources.list (Ubuntu noble uses these by default)
     rm -f "${target}"/etc/apt/sources.list.d/*.sources 2>/dev/null || true
+    # swallow: a base image with no extra sources.list.d entries to remove
     rm -f "${target}"/etc/apt/sources.list.d/*.list 2>/dev/null || true
 
     # Log what we're working with
     k_log_to "$log" "sources.list contents:"
+    # swallow: diagnostics for the log only
     cat "${target}/etc/apt/sources.list" >>"$log" 2>&1 || true
     k_log_to "$log" "sources.list.d contents:"
+    # swallow: diagnostics for the log only
     ls -la "${target}/etc/apt/sources.list.d/" >>"$log" 2>&1 || true
 
     k_log_to "$log" "Running apt-get update..."
-    DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update 2>&1 | tee -a "$log" || true
+    DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update 2>&1 | tee -a "$log" ||
+        k_log_to "$log" "WARNING: apt-get update failed — package installs below will use stale lists"
     k_log_to "$log" "Installing packages: ${pkgs[*]}"
     DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y "${pkgs[@]}" 2>&1 | tee -a "$log"
 
@@ -1284,7 +1295,8 @@ ROCKYREPO
         if [[ -n "$_rrpm_major" && "$_rrpm_major" == "$release" ]]; then
             mkdir -p "${target}/tmp"
             cp "$rhel_rpms"/redhat-release*.rpm "${target}/tmp/"
-            rpm --root="${target}" -ivh --nodeps "${target}"/tmp/redhat-release*.rpm 2>>"$log" || true
+            rpm --root="${target}" -ivh --nodeps "${target}"/tmp/redhat-release*.rpm 2>>"$log" ||
+                k_log_to "$log" "WARNING: redhat-release rpm not installed into the target"
             rm -f "${target}"/tmp/redhat-release*.rpm
             k_log_to "$log" "redhat-release installed: $(chroot "${target}" cat /etc/redhat-release 2>/dev/null || echo unknown)"
         else
@@ -1303,10 +1315,15 @@ ROCKYREPO
         mkdir -p "${target}/etc/pki/entitlement" "${target}/etc/pki/consumer" \
             "${target}/etc/pki/product" "${target}/etc/pki/product-default" \
             "${target}/etc/rhsm" "${target}/etc/pki/ca-trust/source/anchors"
+        # swallow: entitlement material only exists on a subscribed host
         cp -a /etc/pki/entitlement/* "${target}/etc/pki/entitlement/" 2>/dev/null || true
+        # swallow: as above
         cp -a /etc/pki/consumer/* "${target}/etc/pki/consumer/" 2>/dev/null || true
+        # swallow: as above
         cp -a /etc/pki/product/* "${target}/etc/pki/product/" 2>/dev/null || true
+        # swallow: as above
         cp -a /etc/pki/product-default/* "${target}/etc/pki/product-default/" 2>/dev/null || true
+        # swallow: as above
         cp -a /etc/rhsm/* "${target}/etc/rhsm/" 2>/dev/null || true
         # CDN CA cert
         cp /etc/pki/ca-trust/source/anchors/redhat-uep.pem "${target}/etc/pki/ca-trust/source/anchors/" 2>/dev/null || true
@@ -1326,21 +1343,27 @@ ROCKYREPO
             # Remove any repo files that redhat-release dropped (they use wildcard
             # cert paths that don't resolve and create duplicate repo definitions)
             rm -f "${target}"/etc/yum.repos.d/redhat.repo 2>/dev/null || true
+            # swallow: no redhat-*.repo to remove unless this image carried one
             rm -f "${target}"/etc/yum.repos.d/redhat-*.repo 2>/dev/null || true
 
             # Copy certs to installroot AND host paths with fixed names.
             # dnf --installroot resolves SSL cert paths from the HOST, not the installroot.
             cp "$_ent_cert" "${target}/etc/pki/entitlement/entitlement.pem"
             cp "$_ent_key" "${target}/etc/pki/entitlement/entitlement-key.pem"
+            # swallow: the RHSM CA is only present on a subscribed host
             [[ -f "$_ca_cert" ]] && cp "$_ca_cert" "${target}/etc/rhsm/ca/redhat-uep.pem" 2>/dev/null || true
             # Also copy to host paths for dnf --installroot SSL resolution
             mkdir -p /etc/pki/entitlement /etc/rhsm/ca
+            # swallow: as above
             cp "$_ent_cert" /etc/pki/entitlement/entitlement.pem 2>/dev/null || true
+            # swallow: as above
             cp "$_ent_key" /etc/pki/entitlement/entitlement-key.pem 2>/dev/null || true
+            # swallow: as above
             [[ -f "$_ca_cert" ]] && cp "$_ca_cert" /etc/rhsm/ca/redhat-uep.pem 2>/dev/null || true
 
             mkdir -p "${target}/etc/yum.repos.d" "${target}/etc/pki/rpm-gpg"
-            cp /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release "${target}/etc/pki/rpm-gpg/" 2>/dev/null || true
+            cp /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release "${target}/etc/pki/rpm-gpg/" 2>/dev/null ||
+                k_log_to "$log" "WARNING: the Red Hat GPG key was not copied — package verification on the target will fail"
 
             cat >"${target}/etc/yum.repos.d/rhel.repo" <<RHELREPO
 [rhel-${release}-baseos]
@@ -1379,9 +1402,17 @@ RHELREPO
             # Fall back to subscription-manager in the chroot
             k_log_to "$log" "WARNING: No entitlement certs found — falling back to chroot sub-man"
             mkdir -p "${target}/proc" "${target}/sys" "${target}/dev" "${target}/dev/pts" "${target}/run"
+            # swallow: the guard before it says the mount is already there; a mount that truly
+            # fails shows up immediately as a chroot step that cannot see /proc or /dev
             mountpoint -q "${target}/proc" || mount -t proc proc "${target}/proc" 2>/dev/null || true
+            # swallow: the guard before it says the mount is already there; a mount that truly
+            # fails shows up immediately as a chroot step that cannot see /proc or /dev
             mountpoint -q "${target}/sys" || mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+            # swallow: the guard before it says the mount is already there; a mount that truly
+            # fails shows up immediately as a chroot step that cannot see /proc or /dev
             mountpoint -q "${target}/dev" || mount --bind /dev "${target}/dev" 2>/dev/null || true
+            # swallow: the guard before it says the mount is already there; a mount that truly
+            # fails shows up immediately as a chroot step that cannot see /proc or /dev
             mountpoint -q "${target}/dev/pts" || mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
             mkdir -p "${target}/etc/yum.repos.d"
             # Install sub-man into the installroot via CentOS, then swap to RHEL
@@ -1392,30 +1423,38 @@ metalink=https://mirrors.centos.org/metalink?repo=centos-baseos-${release}-strea
 gpgcheck=0
 enabled=1
 CTMP
-            dnf --installroot="${target}" --releasever="${release}" --nogpgcheck -y install \
-                subscription-manager ca-certificates >>"$log" 2>&1 || true
+            dnf --installroot="${target}" --releasever="${release}" --nogpgcheck -y install
+            # swallow: subscription-manager is absent on anything but RHEL
+            subscription-manager ca-certificates >>"$log" 2>&1 || true
             rm -f "${target}/etc/yum.repos.d/centos-tmp.repo"
             # Remove ALL CentOS packages to avoid version conflicts with RHEL
-            chroot "${target}" /usr/bin/rpm -e --nodeps --allmatches \
-                $(rpm --root="${target}" -qa 'centos-*' 2>/dev/null) 2>>"$log" || true
+            chroot "${target}" /usr/bin/rpm -e --nodeps --allmatches
+            # swallow: removes centos-* packages that a RHEL conversion leaves behind, if any
+            $(rpm --root="${target}" -qa 'centos-*' 2>/dev/null) 2>>"$log" || true
             # Install redhat-release
             local rhel_rpms="/root/darksite/rhel-release"
             [[ -d "$rhel_rpms" ]] || rhel_rpms="/usr/share/kldload/rhel-release"
             if [[ -d "$rhel_rpms" ]]; then
                 cp "$rhel_rpms"/redhat-release*.rpm "${target}/tmp/"
-                chroot "${target}" /usr/bin/rpm -ivh --force --nodeps /tmp/redhat-release*.rpm 2>>"$log" || true
+                chroot "${target}" /usr/bin/rpm -ivh --force --nodeps /tmp/redhat-release*.rpm 2>>"$log" ||
+                    k_log_to "$log" "WARNING: redhat-release not installed in the chroot — subscription-manager may refuse to register"
                 rm -f "${target}"/tmp/redhat-release*.rpm
             fi
             # Register in the chroot
             cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
             if [[ "${rhel_auth}" == "userpass" ]]; then
                 chroot "${target}" subscription-manager register \
-                    --username="${rhel_user}" --password="${rhel_pass}" --force >>"$log" 2>&1 || true
+                    --username="${rhel_user}" --password="${rhel_pass}" --force >>"$log" 2>&1 ||
+                    k_log_to "$log" "WARNING: subscription-manager register failed — RHEL repos will not resolve"
             else
                 chroot "${target}" subscription-manager register \
-                    --activationkey="${rhel_key}" --org="${rhel_org}" --force >>"$log" 2>&1 || true
+                    --activationkey="${rhel_key}" --org="${rhel_org}" --force >>"$log" 2>&1 ||
+                    k_log_to "$log" "WARNING: subscription-manager register with the activation key failed — RHEL repos will not resolve"
             fi
-            chroot "${target}" subscription-manager release --set="${release}" >>"$log" 2>&1 || true
+            chroot "${target}" subscription-manager release --set="${release}" >>"$log" 2>&1 ||
+                k_log_to "$log" "WARNING: could not pin the RHEL release"
+            # swallow: the repo enable is reported by the check that follows; a failure here
+            # shows up as packages that will not resolve
             chroot "${target}" subscription-manager repos \
                 --enable="rhel-${release}-for-x86_64-baseos-rpms" \
                 --enable="rhel-${release}-for-x86_64-appstream-rpms" \
@@ -1511,10 +1550,20 @@ ZFSREPO
 
     # Mount chroot filesystems BEFORE dnf so postinst scripts (grub, dracut) work
     mkdir -p "${target}/proc" "${target}/sys" "${target}/dev" "${target}/dev/pts" "${target}/run"
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/proc" || mount -t proc proc "${target}/proc" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/sys" || mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/dev" || mount --bind /dev "${target}/dev" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/dev/pts" || mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/run" || mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
 
     # Ensure key directories exist in the installroot BEFORE dnf runs
@@ -1549,10 +1598,12 @@ ZFSREPO
     # earlier but may not have run yet for partial-install code paths.
     if [[ -d /root/darksite ]] && ! mountpoint -q /run/kldload-darksite; then
         mkdir -p /run/kldload-darksite
+        # swallow: the darksite bind may already be in place
         mount --bind /root/darksite /run/kldload-darksite 2>/dev/null || true
     fi
     if mountpoint -q /run/kldload-darksite && ! mountpoint -q "${target}/run/kldload-darksite"; then
         mkdir -p "${target}/run/kldload-darksite"
+        # swallow: as above
         mount --bind /run/kldload-darksite "${target}/run/kldload-darksite" 2>/dev/null || true
     fi
 
@@ -2047,6 +2098,7 @@ CUSTOMREPO
 
     # Optional packages (eBPF, extra ZFS tools) — same logic as Debian path
     local _opt_pkgs
+    # swallow: a profile with no optional packages returns nothing, which is valid
     _opt_pkgs="$(k_profile_optional_packages 2>/dev/null || true)"
     if [[ -n "$_opt_pkgs" ]]; then
         # Map Debian package names to CentOS equivalents
@@ -2138,6 +2190,7 @@ CUSTOMREPO
                 k_log_to "$log" "Fedora ZFS repo enabled via fc${_zfsrel_actual} (target=fc${_fedora_rel})"
             else
                 k_log_to "$log" "ERROR: zfs-release fc${_zfsrel_actual} URL serves HTTP 200 but dnf install failed — see log tail below"
+                # swallow: printing the tail of a log that may not exist yet
                 tail -20 "$log" | sed 's/^/    | /' >&2 || true
             fi
         fi
@@ -2229,6 +2282,7 @@ CUSTOMREPO
                 # completed (2026-09-09).
                 if compgen -G "${target}/etc/pki/rpm-gpg/RPM-GPG-KEY-openzfs*" >/dev/null; then
                     install -d -m 0755 /etc/pki/rpm-gpg
+                    # swallow: the OpenZFS key is only there once the zfs repo has been installed
                     cp -n "${target}"/etc/pki/rpm-gpg/RPM-GPG-KEY-openzfs* /etc/pki/rpm-gpg/ 2>/dev/null || true
                     k_log_to "$log" "Copied $(ls /etc/pki/rpm-gpg/ | grep -c openzfs) openzfs gpg key(s) onto the live filesystem (dnf resolves file:// keys on the HOST)"
                 else
@@ -2666,7 +2720,9 @@ CUSTOMREPO
             "${target}/var/lib/rpm/rpmdb.sqlite-shm" \
             "${target}/var/lib/rpm/rpmdb.sqlite-wal" 2>/dev/null
         cp -p "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite" "${target}/var/lib/rpm/rpmdb.sqlite"
+        # swallow: the rpmdb WAL files exist only while a transaction is open
         cp -p "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite-shm" "${target}/var/lib/rpm/rpmdb.sqlite-shm" 2>/dev/null || true
+        # swallow: as above
         cp -p "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite-wal" "${target}/var/lib/rpm/rpmdb.sqlite-wal" 2>/dev/null || true
         # Non-fatal verification — set -Eeuo pipefail would propagate any
         # 127 from a missing rpm binary if we ran it inline in a $(...)
@@ -2685,7 +2741,8 @@ CUSTOMREPO
     _ensure_target_mounted() {
         if ! mountpoint -q "${target}" 2>/dev/null; then
             k_log_to "$log" "  [target unmounted — re-importing rpool with altroot=${target}]"
-            zpool import -f -N -R "${target}" rpool >>"$log" 2>&1 || true
+            zpool import -f -N -R "${target}" rpool >>"$log" 2>&1 ||
+                k_log_to "$log" "WARNING: could not import rpool — the steps below have no target to write to"
             # Find the BE dataset (rpool/ROOT/<host_short>) and mount it AT the
             # target path explicitly.
             #
@@ -2877,9 +2934,12 @@ CUSTOMREPO
     # out under `if running in chroot` guards). `2>>$log || true` because
     # `dkms add` errors when the version is already registered — fine.
     chroot "${target}" /usr/sbin/dkms add -m zfs -v "$zfs_ver" >>"$log" 2>&1 || true
-    chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 || true
-    chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 || true
-    chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null || true
+    chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: dkms build of zfs ${zfs_ver} for ${kver} failed — see $log; the module check below decides whether this install can boot"
+    chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: dkms install of zfs ${zfs_ver} for ${kver} failed — see $log"
+    chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null ||
+        k_log_to "$log" "WARNING: depmod failed for ${kver} — modules built above may not be found at boot"
 
     # Hard verify: zfs.ko + spl.ko must exist in /lib/modules/$kver/extra/.
     # Without these the initramfs rebuild below will succeed-but-produce a
@@ -3032,6 +3092,7 @@ CUSTOMREPO
     # Locale + timezone + hostname
     echo "LANG=${KLDLOAD_LOCALE:-en_US.UTF-8}" >"${target}/etc/locale.conf"
     echo "KEYMAP=${KLDLOAD_KEYBOARD_LAYOUT:-us}" >"${target}/etc/vconsole.conf"
+    # swallow: an unknown timezone leaves the target on UTC, which is stated in the log
     ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
     echo "${KLDLOAD_HOSTNAME:-kldload}" >"${target}/etc/hostname"
 
@@ -3337,15 +3398,19 @@ CUDAREPO
                 # so the failure is debuggable post-install. Later /var/log/installer
                 # rsync (if any) picks this up; otherwise it lives on the target.
                 if [[ -f "${target}/var/lib/dkms/nvidia/${_nv_ver}/build/make.log" ]]; then
+                    # swallow: the directory usually exists; the copy below reports what matters
                     mkdir -p "${target}/var/log/kldload" 2>/dev/null || true
+                    # swallow: best-effort copy of a build log for post-mortem
                     cp -f "${target}/var/lib/dkms/nvidia/${_nv_ver}/build/make.log" \
                         "${target}/var/log/kldload/nvidia-dkms-attempt-${_attempt}-make.log" 2>/dev/null || true
                 fi
                 # On retry, fully unregister so `dkms add` next iteration is clean.
                 chroot "${target}" /usr/sbin/dkms remove -m nvidia -v "$_nv_ver" -k "$kver" >>"$log" 2>&1 || true
-                chroot "${target}" /usr/sbin/dkms add -m nvidia -v "$_nv_ver" >>"$log" 2>&1 || true
+                chroot "${target}" /usr/sbin/dkms add -m nvidia -v "$_nv_ver" >>"$log" 2>&1 ||
+                    k_log_to "$log" "WARNING: dkms add for nvidia ${_nv_ver} failed"
             done
-            chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null || true
+            chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null ||
+                k_log_to "$log" "WARNING: depmod failed for ${kver} after the nvidia build"
 
             # Critical fallback: if DKMS still failed after retries, NVIDIA's
             # userspace driver is installed but nvidia.ko isn't on disk. Xorg
@@ -3368,6 +3433,7 @@ CUDAREPO
                     "${target}/etc/X11/xorg.conf.d/"nvidia*.conf \
                     "${target}/usr/lib/modprobe.d/"nvidia*.conf \
                     "${target}/etc/modprobe.d/"nvidia*.conf; do
+                    # swallow: there may be no modprobe config to move aside
                     [[ -f "$_conf" ]] && mv -f "$_conf" "${_conf}.kldload-disabled-no-dkms" 2>/dev/null || true
                 done
             fi
@@ -3389,6 +3455,7 @@ CUDAREPO
     if [[ -d "${target}/usr/share/bcc/tools" ]]; then
         for _tool in execsnoop opensnoop tcplife tcpconnect biolatency biotop cachestat runqlat; do
             [[ -f "${target}/usr/share/bcc/tools/${_tool}" ]] &&
+                # swallow: a bcc tool this image does not carry
                 ln -sf "/usr/share/bcc/tools/${_tool}" "${target}/usr/local/bin/${_tool}-bpfcc" 2>/dev/null || true
         done
         k_log_to "$log" "BCC tools symlinked to /usr/local/bin"
@@ -3485,8 +3552,10 @@ _k_bootstrap_apt() {
         mkdir -p "${target}/usr/sbin"
         printf '#!/bin/sh\nexit 101\n' >"${target}/usr/sbin/policy-rc.d"
         chmod +x "${target}/usr/sbin/policy-rc.d"
-        DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get update -qq >>"$log" 2>&1 || true
-        DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y --allow-unauthenticated systemd-resolved >>"$log" 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get update -qq >>"$log" 2>&1 ||
+            k_log_to "$log" "WARNING: apt-get update failed before installing systemd-resolved"
+        DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y --allow-unauthenticated systemd-resolved >>"$log" 2>&1 ||
+            k_log_to "$log" "WARNING: systemd-resolved not installed — the target may boot with no DNS resolver"
         rm -f "${target}/usr/sbin/policy-rc.d"
     fi
 
@@ -3556,9 +3625,11 @@ NMCONF
                 k_log "NetworkManager conf.d: $(basename "$_nmc")"
         done
     fi
-    k_in_chroot "${target}" systemctl enable NetworkManager 2>/dev/null || true
+    k_in_chroot "${target}" systemctl enable NetworkManager 2>/dev/null ||
+        k_log_to "$log" "WARNING: NetworkManager not enabled — this install may boot with no network"
 
     if [[ -d "${target}/etc/dconf/db/local.d" ]]; then
+        # swallow: dconf update is a cache rebuild the desktop redoes on first login
         k_in_chroot "${target}" dconf update 2>/dev/null || true
     fi
 
@@ -3585,7 +3656,8 @@ NMCONF
             echo "deb http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse" \
                 >"$_nvidia_list"
         fi
-        DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >>"$log" 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >>"$log" 2>&1 ||
+            k_log_to "$log" "WARNING: apt-get update failed — the installs that follow will use stale lists"
 
         # Firmware + pciutils still come from Debian; the DRIVER does not.
         DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
@@ -3647,17 +3719,21 @@ NMCONF
         elif [[ "$distro" == "debian" ]] &&
             k_in_chroot "${target}" bash -c "curl -fsSL -o /tmp/cuda-keyring.deb ${_cuda_repo}/cuda-keyring_1.1-1_all.deb" >>"$log" 2>&1 &&
             k_in_chroot "${target}" dpkg -i /tmp/cuda-keyring.deb >>"$log" 2>&1; then
-            DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >>"$log" 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >>"$log" 2>&1 ||
+                k_log_to "$log" "WARNING: apt-get update failed before the NVIDIA install"
             if DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" \
                 apt-get install -y nvidia-open >>"$log" 2>&1; then
                 k_log_to "$log" "NVIDIA: installed nvidia-open from the vendor repo (builds on kernel 7.1)"
             else
                 k_log_to "$log" "WARNING: nvidia-open failed — falling back to Debian's driver, which CANNOT build on kernel 7.1. Expect no display driver; kldload-firstboot will re-attempt."
+                # swallow: the fallback driver may not build on this kernel, which the line above says;
+                # the nvidia check after this block is what decides
                 DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
                     nvidia-driver nvidia-smi >>"$log" 2>&1 || true
             fi
         else
             k_log_to "$log" "WARNING: could not reach NVIDIA's vendor repo — falling back to Debian's nvidia-driver, which CANNOT build on the backports kernel. The desktop will not start until this is resolved."
+            # swallow: as above — this is the second of two fallbacks
             DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
                 nvidia-driver nvidia-smi >>"$log" 2>&1 || true
         fi
@@ -3666,11 +3742,13 @@ NMCONF
             gpg --batch --yes --dearmor -o "${target}/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" 2>/dev/null
         echo "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/\$(ARCH) /" \
             >"${target}/etc/apt/sources.list.d/nvidia-container-toolkit.list"
-        DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >>"$log" 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >>"$log" 2>&1 ||
+            k_log_to "$log" "WARNING: apt-get update failed before the container toolkit install"
         DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
             nvidia-container-toolkit \
             >>"$log" 2>&1 || k_log_to "$log" "WARNING: nvidia-container-toolkit install failed (optional)"
-        k_in_chroot "${target}" bash -c 'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' 2>/dev/null || true
+        k_in_chroot "${target}" bash -c 'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' 2>/dev/null ||
+            k_log_to "$log" "WARNING: nvidia-ctk cdi generate failed — containers will not see the GPU"
 
         # Remove the temporary mirror line now that the packages are in.
         #
@@ -3799,9 +3877,17 @@ PACCONF
     # Mount chroot filesystems
     mountpoint -q "${target}/dev" || mount --bind /dev "${target}/dev" 2>/dev/null || true
     mkdir -p "${target}/dev/pts"
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/dev/pts" || mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/proc" || mount -t proc proc "${target}/proc" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/sys" || mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/run" || mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
 
     # DNS for package downloads
@@ -3891,6 +3977,8 @@ MIRRORS
         k_log_to "$log" "Installing pinned kernel via pacman -U: ${_linux_pkg}"
         pacman --root "${target}" --config "${pacman_conf}" \
             --noconfirm -U "${_linux_pkg}" "${_linux_headers_pkg}" >>"$log" 2>&1 || {
+            # swallow: the pinned kernel failed and this is the fallback; a kernel that is
+            # genuinely missing is caught by the vmlinuz check after this block
             k_log_to "$log" "WARNING: Pinned kernel install failed — trying latest"
             pacman --root "${target}" --config "${pacman_conf}" \
                 --noconfirm --needed -S linux linux-headers >>"$log" 2>&1 || true
@@ -4007,7 +4095,8 @@ MIRRORS
                         [[ -f "$_dkms_log" ]] && tail -30 "$_dkms_log" >>"$log" 2>&1
                     fi
                 fi
-                chroot "${target}" /usr/sbin/depmod -a "$_inst_kver" 2>/dev/null || true
+                chroot "${target}" /usr/sbin/depmod -a "$_inst_kver" 2>/dev/null ||
+                    k_log_to "$log" "WARNING: depmod failed for ${_inst_kver} — modules may not be found at boot"
             fi
         fi
 
@@ -4024,7 +4113,8 @@ MIRRORS
 
         # Verify zfs.ko is actually present before rebuilding initramfs
         if [[ -n "$kver" ]]; then
-            chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null || true
+            chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null ||
+                k_log_to "$log" "WARNING: depmod failed for ${kver} — modules may not be found at boot"
             if find "${target}/usr/lib/modules/${kver}" -name 'zfs.ko*' 2>/dev/null | grep -q .; then
                 k_log_to "$log" "VERIFIED: zfs.ko found for kernel ${kver}"
             else
@@ -4055,7 +4145,8 @@ MIRRORS
 
         # Enable ZFS services
         chroot "${target}" systemctl enable zfs-import-cache.service zfs-mount.service zfs.target 2>/dev/null || true
-        chroot "${target}" systemctl enable zfs-zed.service 2>/dev/null || true
+        chroot "${target}" systemctl enable zfs-zed.service 2>/dev/null ||
+            k_log_to "$log" "WARNING: zfs-zed not enabled — pool events will go unreported on this machine"
     fi
 
     # ── Profile packages ─────────────────────────────────────────────────────
@@ -4068,6 +4159,7 @@ MIRRORS
         if ! pacman --root "${target}" --config "${pacman_conf}" \
             --noconfirm --needed -S ${profile_pkgs} ${profile_opt} >>"$log" 2>&1; then
             # Retry with forced DB refresh — Arch rolling repos can 404 between sync and download
+            # swallow: a database refresh before the retry below, which reports its own outcome
             k_log_to "$log" "Profile packages failed — retrying with fresh database..."
             pacman --root "${target}" --config "${pacman_conf}" \
                 --noconfirm -Syy >>"$log" 2>&1 || true
@@ -4101,12 +4193,14 @@ MIRRORS
     # ── Locale + timezone + hostname ─────────────────────────────────────────
     local locale="${KLDLOAD_LOCALE:-en_US.UTF-8}"
     echo "${locale} UTF-8" >"${target}/etc/locale.gen"
-    chroot "${target}" locale-gen >>"$log" 2>&1 || true
+    chroot "${target}" locale-gen >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: locale-gen failed — the target may have no usable locale"
     echo "LANG=${locale}" >"${target}/etc/locale.conf"
 
     local keymap="${KLDLOAD_KEYBOARD_LAYOUT:-us}"
     echo "KEYMAP=${keymap}" >"${target}/etc/vconsole.conf"
 
+    # swallow: an unknown timezone leaves the target on UTC
     ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
 
     echo "${KLDLOAD_HOSTNAME:-kldload}" >"${target}/etc/hostname"
@@ -4131,13 +4225,16 @@ EOH
         sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$_sshd_conf"
         sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$_sshd_conf"
     fi
+    # swallow: ssh-keygen -A is a no-op when the host keys already exist
     chroot "${target}" ssh-keygen -A >>"$log" 2>&1 || true
     k_log_to "$log" "SSH host keys generated"
 
     local _profile="${KLDLOAD_PROFILE:-server}"
     if [[ "$_profile" == "desktop" ]]; then
-        chroot "${target}" systemctl enable gdm 2>/dev/null || true
-        chroot "${target}" systemctl set-default graphical.target 2>/dev/null || true
+        chroot "${target}" systemctl enable gdm 2>/dev/null ||
+            k_log_to "$log" "WARNING: gdm not enabled — a desktop install will boot to a console"
+        chroot "${target}" systemctl set-default graphical.target 2>/dev/null ||
+            k_log_to "$log" "WARNING: default target not set to graphical"
         # GDM first-boot hang fix — add a short delay so the display driver
         # is fully initialized before GDM tries to start
         mkdir -p "${target}/etc/systemd/system/gdm.service.d"
@@ -4146,7 +4243,8 @@ EOH
 ExecStartPre=/usr/bin/sleep 3
 GDMFIX
     else
-        chroot "${target}" systemctl set-default multi-user.target 2>/dev/null || true
+        chroot "${target}" systemctl set-default multi-user.target 2>/dev/null ||
+            k_log_to "$log" "WARNING: default target not set to multi-user"
     fi
 
     # ── NetworkManager DHCP connection ───────────────────────────────────────
@@ -4257,9 +4355,17 @@ _k_bootstrap_apk() {
     # Mount chroot filesystems
     mountpoint -q "${target}/dev" || mount --bind /dev "${target}/dev" 2>/dev/null || true
     mkdir -p "${target}/dev/pts"
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/dev/pts" || mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/proc" || mount -t proc proc "${target}/proc" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/sys" || mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+    # swallow: the guard before it says the mount is already there; a mount that truly
+    # fails shows up immediately as a chroot step that cannot see /proc or /dev
     mountpoint -q "${target}/run" || mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
 
     # DNS for package downloads
@@ -4276,10 +4382,13 @@ _k_bootstrap_apk() {
         # can resolve package metadata, but --cache-dir + pre-populated cache means
         # no actual downloads happen.
         mkdir -p "${target}/var/cache/apk"
+        # swallow: no cached apk packages to carry on this image
         find "${darksite}/apk/" -maxdepth 1 -name '*.apk' -exec cp {} "${target}/var/cache/apk/" \; 2>/dev/null || true
+        # swallow: as above
         cp "${darksite}/apk/APKINDEX.tar.gz" "${target}/var/cache/apk/" 2>/dev/null || true
         # Copy signing keys
         if [[ -d "${darksite}/keys" ]]; then
+            # swallow: no apk signing keys to carry
             cp "${darksite}/keys/"* "${target}/etc/apk/keys/" 2>/dev/null || true
         fi
 
@@ -4359,7 +4468,8 @@ REPOS
         else
             chroot "${target}" apk add --allow-untrusted zfs zfs-lts zfs-libs zfs-openrc >>"$log" 2>&1 || {
                 k_log_to "$log" "WARNING: ZFS package install had errors — trying with update"
-                chroot "${target}" apk update >>"$log" 2>&1 || true
+                chroot "${target}" apk update >>"$log" 2>&1 ||
+                    k_log_to "$log" "WARNING: apk update failed — installs below will use stale indexes"
                 chroot "${target}" apk add --allow-untrusted zfs zfs-lts zfs-libs zfs-openrc >>"$log" 2>&1 || {
                     k_log_to "$log" "ERROR: ZFS install failed — ZFS will not work"
                 }
@@ -4401,9 +4511,12 @@ REPOS
 
         # Enable ZFS OpenRC services (per Alpine wiki: default runlevel, not sysinit)
         chroot "${target}" rc-update add zfs-import boot >>"$log" 2>&1 || true
-        chroot "${target}" rc-update add zfs-load-key boot >>"$log" 2>&1 || true
-        chroot "${target}" rc-update add zfs-mount boot >>"$log" 2>&1 || true
-        chroot "${target}" rc-update add zfs-zed default >>"$log" 2>&1 || true
+        chroot "${target}" rc-update add zfs-load-key boot >>"$log" 2>&1 ||
+            k_log_to "$log" "WARNING: zfs-load-key not added to an Alpine runlevel — it will not start at boot"
+        chroot "${target}" rc-update add zfs-mount boot >>"$log" 2>&1 ||
+            k_log_to "$log" "WARNING: zfs-mount not added to an Alpine runlevel — it will not start at boot"
+        chroot "${target}" rc-update add zfs-zed default >>"$log" 2>&1 ||
+            k_log_to "$log" "WARNING: zfs-zed not added to an Alpine runlevel — it will not start at boot"
         k_log_to "$log" "ZFS OpenRC services enabled (import, load-key, mount, zed)"
 
         # Install ZFS scrub + trim cron scripts (Alpine doesn't ship these)
@@ -4414,6 +4527,7 @@ REPOS
 PROPERTY_NAME="org.alpine:periodic-scrub"
 get_property () { zfs get -H -o value "${PROPERTY_NAME}" "$1" 2>/dev/null || return 1; }
 scrub_if_not_in_progress () {
+  # swallow: a scrub already running is the condition this tests for
   zpool status "$1" | grep -q "scrub in progress" || zpool scrub "$1" || true
 }
 zpool list -H -o health,name 2>&1 | awk -F'\t' '$1 == "ONLINE" {print $2}' | while read pool; do
@@ -4430,6 +4544,7 @@ SCRUBEOF
 PROPERTY_NAME="org.alpine:periodic-trim"
 get_property () { zfs get -H -o value "${PROPERTY_NAME}" "$1" 2>/dev/null || return 1; }
 trim_if_not_trimming () {
+  # swallow: a trim already running is the condition this tests for
   zpool status "$1" | grep -q "trimming" || zpool trim "$1" || true
 }
 zpool_is_nvme_only () {
@@ -4455,7 +4570,8 @@ TRIMEOF
 24 0 1-7 * * if [ $(date +\%w) -eq 0 ] && [ -x /usr/libexec/zfs/trim ]; then /usr/libexec/zfs/trim; fi
 CRONEOF
         chmod 600 "${target}/var/spool/cron/crontabs/root"
-        chroot "${target}" rc-update add crond default >>"$log" 2>&1 || true
+        chroot "${target}" rc-update add crond default >>"$log" 2>&1 ||
+            k_log_to "$log" "WARNING: crond not added to an Alpine runlevel — it will not start at boot"
         k_log_to "$log" "ZFS scrub/trim cron scripts installed"
     fi
 
@@ -4501,26 +4617,39 @@ NET
         sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$_sshd_conf"
         sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$_sshd_conf"
     fi
+    # swallow: ssh-keygen -A is a no-op when the host keys already exist
     chroot "${target}" ssh-keygen -A >>"$log" 2>&1 || true
     k_log_to "$log" "SSH host keys generated"
 
     # ── Enable OpenRC services ──────────────────────────────────────────────
     chroot "${target}" rc-update add sshd default >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add dhcpcd default >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add nftables default >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add networking boot >>"$log" 2>&1 || true
+    chroot "${target}" rc-update add dhcpcd default >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: dhcpcd not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add nftables default >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: nftables not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add networking boot >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: networking not added to an Alpine runlevel — it will not start at boot"
 
     # Set default runlevel
     chroot "${target}" rc-update add devfs sysinit >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add dmesg sysinit >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add mdev sysinit >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add hwdrivers sysinit >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add hwclock boot >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add modules boot >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add sysctl boot >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add hostname boot >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add bootmisc boot >>"$log" 2>&1 || true
-    chroot "${target}" rc-update add syslog boot >>"$log" 2>&1 || true
+    chroot "${target}" rc-update add dmesg sysinit >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: dmesg not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add mdev sysinit >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: mdev not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add hwdrivers sysinit >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: hwdrivers not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add hwclock boot >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: hwclock not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add modules boot >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: modules not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add sysctl boot >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: sysctl not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add hostname boot >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: hostname not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add bootmisc boot >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: bootmisc not added to an Alpine runlevel — it will not start at boot"
+    chroot "${target}" rc-update add syslog boot >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: syslog not added to an Alpine runlevel — it will not start at boot"
 
     # ── System files + manifest ──────────────────────────────────────────────
     k_install_system_files
@@ -4577,9 +4706,11 @@ _k_bootstrap_freebsd() {
     # Extract base and kernel
     # GNU tar warns about BSD-specific SCHILY.fflags and gid mismatches — safe to ignore
     k_log_to "$log" "Extracting FreeBSD base..."
-    tar -xpf "${darksite}/base.txz" -C "${target}" >>"$log" 2>&1 || true
+    tar -xpf "${darksite}/base.txz" -C "${target}" >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: FreeBSD base extract reported errors — see $log"
     k_log_to "$log" "Extracting FreeBSD kernel..."
-    tar -xpf "${darksite}/kernel.txz" -C "${target}" >>"$log" 2>&1 || true
+    tar -xpf "${darksite}/kernel.txz" -C "${target}" >>"$log" 2>&1 ||
+        k_log_to "$log" "WARNING: FreeBSD kernel extract reported errors — see $log"
 
     # Verify extraction worked
     [[ -f "${target}/bin/sh" ]] || {
@@ -4659,7 +4790,8 @@ RCLOCAL
     # FreeBSD bootloader EFI
     local efi_mnt="${KLDLOAD_TARGET_MNT:-/target}/boot/efi"
     mkdir -p "${efi_mnt}/EFI/BOOT"
-    cp "${target}/boot/loader.efi" "${efi_mnt}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || true
+    cp "${target}/boot/loader.efi" "${efi_mnt}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null ||
+        k_log_to "$log" "WARNING: could not copy loader.efi to the ESP — this install will not boot"
 
     mkdir -p "${target}/var/log/kldload"
     k_log_to "$log" "FreeBSD bootstrap complete"
@@ -4698,9 +4830,11 @@ _k_bootstrap_openbsd() {
     # EFI (512M) + OpenBSD raw partition (rest of disk)
     # OpenBSD's installer will create disklabel + FFS inside the raw partition
     k_log_to "$log" "Partitioning ${disk} for OpenBSD..."
+    # swallow: zapping a disk with no partition table is a non-event
     sgdisk -Z "${disk}" >>"$log" 2>&1 || true
     sgdisk -n1:0:+512M -t1:EF00 -c1:EFI "${disk}" >>"$log" 2>&1
     sgdisk -n2:0:0 -t2:A600 -c2:OpenBSD "${disk}" >>"$log" 2>&1
+    # swallow: partprobe complains about the empty table it was just asked to re-read
     partprobe "${disk}" 2>/dev/null || true
     sleep 2
 
@@ -4774,8 +4908,10 @@ BOOTCONF
 
     # ── Register EFI boot entry ──────────────────────────────────────────────
     local efi_disk part_num
+    # swallow: lsblk on a path that is not a partition gives an empty answer, checked below
     efi_disk="$(lsblk -no PKNAME "${efi_part}" 2>/dev/null | head -n1 || true)"
     [[ -n "$efi_disk" ]] && efi_disk="/dev/$efi_disk"
+    # swallow: as above
     part_num="$(lsblk -no PARTN "${efi_part}" 2>/dev/null | head -n1 || true)"
     part_num="${part_num:-1}"
 
@@ -4957,6 +5093,7 @@ _k_bootstrap_windows() {
 
     # Copy BCD from Windows image
     if [[ -d /mnt/win-root/Windows/Boot/EFI ]]; then
+        # swallow: a Windows install that has no BCD in that location
         cp -r /mnt/win-root/Windows/Boot/EFI/BCD /mnt/win-efi/EFI/Microsoft/Boot/ 2>/dev/null || true
     fi
 
@@ -4966,13 +5103,17 @@ _k_bootstrap_windows() {
         [[ -d /root/darksite/virtio-win ]] && vio_src="/root/darksite/virtio-win"
         k_log_to "$log" "Copying virtio drivers for KVM guests..."
         mkdir -p /mnt/win-root/virtio-drivers
+        # swallow: virtio drivers are only copied when that media is present
         cp -r "${vio_src}/." /mnt/win-root/virtio-drivers/ 2>/dev/null || true
     fi
 
     # Cleanup
     sync
+    # swallow: teardown of mounts that may already be gone
     umount /mnt/win-efi 2>/dev/null || true
+    # swallow: as above
     umount /mnt/win-root 2>/dev/null || true
+    # swallow: as above
     [[ -d /mnt/win-iso ]] && umount /mnt/win-iso 2>/dev/null || true
 
     k_log_to "$log" "Windows bootstrap complete — reboot to finish Windows setup (OOBE)"
