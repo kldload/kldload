@@ -5,6 +5,14 @@
 # Ctrl+B prefix so every pane is one keystroke away.
 
 set -Eeuo pipefail
+
+# Deliberately NOT errexit: this is the operator console. `kubectl get pods -A | awk | head -40` on a cluster with
+# more than 40 pods SIGPIPEs, and under errexit that kills the console.
+# The 2026-09-15 strict sweep added the line above to a file that had no set
+# line at all. nounset and pipefail are kept -- they catch real bugs here; -e
+# does not. See project_strict-sweep-overrode-soft-set-lines.
+set +e +E
+trap - ERR
 trap 'echo "kldload-console: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 export KUBECONFIG=/root/.kube/config

@@ -13,6 +13,15 @@
 # do the same any time.
 
 set -Eeuo pipefail
+
+# Deliberately NOT errexit: this is a live dashboard of report panes. A section that prints fewer lines than its
+# `| head -N` takes makes head close the pipe, head's producer dies on SIGPIPE
+# (141), and pipefail hands that to errexit -- the pane dies mid-report.
+# The 2026-09-15 strict sweep added the line above to a file that had no set
+# line at all. nounset and pipefail are kept -- they catch real bugs here; -e
+# does not. See project_strict-sweep-overrode-soft-set-lines.
+set +e +E
+trap - ERR
 trap 'echo "kldload-sysdiag: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 export TERM=xterm-256color

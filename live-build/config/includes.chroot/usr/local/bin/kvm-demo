@@ -3,6 +3,14 @@
 # 64GB RAM / 24 cores / RTX 3080
 
 set -Eeuo pipefail
+
+# Deliberately NOT errexit: this is a demo. `virsh list --all --name | grep -c -v '^$'` PRINTS 0 and EXITS 1 when
+# there are no VMs, so the PROOF summary aborted on a clean machine.
+# The 2026-09-15 strict sweep added the line above to a file that had no set
+# line at all. nounset and pipefail are kept -- they catch real bugs here; -e
+# does not. See project_strict-sweep-overrode-soft-set-lines.
+set +e +E
+trap - ERR
 trap 'echo "kvm-demo: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 B="\033[1;34m"
