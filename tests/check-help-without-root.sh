@@ -34,6 +34,7 @@ trap 'echo "check-help-without-root: FAIL at line $LINENO: $BASH_COMMAND" >&2' E
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 BASELINE="tests/help-without-root-baseline.txt"
+SELF="tests/$(basename "${BASH_SOURCE[0]}")"
 
 command -v git >/dev/null 2>&1 || {
     echo "check-help-without-root: git not available — THIS CHECK DID NOT RUN" >&2
@@ -60,7 +61,10 @@ if ! grep -q __SUDO_WAS_CALLED__ <<<"$_probe"; then
     exit 2
 fi
 
-mapfile -t baseline < <(grep -vE '^\s*(#|$)' "$BASELINE" 2>/dev/null || true) # absent baseline = nothing exempt
+# An absent or all-comment baseline is a legitimate state -- it means nothing
+# is exempt, which is where this gate is trying to end up. grep exits 1 on no
+# match, and that 1 is the only thing being swallowed here.
+mapfile -t baseline < <(grep -vE '^\s*(#|$)' "$BASELINE" 2>/dev/null || true)
 is_baselined() {
     local n=$1 b
     for b in ${baseline[@]+"${baseline[@]}"}; do [[ "$n" == "$b" ]] && return 0; done
@@ -75,10 +79,19 @@ for f in "${tracked[@]}"; do
     [[ -f "$f" ]] || continue
     IFS= read -r first <"$f" || continue # empty file: nothing to classify
     [[ "$first" =~ ^#!.*(bash|/bin/sh) ]] || continue
+    # Skip this file. The pattern below is written out literally a few
+    # characters from here, so the gate matches its own source, runs itself
+    # with --help and then waits for a timeout it caused. It only started
+    # doing that once the file was committed: the scan reads `git ls-files`,
+    # and an untracked file is invisible to it.
+    [[ "$f" == "$SELF" ]] && continue
     grep -qE 'exec sudo|sudo +-E +"?\$0' "$f" || continue # no re-exec: out of scope
 
     name="$(basename "$f")"
     out="$(PATH="$STUBDIR:$PATH" timeout 20 bash "$f" --help 2>&1 </dev/null)" && rc=0 || rc=$?
+    # grep -c exits 1 when the count is zero, and zero lines of output is
+    # exactly the failure this gate reports. Swallowing that 1 keeps the count
+    # itself, which is the thing being measured.
     lines="$(printf '%s' "$out" | grep -c . || true)"
 
     ok=1
@@ -93,7 +106,11 @@ for f in "${tracked[@]}"; do
         if is_baselined "$name"; then
             exempt=$((exempt + 1))
         else
-            FAILED+=("${name}: exit=${rc} lines=${lines}$(grep -q '__SUDO_WAS_CALLED__' <<<"$out" && echo ' ASKED-FOR-ROOT' || true)")
+            # The || true covers grep finding no match, which is the ordinary
+            # case for a tool that failed for some other reason: no root was
+            # asked for, so no label is added.
+            _why="$(grep -q '__SUDO_WAS_CALLED__' <<<"$out" && echo ' ASKED-FOR-ROOT' || true)"
+            FAILED+=("${name}: exit=${rc} lines=${lines}${_why}")
             bad=$((bad + 1))
         fi
     fi
