@@ -554,6 +554,20 @@ kiosk_exec() {
     }
     profile="${HOME:?HOME must be set by the unit}/firefox-profile"
     mkdir -p "${profile}" || return 1
+    # A restart can outrun the Firefox it replaced: the old one still holds the
+    # profile lock and the new one opens a "Firefox is already running" dialog over
+    # the show (seen on fiend, 2026-09-15). Stop anything left of ours, then clear
+    # the lock files a killed Firefox leaves behind.
+    if pgrep -u "$(id -u)" -x firefox >/dev/null 2>&1; then
+        pkill -u "$(id -u)" -x firefox 2>/dev/null || true # swallow: it exited between the check and here
+        for _w in 1 2 3 4 5 6 7 8 9 10; do
+            pgrep -u "$(id -u)" -x firefox >/dev/null 2>&1 || break
+            sleep 1
+        done
+        pkill -9 -u "$(id -u)" -x firefox 2>/dev/null || true # swallow: already gone, which is the good case
+    fi
+    rm -f "${profile}/.parentlock" "${profile}/lock" "${profile}/sessionstore.jsonlz4" 2>/dev/null ||
+        _say "WARNING: could not clear the Firefox profile lock in ${profile}"
     _kiosk_prefs >"${profile}/user.js" || return 1
     # The page is served by the web UI behind nginx, both of which are still
     # starting this early in boot. Until they answer, the console screen on VT8 is
