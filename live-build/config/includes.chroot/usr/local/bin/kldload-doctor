@@ -316,13 +316,42 @@ def check_webui_running():
                    remediation="systemctl start kldload-webui; journalctl -u kldload-webui -n 50")
 
 def check_libvirtd():
-    rc, out, _ = _run(["systemctl", "is-active", "libvirtd"])
-    state = "active" if (rc == 0 and out == "active") else (out or "inactive")
-    return _result("services", "libvirtd",
-                   "ok" if state == "active" else "warn",
-                   "active", state,
+    """Is libvirt reachable -- whichever of the two shapes this host ships?
+
+    Modular libvirt (Fedora 44, current EL) has no libvirtd.service running:
+    virtqemud.socket serves the same URI and CONFLICTS with libvirtd. Asking
+    `is-active libvirtd` there reports "inactive" on a perfectly healthy host,
+    and the old remediation told the operator to enable libvirtd -- which is
+    precisely the command that conflicted the sockets out and cost 6-full its
+    cluster and all 15 goldens on build 22 (fiend, 2026-09-16). A doctor that
+    prescribes the disease is worse than no doctor.
+
+    So the check is the OUTCOME: virsh connects, or it does not. The unit name
+    only decides which remediation to print.
+    """
+    modular = os.path.exists("/usr/lib/systemd/system/virtqemud.socket")
+    unit = "virtqemud.socket" if modular else "libvirtd"
+    if os.geteuid() != 0:
+        # qemu:///system needs root (or libvirt group). Unprivileged, a refusal
+        # says nothing about libvirt's health, and reporting it as a warning
+        # would be inventing a fault. Say the check DID NOT RUN.
+        return _result("services", "libvirt", "warn",
+                       "virsh connects", "not checked — run doctor as root",
+                       severity="medium",
+                       remediation="sudo kldload-doctor")
+    rc, _, _ = _run(["virsh", "-c", "qemu:///system", "list", "--all"])
+    if rc == 0:
+        return _result("services", "libvirt", "ok",
+                       "virsh connects", f"virsh connects via {unit}",
+                       severity="medium")
+    _, state, _ = _run(["systemctl", "is-active", unit])
+    return _result("services", "libvirt", "warn",
+                   "virsh connects", f"virsh cannot connect ({unit} is "
+                   f"{state or 'inactive'})",
                    severity="medium",
-                   remediation="systemctl enable --now libvirtd")
+                   remediation=f"systemctl enable --now {unit}" + (
+                       "; systemctl disable --now libvirtd.service libvirtd.socket"
+                       if modular else ""))
 
 def check_kldload_tools():
     """Verify the core CLI set is present."""
