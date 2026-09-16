@@ -2245,6 +2245,45 @@ run_goldens() {
     return "$failed"
 }
 
+# report_goldens LABEL DISTRO... — say what actually got SEALED, and fail if any
+# did not.
+#
+# WHY THIS EXISTS: every cmd_golden* used to end with
+#     run_goldens ... || true   # each failure was already named
+#     log "... goldens ready"
+# which threw away the failure count run_goldens is at pains to return, printed
+# "ready" unconditionally, and exited 0. Naming a failure in a log is not
+# reporting it: kldload-autodeploy reads the EXIT STATUS, so on 6-full (fiend,
+# build 22, 2026-09-16) libvirt was unreachable, all five ztest builds failed in
+# five seconds each, and autodeploy logged "ztest ubuntu — done (5/5 built)" and
+# wrote the klab-ztest-ready marker over an empty pool. This is the defect the
+# engineering rules name first -- "golden all exiting 0 after every golden
+# failed; a golden with no ZFS sealed and announced ready" -- still live.
+#
+# It asks ZFS, not the build's exit code -- a build can return 0 and still leave
+# nothing sealed, and the snapshot is the only thing a clone can actually use.
+# Returns 0 only when every requested distro has its @golden snapshot.
+report_goldens() {
+    local label=${1:-lean}
+    shift
+    local d sealed=0
+    local -a missing=()
+    for d in "$@"; do
+        if golden_exists "$d"; then
+            sealed=$((sealed + 1))
+        else
+            missing+=("$d")
+        fi
+    done
+    if ((${#missing[@]} == 0)); then
+        log "${label} goldens ready: ${sealed}/${#} sealed"
+        return 0
+    fi
+    warn "${label} goldens: ${sealed}/${#} sealed, NOT sealed: ${missing[*]}"
+    warn "rerun with: klab golden${KLAB_GOLDEN_KIND:+-${KLAB_GOLDEN_KIND}} ${missing[*]}"
+    return 1
+}
+
 build_golden_single() {
     local distro="$1"
     validate_distro "$distro"
@@ -2823,7 +2862,8 @@ cmd_golden() {
     # Before this change, a single failed distro #2 left distros 3..N
     # un-attempted because the script exited mid-loop — `|| warn` never
     # got the chance to neutralize it.
-    run_goldens "" "${_distros[@]}" || true # each failure was already named
+    run_goldens "" "${_distros[@]}" || true # the count is not the answer; sealing is, checked next
+    report_goldens "lean" "${_distros[@]}" || return 1
 }
 
 cmd_build_all() {
@@ -2906,7 +2946,8 @@ cmd_golden_ztest() {
     # adds 30+ minutes per distro of additional surface for a transient
     # network hiccup, kernel-headers mismatch, or SSH timeout to fire `die`
     # and tear down the rest of the run.
-    run_goldens "ZTEST" "${_distros[@]}" || true # each failure was already named
+    run_goldens "ZTEST" "${_distros[@]}" || true # the count is not the answer; sealing is, checked next
+    report_goldens "ZFS test" "${_distros[@]}" || return 1
     log "ZFS test goldens ready. Names: klab-ztest-<distro>"
 }
 
@@ -2970,7 +3011,8 @@ cmd_golden_db() {
     # distro from aborting the remaining builds, which is the whole point of
     # asking for several. The verdict the operator acts on is the per-distro
     # log line, not this exit status.
-    run_goldens "DB" "${_distros[@]}" || true
+    run_goldens "DB" "${_distros[@]}" || true # the count is not the answer; sealing is, checked next
+    report_goldens "DB" "${_distros[@]}" || return 1
     log "Database goldens ready. Names: klab-db-<distro> — kvm-clone one per developer."
 }
 
@@ -2993,7 +3035,8 @@ cmd_golden_desktop() {
     done
     log "Building GNOME desktop goldens (target=$*) — separate from blue-green and ztest goldens."
     # Subshell-isolated: see cmd_golden for the why.
-    run_goldens "DESKTOP" "${_distros[@]}" || true # each failure was already named
+    run_goldens "DESKTOP" "${_distros[@]}" || true # the count is not the answer; sealing is, checked next
+    report_goldens "desktop" "${_distros[@]}" || return 1
     log "Desktop goldens ready. Names: klab-desktop-<distro> — clone them for instant desktops."
 }
 
