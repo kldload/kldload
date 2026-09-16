@@ -11881,6 +11881,32 @@ async def main_async(args):
                 ("Content-Length", str(len(_body))),
             ]), _body)
 
+        # Ctrl+Alt+Ins on the first-boot show asks for the screen back. It does
+        # NOT stop anything: kldload-autodeploy is its own unit and keeps building
+        # golden images and the cluster exactly as before. All this writes is a
+        # marker that kldload-firstboot-show watches, so the show stops HOLDING
+        # tty1 and the desktop comes up with the build still running behind it --
+        # which is what kldload-buildmon is on screen to say.
+        #
+        # A GET with a side effect, like every other endpoint here, because this
+        # handler has no do_POST and the socket is the local proxy-only one. The
+        # write is a single empty marker file and cannot fail open into anything
+        # worse than the show ending a few minutes early.
+        if url_path == "/api/firstboot-dismiss":
+            _ok, _err = True, ""
+            try:
+                os.makedirs("/var/lib/kldload", exist_ok=True)
+                with open("/var/lib/kldload/firstboot-dismissed", "w"):
+                    pass
+            except OSError as _e:
+                _ok, _err = False, str(_e)
+            _body = json.dumps({"dismissed": _ok, "error": _err}).encode()
+            return WsResponse(200 if _ok else 500, "OK" if _ok else "Error", WsHeaders([
+                ("Content-Type", "application/json"),
+                ("Cache-Control", "no-store"),
+                ("Content-Length", str(len(_body))),
+            ]), _body)
+
         # The build output inside the show: part 1 is the live installer's logs,
         # part 2 the first-boot build's. kldload-firstboot-show picks the log
         # being written right now and cleans it (control sequences stripped,

@@ -675,6 +675,12 @@ run_show() {
             _say "WARNING: could not start ${KIOSK_UNIT} — console screen only"
         fi
     fi
+    # A marker left by a previous run would dismiss this one instantly. The show
+    # is a first-boot thing and writes firstboot-show-done when it ends, so this
+    # only matters when someone re-runs it by hand -- which is exactly when a
+    # silent no-op would be baffling.
+    rm -f "${STATE}/firstboot-dismissed" 2>/dev/null ||
+        _say "WARNING: could not clear a stale dismiss marker"
     while :; do
         v="$(settle)"
         # The console screen is drawn on VT8 either way: it is what shows while the
@@ -703,6 +709,15 @@ run_show() {
                 fi
                 _vt_switch 1
             fi
+        fi
+        # F12 on the show writes this marker through the webui. It asks for the
+        # SCREEN back and nothing else: kldload-autodeploy is a separate unit and
+        # keeps building golden images and the cluster behind the desktop, which is
+        # what kldload-buildmon is there to say. Checked before the settle rule so
+        # it works at any point, including the six hours a full build can take.
+        if [[ -e "${STATE}/firstboot-dismissed" ]]; then
+            _say "F12 — handing the machine over; the build keeps running"
+            break
         fi
         if [[ "${v}" != building ]]; then
             hold="${HOLD_OK}"

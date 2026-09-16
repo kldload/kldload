@@ -2171,7 +2171,23 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     else if (k === "+" || k === "=") { e.preventDefault(); dwell = Math.min(DWELL_MAX, dwell + 2000); armSlides(); keyHint("slides every " + Math.round(dwell / 1000) + "s"); }
     else if (k === "-" || k === "_") { e.preventDefault(); dwell = Math.max(DWELL_MIN, dwell - 2000); armSlides(); keyHint("slides every " + Math.round(dwell / 1000) + "s"); }
     else if (k === "k" || k === "K" || k === "?") { e.preventDefault(); legendUntil = Date.now() + 20000; }
+    // F12 hands the machine over. It stops the SHOW, not the build: autodeploy is
+    // its own unit and carries on building images and the cluster behind the
+    // desktop, with kldload-buildmon on screen to say so. A function key on
+    // purpose -- N/B/S/+/- are letters a viewer can hit by accident, and this one
+    // ends the presentation (operator, 2026-09-16: "f12 thats close to del").
+    else if (k === "F12") {
+      e.preventDefault();
+      if (dismissing) return;
+      dismissing = true;
+      keyHint("handing over - the build keeps running");
+      fetch("/api/firstboot-dismiss").then(function (r) { return r.json(); }).then(function (j) {
+        if (!j || !j.dismissed) { dismissing = false; keyHint("could not hand over - the build screen stays"); }
+      }).catch(function () { dismissing = false; keyHint("could not hand over - the build screen stays"); });
+    }
   });
+  // Guards the fetch so holding F12 does not queue one request per key repeat.
+  var dismissing = false;
   document.getElementById("event").onclick = function () { SCENES[cur].event(); };
   document.getElementById("pause").onclick = function () { paused = !paused; this.textContent = paused ? "run" : "pause"; };
 
@@ -2180,7 +2196,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   // and for a few seconds after any key is pressed -- and the all call says it
   // out loud now and then, because that is the line people actually read
   // (operator, 2026-09-15: "embed them into messages so user know about them").
-  var LEGEND = "N NEXT SLIDE   B BACK   S SCENE   + - SPEED   CTRL+ALT+F2 TERMINAL";
+  var LEGEND = "N NEXT SLIDE   B BACK   S SCENE   + - SPEED   F12 HAND OVER   CTRL+ALT+F2 TERMINAL";
   var legendUntil = Date.now() + 30000, hint = "", hintT = 0;
   function legendAlpha() {
     var left = (legendUntil - Date.now()) / 1000;
