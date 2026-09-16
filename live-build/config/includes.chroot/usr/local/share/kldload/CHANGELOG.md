@@ -1,5 +1,221 @@
 # Changelog
 
+## 1.5.0 — 16 September 2026
+
+257 commits since 1.4.2: 60 features, 168 fixes, 270 files changed.
+
+---
+
+This release is about provisioning and recovery — getting a rack built without a
+person at each keyboard, and getting a machine back when one dies. The ratio
+tells the rest of the story: 168 fixes against 60 features. Nearly every fix
+below was found the same way 1.4.2's were, by installing on real hardware and
+measuring what actually landed. This cycle that meant seven editions installed
+end to end on the same machine, repeatedly: core, server, net and desktop
+verified, and the three that did not — kvm, k8s and full — are what the last
+four fixes below came from. kvm has since verified clean on this build, with
+all ten golden images sealed and a first-boot smoke suite of 191 checks passing.
+
+### One key provisions the rack
+
+The live USB used to install one machine. It now serves the next one.
+
+An installed machine can retain the netboot payload it was built from, so
+machine one provisions machines two through N with no other infrastructure — no
+separate PXE server, no DHCP surgery, nothing to stand up first. The payload is
+the full darksite, deliberately: 15 GB over PXE so a rack can be built with no
+internet at all.
+
+Around it: per-MAC boot snippets so each machine gets its own answers, a boot
+menu so the distribution is chosen at the console, a configurator menu, answers
+taken from the kernel command line, and golden streams so a built machine can be
+cloned over HTTP rather than reinstalled.
+
+Four ways a netboot used to end quietly are now loud.
+
+### Rebuild a node from its replica
+
+Snapshots were already replicating. What was missing was the other half: taking a
+replica and making it boot somewhere else.
+
+A replicated boot environment can now be restamped for the machine it landed on,
+and a node can be rebuilt from its replica and then *proved* — a canary boot that
+checks the thing actually came up, rather than reporting that the receive
+finished. A restore that is not verified is a backup you have not tested.
+
+### The first boot explains itself
+
+A kldload install reaches a desktop long before it is finished, and the machine
+then spends up to an hour building golden images and a cluster behind a screen
+that looks idle. That gap is now the manual.
+
+The install show holds the screen through the reboot and into first boot: 380
+slides across 20 scenes, with the real build log in a window beside them, driven
+by keys the screen tells you about. It is not decoration — the worked examples
+are real commands with the output the machine actually printed, so the thing you
+watch while waiting is the thing you will type afterwards. F12 hands the machine
+over early if you would rather get on with it; the build carries on behind the
+desktop either way.
+
+An install kiosk runs it, so the show needs no desktop underneath it.
+
+### Firecracker microVMs on the same substrate
+
+Appliances can now be stamped as Firecracker microVMs from the ZFS zvols they
+already live on, run under the jailer as an unprivileged user, and be enrolled,
+metered, meshed and torn down exactly like the full VMs beside them. Clone and
+teardown run in parallel, with a TCP readiness probe for the clones that do not
+speak HTTP.
+
+Arbitrary VMs can also be put on a private WireGuard mesh.
+
+### Failures that reported success
+
+The largest single class of fix this cycle, and the one worth reading if you read
+nothing else.
+
+`klab` announced fifteen golden images ready and exited 0 after every one of
+them had failed to build. The exit status is what the orchestrator reads, so it
+wrote a ready marker over an empty pool. A golden is now "ready" when ZFS has the
+snapshot, not when the log says so.
+
+A systemd unit set `StandardOutput` twice — a file, and thirty lines below it a
+leftover `journal` from April. systemd silently takes the last one, and
+`systemd-analyze verify` is happy with both, so the first-boot smoke suite ran
+and its report went nowhere. There is now a gate that fails the build on any
+directive set twice in one section.
+
+The installer enabled the monolithic `libvirtd` on distributions that ship
+modular libvirt. The two conflict, so `virtqemud.socket` stayed inactive and
+every `virsh` call failed — which took out a Kubernetes bootstrap and fifteen
+golden images in one go, on the one profile combination nobody had tested.
+
+A first-boot script called a logging helper that only exists inside the
+installer: exit 127, command not found, on the benign path where the network was
+already up.
+
+Silent failures were cleared out of the whole install path — `kldload-firstboot`,
+`bootstrap.sh`, `profiles.sh`, `kldload-install-target`, and the storage and
+bootloader paths — and both ratchets that police them now hold at their
+baselines.
+
+### Why the shape is what it is
+
+Worth stating plainly, because most of what is above only makes sense if you
+know what was deliberately left out.
+
+**ZFS is the substrate, not a storage plugin.** Proxmox supports ZFS well, among
+LVM-thin, directory storage, Ceph and the rest — which means nothing in it can
+*assume* ZFS. kldload assumes it, and that assumption is what the whole product
+is made of. A VM disk is a zvol. A new node is a clone of a golden zvol. A
+backup is a snapshot. Disaster recovery is send, receive, restamp, boot. None of
+those are features that were added; they are the filesystem behaving normally,
+and the tooling is thin because it has to be.
+
+**No qcow2, no image files, no format layer.** A qcow2 file is a
+copy-on-write filesystem implemented inside a file that is itself sitting on a
+copy-on-write filesystem. That is the same work done twice, with a backing-file
+chain that lengthens as you clone and eventually wants consolidating. A zvol is
+a block device on the pool: one copy-on-write layer, no chain, no consolidation,
+no format to convert when you move it. `kube-demo` measures the clone on the
+machine in front of you and prints the milliseconds it took — a 40 GB disk,
+created by writing metadata. It is not a benchmark we are asking you to believe;
+it is a command you run.
+
+The knock-on effects are the interesting part. Every node in a six-node cluster
+stores only the blocks that diverged from the one golden image, so cluster size
+stops being a disk-capacity question. Compression and the ARC operate on real
+blocks rather than through a format layer. A snapshot of a running VM is
+instant, and so is the rollback.
+
+**Immutable where it helps, ordinary Linux where it does not.** Talos is
+genuinely excellent at what it does, and what it does is remove the shell. That
+is the right trade for a fleet that never needs debugging by hand and the wrong
+one the first time it does. kldload is immutable at *deployment* — the install
+is reproducible, air-gappable and rebuilt from a manifest rather than patched
+into shape — and a full mutable Linux once it is running. You can `ssh` in and
+read the logs, because eventually you will have to.
+
+**Provisioning tools assume a substrate exists.** MAAS and Foreman are
+provisioning layers, and good ones, but both start from the premise that
+something already stands up the machine underneath. This release closes that
+gap from the other direction: the live key *is* the infrastructure. One machine
+is installed by hand, retains its netboot payload, and provisions the rest of
+the rack over PXE with the full offline mirror — no DHCP surgery, no separate
+server, no internet.
+
+**The class of work that disappears.** This is the part worth saying out loud.
+
+When a node is a clone of a golden image, and the install that produced the
+golden is reproducible from a manifest rather than patched into shape by hand,
+the response to a broken machine changes category. It stops being *diagnose,
+form a theory, apply a change, hope* and becomes *destroy, replace, carry on*.
+The replacement is not "a machine like the old one"; it is the same blocks from
+the same snapshot, which is why you can trust it without re-testing it.
+
+That removes work rather than automating it. Configuration drift stops being a
+thing you detect and reconcile, because nothing drifts — the node is replaced,
+not repaired. The long tail of "this one box is weird" evaporates, because there
+is no mechanism by which a box becomes weird and survives. Most of a
+troubleshooting session is establishing what state a machine is actually in, and
+that question stops being interesting when the answer is always "identical to
+the golden, plus whatever diverged since Tuesday, and here is the snapshot."
+
+It works because the two halves meet. Layer zero — before the OS, the firmware
+and boot path and pool layout — is provisioned by the same artefact that
+installs layer one, from one key, over PXE, offline. Neither half assumes the
+other was done by somebody else, which is exactly the seam that normally leaks:
+a provisioning tool that hands off to a configuration tool that inherits a
+machine neither of them fully built.
+
+The honest limit: the *machine* is disposable, the *pool* is not. Data, state
+and the goldens themselves still need the care they always did — which is what
+the replication and the restamped-and-canaried restore in this release are for.
+Destroy-and-replace is a claim about compute, not about storage, and a product
+that blurs that line is lying to you.
+
+**And the automation is the boring kind.** Answers come from a file or the
+kernel command line, per-MAC snippets give each machine its own, and the whole
+thing is verifiable afterwards: this cycle every edition was installed end to
+end on real hardware and checked against what the answers asked for, which is
+how the four worst defects in this release were found.
+
+None of this is invention. It is an opinionated assembly of proven parts, and
+the opinions are the product.
+
+### Two defaults changed
+
+Neither breaks an existing answers file, but both change what a machine does:
+
+- **ZFS encryption defaults to off.** State it explicitly if you want it.
+- **Shipped answer templates no longer carry a real default password.** The old
+  templates did, which is exactly the kind of thing that gets copied once and
+  lives forever.
+
+### Also
+
+- The desktop keymap rotates workspaces, `Super+G` tiles into a grid, and
+  `Ctrl+Delete` opens a command center
+- A metrics explorer that walks the machine as a tree, BPF run-time statistics,
+  and dashboards that read zero rather than blank when there is nothing to show
+- Storage controller, firmware and drive health reported without a vendor tool
+- Guests get a sound card and something to drive it
+- The ISO build chooses what it carries: payload, darksites, Kubernetes images,
+  Ollama
+- The installer refuses to create `rpool` while another importable pool already
+  has that name — three importable pools called `rpool` is how a machine boots
+  into the wrong one
+
+### Known issues
+
+- Around forty shipped tools have no `-h`/`--help` handler and will run their
+  actual job if handed one. Thirteen were fixed this cycle; the rest are queued.
+- `builder/build-iso.sh` is the last script not running under strict mode, held
+  back deliberately because the only honest test of it is a full build.
+- The installation media carries a shared module-signing key. This is currently
+  by design — any machine installed from that media can be resurrected by it —
+  but a per-site key generated at build time is the intended replacement.
+
 ## 1.4.2 — 28 August 2026
 
 195 commits since 1.4.1: 30 features, 127 fixes, 120 files changed.
