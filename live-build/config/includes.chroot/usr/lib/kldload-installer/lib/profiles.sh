@@ -746,6 +746,7 @@ k_profile_optional_packages() {
     # Auto-detect hypervisor and add guest tools so the installed system
     # cooperates with the host (graceful shutdown, time sync, etc.)
     local virt
+    # swallow: systemd-detect-virt exits 1 on bare metal, which is an answer, not a failure
     virt="$(systemd-detect-virt 2>/dev/null || true)"
     case "${virt}" in
     vmware) out+=(open-vm-tools) ;;
@@ -1304,7 +1305,8 @@ k_install_system_files() {
         # since the base model has zero kldload training.
         if [[ -d /usr/local/share/kldload-ai ]]; then
             mkdir -p "${target}/usr/local/share/kldload-ai"
-            cp /usr/local/share/kldload-ai/*.txt "${target}/usr/local/share/kldload-ai/" 2>/dev/null || true
+            cp /usr/local/share/kldload-ai/*.txt "${target}/usr/local/share/kldload-ai/" 2>/dev/null ||
+                k_log "WARNING: AI prompt files not copied to the target"
             k_log "Bob docs corpus copied to target ($(du -sh "${target}/usr/local/share/kldload-ai" 2>/dev/null | cut -f1))"
         fi
 
@@ -1336,13 +1338,16 @@ k_install_system_files() {
         # Creating the symlinks manually achieves the same effect.
         mkdir -p "${target}/etc/systemd/system/timers.target.wants"
         ln -sf "/usr/lib/systemd/system/kldload-srv-snapshot.timer" \
-            "${target}/etc/systemd/system/timers.target.wants/kldload-srv-snapshot.timer" || true
+            "${target}/etc/systemd/system/timers.target.wants/kldload-srv-snapshot.timer" ||
+            k_log "WARNING: could not enable kldload-srv-snapshot.timer on the target — it will not start at boot"
         # Sanoid scheduled snapshots (daily/weekly/monthly/yearly)
         ln -sf "/lib/systemd/system/sanoid.timer" \
-            "${target}/etc/systemd/system/timers.target.wants/sanoid.timer" || true
+            "${target}/etc/systemd/system/timers.target.wants/sanoid.timer" ||
+            k_log "WARNING: could not enable sanoid.timer on the target — it will not start at boot"
         # Prometheus file_sd target regeneration (every 30s, zero hardcoded IPs)
         ln -sf "/usr/lib/systemd/system/klab-prom-targets.timer" \
-            "${target}/etc/systemd/system/timers.target.wants/klab-prom-targets.timer" || true
+            "${target}/etc/systemd/system/timers.target.wants/klab-prom-targets.timer" ||
+            k_log "WARNING: could not enable klab-prom-targets.timer on the target — it will not start at boot"
 
         # The inventory sync: copies each running VM's DHCP lease from libvirt
         # into the state DB every 60s. kldload-inventory selects VMs
@@ -1390,14 +1395,17 @@ k_install_system_files() {
         # ln -sf replaces one silently; a read-only wants dir must not abort the
         # whole install for one timer the operator can enable by hand.
         ln -sf "/usr/lib/systemd/system/kldload-collect.timer" \
-            "${target}/etc/systemd/system/timers.target.wants/kldload-collect.timer" || true
+            "${target}/etc/systemd/system/timers.target.wants/kldload-collect.timer" ||
+            k_log "WARNING: could not enable kldload-collect.timer on the target — it will not start at boot"
 
         mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
         ln -sf "/usr/lib/systemd/system/kldload-firstboot.service" \
-            "${target}/etc/systemd/system/multi-user.target.wants/kldload-firstboot.service" || true
+            "${target}/etc/systemd/system/multi-user.target.wants/kldload-firstboot.service" ||
+            k_log "WARNING: could not enable kldload-firstboot.service on the target — it will not start at boot"
         # kldload-webui enabled at boot (firstboot also starts it, but enable here for robustness)
         ln -sf "/usr/lib/systemd/system/kldload-webui.service" \
-            "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" || true
+            "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" ||
+            k_log "WARNING: could not enable kldload-webui.service on the target — it will not start at boot"
 
         # ── RHEL firstboot composer build ──────────────────────────────────
         # Wires kldload-rhel-composer.service into multi-user.target.wants/.
@@ -1408,7 +1416,8 @@ k_install_system_files() {
         # (RH's password-grant SSO API is dead; composer is the replacement).
         if [[ -f /usr/lib/systemd/system/kldload-rhel-composer.service ]]; then
             ln -sf "/usr/lib/systemd/system/kldload-rhel-composer.service" \
-                "${target}/etc/systemd/system/multi-user.target.wants/kldload-rhel-composer.service" || true
+                "${target}/etc/systemd/system/multi-user.target.wants/kldload-rhel-composer.service" ||
+                k_log "WARNING: could not enable kldload-rhel-composer.service on the target — it will not start at boot"
         fi
         install -d -m 0755 "${target}/var/lib/klab/images"
         # ── 1.0.6 TLS-terminator: nginx ─────────────────────────────────────
@@ -1427,8 +1436,10 @@ k_install_system_files() {
             # Preserve anything the target's nginx RPM/DEB shipped that our
             # includes.chroot tree doesn't touch (e.g. mime.types, modules-*).
             cp -r /etc/nginx/conf.d "${target}/etc/nginx/" 2>/dev/null || true
-            cp -r /etc/nginx/kldload "${target}/etc/nginx/" 2>/dev/null || true
-            cp /etc/nginx/nginx.conf "${target}/etc/nginx/nginx.conf" 2>/dev/null || true
+            cp -r /etc/nginx/kldload "${target}/etc/nginx/" 2>/dev/null ||
+                k_log "WARNING: nginx helper configs not copied — the web UI proxy will not start"
+            cp /etc/nginx/nginx.conf "${target}/etc/nginx/nginx.conf" 2>/dev/null ||
+                k_log "WARNING: nginx.conf not copied to the target — the web UI proxy will not start"
             mkdir -p "${target}/etc/nginx/conf.d/kldload-dyn"
             # Nginx system user differs by distro: RHEL/Fedora ship `nginx`,
             # Debian/Ubuntu ship `www-data`. Our shipped nginx.conf uses
@@ -1438,7 +1449,8 @@ k_install_system_files() {
             case "${KLDLOAD_DISTRO:-centos}" in
             debian | ubuntu)
                 sed -i 's|^[[:space:]]*user[[:space:]]\+nginx;|user www-data;|' \
-                    "${target}/etc/nginx/nginx.conf" 2>/dev/null || true
+                    "${target}/etc/nginx/nginx.conf" 2>/dev/null ||
+                    k_log "WARNING: could not patch nginx.conf on the target"
                 ;;
             esac
             k_log "nginx config tree copied to target"
@@ -1448,7 +1460,8 @@ k_install_system_files() {
         mkdir -p "${target}/etc/systemd/system/nginx.service.d"
         if [[ -d /etc/systemd/system/nginx.service.d ]]; then
             cp /etc/systemd/system/nginx.service.d/*.conf \
-                "${target}/etc/systemd/system/nginx.service.d/" 2>/dev/null || true
+                "${target}/etc/systemd/system/nginx.service.d/" 2>/dev/null ||
+                k_log "WARNING: nginx drop-in not copied to the target"
         fi
         # Session metadata dir (kldload-session writes here).
         mkdir -p "${target}/var/lib/kldload/sessions"
@@ -1489,7 +1502,8 @@ k_install_system_files() {
         fi
         # Enable nginx at boot.
         ln -sf "/usr/lib/systemd/system/nginx.service" \
-            "${target}/etc/systemd/system/multi-user.target.wants/nginx.service" || true
+            "${target}/etc/systemd/system/multi-user.target.wants/nginx.service" ||
+            k_log "WARNING: could not enable nginx.service on the target — it will not start at boot"
         # kldload-proxy kept on disk for rollback, but NOT enabled AND MASKED
         # so systemd won't auto-restart-loop it against nginx (it'll keep
         # failing with port-in-use since nginx already owns :8443). Masking
@@ -1499,12 +1513,14 @@ k_install_system_files() {
         # disable nginx; systemctl start kldload-proxy`.
         rm -f "${target}/etc/systemd/system/multi-user.target.wants/kldload-proxy.service" 2>/dev/null || true
         mkdir -p "${target}/etc/systemd/system"
+        # swallow: masking kldload-proxy is belt to the braces of not enabling it
         ln -sf /dev/null "${target}/etc/systemd/system/kldload-proxy.service" 2>/dev/null || true
         # Autodeploy orchestrator — runs once after firstboot, invokes AI pull
         # + K8s bootstrap + klab goldens in dependency order, writes phase-ready
         # markers the UI reads to turn the Lab Ready banner green.
         ln -sf "/usr/lib/systemd/system/kldload-autodeploy.service" \
-            "${target}/etc/systemd/system/multi-user.target.wants/kldload-autodeploy.service" || true
+            "${target}/etc/systemd/system/multi-user.target.wants/kldload-autodeploy.service" ||
+            k_log "WARNING: could not enable kldload-autodeploy.service on the target — it will not start at boot"
         # The first-boot build screen. Enabled on every install; it decides at
         # boot, from `kldload-autodeploy --want`, whether there is anything to
         # show, so core, server and a plain desktop skip it in one fork and come
@@ -1551,7 +1567,8 @@ k_install_system_files() {
         # works as soon as the webui is reachable.
         [[ -f "${target}/usr/lib/systemd/system/ttyd-k9s.service" ]] &&
             ln -sf "/usr/lib/systemd/system/ttyd-k9s.service" \
-                "${target}/etc/systemd/system/multi-user.target.wants/ttyd-k9s.service" || true
+                "${target}/etc/systemd/system/multi-user.target.wants/ttyd-k9s.service" ||
+            k_log "WARNING: could not enable ttyd-k9s.service on the target — it will not start at boot"
 
         # ── Fix websockets version (CentOS 9 RPM is too old for websockets.http11) ──
         # The kldload-webui Python server requires websockets.http11 (v11+ API).
@@ -1682,6 +1699,7 @@ DASHSTART
                 install -m 0644 "$_lnch" \
                     "${target}/usr/share/applications/$(basename "$_lnch")"
             done
+            # swallow: the desktop database is a cache; a missing tool only delays menu entries
             chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
 
             # Custom kldload app icons (gold-on-slate set) — copy the scalable theme
@@ -1752,6 +1770,7 @@ DASHSTART
                     "${target}/usr/share/icons/hicolor/scalable/apps/utilities-terminal.svg"
                 k_log "icons: utilities-terminal symlinked from breeze (${_btv}px) — Konsole dock pin now resolves"
             fi
+            # swallow: the icon cache is rebuilt by the desktop on first login anyway
             chroot "${target}" gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
 
             # Curate stock launchers (package-owned, so patched on-target, idempotent):
@@ -1912,6 +1931,7 @@ DASHSTART
                 # ordering accident away, and that is exactly what happened.
                 _no_login_gui=1
             fi
+            # swallow: as above — a cache, not state
             chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
         fi
 
@@ -1942,15 +1962,20 @@ DASHSTART
                 # default WantedBy enable intact.
                 k_log "Web ops console: enabled at boot (opt-in via Platform Options)."
             else
+                # swallow: disabling a unit that was never enabled is the normal case here
                 chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
+                # swallow: as above
                 chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
+                # swallow: as above
                 chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
             fi
             ;;
         *)
             # core (and any unknown profile) — disable.
             chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
+            # swallow: as above
             chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
+            # swallow: as above
             chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
             ;;
         esac
@@ -2182,7 +2207,9 @@ DASHSTART
         # Copy smoke tests to installed system
         if [[ -d /usr/local/share/kldload/tests ]]; then
             mkdir -p "${target}/usr/local/share/kldload/tests"
-            cp /usr/local/share/kldload/tests/*.sh "${target}/usr/local/share/kldload/tests/" 2>/dev/null || true
+            cp /usr/local/share/kldload/tests/*.sh "${target}/usr/local/share/kldload/tests/" 2>/dev/null ||
+                k_log "WARNING: smoke-test suite not copied to the target — the first-boot smoke unit will have nothing to run"
+            # swallow: chmod on a glob that matched nothing, which the copy above already reported
             chmod +x "${target}/usr/local/share/kldload/tests/"*.sh 2>/dev/null || true
             # Convenience symlink: kldload-test runs the full report
             ln -sf /usr/local/share/kldload/tests/smoke-all.sh "${target}/usr/local/bin/kldload-test" 2>/dev/null || true
@@ -2682,6 +2709,7 @@ CHROMEPOLICY
     # ── GDM login screen (dconf db + profile + config) ────────────────────────────
     if [[ -d /etc/dconf/db/gdm.d ]]; then
         mkdir -p "${target}/etc/dconf/db/gdm.d"
+        # swallow: the GDM login dconf tweak is cosmetic and absent on non-GNOME targets
         cp /etc/dconf/db/gdm.d/00-kldload-login "${target}/etc/dconf/db/gdm.d/00-kldload-login" 2>/dev/null || true
         [[ -f /etc/dconf/profile/gdm ]] && cp /etc/dconf/profile/gdm "${target}/etc/dconf/profile/gdm"
     fi
@@ -2746,7 +2774,8 @@ EOLDM
         # Debian gates autologin on this group: without it lightdm ignores
         # autologin-user and still shows the greeter.
         chroot "${target}" sh -c 'getent group autologin >/dev/null 2>&1 || groupadd -r autologin' 2>/dev/null || true
-        chroot "${target}" usermod -aG autologin "${_install_user}" 2>/dev/null || true
+        chroot "${target}" usermod -aG autologin "${_install_user}" 2>/dev/null ||
+            k_log "WARNING: ${_install_user} not added to the autologin group — autologin will not take effect"
         k_log "lightdm autologin configured for ${_install_user} (install-time)"
     fi
 
@@ -2902,7 +2931,8 @@ WPEOF
         _uid="$(chroot "${target}" id -u "${_user}" 2>/dev/null || echo '')"
         _gid="$(chroot "${target}" id -g "${_user}" 2>/dev/null || echo '')"
         [[ -n "$_uid" && -n "$_gid" ]] &&
-            chown -R "${_uid}:${_gid}" "${_user_home}/" 2>/dev/null || true
+            chown -R "${_uid}:${_gid}" "${_user_home}/" 2>/dev/null ||
+            k_log "WARNING: could not chown ${_user_home} — the operator account may not own its own home"
     fi
 
     # ── Performance tuning (sysctl, ZFS ARC, I/O scheduler) ─────────────────────
@@ -2926,6 +2956,7 @@ WPEOF
     if [[ "$_profile" != "core" && -d /usr/lib/kldload-installer/backend ]]; then
         mkdir -p "${target}/usr/lib/kldload-installer/backend/bin"
         cp -r /usr/lib/kldload-installer/backend/. "${target}/usr/lib/kldload-installer/backend/"
+        # swallow: chmod on a glob that matched nothing (this profile ships no backend bins)
         chmod +x "${target}/usr/lib/kldload-installer/backend/bin/"* 2>/dev/null || true
         # Expose backend tools in PATH with short names
         mkdir -p "${target}/usr/local/bin"
@@ -3060,7 +3091,9 @@ WPEOF
         fi
         mkdir -p "${target}/etc/kernel/postinst.d"
         cp "${tgt_files}/etc/kernel/postinst.d/kldload-dkms-verify" \
-            "${target}/etc/kernel/postinst.d/kldload-dkms-verify" 2>/dev/null || true
+            "${target}/etc/kernel/postinst.d/kldload-dkms-verify" 2>/dev/null ||
+            k_log "WARNING: kldload-dkms-verify kernel hook not installed — a kernel update could leave ZFS unbuilt and unnoticed"
+        # swallow: the copy above already reported if there is nothing to make executable
         chmod +x "${target}/etc/kernel/postinst.d/kldload-dkms-verify" 2>/dev/null || true
     fi
 
@@ -3089,7 +3122,8 @@ WPEOF
             cp "$mirror_svc" "${target}/usr/lib/systemd/system/kldload-apt-mirror.service"
             mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
             ln -sf "/usr/lib/systemd/system/kldload-apt-mirror.service" \
-                "${target}/etc/systemd/system/multi-user.target.wants/kldload-apt-mirror.service" || true
+                "${target}/etc/systemd/system/multi-user.target.wants/kldload-apt-mirror.service" ||
+                k_log "WARNING: could not enable kldload-apt-mirror.service on the target — it will not start at boot"
             k_log "kldload-apt-mirror.service enabled on target"
         fi
     fi
@@ -3112,7 +3146,8 @@ WPEOF
             -o mountpoint=none \
             -o compression=lz4 \
             -o recordsize=64K \
-            rpool/vms 2>/dev/null || true
+            rpool/vms 2>/dev/null ||
+            k_log "WARNING: could not create rpool/vms — VM storage will land on the root dataset"
         # Create the libvirt images directory for ISO storage and any qcow2 fallback
         mkdir -p "${target}/var/lib/libvirt/images" 2>/dev/null || true
 
@@ -3120,7 +3155,8 @@ WPEOF
         zfs create -o mountpoint=/var/lib/libvirt/isos \
             -o compression=zstd \
             -o atime=off \
-            rpool/vms/isos 2>/dev/null || true
+            rpool/vms/isos 2>/dev/null ||
+            k_log "WARNING: could not create rpool/vms/isos"
 
         # ARC tuning — cap at 50% of system RAM, leave the rest for KVM guests
         local _total_ram_bytes
@@ -3294,6 +3330,7 @@ REPL
         # ebpf_exporter configs (biolatency, bio-trace yaml + .bpf.o)
         if [[ -d /etc/ebpf_exporter ]]; then
             mkdir -p "${target}/etc/ebpf_exporter"
+            # swallow: eBPF exporter config is only present when that profile carries it
             cp -r /etc/ebpf_exporter/* "${target}/etc/ebpf_exporter/" 2>/dev/null || true
         fi
         # zed → Loki event shipping script
@@ -3332,6 +3369,7 @@ REPL
         # Admin-editable TLS extra-SANs config (custom DNS names / VIPs)
         if [[ -d /etc/kldload ]]; then
             mkdir -p "${target}/etc/kldload"
+            # swallow: no .txt files to carry on this profile
             cp /etc/kldload/*.txt "${target}/etc/kldload/" 2>/dev/null || true
         fi
         # node_exporter override (disable broken zfs collector, enable textfile)
@@ -3393,7 +3431,8 @@ REPL
             # only caught 6 top-level files (~6 dashboards), losing all 16
             # in subfolders. Caught .142 2026-05-17.
             cp -r /var/lib/grafana/dashboards/. \
-                "${target}/var/lib/grafana/dashboards/" 2>/dev/null || true
+                "${target}/var/lib/grafana/dashboards/" 2>/dev/null ||
+                k_log "WARNING: Grafana dashboards not copied — the metrics UI will come up empty"
         fi
         # Provisioner config — kldload.yaml has the per-folder provider
         # mapping; without it Grafana falls back to a stub klab.yaml (or
@@ -3402,9 +3441,11 @@ REPL
             mkdir -p "${target}/etc/grafana/provisioning/dashboards" \
                 "${target}/etc/grafana/provisioning/datasources"
             cp -r /etc/grafana/provisioning/dashboards/. \
-                "${target}/etc/grafana/provisioning/dashboards/" 2>/dev/null || true
+                "${target}/etc/grafana/provisioning/dashboards/" 2>/dev/null ||
+                k_log "WARNING: Grafana dashboard provisioning not copied"
             cp -r /etc/grafana/provisioning/datasources/. \
-                "${target}/etc/grafana/provisioning/datasources/" 2>/dev/null || true
+                "${target}/etc/grafana/provisioning/datasources/" 2>/dev/null ||
+                k_log "WARNING: Grafana datasource provisioning not copied — dashboards will have no data source"
         fi
 
     fi
@@ -3429,7 +3470,8 @@ Persistent=true
 WantedBy=timers.target
 SNAPTMR
         ln -sf /etc/systemd/system/kvm-snapshot.timer \
-            "${target}/etc/systemd/system/timers.target.wants/kvm-snapshot.timer" 2>/dev/null || true
+            "${target}/etc/systemd/system/timers.target.wants/kvm-snapshot.timer" 2>/dev/null ||
+            k_log "WARNING: could not enable kvm-snapshot.timer on the target — VM snapshots will not be taken"
 
         # Add VM datasets to sanoid for snapshot management
         if [[ -f "${target}/etc/sanoid/sanoid.conf" ]]; then
@@ -3529,7 +3571,8 @@ STORAGE
 DOCKERJSON
 
         if chroot "${target}" sh -c 'command -v dockerd >/dev/null 2>&1'; then
-            chroot "${target}" systemctl enable docker 2>/dev/null || true
+            chroot "${target}" systemctl enable docker 2>/dev/null ||
+                k_log "WARNING: docker not enabled on the target"
             # Verify the OUTCOME, not that the files were written. A dataset
             # and a config prove intent; only the driver Docker actually chose
             # proves the result, and it cannot be re-chosen later without
@@ -3636,6 +3679,7 @@ if ! _net_ready; then
     # and give it a final window. Both units are absent on a monolithic
     # libvirtd host, where the first poll would already have succeeded.
     _log "libvirt network driver not answering — starting virtnetworkd"
+    # swallow: libvirt socket activation may already have started these
     systemctl start virtnetworkd.socket virtnetworkd.service 2>/dev/null || true
     for _ in $(seq 1 30); do
         _net_ready && break
@@ -3654,7 +3698,9 @@ if virsh -c qemu:///system net-info "$_net" >/dev/null 2>&1; then
     _active=$(virsh -c qemu:///system net-info "$_net" | awk '/^Active:/ {print $2}')
     if [[ "$_active" != "yes" ]]; then
         _log "net '$_net' present but inactive — recreating"
+        # swallow: tearing down a network that may not be defined — this is cleanup
         virsh -c qemu:///system net-destroy "$_net" 2>/dev/null || true
+        # swallow: as above
         virsh -c qemu:///system net-undefine "$_net" 2>/dev/null || true
     fi
 fi
@@ -3690,7 +3736,8 @@ NETXML
     fi
 fi
 virsh -c qemu:///system net-autostart "$_net" >/dev/null
-virsh -c qemu:///system net-start "$_net" 2>/dev/null || true
+virsh -c qemu:///system net-start "$_net" 2>/dev/null ||
+    k_log "WARNING: could not start libvirt network ${_net} — VMs on it will have no bridge"
 
 # Final verification: must be Active AND Persistent. Anything else is a fail.
 _status=$(virsh -c qemu:///system net-info "$_net" 2>/dev/null | awk '/^(Active|Persistent):/ {print $1$2}' | sort | xargs)
@@ -3754,7 +3801,8 @@ Unit=kldload-virbr0.service
 [Install]
 WantedBy=timers.target
 VIRBR0TMR
-        chroot "${target}" systemctl enable kldload-virbr0.service kldload-virbr0.timer 2>/dev/null || true
+        chroot "${target}" systemctl enable kldload-virbr0.service kldload-virbr0.timer 2>/dev/null ||
+            k_log "WARNING: kldload-virbr0 units not enabled — the VM bridge may not come up at boot"
 
         k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools, Podman ZFS driver"
     fi
@@ -3859,15 +3907,33 @@ K8SSYS
         # ZFS datasets for K8s components
         local root_pool
         root_pool="${root_ds%%/*}"
+        # swallow: these run INSIDE the chroot, where k_log does not exist and a
+        # dataset that already exists is a normal re-run; the outcome is checked
+        # against the target right after the call instead.
         chroot "${target}" bash -c "
+      # swallow: inside the chroot; an existing dataset is a re-run, and the loop
+      # after this call reports any that are genuinely missing
       zfs create -p -o mountpoint=/var/lib/etcd -o recordsize=8K -o compression=lz4 -o atime=off ${root_pool}/var/lib/etcd 2>/dev/null || true
+      # swallow: inside the chroot; an existing dataset is a re-run, and the loop
+      # after this call reports any that are genuinely missing
       zfs create -p -o mountpoint=/var/lib/containerd -o compression=lz4 -o atime=off ${root_pool}/var/lib/containerd 2>/dev/null || true
+      # swallow: inside the chroot; an existing dataset is a re-run, and the loop
+      # after this call reports any that are genuinely missing
       zfs create -p -o mountpoint=/var/lib/kubelet -o compression=lz4 -o atime=off ${root_pool}/var/lib/kubelet 2>/dev/null || true
+    # swallow: as above — the verification loop below is the real check
     " 2>/dev/null || true
+        # Verify the OUTCOME: a component whose dataset is missing silently shares
+        # the root dataset, which is exactly the surprise this split exists to avoid.
+        local _k8s_ds
+        for _k8s_ds in var/lib/etcd var/lib/containerd var/lib/kubelet; do
+            chroot "${target}" zfs list -H -o name "${root_pool}/${_k8s_ds}" >/dev/null 2>&1 ||
+                k_log "WARNING: dataset ${root_pool}/${_k8s_ds} was not created — that component will live on the root dataset"
+        done
 
         # containerd config with SystemdCgroup
         mkdir -p "${target}/etc/containerd"
-        chroot "${target}" bash -c 'containerd config default > /etc/containerd/config.toml 2>/dev/null; sed -i "s/SystemdCgroup = false/SystemdCgroup = true/" /etc/containerd/config.toml 2>/dev/null' || true
+        chroot "${target}" bash -c 'containerd config default > /etc/containerd/config.toml 2>/dev/null; sed -i "s/SystemdCgroup = false/SystemdCgroup = true/" /etc/containerd/config.toml 2>/dev/null' ||
+            k_log "WARNING: containerd config not written — the kubelet may not use the systemd cgroup driver"
 
         # crictl config
         cat >"${target}/etc/crictl.yaml" <<'CRICTLCFG'
@@ -3879,7 +3945,8 @@ CRICTLCFG
 
         # Enable containerd and kubelet
         chroot "${target}" systemctl enable containerd 2>/dev/null || true
-        chroot "${target}" systemctl enable kubelet 2>/dev/null || true
+        chroot "${target}" systemctl enable kubelet 2>/dev/null ||
+            k_log "WARNING: kubelet not enabled on the target"
 
         # K8s bootstrap is manual — the user runs "kube-cluster bootstrap" after
         # first login so they can watch the full deployment live: ZFS clones,
@@ -4024,7 +4091,8 @@ Unit=klab-firstboot.service
 WantedBy=timers.target
 KLABTIMER
         ln -sf /etc/systemd/system/klab-firstboot.timer \
-            "${target}/etc/systemd/system/timers.target.wants/klab-firstboot.timer" 2>/dev/null || true
+            "${target}/etc/systemd/system/timers.target.wants/klab-firstboot.timer" 2>/dev/null ||
+            k_log "WARNING: could not enable klab-firstboot.timer on the target — no golden images will be built at first boot"
         # Remove any boot-blocking enablement left by an earlier install.
         rm -f "${target}/etc/systemd/system/multi-user.target.wants/klab-firstboot.service" 2>/dev/null || true
         k_log "klab will auto-build golden images on first boot (centos/rocky/fedora/debian/ubuntu/rhel — RHEL skipped if creds+image unavailable)"
@@ -4033,7 +4101,8 @@ KLABTIMER
         for _svc in klab-exporter klab-hubble-relay; do
             if [[ -f "${target}/usr/lib/systemd/system/${_svc}.service" ]]; then
                 ln -sf "/usr/lib/systemd/system/${_svc}.service" \
-                    "${target}/etc/systemd/system/multi-user.target.wants/${_svc}.service" 2>/dev/null || true
+                    "${target}/etc/systemd/system/multi-user.target.wants/${_svc}.service" 2>/dev/null ||
+                    k_log "WARNING: could not enable ${_svc}.service on the target — it will not start at boot"
                 k_log "Enabled ${_svc}.service"
             fi
         done
