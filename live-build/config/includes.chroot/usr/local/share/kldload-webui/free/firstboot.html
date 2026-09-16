@@ -1919,8 +1919,23 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   var LAB = Q.get("lab") === "1", MIN = LAB ? 40 : 90, MAX = LAB ? 70 : 90;
   if (LAB) document.getElementById("lab").hidden = false;
   // No pointer on the machine: cage shows the cursor wherever a mouse left it, and the
-  // kiosk screenshots on fiend had an arrow parked over the scene (2026-09-15).
-  else document.documentElement.style.cursor = "none";
+  // kiosk screenshots on fiend had an arrow parked over the scene (2026-09-15). But
+  // hiding it outright makes the page unusable in an ordinary browser -- the operator
+  // moved the mouse into the window on onyx and it vanished. So it hides itself only
+  // after three seconds of stillness, which on the machine is immediately and forever,
+  // and on a desk is the behaviour every video player already has.
+  else {
+    var curTimer = null;
+    function hideCursor() { document.documentElement.style.cursor = "none"; }
+    function wakeCursor() {
+      document.documentElement.style.cursor = "";
+      if (curTimer) clearTimeout(curTimer);
+      curTimer = setTimeout(hideCursor, 3000);
+    }
+    hideCursor();
+    addEventListener("mousemove", wakeCursor, { passive: true });
+    addEventListener("mousedown", wakeCursor, { passive: true });
+  }
   var bag = [], cur = -1, curAt = 0, curDur = 0, wipe = 0, nextBeat = 1;
   // Every scene plays once before any plays again (operator, 2026-09-15: "it should
   // go through all of the screen types before going back to the same one"). The bag
