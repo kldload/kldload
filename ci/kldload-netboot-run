@@ -56,8 +56,17 @@ PHASES=(build smoke stage arm boot watch installed ready verify)
 
 ANSWERS="" HOSTS="" FROM="" UNTIL="" DO_BUILD=0 DO_SMOKE=1 READY_TIMEOUT="" ISO_ARG=""
 usage() {
-    sed -n '/^# USAGE/,/^# INPUTS/p' "$0" | sed 's/^# \{0,1\}//' >&2
-    exit 2
+    # Asked-for help is the output the caller wanted: stdout, exit 0. A usage
+    # ERROR is a diagnostic: stderr, exit 2 (the code documented at the top).
+    # Both went to stderr with exit 2 before, so `kldload-netboot-run --help`
+    # answered correctly and then reported failure.
+    local _rc=${1:-2}
+    if ((_rc == 0)); then
+        sed -n '/^# USAGE/,/^# INPUTS/p' "$0" | sed 's/^# \{0,1\}//'
+    else
+        sed -n '/^# USAGE/,/^# INPUTS/p' "$0" | sed 's/^# \{0,1\}//' >&2
+    fi
+    exit "$_rc"
 }
 while (($#)); do
     case "$1" in
@@ -69,7 +78,7 @@ while (($#)); do
     --no-smoke) DO_SMOKE=0 && shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?}" && shift 2 ;;
     --iso) ISO_ARG="${2:?}" && shift 2 ;;
-    -h | --help) usage ;;
+    -h | --help) usage 0 ;;
     *) usage ;;
     esac
 done

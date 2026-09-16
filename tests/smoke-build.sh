@@ -2791,6 +2791,32 @@ else
     fi
 fi
 
+# --help must not need root. Rule 9 says a tool answers --help first, without
+# root, and exits 0. `klab --help` asked for a password to print text, because
+# its help sat in the dispatcher a hundred lines past the re-exec; sweeping the
+# other 254 shell files found eight more (2026-09-16).
+#
+# The gate RUNS each tool with a stub sudo on PATH rather than reading it: a
+# re-exec inside a function body is above the help case in the file and below it
+# at runtime, so line order proves nothing. Tools with no handler yet are listed
+# in tests/help-without-root-baseline.txt, which may only ever shrink.
+_section "--help without root"
+
+_hr_script="$ROOT/tests/check-help-without-root.sh"
+if [[ ! -r "$_hr_script" ]]; then
+    _didnotrun "--help without root" "tests/check-help-without-root.sh is missing"
+else
+    _hr_out="$(cd "$ROOT" && bash "$_hr_script" 2>&1)" && _hr_rc=0 || _hr_rc=$?
+    if [[ "$_hr_rc" -eq 0 ]]; then
+        _pass "--help without root: $(printf '%s' "$_hr_out" | head -n 1)"
+    elif [[ "$_hr_rc" -eq 2 ]]; then
+        _didnotrun "--help without root" "$(printf '%s' "$_hr_out" | tail -n 1)"
+    else
+        _fail "--help without root" \
+            "$(printf '%s' "$_hr_out" | grep -E 'ASKED-FOR-ROOT|exit=' | head -n 3 | tr '\n' ' ')"
+    fi
+fi
+
 _section "systemd drop-ins"
 
 _di_src="$ROOT/live-build/config/includes.chroot/usr/lib/systemd/system"
