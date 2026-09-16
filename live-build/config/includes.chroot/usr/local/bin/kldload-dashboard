@@ -5,7 +5,13 @@
 set -Eeuo pipefail
 trap 'echo "kldload-dashboard: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-set -eo pipefail
+# This file's own options line is `set -eo pipefail`, and that is the author's
+# intent. The 2026-09-15 strict sweep put `set -Eeuo pipefail` above it, which
+# additionally forced nounset here; a LATER set line cannot clear an
+# option an earlier one set, so the file ran that way regardless. That is the
+# mechanic that killed build 21 on onyx through dracut. The drop has to be
+# explicit. See project_strict-sweep-overrode-soft-set-lines.
+set +u
 URL="https://localhost:8443/"
 for b in google-chrome google-chrome-stable chromium chromium-browser brave-browser; do
     command -v "$b" >/dev/null 2>&1 && exec "$b" --app="$URL" --class=kldload-dashboard \

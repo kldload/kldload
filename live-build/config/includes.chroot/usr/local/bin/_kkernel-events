@@ -15,9 +15,15 @@
 # Also runnable standalone: `sudo _kkernel-events`.
 
 set -Eeuo pipefail
-trap 'echo "_kkernel-events: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-set -u
+# This file's own options line is `set -u`, and that is the author's
+# intent. The 2026-09-15 strict sweep put `set -Eeuo pipefail` above it, which
+# additionally forced errexit and pipefail here; a LATER set line cannot clear an
+# option an earlier one set, so the file ran that way regardless. That is the
+# mechanic that killed build 21 on onyx through dracut. The drop has to be
+# explicit. See project_strict-sweep-overrode-soft-set-lines.
+set +e +E
+set +o pipefail
 
 BT_SCRIPT=/usr/local/share/kldload/kkernel-events.bt
 AWK_FMT=/usr/local/share/kldload/kkernel-events.awk

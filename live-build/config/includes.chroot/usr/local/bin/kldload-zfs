@@ -7,7 +7,13 @@
 set -Eeuo pipefail
 trap 'echo "kldload-zfs: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-set -eo pipefail
+# This file's own options line is `set -eo pipefail`, and that is the author's
+# intent. The 2026-09-15 strict sweep put `set -Eeuo pipefail` above it, which
+# additionally forced nounset here; a LATER set line cannot clear an
+# option an earlier one set, so the file ran that way regardless. That is the
+# mechanic that killed build 21 on onyx through dracut. The drop has to be
+# explicit. See project_strict-sweep-overrode-soft-set-lines.
+set +u
 
 case "${1:-}" in
 -h | --help)

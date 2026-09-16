@@ -6,7 +6,14 @@
 set -Eeuo pipefail
 trap 'echo "5065-kldload-tls.hook.chroot: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-set -e
+# This file's own options line is `set -e`, and that is the author's
+# intent. The 2026-09-15 strict sweep put `set -Eeuo pipefail` above it, which
+# additionally forced nounset and pipefail here; a LATER set line cannot clear an
+# option an earlier one set, so the file ran that way regardless. That is the
+# mechanic that killed build 21 on onyx through dracut. The drop has to be
+# explicit. See project_strict-sweep-overrode-soft-set-lines.
+set +u
+set +o pipefail
 
 TLS_DIR=/etc/kldload/tls
 mkdir -p "${TLS_DIR}"

@@ -26,9 +26,14 @@
 # Exit: 0 all passed, 1 one or more failed.
 
 set -Eeuo pipefail
-trap 'echo "smoke-features.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-set -uo pipefail
+# This file's own options line is `set -uo pipefail`, and that is the author's
+# intent. The 2026-09-15 strict sweep put `set -Eeuo pipefail` above it, which
+# additionally forced errexit here; a LATER set line cannot clear an
+# option an earlier one set, so the file ran that way regardless. That is the
+# mechanic that killed build 21 on onyx through dracut. The drop has to be
+# explicit. See project_strict-sweep-overrode-soft-set-lines.
+set +e +E
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-test.sh
 . "${SCRIPT_DIR}/lib-test.sh"
