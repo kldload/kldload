@@ -386,6 +386,47 @@ DNS
 
     ok "=== MASTER ready ==="
 }
+# libvirt_enable_now — bring up libvirt the way THIS host expects it.
+#
+# Fedora 44 and current EL ship MODULAR libvirt: virtqemud / virtnetworkd /
+# virtstoraged, each socket-activated, and virsh's default URI resolves to
+# /var/run/libvirt/virtqemud-sock. libvirtd.service is the OLD monolithic daemon
+# and it CONFLICTS with those sockets -- enable it and they stay inactive, so
+# every virsh call fails with
+#   Failed to connect socket to '/var/run/libvirt/virtqemud-sock'
+#
+# HISTORY: 4ce96ba4 fixed that in the installer and this file quietly undid it
+# eleven minutes later (fiend, build 23, 2026-09-16: the installer enabled
+# virtqemud.socket at 13:24, firstboot enabled libvirtd at 13:35, and the host
+# ended up monolithic with the modular sockets conflicted out). A fix applied to
+# two of the three places that enable libvirt is not a fix.
+#
+# Returns 0 only when virsh can actually CONNECT -- the outcome, not the exit
+# status of the enable.
+libvirt_enable_now() {
+    # Named so the warning at the bottom points at a unit that EXISTS on this
+    # host. Telling a monolithic host to "check virtqemud.socket" sends the
+    # operator after a file that was never installed.
+    local _blame
+    if [[ -e /usr/lib/systemd/system/virtqemud.socket ]]; then
+        _blame=virtqemud.socket
+        systemctl disable --now libvirtd.service libvirtd.socket >/dev/null 2>&1 ||
+            true # already disabled on a stock modular host: that is the good case
+        local _s
+        for _s in virtqemud.socket virtnetworkd.socket virtstoraged.socket; do
+            systemctl enable --now "$_s" >/dev/null 2>&1 ||
+                log "WARNING: could not enable ${_s}"
+        done
+    else
+        _blame=libvirtd.socket
+        systemctl enable --now libvirtd.socket >/dev/null 2>&1 ||
+            systemctl enable --now libvirtd >/dev/null 2>&1 ||
+            log "WARNING: could not enable libvirtd"
+    fi
+    virsh -c qemu:///system list --all >/dev/null 2>&1 && return 0
+    log "WARNING: libvirt enabled but virsh cannot connect — check ${_blame}"
+    return 1
+}
 
 # ══ KVM ══════════════════════════════════════════════════════════════════════
 setup_kvm() {
@@ -433,7 +474,7 @@ setup_kvm() {
     #   1. pool-define-as raced libvirtd → "missing storage pool target path"
     #   2. the previous net-destroy+undefine block left NO default network
     #      behind → klab-firstboot could not attach VMs to virbr0.
-    systemctl enable --now libvirtd
+    libvirt_enable_now || true # it warns for itself; the caller's checks follow
     # NOTE: VM restore-on-reboot (libvirt-guests) is armed in main() for EVERY
     # VM-capable role, not here — setup_kvm only runs for the kvm role, but the
     # desktop/master/storage roles also run guests. See arm_vm_restore() below.
@@ -3730,9 +3771,8 @@ AIMOTD
             # libvirtd itself still needs to be up for virsh / virt-install,
             # and the 'isos' pool (cloud-init ISOs) is still useful — both
             # are set up elsewhere in firstboot.
-            systemctl enable libvirtd 2>/dev/null || true
-            systemctl start libvirtd 2>/dev/null ||
-                log "WARNING: libvirtd did not start — no VM work can happen on this boot"
+            libvirt_enable_now ||
+                log "WARNING: no VM work can happen on this boot"
             ok "libvirt ready — zvols accessed as raw /dev/zvol/… paths (no pool needed)"
 
             # ── KSM: share identical guest pages ─────────────────────────
