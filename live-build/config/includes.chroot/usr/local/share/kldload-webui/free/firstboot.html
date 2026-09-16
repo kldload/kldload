@@ -284,6 +284,23 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     "the fleet does not need the internet"
   ];
   function allcall(msg) { if (acQueue.length < 4) acQueue.push("all call // " + msg); }
+  // A rebuild on screen should be the command that actually does it, not a
+  // sentence about it (operator, 2026-09-15: "instead of saying redeployed,
+  // actually issue a clone command to deploy it"). Same queue, shell prefix,
+  // and every one of these is a command that works on the installed machine.
+  function cmdcall(cmd) { if (acQueue.length < 4) acQueue.push("$ " + cmd); }
+  var GOLDENS = ["klab-golden-fedora", "klab-golden-rocky", "klab-golden-debian",
+    "klab-golden-centos", "klab-golden-ubuntu", "k8s-golden"];
+  // The rebuild verbs, as an operator would actually type them.
+  function reclone(name) {
+    var g = pick(GOLDENS);
+    switch (Math.random() * 4 | 0) {
+      case 0: return "kvm-clone " + g + " " + name;
+      case 1: return "zfs clone rpool/vms/" + g + "@golden rpool/vms/" + name;
+      case 2: return "kfire clone " + g + " -n 1 --wait";
+      default: return "virsh start " + name + "   # cloned in 0.08s";
+    }
+  }
   setInterval(function () {
     if (acTyping) { acTyping.el.textContent = acTyping.text.slice(0, ++acTyping.i); if (acTyping.i >= acTyping.text.length) acTyping = null; return; }
     if (!acQueue.length) return;
@@ -365,7 +382,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
           c.t += dt;
           if (c.st === "hit" && c.t > .35) { c.st = "gone"; c.t = 0; c.hold = rand(1.4, 3.6); }
           else if (c.st === "gone" && c.t > c.hold) { c.st = "re"; c.t = 0; }
-          else if (c.st === "re" && c.t > 1.5) { c.st = "ok"; c.t = 0; c.fresh = 1; replaced++; if (Math.random() < .3) allcall("node " + pad(cells.indexOf(c) + 1, 2) + " of " + cells.length + " regenerated"); }
+          else if (c.st === "re" && c.t > 1.5) { c.st = "ok"; c.t = 0; c.fresh = 1; replaced++; if (Math.random() < .3) cmdcall(reclone("node-" + pad(cells.indexOf(c) + 1, 2))); }
           if (c.fresh) c.fresh = Math.max(0, c.fresh - dt * .8);
           if (!front(c.f)) return;
           var q = quad(g, c, .07), core = quad(g, c, .3), fr = c.fresh || 0;
@@ -435,7 +452,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
           p.t += dt;
           if (p.st === "derez" && p.t > 1.2) { p.st = "gone"; p.t = 0; }
           else if (p.st === "gone" && p.t > 1.8) { p.st = "rise"; p.t = 0; }
-          else if (p.st === "rise" && p.t > 1.5) { p.st = "ok"; p.t = 0; p.fresh = 1; replaced++; if (Math.random() < .4) allcall("pylon rebuilt from the golden. identical to the one it replaced"); }
+          else if (p.st === "rise" && p.t > 1.5) { p.st = "ok"; p.t = 0; p.fresh = 1; replaced++; if (Math.random() < .4) cmdcall(reclone("pylon-" + pad(pylons.indexOf(p) + 1, 2))); }
           if (p.fresh) p.fresh = Math.max(0, p.fresh - dt * .7);
           var fr = p.st === "derez" ? 1 - p.t / 1.2 : (p.st === "gone" ? 0 : (p.st === "rise" ? Math.min(1, p.t / 1.5) : 1));
           var col = p.st === "derez" ? "255,140,60" : (p.st === "rise" ? "233,255,242" : "33,230,255"), w = .45;
@@ -552,7 +569,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
         nodes.forEach(function (n) {
           n.t += dt;
           if (n.st === "gone" && n.t > 3) { n.st = "drop"; n.t = 0; }
-          if (n.st === "drop" && n.t > 1.2) { n.st = "ok"; n.t = 0; replaced++; if (Math.random() < .5) allcall("a replacement node lands. the ground holds " + nodes.filter(function (q) { return q.st === "ok"; }).length); }
+          if (n.st === "drop" && n.t > 1.2) { n.st = "ok"; n.t = 0; replaced++; if (Math.random() < .5) cmdcall(reclone("node-" + pad(nodes.indexOf(n) + 1, 2))); }
           if (!vis(n.x)) return;
           var px = sx(n.x), gy = sy(.72 + .22 * (h(n.x) - .5)) - 4;
           if (n.st === "ok" || n.st === "held") { if (n.st === "held") return; cx.strokeStyle = C.vec; cx.lineWidth = 1.4; cx.strokeRect(px - 5, gy - 14, 10, 10); line(px, gy - 4, px, gy); }
@@ -942,7 +959,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
         launches = launches.filter(function (L) { L.t += dt / 2.6; var st = L.from, a = proj(g, Math.cos(st.lat) * Math.cos(st.lon), Math.sin(st.lat), Math.cos(st.lat) * Math.sin(st.lon), rot), q = satPos(L.s, t), b = proj(g, q[0], q[1], q[2], 0), k = Math.min(1, L.t);
           var mx = (a[0] + b[0]) / 2 + (b[1] - a[1]) * .3, my = (a[1] + b[1]) / 2 - g.R * .5, hx = (1 - k) * (1 - k) * a[0] + 2 * (1 - k) * k * mx + k * k * b[0], hy = (1 - k) * (1 - k) * a[1] + 2 * (1 - k) * k * my + k * k * b[1];
           cx.strokeStyle = "rgba(255,216,77,.8)"; cx.lineWidth = 2; cx.beginPath(); cx.moveTo(a[0], a[1]); cx.quadraticCurveTo(mx, my, hx, hy); cx.stroke();
-          if (k >= 1) { L.s.st = "ok"; L.s.t = 0; replaced++; allcall("replacement in orbit. the constellation is whole"); return false; } return true; });
+          if (k >= 1) { L.s.st = "ok"; L.s.t = 0; replaced++; cmdcall(reclone("sat-" + pad(sats.indexOf(L.s) + 1, 2))); return false; } return true; });
         cx.restore();
       }
     });
@@ -1037,7 +1054,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     SCENES.push({
       pal: ["#ff9966", "#cc99cc", "#9999ff"], card: "bridge console", label: "systems", layouts: [0, 1, 3],
       count: function () { return pad(nodes.filter(function (n) { return n.st === "ok"; }).length, 2) + "/" + nodes.length; },
-      event: function () { var ok = nodes.filter(function (n) { return n.st === "ok"; }); if (ok.length) { var n = pick(ok); n.st = "fail"; n.t = 0; allcall("node " + pad(nodes.indexOf(n) + 1, 2) + " offline. rebuilding from its golden"); } },
+      event: function () { var ok = nodes.filter(function (n) { return n.st === "ok"; }); if (ok.length) { var n = pick(ok); n.st = "fail"; n.t = 0; cmdcall(reclone("node-" + pad(nodes.indexOf(n) + 1, 2))); } },
       beat: [2.5, 4],
       draw: function (t, dt) {
         var x0 = AX(.02), y0 = AY(.04), w = AW() * .96, h = AH() * .92, bar = Math.max(26, w * .07), gap = 6;
@@ -1141,7 +1158,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     SCENES.push({
       pal: ["#5aa0ff", "#ff5a5a", "#ffe066"], card: "file system", label: "datasets", layouts: [0, 1, 2, 3],
       count: function () { return pad(plats.length, 2); },
-      event: function () { if (roll) return; var p = pick(plats), tw = p.towers.filter(function (x) { return x.snap; }); if (!tw.length) return; roll = { tw: pick(tw), t: 0, h0: 0, p: p }; roll.h0 = roll.tw.h; allcall("rolling " + p.name + " back to its snapshot"); },
+      event: function () { if (roll) return; var p = pick(plats), tw = p.towers.filter(function (x) { return x.snap; }); if (!tw.length) return; roll = { tw: pick(tw), t: 0, h0: 0, p: p }; roll.h0 = roll.tw.h; cmdcall("zfs rollback rpool/" + p.name.toLowerCase() + "@snapshot"); },
       beat: [4, 7],
       draw: function (t, dt) {
         cam = (t * .9) % 14 - 2;
@@ -1498,7 +1515,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
           for (var n = 0; n < 900; n++) { var v = Math.random() * 60 | 0; cx.fillStyle = "rgba(" + (v + 30) + "," + (v + 20) + "," + v + ",.35)"; cx.fillRect(x0 + Math.random() * w, y0 + Math.random() * h, 2, 2); }
           cx.strokeStyle = "rgba(255,210,140,.8)"; cx.lineWidth = 1; cx.strokeRect(fx - 60, fy - 40, 120, 80); line(fx, y0, fx, fy - 40); line(fx, fy + 40, fx, y0 + h); line(x0, fy, fx - 60, fy); line(fx + 60, fy, x0 + w, fy);
           ptext("ENHANCE " + pad(zoomStep, 2) + "  X" + z.toFixed(1), x0 + 14, y0 + 14, 3, "#ffd28c");
-          if (mt > 1.6 * steps.length + 2.5) { mode = "city"; mt = 0; replaced++; allcall("node 23 identified. it has already been replaced"); }
+          if (mt > 1.6 * steps.length + 2.5) { mode = "city"; mt = 0; replaced++; cmdcall(reclone("node-23")); }
         }
         cx.restore();
       }
@@ -1756,7 +1773,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
           cx.fillStyle = "#ffcf4d"; cx.fillRect(hx - 2, hy - 2, 4, 4);
           if (k >= 1) {
             a.b.st = "down"; a.b.t = 0; arcs.splice(i, 1);
-            allcall(a.b.n + " is gone. the restore is already running");
+            cmdcall(reclone(a.b.n.replace(/[^a-z0-9]+/g, "-")));
           }
         }
         // sites
@@ -2461,29 +2478,7 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     ["WireGuard", "The cluster talks over the tunnel", "The kubelet is pinned to the mesh address. Node-to-node traffic is encrypted *because of where it is bound*, not because of a policy somebody has to maintain."],
     ["WireGuard", "Roaming is free", "A peer that changes address is discovered from the next authenticated packet. Move a machine to another network and the tunnel *does not notice*."],
     ["WireGuard", "The keys never reach the logs", "Private keys are generated in place, kept mode 0600, and scrubbed from a live session. A key in a journal is a key you have to rotate."],
-    ["eBPF", "Watch every process the machine starts", "The kernel tells you, at the source, with no polling and no sampling gap.",
-      ["$ execsnoop", "PCOMM     PID    PPID   RET ARGS", "kubelet   4412   1      0 /usr/bin/kubelet", "zfs       4431   4412   0 /sbin/zfs list -H -o name", "qemu-kvm  4502   1      0 /usr/bin/qemu-kvm -name g-01"]],
-    ["eBPF", "Where the latency actually is", "Not the average the dashboard shows you: the shape of the whole distribution.",
-      ["$ biolatency -m", "     msecs        : count   distribution", "     0 -> 1     : 21455   |****************|", "     2 -> 3     :  1802   |*               |", "     4 -> 7     :    96   |                |", "     8 -> 15    :     3   |                |"]],
-    ["eBPF", "How ZFS is really answering", "zfsdist shows the pool's own latency, per operation, while the work is happening.",
-      ["$ zfsdist", "operation = read", "     usecs        : count   distribution", "     16 -> 31   : 18234   |****************|", "     32 -> 63   :  2210   |*               |", "  (ARC hits are the left column; the tail is the disks)"]],
-    ["eBPF", "Which files are hot right now", "filetop is top, for the filesystem. It answers \"what is thrashing\" in one screen.",
-      ["$ filetop -C", "TID    COMM        READS WRITES R_Kb  W_Kb  FILE", "4502   qemu-kvm      812     44 51968  2816  g-01.qcow2", "4412   kubelet        96      2  6144   128  config.yaml"]],
-    ["eBPF", "Short-lived connections, caught", "The ones that are gone before netstat runs, with how long each lived.",
-      ["$ tcplife", "PID   COMM     LADDR       LPORT RADDR       RPORT  MS", "4412  kubelet  10.42.0.11  52344 10.42.0.1    6443  3.20", "5210  curl     10.42.0.11  48120 10.42.0.23     80  0.61"]],
     ["eBPF", "Nothing to install, nothing to compile", "The CO-RE tools carry their own type information and run on the kernel that is here. The old ones compile against kernel headers at run time, and *die on a current kernel*."],
-    ["Commands", "The pool, in one screen", "kst is the first thing to run when something feels wrong.",
-      ["$ kst", "# POOL", "rpool   ONLINE   1.82T used   5.63T free   0 errors", "# BOOT ENVIRONMENTS", "rpool/ROOT/fiend    active, 4 snapshots", "# SERVICES", "libvirtd kubelet wg-quick@wg0   all active"]],
-    ["Commands", "A snapshot before the package manager touches anything", "kpkg wraps apt, dnf and pacman, and takes the snapshot first.",
-      ["$ kpkg install htop", "==> snapshot rpool/ROOT/fiend@kpkg-2026-09-15-1812", "==> dnf install -y htop", "Installed: htop-3.3.0-4.fc44.x86_64", "==> undo: zfs rollback rpool/ROOT/fiend@kpkg-1812"]],
-    ["Commands", "Ten microVMs, timed to first answer", "It does not say \"started\". It waits until each one serves its port.",
-      ["$ kfire clone app-web-stack -n 10 --wait", "web-stack-1   up   412 ms   10.99.0.11", "web-stack-2   up   398 ms   10.99.0.12", "  ...", "web-stack-10  up   441 ms   10.99.0.20", "10 of 10 answering, enrolled on the mesh"]],
-    ["Commands", "A clone that costs nothing", "The copy exists immediately and consumes space only as it diverges.",
-      ["$ kclone /srv/database /srv/database-test", "==> zfs snapshot rpool/srv/database@kclone-1812", "==> zfs clone   ...database@kclone-1812 ...database-test", "/srv/database-test   ready   0B used"]],
-    ["Commands", "Ask the machine what is wrong with it", "kldload-doctor profiles this host against a baseline and prints the fix.",
-      ["$ kldload-doctor", "  ok    pool health, boot environments, held packages", "  ok    mesh: 6 peers, all handshaking", "  DRIFT kubelet is not pinned to the mesh address", "        fix: kube-network pin --mesh"]],
-    ["Commands", "Where the disagreement is", "Six subsystems are asked what they believe, and the answers are merged.",
-      ["$ kldload-estate", "NAME        LIBVIRT  DHCP   MESH   K8S    VERDICT", "g-01        running  .21    alive  Ready  ok", "g-04        running  .24    stale  Ready  mesh stale", "old-test    absent   .38    alive  -      orphaned lease"]],
     ["C=64", "Where this started", "1984, 64 kilobytes, a 1 MHz 6510 and a SID chip. *The log this install is writing right now is larger than that entire machine* — memory, ROM, screen and all."],
     ["C=64", "The drive that made us fast", "The 1541 was so slow that people rewrote the serial protocol themselves to beat it. That instinct — *refuse the speed you were given* — is the same one behind a 75-millisecond clone."],
     ["C=64", "Forty columns and no excuses", "Everything had to fit in 40 columns and one screen. The discipline shows up here too: *a slide that needs a paragraph is a slide that has not been thought about*."],
@@ -2504,6 +2499,30 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     ["1985", "Three named chips and a 7 MHz CPU", "The processor mostly coordinated while Agnus, Denise and Paula did the work in parallel. *That is the shape of every system-on-chip shipping today*, drawn thirty-five years early on a machine that cost less than a car."],
     ["Still", "And we are still on Intel", "Forty years on, the default machine is a heap of general-purpose cores taking turns at being specialists. *Agnus would not be impressed.*"],
     ["Offload", "This box gives the work back", "ZFS checksums, WireGuard's ChaCha, Cilium's programs in the datapath, the encode, the model. *Each one runs on the silicon built for it* — which is the argument the Amiga lost in 1994 and won afterwards."],
+    ["Start here", "Where am I", "One command answers it: pool health, what the root is, how many snapshots exist and whether the services are up.",
+      ["$ kst", "  kldload fiend  (free edition)", "  Pool      rpool ONLINE  (no known data errors)", "  Root      20.9G used / 1.66T free  (compr 1.22x)", "  Snapshots 387 total", "  Boot envs 1 available"]],
+    ["Boot environments", "The whole root, versioned", "Your running system is a dataset. Another one can sit beside it, and the boot menu lets you pick.",
+      ["$ kbe list", "NAME               CREATION           USED", "rpool/ROOT/fiend   Sep 15 17:24 2026  20.9G  <- now", "", "# before a risky change, then reboot into it", "$ kbe create pre-upgrade", "$ kbe activate pre-upgrade"]],
+    ["Snapshots", "Take one before you touch anything", "It is instant and it costs nothing until the data diverges. There is no reason not to.",
+      ["$ ksnap /srv/app", "rpool/srv/app@ksnap-2026-09-15-2014   0B", "", "$ ksnap list | head -2", "rpool/ROOT/fiend@install-20260916T003549Z    0B", "rpool/home@autosnap_2026-09-16_00:30_daily   0B"]],
+    ["Rollback", "Undo is a command, not a restore", "The dataset goes back to exactly what it was. No copying, no backup window, no waiting.",
+      ["$ ksnap rollback /srv/app", "rolling back to @ksnap-2026-09-15-2014", "done. 0.04s", "", "# the root too, from the boot menu, if it will not boot"]],
+    ["Upgrade", "The snapshot happens first", "kpkg wraps apt, dnf and pacman. It snapshots, then upgrades, and prints the one line that undoes it.",
+      ["$ kpkg upgrade", "==> snapshot rpool/ROOT/fiend@kpkg-2026-09-15", "==> dnf upgrade -y", "Upgraded: 41 packages", "==> undo: zfs rollback rpool/ROOT/fiend@kpkg-..."]],
+    ["Automatic", "It is already snapshotting", "sanoid runs on a timer from the moment you install. Hourly, daily, weekly, monthly, pruned on a policy.",
+      ["$ zfs list -t snapshot -o name,used rpool/home", "rpool/home@autosnap_2026-09-16_00:30_hourly    0B", "rpool/home@autosnap_2026-09-16_00:30_daily     0B", "rpool/home@autosnap_2026-09-16_00:30_weekly    0B", "rpool/home@autosnap_2026-09-16_00:30_monthly   0B"]],
+    ["Replicate", "Send a machine somewhere else", "A snapshot is a stream. That is the whole backup story: no agent, no catalogue, no format of its own.",
+      ["$ zfs send -R rpool/ROOT/fiend@daily |", "    ssh backup zfs recv -F tank/fiend", "", "# or let the timer do it, and verify it landed", "$ zxplore --sync install nightly-offsite", "timer enabled and verified"]],
+    ["Clone", "A copy that costs nothing", "Branch a dataset and it shares every block until you change one. Ten copies are still one copy of the data.",
+      ["$ kclone /srv/database /srv/database-test", "==> snapshot rpool/srv/database@kclone-2014", "==> clone    rpool/srv/database-test", "/srv/database-test   ready   0B used"]],
+    ["Space", "Where it actually went", "df cannot see compression, snapshots or clones. This can.",
+      ["$ kdf", "DATASET        USED   AVAIL  RATIO  MOUNTPOINT", "rpool         96.7G   1.66T  1.40x  none", "ROOT/fiend    20.9G   1.66T  1.22x  /", "kldload/state 4.95G   1.66T  1.01x  /var/lib/kldload"]],
+    ["Fleet", "Seal one, stamp out many", "Build the machine once, seal it, and every copy after that is a clone rather than an install.",
+      ["$ kfire golden app-web-stack        # ~5 s", "$ kfire clone app-web-stack -n 10 --wait", "web-stack-1   up   412 ms   10.99.0.11", "  ...", "10 of 10 answering, enrolled on the mesh"]],
+    ["Export", "Take it with you", "Any disk here becomes a portable image, sealed first so it does not carry this machine's identity.",
+      ["$ kexport /dev/sda qcow2", "==> kldload-seal: machine-id, ssh keys, hostid", "==> qemu-img convert -O qcow2", "out/fiend-2026-09-15.qcow2   6.4G"]],
+    ["Watch it work", "The kernel will tell you", "No polling, no sampling gap. These ship on the machine and run on the kernel that is already here.",
+      ["$ execsnoop", "PCOMM     PID   PPID  RET ARGS", "kubelet   4412  1       0 /usr/bin/kubelet", "zfs       4431  4412    0 /sbin/zfs list -H -o name", "$ biolatency -m    # where the latency really is", "$ zfsdist          # what the pool answers in"]],
     ["Almost there", "When this screen goes away", "The build has settled, the smoke test has run and the machine is yours: *log in to a finished system*."]
   ];
 
