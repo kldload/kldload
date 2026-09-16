@@ -58,6 +58,8 @@ _log() { echo "$(date '+%Y-%m-%dT%H:%M:%S') $*" >>"$LOG"; }
 # dataset's snapshot still had it.
 _state_ds="${KLDLOAD_STATE_DATASET:-rpool/kldload/state}"
 if zfs list -H "$_state_ds" >/dev/null 2>&1; then
+    # findmnt exits 1 when the directory is not itself a mount point, which is the
+    # normal case before the state dataset exists; an empty _src is handled below.
     _src="$(findmnt -no SOURCE "$(dirname "$STATE")" 2>/dev/null || true)"
     if [[ "$_src" != "$_state_ds" ]]; then
         _log "$(dirname "$STATE") is on '${_src:-nothing}', not $_state_ds — mounting it before writing the list"

@@ -423,6 +423,8 @@ bootenv_delete() {
 
     local active bootfs
     active="$(_bootenv_active_dataset)"
+    # A pool with no bootfs set yet returns empty and exits non-zero; that is the
+    # ordinary pre-first-boot state here, not a failure worth aborting the caller.
     bootfs="$(zpool get -H -o value bootfs rpool 2>/dev/null || true)"
     [[ "$ds" != "$active" ]] ||
         die "bootenv_delete: $ds is the running boot environment"

@@ -57,7 +57,8 @@ done
 
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$DIR" >/dev/null 2>&1 &
 SRV=$!
-trap 'kill "$SRV" 2>/dev/null || true' EXIT # the server is ours; a dead one is fine
+# The server is ours and may already have exited; a dead one is nothing to report.
+trap 'kill "$SRV" 2>/dev/null || true' EXIT
 sleep 0.5
 
 chrome() { # url [budget-ms]  — the console goes to stderr
@@ -80,8 +81,11 @@ fi
 # 3. every scene, one run each
 bad=0
 for i in $(seq 1 "$N"); do
+    # chrome exits non-zero on a clean headless run often enough that its status says
+    # nothing; the console output captured here is what this gate actually judges.
     log=$(chrome "http://127.0.0.1:$PORT/firstboot.html?lab=1&scene=$i&still=4" 2>&1 >/dev/null || true)
-    errs=$(printf '%s\n' "$log" | grep -E 'Uncaught|ReferenceError|TypeError|SyntaxError|is not defined' || true) # no error lines is the pass
+    # grep exits 1 when there are no error lines at all, which is the pass.
+    errs=$(printf '%s\n' "$log" | grep -E 'Uncaught|ReferenceError|TypeError|SyntaxError|is not defined' || true)
     if [[ -n "$errs" ]]; then
         _fail "scene $i" "$(printf '%s\n' "$errs" | head -1)"
         bad=$((bad + 1))
@@ -93,7 +97,9 @@ done
 
 # 4. the slides the page built against the slides the source declares
 want=$(grep -cE '^    \["' "$PAGE" || true)
-got=$(dom "http://127.0.0.1:$PORT/firstboot.html?lab=1&still=1" 3000 | grep -o 'class="slide' | wc -l || true) # grep 1 = zero slides, which is the failure reported below, not an abort
+# grep exits 1 for zero slides; that is the failure reported below, not a reason
+# to abort the gate before it can report it.
+got=$(dom "http://127.0.0.1:$PORT/firstboot.html?lab=1&still=1" 3000 | grep -o 'class="slide' | wc -l || true)
 # MANUAL entries are also 4-space "[" lines; subtract them from the source count
 manual=$(awk '/var MANUAL = \[/{m=1; next} m && /^  \];/{m=0} m && /^    \[/{n++} END{print n+0}' "$PAGE")
 want=$((want - manual))

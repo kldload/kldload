@@ -99,9 +99,11 @@ if zfs list "${ZVOL}" >/dev/null 2>&1; then
             USED_BY=$(zfs get -H -o value origin -t volume -r rpool/vms 2>/dev/null | grep -x "${snap}" || true) # no match means orphaned, which is the case we want
             if [[ -z "$USED_BY" ]]; then
                 echo "Cleaning up orphaned snapshot: ${snap}"
-                zfs destroy "${snap}" </dev/null 2>/dev/null || true # a snapshot something else holds is not ours to take; the zvol is already gone
+                # A snapshot something else holds is not ours to take, and the zvol is already gone.
+                zfs destroy "${snap}" </dev/null 2>/dev/null || true
             fi
-        done < <(zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' || true) # a source with no clone- snapshots is the common case
+            # grep exits 1 when a source has no clone- snapshots, which is the common case.
+        done < <(zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' || true)
     fi
 else
     echo "Warning: ZFS zvol '${ZVOL}' not found"
