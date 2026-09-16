@@ -9,7 +9,9 @@ for review (the sheet has a mid background so both the blue and the black
 outline are visible; the shipped icons themselves are transparent).
 Run: python3 gen_icons.py <outdir>
 """
-import math, os, sys
+import math
+import os
+import sys
 
 # STYLE (env): pick the aesthetic — 'outline' (blue + black lining, pops/sticker),
 # 'clean' (single-weight blue stroke, no outline — sleek/modern Lucide-ish),

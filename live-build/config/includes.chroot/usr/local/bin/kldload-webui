@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 import uuid
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 
 try:
@@ -880,8 +880,6 @@ def get_disks():
         # Detect the live boot device so we can flag it
         live_dev = ""
         try:
-            with open("/proc/cmdline") as f:
-                cmdline = f.read()
             # Find the device backing /run/initramfs/live
             live_mount = subprocess.check_output(
                 ["findmnt", "-n", "-o", "SOURCE", "/run/initramfs/live"],
@@ -1675,7 +1673,8 @@ async def ws_handler(websocket):
                         for p in creds.get("proxmox", []):
                             if p.get("id") == pid:
                                 try:
-                                    import urllib.request, urllib.error
+                                    import urllib.error
+                                    import urllib.request
                                     url = f"https://{p['host']}:{p.get('port',8006)}/api2/json/version"
                                     req = urllib.request.Request(url,
                                         headers={"Authorization": f"PVEAPIToken={p['token_id']}={p['token_secret']}"},
@@ -3675,10 +3674,8 @@ def _detect_distro():
     return "centos"  # default for kldload
 
 async def _test_rhel_cdn(websocket, msg):
-    """Test RHEL CDN connectivity and subscription validity."""
-    params = msg.get("params", {})
-    key = params.get("rhel_key", "")
-    org = params.get("rhel_org", "")
+    """Test that subscription.rhsm.redhat.com is reachable. Only reachability:
+    the key/org are not validated here, that happens at subscription time."""
     try:
         # Test 1: Try with proper cert verification
         proc = await asyncio.create_subprocess_exec(
@@ -4978,7 +4975,7 @@ async def _vm_rollback(websocket, msg):
     # Required if the user wants to revert past an intermediate snap.
     try:
         subprocess.check_call(["zfs", "rollback", "-r", snap], stderr=subprocess.STDOUT)
-        await websocket.send(json.dumps({"type": "log_line", "line": f"[rollback] zfs rollback OK", "target": "vm-log"}))
+        await websocket.send(json.dumps({"type": "log_line", "line": "[rollback] zfs rollback OK", "target": "vm-log"}))
     except Exception as e:
         await websocket.send(json.dumps({"type": "error", "msg": f"zfs rollback failed: {e}"}))
         return
@@ -5152,7 +5149,9 @@ def _vm_cloud_userdata(name: str, flavor: str, de: str = "xfce") -> str:
 
 async def _vm_create_cloud(websocket, msg):
     """Deploy a cloud-init VM (server or desktop) from a klab golden zvol."""
-    import tempfile, time as _time, os as _os
+    import os as _os
+    import tempfile
+    import time as _time
     distro = (msg.get("distro") or "").strip().lower()
     flavor = (msg.get("flavor") or "server").strip().lower()
     de     = (msg.get("desktop_env") or "xfce").strip().lower()
@@ -5410,7 +5409,7 @@ async def _service_deploy(websocket, msg):
     salt_state = _generate_salt_state(name, dataset, image, runtime, config)
 
     # Write state to /srv/salt/kldload/services/<name>.sls
-    state_dir  = Path(f"/srv/salt/kldload/services")
+    state_dir  = Path("/srv/salt/kldload/services")
     state_file = state_dir / f"{name}.sls"
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -5524,7 +5523,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         # don't leave stale bundles on disk. Safe: run-id must match
         # the YYYYMMDD-HHMMSS shape — no path traversal.
         if self.path.startswith("/download/klab/"):
-            import re, tarfile, io, os
+            import io
+            import os
+            import re
+            import tarfile
             m = re.match(r"^/download/klab/(\d{8}-\d{6})\.tar\.gz$", self.path)
             if not m:
                 self.send_error(400, "Invalid run id"); return
@@ -5550,7 +5552,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         # Plain full.log download — the OpenZFS team can attach this
         # single file to a bug report without unpacking the tarball.
         if self.path.startswith("/download/klab-log/"):
-            import re, os
+            import os
+            import re
             m = re.match(r"^/download/klab-log/(\d{8}-\d{6})\.log$", self.path)
             if not m:
                 self.send_error(400, "Invalid run id"); return
@@ -5636,6 +5639,7 @@ def _scan_playbooks(directory, origin):
     """Parse YAML playbooks in a directory and return a list of metadata dicts.
     `origin` tags each entry so the UI can show system vs user-uploaded."""
     import glob
+
     import yaml as _yaml
     out = []
     if not os.path.isdir(directory):
@@ -9414,7 +9418,6 @@ async def _klab_what_happened(websocket, msg):
         formatted = []
         for title, body in sections:
             formatted.append({"title": title, "body": body})
-        summary_lines = [f"=== {s['title']} ===" for s in formatted]
         await websocket.send(json.dumps({
             "type": "klab_what_happened",
             "summary": f"Captured {len(sections)} sections of activity in the last {seconds}s",
@@ -9699,6 +9702,7 @@ BOB_SHELL_SAFE_PREFIXES = (
 # Absolute-no regex: these always require the UNLEASHED mode toggle,
 # even with approval. Every one wipes data or takes the host down.
 import re as _re
+
 BOB_SHELL_DANGEROUS = _re.compile(
     r"\b("
     r"rm\s+-[rRfF]|"
@@ -10213,7 +10217,8 @@ def _bob_tool_exec(name, args):
             return json.dumps({"count": len(lines), "events": lines})
 
         if name == "prom_query":
-            import urllib.parse, urllib.request
+            import urllib.parse
+            import urllib.request
             q = args.get("query", "")
             if not q:
                 return json.dumps({"error": "query required"})
@@ -10287,7 +10292,6 @@ def _bob_tool_exec(name, args):
                 # Chunk by blank-line-separated paragraphs; section
                 # headers in the scrape look like "=== path/to/page ===".
                 para = []
-                para_start = 0
                 cur_section = "(root)"
                 source = path.split("/")[-1]
                 for i, line in enumerate(text.splitlines()):
@@ -10295,8 +10299,6 @@ def _bob_tool_exec(name, args):
                         cur_section = line.strip("= ").strip()
                         continue
                     if line.strip():
-                        if not para:
-                            para_start = i
                         para.append(line)
                         continue
                     if para:
@@ -10405,7 +10407,8 @@ def _bob_tool_exec(name, args):
             return json.dumps({"exit": rc, "stdout": out, "stderr": err, "command": cmd})
 
         if name == "shell_run_async":
-            import shlex, uuid
+            import shlex
+            import uuid
             cmd = (args.get("command") or "").strip()
             cwd = args.get("cwd") or "/root"
             ttl = max(1, min(1800, int(args.get("ttl") or 300)))
@@ -10424,7 +10427,8 @@ def _bob_tool_exec(name, args):
                 )
             except Exception as e:
                 return json.dumps({"error": f"spawn failed: {e}"})
-            import threading, time as _time
+            import threading
+            import time as _time
             stdout_buf: list = []
             stderr_buf: list = []
             def _drain(stream, buf):
@@ -10778,7 +10782,8 @@ async def _bob_chat(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": "model and messages required"}))
         return
 
-    import concurrent.futures, urllib.request, queue, threading
+    import queue
+    import urllib.request
 
     def _ollama_chat_stream(msgs, msg_queue):
         """Stream chunks from Ollama to a queue. Non-blocking from asyncio's
@@ -10979,11 +10984,12 @@ async def _bob_chat(websocket, msg):
             # Must be paired with the outer `if use_tools:`, not nested
             # under the round loop (was the second half of the same
             # misindent bug — made this branch unreachable in practice).
-            chunks = await loop.run_in_executor(pool, _stream_call, messages)
-            for c in chunks:
-                await websocket.send(json.dumps({
-                    "type": "bob_chat_chunk", "content": c, "done": False,
-                }))
+            # One round through the same streamer the tool loop uses; the
+            # payload carries no tools because use_tools is False. This
+            # branch used to call a _stream_call that never existed, so
+            # turning tools off crashed every chat into bob_chat_error
+            # (found by ruff F821, 2026-09-15).
+            await _run_one_round(messages)
 
         await websocket.send(json.dumps({"type": "bob_chat_done"}))
     except Exception as e:
@@ -11400,7 +11406,10 @@ async def _vm_display_open(websocket, msg):
     from --web=/usr/share/novnc, AND upgrades the same path's WebSocket to
     the VM's VNC TCP port. The UI iframe loads .../vnc.html which calls
     back into .../websockify for the WS — both same-origin, no CORS."""
-    import os as _os, secrets as _secrets, socket as _sock, re as _re_disp
+    import os as _os
+    import re as _re_disp
+    import secrets as _secrets
+    import socket as _sock
     vm = (msg.get("vm") or "").strip()
     if not vm:
         await websocket.send(json.dumps({"type": "error", "msg": "vm name required"}))
@@ -11479,7 +11488,9 @@ async def _vm_display_open(websocket, msg):
     # against the worker swap, and the iframe lands on the catch-all
     # webui location → 404. Poll the new location until non-404 (or 3s
     # timeout) so the URL we return is guaranteed live.
-    import urllib.request as _urlreq, ssl as _ssl_, time as _time_
+    import ssl as _ssl_
+    import time as _time_
+    import urllib.request as _urlreq
     _ctx = _ssl_.create_default_context(); _ctx.check_hostname=False; _ctx.verify_mode=_ssl_.CERT_NONE
     for _ in range(30):
         try:
@@ -11735,10 +11746,10 @@ async def _klab_run_playbook(websocket, msg):
 
 
 async def main_async(args):
-    import http
     import mimetypes
-    from websockets.http11 import Response as WsResponse
+
     from websockets.datastructures import Headers as WsHeaders
+    from websockets.http11 import Response as WsResponse
 
     # Order matters: _ensure_secrets_dir() creates rpool/kldload/state and
     # mounts it on /var/lib/kldload. If db_init() runs first, its state.db

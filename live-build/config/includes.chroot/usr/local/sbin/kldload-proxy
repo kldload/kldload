@@ -22,7 +22,6 @@
 # stdlib only. Threaded — one thread per client connection. WebSocket
 # upgrades switch to raw-bytes bi-directional pipe mode.
 import os
-import re
 import select
 import socket
 import ssl
@@ -325,7 +324,7 @@ def handle(client_sock, client_addr):
         header_block = head[:-4] if head.endswith(b"\r\n\r\n") else head
         try:
             request_line, headers = parse_headers(header_block)
-        except Exception as e:
+        except Exception:
             client_sock.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
             return
 
@@ -443,7 +442,7 @@ def main():
     srv.bind((LISTEN_HOST, LISTEN_PORT))
     srv.listen(128)
     log(f"listening on {LISTEN_HOST}:{LISTEN_PORT} (TLS)")
-    log(f"routes: grafana:3000, k9s:7681, bob:8080, webui:8444")
+    log("routes: grafana:3000, k9s:7681, bob:8080, webui:8444")
 
     while True:
         raw, addr = srv.accept()
