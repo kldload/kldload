@@ -28,7 +28,12 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 
-if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+# Rule 9: -h/--help answers BEFORE this re-exec. Asking a tool to explain
+# itself must never need a password, and on a machine where the operator has
+# no sudo rights the tool could not describe itself at all. Proven by running
+# each one with a stub sudo on PATH: eight asked for root to print text
+# (swept 2026-09-16, same defect klab had).
+if [[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]]; then exec sudo "$0" "$@"; fi
 
 # ── Configuration ─────────────────────────────────────────────────────────
 POOL="${POOL:-rpool}"

@@ -33,7 +33,12 @@
 set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-[[ $EUID -ne 0 ]] && exec sudo "$0" "$@"
+# Rule 9: -h/--help answers BEFORE this re-exec. Asking a tool to explain
+# itself must never need a password, and on a machine where the operator has
+# no sudo rights the tool could not describe itself at all. Proven by running
+# each one with a stub sudo on PATH: eight asked for root to print text
+# (swept 2026-09-16, same defect klab had).
+[[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]] && exec sudo "$0" "$@"
 
 MESH_DIR=/var/lib/kldload/mesh
 SSH_KEY="${KVM_MESH_SSH_KEY:-/root/.ssh/id_ed25519}"

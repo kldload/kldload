@@ -39,7 +39,12 @@ set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate: mokutil writes EFI variables, root required.
-if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+# Rule 9: -h/--help answers BEFORE this re-exec. Asking a tool to explain
+# itself must never need a password, and on a machine where the operator has
+# no sudo rights the tool could not describe itself at all. Proven by running
+# each one with a stub sudo on PATH: eight asked for root to print text
+# (swept 2026-09-16, same defect klab had).
+if [[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]]; then exec sudo "$0" "$@"; fi
 
 PASS="kldload" # must match lib/security.sh k_configure_mok
 G=$'\e[1;32m' R=$'\e[1;31m' Y=$'\e[1;33m' C=$'\e[1;36m' N=$'\e[0m'
