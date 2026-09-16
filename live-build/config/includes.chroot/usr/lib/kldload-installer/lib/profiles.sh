@@ -3613,8 +3613,40 @@ DOCKERJSON
             fi
         fi
 
-        # Enable libvirtd + default network (virbr0)
-        chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
+        # Enable libvirt + default network (virbr0).
+        #
+        # MODULAR libvirt, not the monolithic daemon. Fedora 44 and current EL ship
+        # virtqemud/virtnetworkd/virtstoraged, each socket-activated, and virsh's
+        # default URI resolves to /var/run/libvirt/virtqemud-sock. libvirtd.service
+        # still exists and CONFLICTS with those sockets, so enabling it -- which is
+        # what this used to do -- produces a host where libvirtd is running, the
+        # modular sockets are inactive, and EVERY virsh call fails with
+        #   Failed to connect socket to '/var/run/libvirt/virtqemud-sock'
+        # HISTORY: 6-full on build 22 (fiend, 2026-09-16). The desktop profile ships
+        # modular libvirt; the k8s bootstrap ran virt-install against a libvirt it
+        # could not reach, and the edition lost the cluster (0 of 6 nodes) and all 15
+        # goldens in one go. Reproduced and fixed on the machine by hand: with
+        # virtqemud.socket enabled, `virsh list --all` answers immediately.
+        # The monolithic path stays for substrates that only ship it.
+        if [[ -e "${target}/usr/lib/systemd/system/virtqemud.socket" ]]; then
+            for _lv_sock in virtqemud.socket virtnetworkd.socket virtstoraged.socket; do
+                chroot "${target}" systemctl enable "$_lv_sock" >/dev/null 2>&1 ||
+                    k_log_to "$log" "WARNING: could not enable ${_lv_sock} — virsh may not reach libvirt"
+            done
+            # libvirtd conflicts with the sockets above; leaving it enabled is what
+            # broke build 22. Disabling a unit that is already disabled is a no-op.
+            chroot "${target}" systemctl disable libvirtd.service libvirtd.socket >/dev/null 2>&1 ||
+                true # already disabled on a stock modular host: that is the good case
+            # Outcome, not exit code: assert the enable symlink actually landed.
+            if [[ -e "${target}/etc/systemd/system/sockets.target.wants/virtqemud.socket" ]]; then
+                k_log_to "$log" "libvirt: modular sockets enabled (virtqemud, virtnetworkd, virtstoraged)"
+            else
+                k_log_to "$log" "FATAL: virtqemud.socket did not enable — virsh will not reach libvirt"
+            fi
+        else
+            chroot "${target}" systemctl enable libvirtd >/dev/null 2>&1 ||
+                k_log_to "$log" "WARNING: could not enable libvirtd — this host ships no modular libvirt either"
+        fi
         # virsh can't run in a chroot (no running libvirtd to connect to). At
         # firstboot, libvirtd takes variable time to register drivers and create
         # the default network; a plain After=libvirtd.service races.

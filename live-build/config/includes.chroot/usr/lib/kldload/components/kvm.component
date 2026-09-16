@@ -15,7 +15,12 @@ COMPONENT_MINUTES=2
 COMPONENT_REQUIRES=""
 
 component_status() {
-    if systemctl is-active libvirtd >/dev/null 2>&1 ||
+    # virtqemud.socket FIRST: on a modular-libvirt host (Fedora 44, current EL)
+    # that is the socket that exists, and asking only about libvirtd reported
+    # "absent" on a machine where libvirt was working perfectly well.
+    if systemctl is-active virtqemud.socket >/dev/null 2>&1 ||
+        systemctl is-active virtqemud >/dev/null 2>&1 ||
+        systemctl is-active libvirtd >/dev/null 2>&1 ||
         systemctl is-active libvirtd.socket >/dev/null 2>&1; then
         echo installed
     else
@@ -28,10 +33,23 @@ component_install() {
         echo "FATAL: virsh not present — the profile did not ship libvirt" >&2
         return 1
     }
-    # Socket activation on modern libvirt; the service name is the fallback for
-    # substrates still shipping the monolithic daemon.
-    systemctl enable --now libvirtd.socket 2>/dev/null ||
-        systemctl enable --now libvirtd
+    # MODULAR sockets first. libvirtd.socket is the MONOLITHIC daemon's socket and
+    # CONFLICTS with virtqemud.socket, so enabling it on a modular host (Fedora 44,
+    # current EL) leaves virsh unable to reach /var/run/libvirt/virtqemud-sock --
+    # which is how 6-full lost its cluster and all 15 goldens on build 22 (fiend,
+    # 2026-09-16). The monolithic path stays as the fallback it was meant to be.
+    if [[ -e /usr/lib/systemd/system/virtqemud.socket ]]; then
+        for _lv_sock in virtqemud.socket virtnetworkd.socket virtstoraged.socket; do
+            systemctl enable --now "$_lv_sock" >/dev/null 2>&1 ||
+                echo "WARNING: could not enable ${_lv_sock}" >&2
+        done
+    else
+        systemctl enable --now libvirtd.socket 2>/dev/null ||
+            systemctl enable --now libvirtd
+    fi
+    # Outcome, not exit code: virsh must actually answer.
+    virsh -c qemu:///system list --all >/dev/null 2>&1 ||
+        echo "WARNING: libvirt enabled but virsh cannot connect — check virtqemud.socket" >&2
     # The default NAT network is what every lab component attaches to. It is
     # inert on a fresh install until started, and autostart makes it survive
     # the reboot the operator is about to do.
