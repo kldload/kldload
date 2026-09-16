@@ -2,7 +2,7 @@
 
 ## 1.5.0 — 16 September 2026
 
-257 commits since 1.4.2: 60 features, 168 fixes, 270 files changed.
+267 commits since 1.4.2: 60 features, 174 fixes, 278 files changed.
 
 ---
 
