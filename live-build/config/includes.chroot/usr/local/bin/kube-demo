@@ -13,6 +13,40 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 
+# --help answers before the root re-exec: asking what a tool does must never
+# need a password. Handled here rather than in the option loop below, which
+# runs after the re-exec and ignores anything it does not recognise.
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kube-demo [--no-pause]
+
+Walk the full Kubernetes stack running on ZFS instant clones, as a narrated
+demo. Read-only until the teardown step at the end, which asks first.
+
+  --no-pause, --nopause, -n   do not wait for a keypress between sections.
+                              Use this when the output is being piped or
+                              captured, where a pause looks like a hang.
+
+Needs root. Any other argument is ignored rather than rejected, so a mistyped
+flag runs the demo with pauses ON.
+
+Environment:
+  KUBE_DEMO_COUNT     how many clones to spin in the clone section. Default 1.
+  KUBECONFIG          Default /root/.kube/config.
+  KLDLOAD_DEMO_YES=1  skip the teardown confirmation. Set this for cron and
+                      scripts.
+
+The teardown prompt only appears on a TTY. Run non-interactively -- from the
+web UI button, `ssh host kube-demo`, or cron -- and it auto-confirms, because
+reading from a closed stdin used to abort the destroy silently.
+
+See also: kube-cluster, kube-status, kube-demo-image, kube-demo-publish.
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 KUBE_DEMO_PAUSE=1

@@ -4,6 +4,50 @@
 set -euo pipefail
 
 # Auto-elevate to root
+# --help answers before the root re-exec: asking what a tool does must never
+# need a password. This one takes no positional arguments -- its interface is
+# the environment, which is exactly the part nobody could discover without
+# reading the source.
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kube-init
+
+Bootstrap the FIRST control plane of a cluster and install Cilium as the CNI.
+Run kube-setup first. Other nodes join afterwards with kube-join.
+
+Takes no arguments. Needs root.
+
+Cilium replaces kube-proxy: kubeadm runs with --skip-phases=addon/kube-proxy
+and Cilium is installed with kubeProxyReplacement=true. A cluster built this
+way has NO kube-proxy DaemonSet, and that absence is normal, not a missing
+component.
+
+Environment:
+  POD_CIDR            Default 10.244.0.0/16.
+  SVC_CIDR            Default 10.96.0.0/12.
+  CILIUM_VERSION      Default 1.16.5.
+  METALLB_VERSION     Default 0.14.9.
+  METALLB_POOL        address range for MetalLB, e.g. 192.168.122.240-250.
+                      EMPTY by default, which means MetalLB is not configured
+                      and a LoadBalancer service will stay pending.
+  METALLB_POOL_NAME   Default kldload-pool.
+  KUBE_VIP_ADDRESS    the floating apiserver VIP. Empty by default, in which
+                      case this node's own address is used and there is no
+                      HA endpoint for the other control planes to share.
+  KUBE_VIP_INTERFACE  interface to hold the VIP. Empty means autodetect.
+  KUBE_VIP_VERSION    Default v0.8.9.
+
+For a multi-control-plane cluster set KUBE_VIP_ADDRESS before running this,
+not after: the certificate SANs are generated here, and adding the VIP later
+means reissuing them.
+
+See also: kube-setup, kube-join, kube-cluster, kube-status, kube-reset.
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"

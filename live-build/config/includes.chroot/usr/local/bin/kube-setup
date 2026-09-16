@@ -5,6 +5,36 @@
 set -euo pipefail
 
 # Auto-elevate to root
+# --help answers before the root re-exec: asking what a tool does must never
+# need a password. This one takes no positional arguments -- its interface is
+# the environment, which is exactly the part nobody could discover without
+# reading the source.
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kube-setup
+
+Install the Kubernetes package set on this node: containerd, kubeadm, kubelet,
+kubectl, cri-tools, Helm and the Cilium CLI. Run it on every node, control
+plane and worker alike, before kube-init or kube-join.
+
+Takes no arguments. Needs root. Handles dnf (CentOS, RHEL, Rocky, Fedora) and
+apt (Debian, Ubuntu) from /etc/os-release.
+
+Environment:
+  K8S_VERSION          package repo stream. Default v1.32.
+  HELM_VERSION         Default v3.17.0.
+  CILIUM_CLI_VERSION   Default 0.19.2.
+
+Set K8S_VERSION to the minor stream (v1.32), not a patch release -- it selects
+the pkgs.k8s.io repo, not a package pin.
+
+See also: kube-init, kube-join, kube-load-images, kube-status.
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 K8S_VERSION="${K8S_VERSION:-v1.32}"
