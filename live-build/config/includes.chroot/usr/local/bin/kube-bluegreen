@@ -50,7 +50,10 @@ _die() {
 command -v kubectl >/dev/null || _die "kubectl not found"
 command -v helm >/dev/null || _die "helm not found"
 
-_active() { kubectl -n "$NS" get svc shop -o jsonpath='{.spec.selector.track}' 2>/dev/null; }
+# `|| true`: no Service means the demo is not deployed, which the caller reports
+# in words; without it the ERR trap fired three times for `status` on a cluster
+# that simply had no demo on it (fiend, 2026-09-15).
+_active() { kubectl -n "$NS" get svc shop -o jsonpath='{.spec.selector.track}' 2>/dev/null || true; }
 _other() { [[ "$1" == "blue" ]] && echo green || echo blue; }
 
 # Ready/desired for one track. Prints "ready/desired"; callers compare them

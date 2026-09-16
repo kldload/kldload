@@ -18,8 +18,8 @@
 [Unit]
 Description=Apply KLDload platform package holds
 ConditionPathExists=/usr/sbin/kldload-apply-platform-holds
-After=zfs-mount.service local-fs.target
-Wants=zfs-mount.service
+After=zfs.target zfs-mount.service local-fs.target
+Wants=zfs.target zfs-mount.service
 # RequiresMountsFor is the one that actually works, and the reason is subtle.
 # /var/lib/kldload is NOT mounted by zfs-mount.service -- it gets a GENERATED
 # var-lib-kldload.mount unit, and that activates later. Measured on .105
@@ -30,6 +30,11 @@ Wants=zfs-mount.service
 # it. The read-back check stayed silent because at write time the file really
 # did exist and really was readable -- it only became invisible ten seconds
 # later. Ordering on the SERVICE is not ordering on the MOUNT.
+#
+# And RequiresMountsFor= only orders against a .mount unit that EXISTS: on
+# fiend 2026-09-15 (Fedora 44, no generated var-lib-kldload.mount) the list
+# landed under the mount again. zfs.target above is belt; the braces are in the
+# script, which now checks findmnt against the state dataset before it writes.
 RequiresMountsFor=/var/lib/kldload
 
 [Service]

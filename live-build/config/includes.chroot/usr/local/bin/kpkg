@@ -9,6 +9,13 @@ cmd="${1:-help}"
 shift 2>/dev/null || true
 
 _snap() {
+    # When the package manager on PATH is kldload-pkg-wrapper it takes the
+    # pre-transaction snapshot itself (@dnf-pre-/@apt-pre-); a second one here
+    # was pure noise — fiend 2026-09-15 carried a @kpkg-/@dnf-pre- pair, 96K
+    # apart, for every transaction.
+    if [[ "$(readlink -f "$(command -v "$PKG" 2>/dev/null)" 2>/dev/null)" == *kldload-pkg-wrapper ]]; then
+        return 0
+    fi
     if command -v zfs &>/dev/null && zpool list &>/dev/null 2>&1; then
         local ds
         ds=$(mount | awk '$3=="/" && /zfs/{print $1}')

@@ -49,6 +49,26 @@ mkdir -p "$(dirname "$LOG")" "$(dirname "$STATE")"
 
 _log() { echo "$(date '+%Y-%m-%dT%H:%M:%S') $*" >>"$LOG"; }
 
+# The list must land ON the state dataset, not under it. /var/lib/kldload is
+# rpool/kldload/state where that dataset exists, and RequiresMountsFor= in the
+# unit is inert for a ZFS mount (no .mount unit exists for it), so this ran
+# before the dataset was mounted and wrote the list into the root dataset's
+# /var/lib/kldload — where the mount then hid it. HISTORY: fiend 2026-09-15,
+# the log said "pinned 33 package(s)", the list was nowhere, and the root
+# dataset's snapshot still had it.
+_state_ds="${KLDLOAD_STATE_DATASET:-rpool/kldload/state}"
+if zfs list -H "$_state_ds" >/dev/null 2>&1; then
+    _src="$(findmnt -no SOURCE "$(dirname "$STATE")" 2>/dev/null || true)"
+    if [[ "$_src" != "$_state_ds" ]]; then
+        _log "$(dirname "$STATE") is on '${_src:-nothing}', not $_state_ds — mounting it before writing the list"
+        zfs mount "$_state_ds" || {
+            _log "FATAL: could not mount $_state_ds; refusing to write $STATE where the mount would hide it"
+            echo "kldload-apply-platform-holds: could not mount $_state_ds — see $LOG" >&2
+            exit 1
+        }
+    fi
+fi
+
 # ── What counts as "the substrate" ─────────────────────────────────────────
 # Names where the packaging is stable, patterns where it is not. NVIDIA is
 # always a pattern: the package set differs per driver branch and per flavour

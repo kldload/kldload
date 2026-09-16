@@ -1663,13 +1663,13 @@ EOF
         cat >"${target}/etc/kldload/install.attest" <<ATTEST
 
 [install_attestation]
-iso_version    = ${_iso_ver:-?}
-iso_sha256     = ${_iso_sha:-?}
+iso_version    = ${_iso_ver:-$(head -1 /etc/kldload/VERSION 2>/dev/null || echo '?')}
+iso_sha256     = ${_iso_sha:-? (netboot: no mounted ISO to hash)}
 iso_built_at   = ${_iso_build}
 install_date   = $(date -Iseconds)
 install_host   = $(hostname 2>/dev/null || cat /etc/hostname)
-install_disk   = ${KLDLOAD_INSTALL_DISK:-?}
-installer_ver  = ${KLDLOAD_INSTALLER_VERSION:-?}
+install_disk   = ${KLDLOAD_DISK:-?}
+installer_ver  = ${KLDLOAD_INSTALLER_VERSION:-$(head -1 /etc/kldload/VERSION 2>/dev/null || echo '?')}
 target_distro  = ${KLDLOAD_DISTRO:-?}
 target_profile = ${KLDLOAD_PROFILE:-?}
 ATTEST
@@ -3006,7 +3006,7 @@ MOKENROLL
     # ships no /usr/local/share/kldload/tests, so this unit's ExecStartPre sat for
     # 90 minutes waiting for autodeploy markers core never writes, then would have
     # run nothing; the operator's reboot stopped it and ExecStopPost marked it done.
-    if [[ ! -x "${target}/usr/local/share/kldload/tests/smoke-all.sh" ]]; then
+    if [[ ! -f "${target}/usr/local/share/kldload/tests/smoke-all.sh" ]]; then
         _ok "Smoke test" "not scheduled — this profile ships no smoke suite"
     else
         cat >"${target}/etc/systemd/system/kldload-smoke-firstboot.service" <<'SMOKEFB'
@@ -3043,7 +3043,13 @@ ExecStartPre=/bin/bash -c '\
         sleep 30; \
     done; \
     echo "smoke: autodeploy did not finish within 6 h — running anyway"'
-ExecStart=/bin/bash -c 'if [[ -x /usr/local/share/kldload/tests/smoke-all.sh ]]; then /usr/local/share/kldload/tests/smoke-all.sh > /root/kldload-smoke-report.txt 2>&1; fi'
+# `bash script`, not `[[ -x ]] && script`: the guard turned a suite that had
+# lost its exec bit into a unit that succeeded in 0 s and wrote no report
+# (fiend 2026-09-15: Result=success, no /root/kldload-smoke-report.txt). A
+# missing suite now fails the unit, which is what a missing suite is.
+ExecStart=/bin/bash /usr/local/share/kldload/tests/smoke-all.sh
+StandardOutput=file:/root/kldload-smoke-report.txt
+StandardError=inherit
 # Run once, whatever the outcome.
 #
 # This was ExecStartPost, which systemd runs ONLY on success — so a smoke

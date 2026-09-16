@@ -122,18 +122,31 @@ def src_leases() -> dict[str, dict[str, str]]:
 
 
 def src_wireguard() -> dict[str, str]:
-    """Peer addresses present in the mesh, keyed by allowed-ip.
+    """Peer addresses present in the mesh, keyed by address.
 
     Keyed by ADDRESS rather than name because WireGuard has no idea what a
     machine is called — which is precisely why a missing peer is invisible
     from every other tool.
+
+    Both addresses of a peer count: its allowed-ip (the mesh address) and the
+    ENDPOINT it is reached at. A Kubernetes node's libvirt lease is its
+    endpoint and never its allowed-ip, so keying on allowed-ips alone reported
+    mesh-missing for every node of a healthy cluster while `wg show` had all
+    six of them handshaking (fiend, 2026-09-15).
     """
     peers: dict[str, str] = {}
+
+    def add(ip: str, iface: str) -> None:
+        peers.setdefault(ip, "")
+        peers[ip] = (peers[ip] + " " + iface).strip()
+
     for iface in _run(["wg", "show", "interfaces"]).split():
         for line in _run(["wg", "show", iface, "allowed-ips"]).splitlines():
             for ip in re.findall(r"(\d+\.\d+\.\d+\.\d+)/\d+", line):
-                peers.setdefault(ip, "")
-                peers[ip] = (peers[ip] + " " + iface).strip()
+                add(ip, iface)
+        for line in _run(["wg", "show", iface, "endpoints"]).splitlines():
+            for ip in re.findall(r"(\d+\.\d+\.\d+\.\d+):\d+", line):
+                add(ip, iface)
     return peers
 
 
