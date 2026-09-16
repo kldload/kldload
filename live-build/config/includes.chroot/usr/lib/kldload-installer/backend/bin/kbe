@@ -5,10 +5,10 @@ set -euo pipefail
 # kbe — boot environment management tool
 # Usage:
 #   kbe list
-#   kbe create <name>
-#   kbe activate <snapshot>
-#   kbe rollback <snapshot>
-#   kbe delete <snapshot>
+#   kbe create <name>                 snapshot the running root as @<name>, clone it to rpool/ROOT/<name>
+#   kbe activate <dataset>            point the boot menu at that one for the next boot
+#   kbe rollback <snapshot>           roll the running root back to <snapshot>
+#   kbe delete <dataset|snapshot>     remove a boot environment and the snapshot it was made from
 # ---------------------------------------------------------------------------
 
 PROGNAME="$(basename "$0")"
@@ -27,20 +27,36 @@ usage() {
 Usage: $PROGNAME <command> [args]
 
 Commands:
-  list                      List boot environments (datasets under rpool/ROOT)
-  create <name>             Create a snapshot: rpool/ROOT/default@<name>
-  activate <snapshot>       Set pool bootfs to the dataset of <snapshot>
-  rollback <snapshot>       Roll back rpool/ROOT/default to <snapshot>
-  delete <snapshot>         Destroy a boot environment snapshot
+  list                      List boot environments: rpool/ROOT, its datasets, their snapshots
+  create <name>             Snapshot the running root as @<name> and clone it to
+                            rpool/ROOT/<name>, so both appear in the boot menu
+  activate <dataset>        Point the boot menu (pool bootfs) at that one for the next boot
+  rollback <snapshot>       Roll the running root back to <snapshot> (discards newer changes)
+  delete <dataset|snapshot> Remove a boot environment and the snapshot it was made from;
+                            refuses the running root and the pool's bootfs
 
 Examples:
   $PROGNAME list
-  $PROGNAME create my-backup
-  $PROGNAME activate rpool/ROOT/default@my-backup
-  $PROGNAME rollback rpool/ROOT/default@my-backup
-  $PROGNAME delete rpool/ROOT/default@my-backup
+  $PROGNAME create pre-upgrade
+  $PROGNAME activate rpool/ROOT/pre-upgrade      # then reboot
+  $PROGNAME activate rpool/ROOT/$(hostname)      # and back again
+  $PROGNAME rollback rpool/ROOT/$(hostname)@pre-upgrade
+  $PROGNAME delete rpool/ROOT/pre-upgrade
 EOF
 }
+
+# Help needs neither the library nor root: `kbe --help` as admin used to answer
+# "FATAL: This operation requires root privileges" (fiend, 2026-09-15).
+case "${1:-}" in
+help | --help | -h)
+    usage
+    exit 0
+    ;;
+"")
+    usage >&2
+    exit 2
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Locate and source bootenv.sh
@@ -145,12 +161,9 @@ rollback)
     ;;
 
 delete)
-    SNAP="${1:-}"
-    [[ -n "$SNAP" ]] || die "delete requires a snapshot argument."
-    [[ "$SNAP" == *"@"* ]] || die "delete requires a full snapshot path (e.g. rpool/ROOT/default@name)"
-    log "Deleting boot environment: $SNAP"
-    run zfs destroy "$SNAP"
-    log "Deleted: $SNAP"
+    TARGET="${1:-}"
+    [[ -n "$TARGET" ]] || die "delete requires a boot environment: a dataset or snapshot from '$PROGNAME list'"
+    bootenv_delete "$TARGET"
     ;;
 
 help | --help | -h | "")

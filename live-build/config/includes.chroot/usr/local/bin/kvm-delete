@@ -88,14 +88,20 @@ if zfs list "${ZVOL}" >/dev/null 2>&1; then
     # Find all clone-* snapshots on the source that have no remaining clones
     SRC=$(echo "$ORIGIN" | cut -d@ -f1)
     if [[ -n "$SRC" && "$SRC" != "-" ]]; then
-        zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' | while read snap; do
-            # Check if any zvol still uses this snapshot as its origin
-            USED_BY=$(zfs get -H -o value origin -t volume -r rpool/vms 2>/dev/null | grep "^${snap}$")
+        # HISTORY: fiend 2026-09-15. Both greps below return 1 in the ordinary
+        # case — no clone- snapshots on the source, or a snapshot still in
+        # use — and under `set -e` + pipefail each one ended the script right
+        # here, AFTER the zvol was gone: exit 1 on a delete that had worked,
+        # "Deleted" never printed, and the state-DB row never soft-deleted, so
+        # the inventory kept advertising a machine that no longer existed.
+        while IFS= read -r snap; do
+            # -x: the snapshot name as a whole line, not a regex ('.' and '@' are in it)
+            USED_BY=$(zfs get -H -o value origin -t volume -r rpool/vms 2>/dev/null | grep -x "${snap}" || true) # no match means orphaned, which is the case we want
             if [[ -z "$USED_BY" ]]; then
                 echo "Cleaning up orphaned snapshot: ${snap}"
-                zfs destroy "${snap}" 2>/dev/null || true
+                zfs destroy "${snap}" </dev/null 2>/dev/null || true # a snapshot something else holds is not ours to take; the zvol is already gone
             fi
-        done
+        done < <(zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' || true) # a source with no clone- snapshots is the common case
     fi
 else
     echo "Warning: ZFS zvol '${ZVOL}' not found"

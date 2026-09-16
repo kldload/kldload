@@ -388,6 +388,84 @@ bootenv_activate() {
 }
 
 # ---------------------------------------------------------------------------
+# bootenv_delete TARGET — remove a boot environment that bootenv_create made.
+#
+# TARGET is the BE dataset (rpool/ROOT/<name>) or the snapshot it was cloned
+# from (<active>@<name>). Either spelling removes both halves, because they
+# only ever exist as a pair: the dataset is a clone of the snapshot, so ZFS
+# refuses to destroy the snapshot alone ("has dependent clones") and `kbe
+# delete <snapshot>` had never worked on anything `kbe create` produced
+# (fiend, 2026-09-15: create show-demo, delete rpool/ROOT/fiend@show-demo,
+# exit 1, both halves still on disk).
+#
+# Refuses the running root, the pool's bootfs, a BE that has clones of its
+# own, and an origin snapshot that something else is still cloned from. The
+# origin is removed only when it carries the BE's own name; a BE cloned from
+# somebody else's snapshot leaves that snapshot alone.
+# ---------------------------------------------------------------------------
+bootenv_delete() {
+    local target="$1"
+    [[ -n "$target" ]] || die "bootenv_delete: a boot environment is required (see kbe list)"
+
+    local ds snap name
+    if [[ "$target" == *"@"* ]]; then
+        snap="$target"
+        name="${target#*@}"
+        ds="${target%%@*}"
+        ds="${ds%/*}/${name}"
+    else
+        ds="$target"
+        name="${ds##*/}"
+        # WHY: '-' is what zfs prints for a dataset that is not a clone
+        snap="$(zfs get -H -o value origin "$ds" 2>/dev/null || true)"
+        [[ "$snap" == "-" ]] && snap=""
+    fi
+
+    local active bootfs
+    active="$(_bootenv_active_dataset)"
+    bootfs="$(zpool get -H -o value bootfs rpool 2>/dev/null || true)"
+    [[ "$ds" != "$active" ]] ||
+        die "bootenv_delete: $ds is the running boot environment"
+    [[ "$ds" != "$bootfs" ]] ||
+        die "bootenv_delete: $ds is the pool's bootfs — activate another one first (kbe list)"
+
+    if zfs list -H "$ds" >/dev/null 2>&1; then
+        local deps
+        deps="$(zfs list -H -o name,origin -t filesystem,volume -r rpool 2>/dev/null |
+            awk -v z="${ds}@" 'index($2, z) == 1 { print $1 }')"
+        [[ -z "$deps" ]] ||
+            die "bootenv_delete: $ds still has clones of its own: ${deps//$'\n'/ }"
+        log "Deleting boot environment: $ds"
+        run zfs destroy -r "$ds"
+    else
+        # A name that matches nothing is a typo, not a success: the first cut
+        # printed "Deleted boot environment: rpool/ROOT/nosuch" and exited 0.
+        [[ -n "$snap" ]] && zfs list -H -t snapshot "$snap" >/dev/null 2>&1 ||
+            die "bootenv_delete: no such boot environment: $target (see kbe list)"
+        log "NOTE: no dataset $ds — removing the snapshot only"
+    fi
+
+    if [[ -n "$snap" ]] && zfs list -H -t snapshot "$snap" >/dev/null 2>&1; then
+        if [[ "${snap#*@}" == "$name" ]]; then
+            local others
+            others="$(zfs list -H -o name,origin -t filesystem,volume -r rpool 2>/dev/null |
+                awk -v s="$snap" '$2 == s { print $1 }')"
+            [[ -z "$others" ]] ||
+                die "bootenv_delete: $snap is still the origin of: ${others//$'\n'/ }"
+            log "Deleting its origin snapshot: $snap"
+            run zfs destroy "$snap"
+        else
+            log "NOTE: leaving $snap alone — it is not named after this boot environment"
+        fi
+    fi
+
+    # Outcome, not exit code.
+    ! zfs list -H "$ds" >/dev/null 2>&1 ||
+        die "bootenv_delete: $ds still exists"
+    log "Deleted boot environment: $ds"
+}
+
+# ---------------------------------------------------------------------------
 # bootenv_rollback — roll back a dataset to a snapshot
 # Args: snapshot (e.g. rpool/ROOT/default@name)
 # ---------------------------------------------------------------------------
