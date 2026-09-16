@@ -3,6 +3,29 @@
 set -euo pipefail
 
 # Auto-elevate to root
+# --help answers before the root re-exec below: asking a tool what it does
+# must never need a password, and on a machine where the operator has no
+# sudo rights it could not answer at all (swept 2026-09-16).
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kube-status
+
+Print a health summary of the Kubernetes cluster this node belongs to: nodes
+and their readiness, control-plane pods, and what is not running.
+
+Takes no options. Needs root, because it reads the cluster admin kubeconfig.
+
+Exits 1 with "No cluster available" when kubectl is missing or cannot reach an
+apiserver -- which is the answer on a worker or a machine with no cluster, not
+a fault.
+
+See also: kube-init, kube-join, kube-cluster, kube-reset.
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 C="\033[1;36m"

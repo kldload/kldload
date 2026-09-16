@@ -3,6 +3,38 @@
 set -euo pipefail
 
 # Auto-elevate to root
+# --help answers before the root re-exec below: asking a tool what it does
+# must never need a password, and on a machine where the operator has no
+# sudo rights it could not answer at all (swept 2026-09-16).
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kube-reset
+
+Tear Kubernetes off THIS node. Destructive, and it asks first: you must type
+the word reset at the prompt, and anything else aborts without touching a
+thing.
+
+Takes no options. Needs root.
+
+What it removes, in order:
+  - a recursive ZFS snapshot of the root pool FIRST, named
+    <pool>@pre-kube-reset-<utc-timestamp>, so the whole thing is reversible
+    with zfs rollback -r
+  - kubeadm reset -f
+  - /etc/kubernetes, /var/lib/kubelet, /var/lib/etcd, /root/.kube/config
+  - iptables, ip6tables and CNI state left behind by kube-proxy or Cilium
+  - restarts containerd clean
+
+The packages stay installed. Rejoin with kube-join <control-plane-ip>, or
+start a new cluster with kube-init.
+
+See also: kube-init, kube-join, kube-status.
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 log() { echo -e "\033[1;32m[kube-reset]\033[0m $*"; }

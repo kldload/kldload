@@ -3,6 +3,29 @@
 set -euo pipefail
 
 # Auto-elevate to root (ZFS + libvirt require it)
+# --help answers before the root re-exec below: asking a tool what it does
+# must never need a password, and on a machine where the operator has no
+# sudo rights it could not answer at all (swept 2026-09-16).
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kvm-list
+
+List every libvirt VM on this host with the state, memory and vCPU count
+libvirt reports, and the space its ZFS zvol actually uses.
+
+Takes no options. Needs root, because it reads both libvirt and ZFS.
+
+The ZVOL USED column looks up rpool/vms/<vm-name>. A VM whose disk is not a
+zvol under that path shows n/a -- it exists, it is just not backed the way
+kvm-create makes them.
+
+See also: kvm-create, kvm-clone, kvm-snap, kvm-delete.
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 printf "%-20s %-12s %-10s %-10s %-10s\n" "NAME" "STATE" "RAM" "VCPUS" "ZVOL USED"

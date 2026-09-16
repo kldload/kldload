@@ -3,6 +3,33 @@
 # Run before kube-init on offline/air-gapped systems
 set -euo pipefail
 
+# --help answers before the root re-exec below: asking a tool what it does
+# must never need a password, and on a machine where the operator has no
+# sudo rights it could not answer at all (swept 2026-09-16).
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kube-load-images [IMAGES_DIR]
+
+Import pre-pulled container images into containerd from a darksite directory,
+so an air-gapped node can start a cluster without reaching a registry. Run it
+before kube-init.
+
+  IMAGES_DIR   where the image tarballs are. Default
+               /root/darksite/k8s-images.
+
+Needs root, because it talks to containerd through ctr.
+
+An empty or missing directory is not an error: it says so and exits 0, leaving
+the node to pull from the internet as it normally would. A missing ctr IS an
+error (exit 1), because that means containerd is not installed.
+
+See also: kube-init, kube-join.
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 IMAGES_DIR="${1:-/root/darksite/k8s-images}"
