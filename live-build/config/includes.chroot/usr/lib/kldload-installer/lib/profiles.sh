@@ -948,6 +948,13 @@ k_install_system_files() {
     k_install_substrate_safety ||
         k_log "WARNING: substrate safety incomplete (see above) — journal, package holds or boot repair may be missing"
 
+    # The NFO travels to the machine as well, for every profile: the release it was
+    # installed from, on the box itself, where an operator can read it a year later.
+    if [[ -f /usr/share/kldload/kldload.nfo ]]; then
+        install -Dm 0644 /usr/share/kldload/kldload.nfo "${target}/usr/share/kldload/kldload.nfo"
+        k_log "carried kldload.nfo (this build's release notes)"
+    fi
+
     # The drop-in carry runs for EVERY profile, core included, so it sits above
     # core's early return. It used to live in the non-core branch, and once core
     # started installing OpenIPMI (the per-family package names, 2026-09-14) every

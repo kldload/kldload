@@ -91,6 +91,21 @@ MOUNTPOINT=$(mktemp -d)
 if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
     _pass "ISO mounts successfully"
 
+    # The NFO: at the ISO root (the first thing on the USB) and in the image, with its
+    # placeholders filled. A release with no NFO, or one still claiming to be @VERSION@,
+    # is not a release.
+    if [[ -f "$MOUNTPOINT/KLDLOAD.NFO" ]]; then
+        if grep -q '@[A-Z]*@' "$MOUNTPOINT/KLDLOAD.NFO"; then
+            _fail "NFO on the ISO" "unfilled placeholders: $(grep -o '@[A-Z]*@' "$MOUNTPOINT/KLDLOAD.NFO" | sort -u | tr '\n' ' ')"
+        elif grep -q "kldload" "$MOUNTPOINT/KLDLOAD.NFO"; then
+            _pass "NFO at the ISO root ($(wc -l <"$MOUNTPOINT/KLDLOAD.NFO") lines, version filled in)"
+        else
+            _fail "NFO on the ISO" "KLDLOAD.NFO does not name kldload — wrong file?"
+        fi
+    else
+        _fail "NFO on the ISO" "no /KLDLOAD.NFO at the ISO root — builder/build-iso.sh did not write it"
+    fi
+
     # Check squashfs
     if [[ -f "$MOUNTPOINT/LiveOS/squashfs.img" ]]; then
         SQ_SIZE=$(stat -c%s "$MOUNTPOINT/LiveOS/squashfs.img" 2>/dev/null || echo 0)

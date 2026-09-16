@@ -3934,6 +3934,34 @@ cp "${ISO_STAGING}/VERSION" "${ISO_STAGING}/etc/kldload/VERSION"
 mkdir -p "${ROOTFS}/etc/kldload"
 cp "${ISO_STAGING}/VERSION" "${ROOTFS}/etc/kldload/VERSION"
 
+# ── The NFO ─────────────────────────────────────────────────────────────────
+# Every release gets one: an 80-column plain-text file that says what this build
+# is, what is on the media and who it was assembled from. It lands at the root of
+# the ISO, so it is the first thing anyone sees on the USB stick, and inside the
+# image at /usr/share/kldload/kldload.nfo, where the installer carries it to the
+# machine. Placeholders are filled from the same values as VERSION above, so the
+# NFO can never disagree with the build it shipped with.
+_nfo_src=/build/builder/nfo/kldload.nfo.in
+if [[ -f "${_nfo_src}" ]]; then
+    mkdir -p "${ROOTFS}/usr/share/kldload"
+    sed -e "s|@VERSION@|${VERSION}|g" \
+        -e "s|@ISO@|${ISO_NAME}|g" \
+        -e "s|@EDITION@|${EDITION:-free}|g" \
+        -e "s|@PROFILE@|${PROFILE:-desktop}|g" \
+        -e "s|@ARCH@|${ARCH:-x86_64}|g" \
+        -e "s|@BUILT@|${_iso_built_at}|g" \
+        "${_nfo_src}" >"${ISO_STAGING}/KLDLOAD.NFO"
+    cp "${ISO_STAGING}/KLDLOAD.NFO" "${ROOTFS}/usr/share/kldload/kldload.nfo"
+    # Outcome, not exit code: a placeholder left behind means the sed above lost a
+    # value, and the NFO would ship claiming to be @VERSION@.
+    if grep -q '@[A-Z]*@' "${ISO_STAGING}/KLDLOAD.NFO"; then
+        die "FATAL: KLDLOAD.NFO still has unfilled placeholders: $(grep -o '@[A-Z]*@' "${ISO_STAGING}/KLDLOAD.NFO" | sort -u | tr '\n' ' ')"
+    fi
+    log "NFO written: /KLDLOAD.NFO and /usr/share/kldload/kldload.nfo ($(wc -l <"${ISO_STAGING}/KLDLOAD.NFO") lines)"
+else
+    log "  WARNING builder/nfo/kldload.nfo.in is missing — this release ships with no NFO"
+fi
+
 # Build ISO with UEFI boot that works from USB *and* CD-ROM emulation.
 #
 # Two boot paths need to coexist:
