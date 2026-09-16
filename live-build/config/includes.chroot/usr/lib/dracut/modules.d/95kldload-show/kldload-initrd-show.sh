@@ -49,13 +49,17 @@
 # EXIT: always 0.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# nounset and pipefail, but deliberately NOT errexit and NOT an ERR trap: a failed
+# stat or curl mid-download is an ordinary moment, not a reason to stop drawing.
+# HISTORY: the 2026-09-15 strict-mode sweep inserted the canonical line above this
+# file's existing `set -uo pipefail`. A LATER set line does not clear -e, -E or the
+# ERR trap, so the sweep silently made this script errexit despite the contract
+# above (caught on onyx 2026-09-15, before build 21 shipped). Dropping them has to
+# be explicit, which is what the two lines below are. Keep them.
 set -Eeuo pipefail
-trap 'echo "kldload-initrd-show.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
-
-set -uo pipefail
+set +e
+trap - ERR
 export LC_ALL=C
-# No -e: a failed stat or curl mid-download is an ordinary moment, not a reason to
-# stop drawing. No ERR trap for the same reason.
 
 CMDLINE="${KLDLOAD_SHOW_CMDLINE:-/proc/cmdline}"
 TTY="${KLDLOAD_SHOW_TTY:-/dev/tty1}"

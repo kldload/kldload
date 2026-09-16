@@ -45,10 +45,17 @@
 #     headroom; it is what made a full-toggle first boot reboot-cycle.
 # ══════════════════════════════════════════════════════════════════════════════
 
+# nounset and pipefail, but deliberately NOT errexit and NOT an ERR trap: this is
+# a long idempotent convergence run, and one failed phase must not abort the rest
+# of first boot. Phases report their own failures.
+# HISTORY: the 2026-09-15 strict-mode sweep inserted the canonical line above this
+# file's existing `set -uo pipefail`. A LATER set line does not clear -e, -E or the
+# ERR trap, so the sweep silently made this script errexit despite the contract
+# above (caught on onyx 2026-09-15, before build 21 shipped). Dropping them has to
+# be explicit, which is what the two lines below are. Keep them.
 set -Eeuo pipefail
-trap 'echo "kldload-autodeploy: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
-
-set -uo pipefail
+set +e
+trap - ERR
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 WANT_ONLY=0
 case "${1:-}" in
