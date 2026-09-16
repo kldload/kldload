@@ -10,14 +10,19 @@ trap 'echo "all-loki.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 LOKI_URL="${LOKI_URL:-http://127.0.0.1:3100/loki/api/v1/push}"
 
 # Build a compact, grep-friendly log line.
+# WHY the :- defaults: ZED only exports the vdev/error variables for events that
+# HAVE a vdev. On a pool-level event (scrub start, history) they are unset, and
+# under the nounset this file gained on 2026-09-15 that aborted the zedlet before
+# it pushed anything -- every scrub event stopped reaching Loki. Verified by
+# running it with only ZEVENT_CLASS and ZEVENT_POOL set.
 _line="class=${ZEVENT_CLASS:-?} pool=${ZEVENT_POOL:-?}"
-[[ -n "${ZEVENT_VDEV_PATH}" ]] && _line+=" vdev=${ZEVENT_VDEV_PATH}"
-[[ -n "${ZEVENT_VDEV_STATE_STR}" ]] && _line+=" vdev_state=${ZEVENT_VDEV_STATE_STR}"
-[[ -n "${ZEVENT_HISTORY_INTERNAL_STR}" ]] && _line+=" hist=${ZEVENT_HISTORY_INTERNAL_STR}"
-[[ -n "${ZEVENT_EID}" ]] && _line+=" eid=${ZEVENT_EID}"
-[[ -n "${ZEVENT_CKSUM_ERRORS}" ]] && _line+=" cksum_errs=${ZEVENT_CKSUM_ERRORS}"
-[[ -n "${ZEVENT_READ_ERRORS}" ]] && _line+=" read_errs=${ZEVENT_READ_ERRORS}"
-[[ -n "${ZEVENT_WRITE_ERRORS}" ]] && _line+=" write_errs=${ZEVENT_WRITE_ERRORS}"
+[[ -n "${ZEVENT_VDEV_PATH:-}" ]] && _line+=" vdev=${ZEVENT_VDEV_PATH:-}"
+[[ -n "${ZEVENT_VDEV_STATE_STR:-}" ]] && _line+=" vdev_state=${ZEVENT_VDEV_STATE_STR:-}"
+[[ -n "${ZEVENT_HISTORY_INTERNAL_STR:-}" ]] && _line+=" hist=${ZEVENT_HISTORY_INTERNAL_STR:-}"
+[[ -n "${ZEVENT_EID:-}" ]] && _line+=" eid=${ZEVENT_EID:-}"
+[[ -n "${ZEVENT_CKSUM_ERRORS:-}" ]] && _line+=" cksum_errs=${ZEVENT_CKSUM_ERRORS:-}"
+[[ -n "${ZEVENT_READ_ERRORS:-}" ]] && _line+=" read_errs=${ZEVENT_READ_ERRORS:-}"
+[[ -n "${ZEVENT_WRITE_ERRORS:-}" ]] && _line+=" write_errs=${ZEVENT_WRITE_ERRORS:-}"
 
 # Push to Loki. Timestamp is ns-epoch. Labels are the high-cardinality
 # safe ones: host, job=zed, class, pool. Everything else goes in the log.
