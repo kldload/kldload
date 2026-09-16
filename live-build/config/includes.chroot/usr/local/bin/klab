@@ -20,7 +20,7 @@
 #
 # Usage:
 #   klab                                    Interactive menu
-#   klab golden [distro|all]                Build golden images
+#   klab golden [distro...|all]             Build golden images
 #   klab golden-desktop [distro...]         Build GNOME desktop goldens (default: all)
 #   klab deploy blue|green                  Clone goldens to site
 #   klab promote green                      Green becomes new blue
@@ -49,11 +49,69 @@ set -uo pipefail
 # disappears.
 #
 # Only apply to the long-running subcommands (test/golden/destroy/deploy).
-# Keep default behaviour for interactive commands (status, list, verify)
-# so Ctrl+C at the prompt still works cleanly.
+# Keep default behaviour for the interactive ones (status, verify, results) so
+# Ctrl+C at the prompt still works cleanly.
 case "${1:-}" in
 test | golden | golden-ztest | deploy | destroy | promote | rollback | build | demo)
     trap '' HUP PIPE
+    ;;
+esac
+
+usage() {
+    cat <<'USAGE'
+klab — Multi-Distro Test Platform
+
+Usage:
+  klab                                    Interactive menu
+  klab golden [distro...|all]             Build golden images
+  klab golden-desktop [distro...]         GNOME desktop goldens for instant clones
+                                          (default: all — one GNOME image per distro)
+  klab golden-db [distro...]              PostgreSQL goldens carrying a generated
+                                          dataset — clone one per developer
+                                          (KLAB_DB_SCALE=200 ≈ 3GB, 3400 ≈ 500GB)
+  klab deploy blue|green                  Deploy site from goldens
+  klab promote green                      Promote green to blue
+  klab rollback                           Revert blue to previous snapshot
+  klab test [--quick|--full] [--distro d] Run OpenZFS test suite
+  klab kubernetes [--workers N]           Deploy K8s cluster
+  klab run-playbook /path/to/script.sh    Run custom payload on site VMs
+  klab verify [distro|all]                Smoke test goldens
+  klab status                             Show everything
+  klab results [run-id]                   Display test matrix
+  klab destroy blue|green|all|goldens     Tear down
+  klab fetch-rhel-image [--output PATH]   Pull the RHEL KVM guest image
+                                          using saved/env RHEL credentials
+
+Distros: centos rocky fedora debian ubuntu
+         (arch and rhel are NOT golden targets -- they were listed here
+          for a while and validate_distro rejected both every time)
+
+ZFS Version Flags:
+  --zfs-version 2.3.0               Build from release tarball
+  --zfs-git openzfs/zfs@master       Build from git branch
+  --zfs-tarball /path/to/zfs.tar.gz  Build from local tarball
+
+Examples:
+  klab golden all                         Build all golden images
+  klab deploy blue                        Clone goldens to blue site
+  klab test --quick --distro centos,debian Quick ZFS tests on 2 distros
+  klab run-playbook ./my-test.sh          Run custom script on all blue VMs
+  klab promote green                      Swap green to blue
+  klab destroy all                        Tear down sites, keep goldens
+USAGE
+    exit 0
+}
+
+# --help answers BEFORE the sudo re-exec below. Asking for the usage of a tool
+# should never need root, and re-execing first meant `klab --help` prompted for
+# a password to print a paragraph of text -- or, on a box with no sudo rights,
+# refused to explain itself at all. Same rule that got thirteen other tools
+# fixed on 2026-09-15; klab was missed because its help lives in the dispatcher,
+# which is a hundred lines the far side of the re-exec.
+case "${1:-}" in
+help | -h | --help)
+    usage
+    exit 0
     ;;
 esac
 
@@ -869,6 +927,43 @@ validate_distro() {
         [[ "$d" == "$valid" ]] && return 0
     done
     die "Unknown distro: ${d}. Valid: ${DISTROS[*]}"
+}
+
+# expand_golden_distros ARG... -> the distro list, one per line on stdout.
+#
+# "all" expands to DISTROS; no arguments means all. Every other name is checked
+# against DISTROS *before any build starts*, which is the whole point.
+#
+# HISTORY: `klab golden list` (fiend, 2026-09-16). An unknown name used to
+# travel all the way down into build_golden_single, die there, get swallowed by
+# the `|| true` that stops one bad distro from killing a multi-distro run, and
+# come back out of report_goldens as "0/1 sealed, NOT sealed: list" followed by
+# "rerun with: klab golden list" -- the exact command that had just failed. It
+# charged off and tried to BUILD something first, too. `list` and `status` are
+# what an operator types on day one; they deserve a usage error, not a build
+# attempt and advice that loops forever.
+#
+# Exit: 2 (usage) naming every bad argument. Callers must propagate it --
+# this runs in a command substitution, so its exit does NOT end the caller.
+expand_golden_distros() {
+    [[ $# -eq 0 ]] && set -- all
+    local _arg _bad=() _out=()
+    for _arg in "$@"; do
+        if [[ "$_arg" == "all" ]]; then
+            _out+=("${DISTROS[@]}")
+        elif printf '%s\n' "${DISTROS[@]}" | grep -qxF -- "$_arg"; then
+            _out+=("$_arg")
+        else
+            _bad+=("$_arg")
+        fi
+    done
+    if ((${#_bad[@]})); then
+        warn "not a distro: ${_bad[*]}"
+        warn "valid: ${DISTROS[*]} all"
+        warn "to see what is already built: klab status"
+        exit 2
+    fi
+    printf '%s\n' "${_out[@]}"
 }
 
 validate_site() {
@@ -2849,14 +2944,12 @@ cmd_golden() {
     # instead of silently dropping args. Single "all" expands to the full
     # DISTROS list. Mix is allowed.
     [[ $# -eq 0 ]] && set -- all
-    local _distros=()
-    for _arg in "$@"; do
-        if [[ "$_arg" == "all" ]]; then
-            _distros+=("${DISTROS[@]}")
-        else
-            _distros+=("$_arg")
-        fi
-    done
+    local _distros=() _expanded
+    # Command substitution, not process substitution: expand_golden_distros
+    # signals a bad argument by exiting 2, and an exit inside <( ) would be
+    # lost. This form gives us its status to propagate.
+    _expanded="$(expand_golden_distros "$@")" || exit $?
+    mapfile -t _distros <<<"$_expanded"
     # Subshell each call so a `die` inside build_golden_single (which is
     # `exit 1`, not `return 1`) doesn't kill the whole `golden all` run.
     # Before this change, a single failed distro #2 left distros 3..N
@@ -2932,14 +3025,12 @@ cmd_golden_ztest() {
     [[ $# -eq 0 ]] && set -- all
     export KLAB_GOLDEN_KIND=ztest
     export KLAB_ZFS_DEV=1
-    local _distros=()
-    for _arg in "$@"; do
-        if [[ "$_arg" == "all" ]]; then
-            _distros+=("${DISTROS[@]}")
-        else
-            _distros+=("$_arg")
-        fi
-    done
+    local _distros=() _expanded
+    # Command substitution, not process substitution: expand_golden_distros
+    # signals a bad argument by exiting 2, and an exit inside <( ) would be
+    # lost. This form gives us its status to propagate.
+    _expanded="$(expand_golden_distros "$@")" || exit $?
+    mapfile -t _distros <<<"$_expanded"
     log "Building ZFS test goldens (target=$*) — these are separate from blue-green goldens."
     # Subshell-isolated: see cmd_golden for the why. The ztest lineage is
     # especially prone to triggering this because the from-source ZFS build
@@ -2997,14 +3088,12 @@ cmd_golden_db() {
     export KLAB_GOLDEN_KIND=db
     export KLAB_DB=1
     export KLAB_GOLDEN_MAX_SECS="${KLAB_GOLDEN_MAX_SECS:-14400}"
-    local _distros=()
-    for _arg in "$@"; do
-        if [[ "$_arg" == "all" ]]; then
-            _distros+=("${DISTROS[@]}")
-        else
-            _distros+=("$_arg")
-        fi
-    done
+    local _distros=() _expanded
+    # Command substitution, not process substitution: expand_golden_distros
+    # signals a bad argument by exiting 2, and an exit inside <( ) would be
+    # lost. This form gives us its status to propagate.
+    _expanded="$(expand_golden_distros "$@")" || exit $?
+    mapfile -t _distros <<<"$_expanded"
     log "Building DATABASE goldens (target=$*, scale=${KLAB_DB_SCALE:-200}) — clone them for instant writable copies."
     # The harmless case: run_goldens already logged, per distro, which builds
     # failed and returns non-zero when ANY did. Swallowing here keeps one bad
@@ -3025,14 +3114,12 @@ cmd_golden_desktop() {
     # cannot make a normal desktop build look like a hang — the operator can
     # still override.
     export KLAB_GOLDEN_MAX_SECS="${KLAB_GOLDEN_MAX_SECS:-2400}"
-    local _distros=()
-    for _arg in "$@"; do
-        if [[ "$_arg" == "all" ]]; then
-            _distros+=("${DISTROS[@]}")
-        else
-            _distros+=("$_arg")
-        fi
-    done
+    local _distros=() _expanded
+    # Command substitution, not process substitution: expand_golden_distros
+    # signals a bad argument by exiting 2, and an exit inside <( ) would be
+    # lost. This form gives us its status to propagate.
+    _expanded="$(expand_golden_distros "$@")" || exit $?
+    mapfile -t _distros <<<"$_expanded"
     log "Building GNOME desktop goldens (target=$*) — separate from blue-green and ztest goldens."
     # Subshell-isolated: see cmd_golden for the why.
     run_goldens "DESKTOP" "${_distros[@]}" || true # the count is not the answer; sealing is, checked next
@@ -4864,47 +4951,6 @@ interactive_menu() {
 
 # ── Section 12: CLI Dispatch ─────────────────────────────────────────────
 
-usage() {
-    cat <<'USAGE'
-klab — Multi-Distro Test Platform
-
-Usage:
-  klab                                    Interactive menu
-  klab golden [distro|all]                Build golden images
-  klab golden-desktop [distro...]         GNOME desktop goldens for instant clones
-                                          (default: all — one GNOME image per distro)
-  klab golden-db [distro...]              PostgreSQL goldens carrying a generated
-                                          dataset — clone one per developer
-                                          (KLAB_DB_SCALE=200 ≈ 3GB, 3400 ≈ 500GB)
-  klab deploy blue|green                  Deploy site from goldens
-  klab promote green                      Promote green to blue
-  klab rollback                           Revert blue to previous snapshot
-  klab test [--quick|--full] [--distro d] Run OpenZFS test suite
-  klab kubernetes [--workers N]           Deploy K8s cluster
-  klab run-playbook /path/to/script.sh    Run custom payload on site VMs
-  klab verify [distro|all]                Smoke test goldens
-  klab status                             Show everything
-  klab results [run-id]                   Display test matrix
-  klab destroy blue|green|all|goldens     Tear down
-
-Distros: centos rocky fedora debian ubuntu arch rhel
-
-ZFS Version Flags:
-  --zfs-version 2.3.0               Build from release tarball
-  --zfs-git openzfs/zfs@master       Build from git branch
-  --zfs-tarball /path/to/zfs.tar.gz  Build from local tarball
-
-Examples:
-  klab golden all                         Build all golden images
-  klab deploy blue                        Clone goldens to blue site
-  klab test --quick --distro centos,debian Quick ZFS tests on 2 distros
-  klab run-playbook ./my-test.sh          Run custom script on all blue VMs
-  klab promote green                      Swap green to blue
-  klab destroy all                        Tear down sites, keep goldens
-USAGE
-    exit 0
-}
-
 CMD="${1:-}"
 [[ -z "$CMD" ]] && {
     interactive_menu
@@ -4937,8 +4983,11 @@ done
 set -- "${_args[@]+"${_args[@]}"}"
 
 case "$CMD" in
-golden) cmd_golden "${1:-all}" ;;
-golden-ztest) cmd_golden_ztest "${1:-all}" ;;
+# "$@", not "$1": both functions iterate every argument, and passing only the
+# first silently built one distro out of `klab golden centos debian` -- the very
+# drop cmd_golden's comment says it fixed. They default to all on no args.
+golden) cmd_golden "$@" ;;
+golden-ztest) cmd_golden_ztest "$@" ;;
 golden-desktop) cmd_golden_desktop "$@" ;;
 golden-db) cmd_golden_db "$@" ;;
 build-all) cmd_build_all ;;
