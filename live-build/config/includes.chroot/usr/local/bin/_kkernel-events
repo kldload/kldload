@@ -52,6 +52,18 @@ fi
 
 # Auto-elevate -- bpftrace needs CAP_BPF or root. Re-exec under sudo
 # if we're not already root. -E so the env (TMUX, PATH) survives.
+# Rule 9: --help answers before the root re-exec below, straight from the
+# header banner above. The explanation was already written -- it just could not
+# be reached without a password, and on a machine with no sudo rights not at
+# all. Prints every consecutive comment line from line 2, the banner idiom
+# used by the other tools here.
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then
     exec sudo -E "$0" "$@"
 fi
