@@ -27,6 +27,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -510,7 +511,8 @@ def check_metrics_server():
 
 def _prom_query(q, timeout=4):
     """Return parsed Prometheus instant query result or None."""
-    import urllib.parse, urllib.request
+    import urllib.parse
+    import urllib.request
     try:
         url = f"http://localhost:9090/api/v1/query?query={urllib.parse.quote(q)}"
         with urllib.request.urlopen(url, timeout=timeout) as r:
@@ -734,12 +736,11 @@ def check_cluster_firewall():
             conf = f.read()
     except Exception:
         return _result("observability", "cluster firewall", "skip", "", "unreadable")
-    # Heuristics: either a "ip saddr <subnet> accept" rule, or explicit port
-    # opens for 10250/4244.
+    # Heuristics: either a "ip saddr <subnet> accept" rule, or an explicit
+    # port open for kubelet 10250.
     has_subnet = "ip saddr" in conf and ("192.168.122" in conf or "node_cidr" in conf or "/24" in conf)
     has_pod_cidr = "10.244" in conf or "pod_cidr" in conf
     has_kubelet = "10250" in conf
-    has_hubble = "4244" in conf
     if not (has_subnet or has_kubelet):
         return _result("observability", "cluster firewall", "fail",
                        "inet filter trusts node subnet OR opens kubelet:10250",
@@ -1182,7 +1183,25 @@ def _log_run(payload):
         pass
 
 
+USAGE = """\
+usage: kldload-doctor
+
+Profiles this host against a known-good baseline and prints JSON on stdout:
+  .summary            counts of ok / warn / fail / skip
+  .results[]          one per check: subsystem, name, status, actual,
+                      expected, severity and the remediation command
+There are no options. Read it with jq, for example the checks that are not ok:
+
+  kldload-doctor | jq -r '.results[] | select(.status!="ok")
+      | "\\(.status)\\t\\(.name)\\t\\(.remediation)"'
+"""
+
+
 def main():
+    # --help used to run every check and print the JSON (fiend, 2026-09-15)
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        print(USAGE, end="")
+        return
     results = []
     crashed = 0
     for fn in CHECKS:

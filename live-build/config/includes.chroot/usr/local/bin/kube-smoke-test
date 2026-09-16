@@ -4,6 +4,15 @@
 # Run on a node after kube-setup to verify readiness, or after kube-init to verify cluster
 set -euo pipefail
 
+# help before the sudo re-exec: --help used to run the whole audit as root
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    echo
+    echo "Usage: kube-smoke-test        (no options; runs every check, exit 1 on a critical failure)"
+    exit 0
+    ;;
+esac
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 C="\033[1;36m"

@@ -28,7 +28,8 @@ Examples:
   kdir -p /srv/apps/backend/data
   kdir -o compression=zstd -o quota=50G /srv/bigdata
 EOF
-    exit 1
+    # asked-for help is 0; a usage error is 1
+    exit "${1:-1}"
 }
 
 die() {
@@ -64,11 +65,13 @@ dataset_for_path() {
 PARENTS=0
 ZFS_OPTS=()
 
+# getopts only knows single letters; --help is what people type
+[[ "${1:-}" == "--help" ]] && usage 0
 while getopts ":po:h" opt; do
     case "$opt" in
     p) PARENTS=1 ;;
     o) ZFS_OPTS+=(-o "$OPTARG") ;;
-    h) usage ;;
+    h) usage 0 ;;
     :) die "option -$OPTARG requires an argument" ;;
     \?) die "unknown option: -$OPTARG" ;;
     esac

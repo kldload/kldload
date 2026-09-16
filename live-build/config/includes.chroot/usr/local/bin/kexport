@@ -20,11 +20,12 @@ DISK=""
 FMT=""
 OUTDIR="/root/exports"
 SEAL=1
+HELP=0
 for a in "$@"; do
     case "$a" in
     --no-seal) SEAL=0 ;;
     --seal) SEAL=1 ;;
-    -h | --help) : ;; # handled below
+    -h | --help) HELP=1 ;;
     *)
         if [[ -z "$DISK" ]]; then
             DISK="$a"
@@ -77,13 +78,18 @@ die() {
 }
 log() { echo "[kexport] $*"; }
 
-[[ -n "$DISK" ]] || {
+# asked-for help is 0; a missing operand is a usage error, 2
+((HELP)) && {
     usage
-    exit 1
+    exit 0
+}
+[[ -n "$DISK" ]] || {
+    usage >&2
+    exit 2
 }
 [[ -n "$FMT" ]] || {
-    usage
-    exit 1
+    usage >&2
+    exit 2
 }
 [[ -b "$DISK" || -f "$DISK" ]] || die "$DISK is not a block device or file"
 command -v qemu-img >/dev/null || die "qemu-img not found — install qemu-img"

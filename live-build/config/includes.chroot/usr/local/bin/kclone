@@ -6,8 +6,32 @@ set -euo pipefail
 #   kclone /home/admin /home/admin-backup
 #   kclone /srv/database /srv/database-test
 
-src_path="${1:?Usage: kclone <source-path> <dest-path>}"
-dst_path="${2:?Usage: kclone <source-path> <dest-path>}"
+usage() {
+    cat <<'USAGE'
+Usage: kclone <source-path> <dest-path>
+
+Clones the ZFS dataset mounted at <source-path> to a new dataset mounted at
+<dest-path>: a snapshot, then a copy-on-write clone. Instant, and 0B until
+the two diverge.
+
+Examples:
+  kclone /home/admin /home/admin-backup
+  kclone /srv/database /srv/database-test
+USAGE
+}
+case "${1:-}" in
+-h | --help)
+    usage
+    exit 0
+    ;;
+esac
+# a usage error is exit 2, like the rest of the tools
+[[ $# -eq 2 ]] || {
+    usage >&2
+    exit 2
+}
+src_path="$1"
+dst_path="$2"
 
 _log() { printf '\033[0;32m[kclone]\033[0m %s\n' "$*"; }
 _err() {
