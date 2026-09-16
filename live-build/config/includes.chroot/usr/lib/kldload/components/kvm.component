@@ -38,18 +38,23 @@ component_install() {
     # current EL) leaves virsh unable to reach /var/run/libvirt/virtqemud-sock --
     # which is how 6-full lost its cluster and all 15 goldens on build 22 (fiend,
     # 2026-09-16). The monolithic path stays as the fallback it was meant to be.
+    local _blame
     if [[ -e /usr/lib/systemd/system/virtqemud.socket ]]; then
+        _blame=virtqemud.socket
         for _lv_sock in virtqemud.socket virtnetworkd.socket virtstoraged.socket; do
             systemctl enable --now "$_lv_sock" >/dev/null 2>&1 ||
                 echo "WARNING: could not enable ${_lv_sock}" >&2
         done
     else
+        _blame=libvirtd.socket
         systemctl enable --now libvirtd.socket 2>/dev/null ||
             systemctl enable --now libvirtd
     fi
-    # Outcome, not exit code: virsh must actually answer.
+    # Outcome, not exit code: virsh must actually answer. The unit named is the
+    # one this host actually ships -- sending a monolithic host after
+    # virtqemud.socket is sending it after a file that does not exist.
     virsh -c qemu:///system list --all >/dev/null 2>&1 ||
-        echo "WARNING: libvirt enabled but virsh cannot connect — check virtqemud.socket" >&2
+        echo "WARNING: libvirt enabled but virsh cannot connect — check ${_blame}" >&2
     # The default NAT network is what every lab component attaches to. It is
     # inert on a fresh install until started, and autostart makes it survive
     # the reboot the operator is about to do.
@@ -63,7 +68,24 @@ component_install() {
 }
 
 component_remove() {
-    echo "stopping libvirtd (VMs and storage are left untouched)"
-    systemctl disable --now libvirtd.socket 2>/dev/null || true
-    systemctl disable --now libvirtd 2>/dev/null || true
+    # Both shapes, because component_install may have enabled either one. The
+    # old version disabled only the monolithic daemon, so on a modular host
+    # (Fedora 44, current EL -- the default substrate) "remove" printed that it
+    # had stopped libvirt and left virtqemud.socket serving happily. A remove
+    # that reports success without removing anything is the same silent-success
+    # class as the enable bug above (fiend, 2026-09-16).
+    echo "stopping libvirt (VMs and storage are left untouched)"
+    local _u
+    for _u in virtqemud.socket virtnetworkd.socket virtstoraged.socket \
+        virtqemud.service libvirtd.socket libvirtd.service; do
+        systemctl disable --now "$_u" >/dev/null 2>&1 ||
+            true # not present or already disabled: both are the wanted end state
+    done
+    # Outcome, not exit code: if virsh still answers, something is still up and
+    # the operator needs to know rather than read "stopped" and move on.
+    if virsh -c qemu:///system list --all >/dev/null 2>&1; then
+        echo "WARNING: virsh still connects — libvirt did not stop" >&2
+        return 1
+    fi
+    echo "libvirt stopped"
 }
