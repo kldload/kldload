@@ -19,6 +19,7 @@ _emergency_cleanup() {
     local mnt="${KLDLOAD_TARGET_MNT:-/target}"
     # Unmount in reverse order
     umount -R "${mnt}" 2>/dev/null || true
+    # swallow: nothing imported is the normal case on this path
     zpool export rpool 2>/dev/null || true
 }
 trap '_emergency_cleanup' EXIT
@@ -68,9 +69,11 @@ k_poweroff_after_success() {
     local _path="${3:-}"
 
     k_log "Install completed successfully"
+    # swallow: sync reports failures of writes already made; the export is the real gate
     sync || true
     # Eject all optical drives so machine boots from disk on next start
     for _dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/dvd; do
+        # swallow: netboot has no medium to eject, and a tray that will not open costs nothing
         [[ -b "$_dev" ]] && eject "$_dev" 2>/dev/null || true
     done
 
@@ -262,6 +265,7 @@ if ! k_have_func k_save_effective_config; then
     k_save_effective_config() {
         local out="${KLDLOAD_LOG_DIR}/effective-config.env"
         : >"$out"
+        # swallow: grep exits 1 when no KLDLOAD_ vars are set, which leaves an empty (valid) file
         env | sort | grep '^KLDLOAD_' >>"$out" || true
         chmod 0600 "$out"
         k_log "Saved effective config to ${out}"
@@ -285,17 +289,23 @@ if ! k_have_func k_bind_chroot_mounts; then
         mount --bind /run "${KLDLOAD_TARGET_MNT}/run"
         if [[ -d /sys/firmware/efi/efivars ]]; then
             mkdir -p "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars"
-            mount --bind /sys/firmware/efi/efivars "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars" || true
+            mount --bind /sys/firmware/efi/efivars "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars" ||
+                k_log "WARNING: could not bind efivars into the target — efibootmgr in the chroot will not see this machine's boot entries"
         fi
     }
 fi
 
 if ! k_have_func k_unbind_chroot_mounts; then
     k_unbind_chroot_mounts() {
+        # swallow: unbinding what may never have been bound — teardown, not a step
         umount -lf "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars" 2>/dev/null || true
+        # swallow: as above
         umount -lf "${KLDLOAD_TARGET_MNT}/run" 2>/dev/null || true
+        # swallow: as above
         umount -lf "${KLDLOAD_TARGET_MNT}/sys" 2>/dev/null || true
+        # swallow: as above
         umount -lf "${KLDLOAD_TARGET_MNT}/proc" 2>/dev/null || true
+        # swallow: as above
         umount -lf "${KLDLOAD_TARGET_MNT}/dev" 2>/dev/null || true
     }
 fi
@@ -308,6 +318,7 @@ k_seal_image_for_clone() {
 
     # Truncate machine-id — systemd regenerates on first boot
     : >"${target}/etc/machine-id"
+    # swallow: sealing removes identity files that may not exist on this distro
     rm -f "${target}/var/lib/dbus/machine-id" 2>/dev/null || true
 
     # Remove SSH host keys — sshd-keygen regenerates on first boot
@@ -315,20 +326,27 @@ k_seal_image_for_clone() {
 
     # Remove any hardcoded DHCP leases
     rm -f "${target}"/var/lib/NetworkManager/*.lease 2>/dev/null || true
+    # swallow: no leases to clear is the expected case
     rm -f "${target}"/var/lib/dhclient/*.lease 2>/dev/null || true
+    # swallow: as above
     rm -rf "${target}"/var/lib/dhcp/* 2>/dev/null || true
 
     # Reset cloud-init so it runs on next boot
     if [[ -d "${target}/var/lib/cloud" ]]; then
+        # swallow: no cloud-init state to clear unless the image had some
         rm -rf "${target}/var/lib/cloud/instances" 2>/dev/null || true
+        # swallow: as above
         rm -f "${target}/var/lib/cloud/instance" 2>/dev/null || true
     fi
 
     # Ensure cloud-init is enabled (not masked)
     chroot "${target}" systemctl enable cloud-init.service 2>/dev/null || true
-    chroot "${target}" systemctl enable cloud-init-local.service 2>/dev/null || true
-    chroot "${target}" systemctl enable cloud-config.service 2>/dev/null || true
-    chroot "${target}" systemctl enable cloud-final.service 2>/dev/null || true
+    chroot "${target}" systemctl enable cloud-init-local.service 2>/dev/null ||
+        k_log "WARNING: cloud-init-local.service not enabled on the target — a seeded clone will come up with no identity"
+    chroot "${target}" systemctl enable cloud-config.service 2>/dev/null ||
+        k_log "WARNING: cloud-config.service not enabled on the target"
+    chroot "${target}" systemctl enable cloud-final.service 2>/dev/null ||
+        k_log "WARNING: cloud-final.service not enabled on the target"
 
     # Write cloud-init datasource config — NoCloud for Proxmox/KVM, falls back to others
     mkdir -p "${target}/etc/cloud/cloud.cfg.d"
@@ -339,8 +357,11 @@ CLOUDINIT
 
     # Clear bash history and logs from the build process
     rm -f "${target}/root/.bash_history"
+    # swallow: truncating login records that may not exist yet
     : >"${target}/var/log/wtmp" 2>/dev/null || true
+    # swallow: as above
     : >"${target}/var/log/btmp" 2>/dev/null || true
+    # swallow: as above
     : >"${target}/var/log/lastlog" 2>/dev/null || true
 
     # Remove the install manifest (contains build-time passwords)
@@ -477,7 +498,8 @@ if ! k_have_func k_bootstrap_base; then
                 k_log "RHEL mode — using customer subscription repos"
                 # RHEL customers must have repos configured; copy from live host
                 cp /etc/yum.repos.d/*.repo "${target}/etc/yum.repos.d/" 2>/dev/null || true
-                cp -r /etc/pki/rpm-gpg/* "${target}/etc/pki/rpm-gpg/" 2>/dev/null || true
+                cp -r /etc/pki/rpm-gpg/* "${target}/etc/pki/rpm-gpg/" 2>/dev/null ||
+                    k_log "WARNING: no RPM GPG keys copied to the target — package installs there may refuse to verify"
             else
                 cat >"${target}/etc/yum.repos.d/centos.repo" <<DNFREPO
 [baseos]
@@ -570,11 +592,15 @@ ZFSREPO
                 else
                     # Inline fallback if lib/bootstrap.sh wasn't loaded
                     local _mok_dir="${target}/var/lib/dkms"
+                    # swallow: the || echo inside the subject is a fallback value, not a failure;
+                    # a failed openssl here is caught by the mok.key check below
                     mkdir -p "${_mok_dir}" "${target}/etc/dkms/framework.conf.d"
                     openssl req -new -x509 -newkey rsa:2048 \
                         -keyout "${_mok_dir}/mok.key" -out "${_mok_dir}/mok.pub" \
-                        -days 3650 -nodes -subj "/CN=kldload Secure Boot MOK $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" >>"$log" 2>&1 || true
-                    openssl x509 -in "${_mok_dir}/mok.pub" -out "${_mok_dir}/mok.der" -outform DER >>"$log" 2>&1 || true
+                        -days 3650 -nodes -subj "/CN=kldload Secure Boot MOK $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" >>"$log" 2>&1 ||
+                        k_log "WARNING: could not generate the Secure Boot MOK certificate — see $log; the key check below decides what happens next"
+                    openssl x509 -in "${_mok_dir}/mok.pub" -out "${_mok_dir}/mok.der" -outform DER >>"$log" 2>&1 ||
+                        k_log "WARNING: could not write mok.der — Secure Boot enrollment at first boot has no certificate to import"
                     chmod 0600 "${_mok_dir}/mok.key" 2>/dev/null
                     # Sign helper that works on both CentOS and Debian
                     cat >"${target}/etc/dkms/sign_helper.sh" <<'EOSIGN'
@@ -583,6 +609,7 @@ set -euo pipefail
 KVER="${1:?}" MOD="${2:?}"
 SIGN_FILE=$(find /usr/src/kernels/"${KVER}" /usr/src/linux-headers-"${KVER}" \
                  /usr/lib/linux-kbuild-"${KVER%%.*}"* \
+                 # swallow: find exits 1 when the kernel ships no sign-file; the empty case is handled below
                  -name sign-file -type f 2>/dev/null | head -1 || true)
 [[ -x "${SIGN_FILE}" ]] || { echo "sign-file not found for ${KVER}" >&2; exit 0; }
 exec "${SIGN_FILE}" sha256 /var/lib/dkms/mok.key /var/lib/dkms/mok.pub "${MOD}"
@@ -613,14 +640,21 @@ MOKCONF
             local zfs_ver
             zfs_ver=$(chroot "${target}" rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
             if [[ -n "$zfs_ver" ]]; then
-                chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 || true
-                chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 || true
+                chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 ||
+                    k_log "WARNING: dkms build of zfs ${zfs_ver} for ${kver} failed — see ${log}; the module check below decides whether this install can boot"
+                chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 ||
+                    k_log "WARNING: dkms install of zfs ${zfs_ver} for ${kver} failed — see ${log}"
             fi
-            chroot "${target}" depmod -a "$kver" 2>/dev/null || true
+            chroot "${target}" depmod -a "$kver" 2>/dev/null ||
+                k_log "WARNING: depmod failed for ${kver} — modules built above may not be found at boot"
 
+            # swallow: teardown of binds that may not be mounted
             umount "${target}/dev/pts" 2>/dev/null || true
+            # swallow: as above
             umount "${target}/dev" 2>/dev/null || true
+            # swallow: as above
             umount "${target}/sys" 2>/dev/null || true
+            # swallow: as above
             umount "${target}/proc" 2>/dev/null || true
 
             # Prevent services from starting in chroot
@@ -809,21 +843,29 @@ XKBVARIANT=""
 XKBOPTIONS=""
 BACKSPACE="guess"
 EOS
+            # swallow: the keymap file written above is what persists, and dpkg-reconfigure
+            # has no debconf database inside a chroot
             DEBIAN_FRONTEND=noninteractive chroot "${target}" \
                 dpkg-reconfigure -f noninteractive keyboard-configuration \
-                >>"$log" 2>&1 || true
+                >>"$log" 2>&1 ||
+                k_log "note: dpkg-reconfigure keyboard-configuration returned non-zero (no debconf db in a chroot); the config file written above is what persists"
         else
             echo "KEYMAP=${kblayout}" >"${target}/etc/vconsole.conf"
         fi
 
         # Timezone
         local tz="${KLDLOAD_TIMEZONE:-UTC}"
+        # swallow: an unknown zone leaves UTC, and the timedatectl call below reports it
         ln -sf "/usr/share/zoneinfo/${tz}" "${target}/etc/localtime" 2>/dev/null || true
+        # swallow: /etc/timezone is Debian-only; RPM targets keep the symlink above
         echo "${tz}" >"${target}/etc/timezone" 2>/dev/null || true
         if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+            # swallow: the zone symlink written above is what the system reads
             DEBIAN_FRONTEND=noninteractive chroot "${target}" \
-                dpkg-reconfigure -f noninteractive tzdata >>"$log" 2>&1 || true
+                dpkg-reconfigure -f noninteractive tzdata >>"$log" 2>&1 ||
+                k_log "note: dpkg-reconfigure tzdata returned non-zero; the zone symlink written above is what the system reads"
         else
+            # swallow: timedatectl needs a running systemd, which a chroot has not got; the symlink above is what persists
             chroot "${target}" timedatectl set-timezone "${tz}" 2>/dev/null || true
         fi
         k_log "Timezone: ${tz}"
@@ -837,11 +879,14 @@ EOS
             IFS=', ' read -r -a _extra <<<"${KLDLOAD_EXTRA_PACKAGES}"
             if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
                 DEBIAN_FRONTEND=noninteractive chroot "${target}" \
-                    apt-get install -y "${_extra[@]}" >>"$log" 2>&1 || true
+                    apt-get install -y "${_extra[@]}" >>"$log" 2>&1 ||
+                    k_log "WARNING: extra packages not installed: ${_extra[*]} — see $log"
             elif [[ "${distro}" == "arch" ]]; then
-                chroot "${target}" pacman --noconfirm --needed -S "${_extra[@]}" >>"$log" 2>&1 || true
+                chroot "${target}" pacman --noconfirm --needed -S "${_extra[@]}" >>"$log" 2>&1 ||
+                    k_log "WARNING: extra packages not installed: ${_extra[*]} — see $log"
             else
-                chroot "${target}" dnf install -y "${_extra[@]}" >>"$log" 2>&1 || true
+                chroot "${target}" dnf install -y "${_extra[@]}" >>"$log" 2>&1 ||
+                    k_log "WARNING: extra packages not installed: ${_extra[*]} — see $log"
             fi
         fi
 
@@ -960,7 +1005,8 @@ EOS
         else
             # Fallback: enable systemd-networkd (Alpine, minimal installs)
             chroot "${KLDLOAD_TARGET_MNT}" systemctl enable systemd-networkd >>"${KLDLOAD_LOG_DIR}/network.log" 2>&1 || true
-            chroot "${KLDLOAD_TARGET_MNT}" systemctl enable systemd-resolved >>"${KLDLOAD_LOG_DIR}/network.log" 2>&1 || true
+            chroot "${KLDLOAD_TARGET_MNT}" systemctl enable systemd-resolved >>"${KLDLOAD_LOG_DIR}/network.log" 2>&1 ||
+                k_log "WARNING: systemd-resolved not enabled — the target may boot with no DNS resolver"
         fi
         k_log "Network configuration complete"
     }
@@ -994,8 +1040,11 @@ if ! k_have_func k_configure_security; then
         # and chroot fails with "failed to run command '$cmd'". Absolute
         # paths sidestep that — useradd/chpasswd/usermod live in /usr/sbin
         # on every supported target.
+        # swallow: the account already exists on a re-run; chpasswd below fails loudly
+        # if the user genuinely is not there
         chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/useradd -m -s /bin/bash "${user}" \
-            >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+            >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 ||
+            k_log "note: useradd for ${user} returned non-zero (the account may already exist); the chpasswd below is the real check"
         echo "${user}:${upass}" | chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/chpasswd >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1
         if ((_pw_defaulted)); then
             # chage -d 0: last change "never", so PAM demands a new password at
@@ -1015,7 +1064,8 @@ if ! k_have_func k_configure_security; then
         # grants NOPASSWD ALL directly to the user.
         for _grp in wheel sudo; do
             if chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/getent group "${_grp}" >/dev/null 2>&1; then
-                chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/usermod -aG "${_grp}" "${user}" >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+                chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/usermod -aG "${_grp}" "${user}" >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 ||
+                    k_log "WARNING: ${user} was not added to ${_grp} — that group's tools will refuse to run for them"
             fi
         done
 
@@ -1037,7 +1087,8 @@ EOS
         case "${KLDLOAD_DISTRO:-}" in
         centos | rocky | rhel | fedora | arch | alpine) _ssh_svc="sshd" ;;
         esac
-        chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/systemctl enable "$_ssh_svc" >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+        chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/systemctl enable "$_ssh_svc" >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 ||
+            k_log "WARNING: ${_ssh_svc} not enabled — this machine will boot with no ssh, which is how a headless install becomes unreachable"
 
         # Install SSH public keys if provided
         if [[ -n "${KLDLOAD_SSH_PUBKEY:-}" ]]; then
@@ -1191,11 +1242,15 @@ if ! k_have_func k_apply_profile; then
         # Enable display manager for desktop
         if [[ "${profile}" == "desktop" ]]; then
             if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+                # swallow: gdm3 is the Debian name; the RPM branch below covers the others, and
+                # set-default reports if neither took
                 chroot "${target}" systemctl enable gdm3 >>"$log" 2>&1 || true
             else
+                # swallow: gdm is the RPM name; see the gdm3 branch above
                 chroot "${target}" systemctl enable gdm >>"$log" 2>&1 || true
             fi
-            chroot "${target}" systemctl set-default graphical.target >>"$log" 2>&1 || true
+            chroot "${target}" systemctl set-default graphical.target >>"$log" 2>&1 ||
+                k_log "WARNING: default target not set to graphical — a desktop install will boot to a console"
 
             # NOTE: this fallback k_apply_profile USED to write its own stub
             # 00-kldload-desktop dconf override here — hardcoded Adwaita
@@ -1436,9 +1491,12 @@ if ! k_have_func k_write_install_manifest; then
         # the heredoc itself never references a failing subprocess. Safe by
         # construction.
         local _kld_iso_ver=""
-        _kld_iso_ver="$(awk -F'[[:space:]]*=[[:space:]]*' \
-            '/^kldload_version/{print $2; exit}' \
-            /etc/kldload/VERSION 2>/dev/null || true)"
+        _kld_iso_ver="$(
+            awk -F'[[:space:]]*=[[:space:]]*' \
+                '/^kldload_version/{print $2; exit}'
+            # swallow: no VERSION file on a hand-built live image; the fallback below fills it in
+            /etc/kldload/VERSION 2>/dev/null || true
+        )"
         [[ -z "${_kld_iso_ver}" ]] && _kld_iso_ver="1.1.0"
 
         cat >"${target}/etc/kldload/install-manifest.env" <<EOF
@@ -1583,6 +1641,7 @@ EOF
             # if the pipe somehow malfunctions, the worst outcome is an empty _iso_sha
             # which gets the `?` fallback in the attestation file.
             _iso_sha="$(sha256sum "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null |
+                # swallow: a netboot has no mounted ISO to hash; the attestation records ? instead
                 awk '{print $1}' 2>/dev/null || true)"
         fi
         # ${_iso_path:-}, not ${_iso_path}. This line sits OUTSIDE the guard
@@ -1859,9 +1918,13 @@ fi
 
 cleanup() {
     local rc=$?
+    # swallow: sync reports failures of writes already made; the export is the real gate
     sync || true
+    # swallow: unbinding mounts that may already be gone — teardown before export
     k_unbind_chroot_mounts || true
+    # swallow: as above
     umount -lf "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
+    # swallow: as above
     umount -lf "${KLDLOAD_TARGET_MNT}" 2>/dev/null || true
     [[ "$rc" -ne 0 ]] && k_log "Install FAILED (exit ${rc})"
     return "$rc"
@@ -1906,6 +1969,7 @@ k_progress_publish() {
     shift
     mkdir -p "$K_PROGRESS_DIR" 2>/dev/null || return 0
     case "$kind" in
+    # swallow: progress reporting must never abort an install
     phase) printf '%s\n' "$*" >"$K_PROGRESS_DIR/install-phase" 2>/dev/null || true ;;
     step)
         # Tab-separated so the UI can style the label apart from the detail.
@@ -1914,6 +1978,7 @@ k_progress_publish() {
             IFS=$'\t'
             printf '%s' "$*"
         )"
+        # swallow: as above
         printf '%s\t%s\n' "$(date +%s)" "$_rec" >>"$K_PROGRESS_DIR/install-steps" 2>/dev/null || true
         ;;
     esac
@@ -2481,6 +2546,7 @@ main() {
         # Drop to an interactive shell
         export KLDLOAD_TARGET_MNT
         export PS1='\[\e[1;33m\][kldload-storage]\[\e[0m\] \w # '
+        # swallow: the debug shell exits non-zero when the operator ctrl-Ds out of it
         bash --norc --noprofile -i || true
 
         # Verify the user created what we need
@@ -2511,6 +2577,7 @@ main() {
             _efi_dev="$(lsblk -rno PATH,PARTTYPE "${KLDLOAD_DISK}" 2>/dev/null | grep -i 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' | awk '{print $1}' | head -1)"
             if [[ -n "$_efi_dev" ]]; then
                 mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi"
+                # swallow: best-effort remount for the rescue path; the caller checks what it needs
                 mount "$_efi_dev" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
             fi
         fi
@@ -2552,7 +2619,9 @@ main() {
         # live-env access without re-mounting.
         if [[ -d "${KLDLOAD_TARGET_MNT}" ]]; then
             mkdir -p "${KLDLOAD_TARGET_MNT}/root/kldload-install-logs" 2>/dev/null
+            # swallow: copying logs onto a target that may be unmounted by now; the live copy remains
             cp -a "${KLDLOAD_LOG_DIR}"/. "${KLDLOAD_TARGET_MNT}/root/kldload-install-logs/" 2>/dev/null || true
+            # swallow: as above, on the failure path where the target may be gone
             cp -a "${KLDLOAD_LOG_DIR}/bootstrap.log" "${KLDLOAD_TARGET_MNT}/bootstrap.log.failure" 2>/dev/null || true
         fi
         _info ""
@@ -2613,8 +2682,10 @@ main() {
     _info "▸  Taking factory snapshot..."
     local _snap_ts
     _snap_ts=$(date -u +%Y%m%dT%H%M%SZ)
-    zfs snapshot -r "rpool@install-${_snap_ts}" 2>/dev/null || true
-    zfs snapshot -r "bpool@install-${_snap_ts}" 2>/dev/null || true
+    zfs snapshot -r "rpool@install-${_snap_ts}" 2>/dev/null ||
+        k_log "WARNING: no rpool@install-${_snap_ts} snapshot — there is no point to roll back to if first boot goes wrong"
+    zfs snapshot -r "bpool@install-${_snap_ts}" 2>/dev/null ||
+        k_log "note: no bpool snapshot (this layout has no separate boot pool)"
     _ok "Snapshot" "rpool@install-${_snap_ts}"
 
     # ── Bootloader — write EFI files + initramfs (pool still mounted) ──────
@@ -2632,7 +2703,8 @@ main() {
     #       is listed but mountpoint -q /target returns non-zero
     if ! zpool list rpool >/dev/null 2>&1; then
         k_log "rpool got exported during install — re-importing with altroot=${KLDLOAD_TARGET_MNT}"
-        zpool import -f -N -R "${KLDLOAD_TARGET_MNT}" rpool 2>&1 || true
+        zpool import -f -N -R "${KLDLOAD_TARGET_MNT}" rpool 2>&1 ||
+            k_log "WARNING: could not import rpool for the repair pass — the steps below will not find the target"
     fi
     if ! mountpoint -q "${KLDLOAD_TARGET_MNT}" 2>/dev/null; then
         k_log "BE dataset not mounted at ${KLDLOAD_TARGET_MNT} — mounting now"
@@ -2668,11 +2740,13 @@ main() {
         # continue — which is the correct outcome and does not require mounting
         # anything else to reach it.
     fi
+    # swallow: the directory usually exists already; the mount below is the real step
     mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
     if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
         if [[ -n "${KLDLOAD_PART_EFI:-}" && -b "${KLDLOAD_PART_EFI}" ]]; then
             k_log "Re-mounting EFI partition (${KLDLOAD_PART_EFI}) at ${KLDLOAD_TARGET_MNT}/boot/efi for bootloader stage"
-            mount "${KLDLOAD_PART_EFI}" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>&1 || true
+            mount "${KLDLOAD_PART_EFI}" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>&1 ||
+                k_log "WARNING: could not mount ${KLDLOAD_PART_EFI} — the bootloader steps below have nowhere to write"
         fi
     fi
     # Hard verify — refuse to proceed if either the pool isn't mounted
@@ -2767,8 +2841,11 @@ main() {
 
         # Unbind chroot mounts and export pools BEFORE qemu-img reads the disk
         k_unbind_chroot_mounts
+        # swallow: sync reports failures of writes already made; the export is the real gate
         sync || true
+        # swallow: no separate bpool in this layout is the normal case
         zpool export bpool 2>/dev/null || true
+        # swallow: nothing imported is the normal case on this path
         zpool export rpool 2>/dev/null || true
         sleep 1
 
@@ -2821,6 +2898,7 @@ main() {
 
         k_log "Install + export complete"
         k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
+        # swallow: sync reports failures of writes already made; the export is the real gate
         sync || true
         return
     fi
@@ -2883,6 +2961,7 @@ main() {
     # ── Copy install logs to target for post-install debugging ──────────────
     if [[ -d /var/log/installer ]]; then
         mkdir -p "${target}/root/kldload-install-logs"
+        # swallow: as above
         cp -r /var/log/installer/* "${target}/root/kldload-install-logs/" 2>/dev/null || true
         _ok "Install logs" "copied to /root/kldload-install-logs/"
     fi
@@ -2915,8 +2994,10 @@ SuccessExitStatus=0 1
 [Install]
 WantedBy=multi-user.target
 MOKENROLL
+        # swallow: the symlink is checked right below, which is the honest signal
         ln -sf /etc/systemd/system/kldload-mok-enroll.service \
-            "${target}/etc/systemd/system/multi-user.target.wants/kldload-mok-enroll.service" 2>/dev/null || true
+            "${target}/etc/systemd/system/multi-user.target.wants/kldload-mok-enroll.service" 2>/dev/null ||
+            k_log "WARNING: could not link the MOK enrollment unit into multi-user.target.wants"
         _ok "MOK enrollment" "scheduled for first boot (password: kldload)"
     fi
 
@@ -2977,6 +3058,11 @@ ExecStart=/bin/bash -c 'if [[ -x /usr/local/share/kldload/tests/smoke-all.sh ]];
 # /root/kldload-smoke-report.txt, and a genuine failure is still surfaced once
 # — which is the point — rather than every boot forever.
 ExecStartPost=/bin/bash -c 'systemctl disable kldload-smoke-firstboot.service'
+# The disable below swallows its own failure on purpose: the marker file written
+# just before it is what stops this unit running again, and a oneshot with no
+# restart has nothing left to do either way.
+# The disable swallows its own failure on purpose: the marker touched just before
+# it is what stops this unit next boot, so the disable is belt to that braces.
 ExecStopPost=/bin/bash -c 'touch /var/lib/kldload/smoke-firstboot-done; systemctl disable kldload-smoke-firstboot.service 2>/dev/null || true'
 StandardOutput=journal
 StandardError=journal
@@ -2986,8 +3072,10 @@ TimeoutStartSec=23400
 [Install]
 WantedBy=multi-user.target
 SMOKEFB
+        # swallow: the symlink is checked right below
         ln -sf /etc/systemd/system/kldload-smoke-firstboot.service \
-            "${target}/etc/systemd/system/multi-user.target.wants/kldload-smoke-firstboot.service" 2>/dev/null || true
+            "${target}/etc/systemd/system/multi-user.target.wants/kldload-smoke-firstboot.service" 2>/dev/null ||
+            k_log "WARNING: could not link the smoke-test unit into multi-user.target.wants"
         _ok "Smoke test" "scheduled for first boot → /root/kldload-smoke-report.txt"
     fi
 
@@ -3055,6 +3143,7 @@ SMOKEFB
 
     k_log "Install complete"
     k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
+    # swallow: sync reports failures of writes already made; the export is the real gate
     sync || true
 }
 
