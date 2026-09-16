@@ -1523,6 +1523,70 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     });
   })();
 
+  // JUMP — the run up to lightspeed and back out of it. Stars sit still, then
+  // stretch into lines, then the field snaps back somewhere else: the closest
+  // thing the reel has to what a clone actually feels like (operator, 2026-09-15:
+  // "a star wars hyperspace one would be cool"). Homage only, drawn from nothing.
+  (function () {
+    var stars = [], mode = "cruise", mt = 0, jumps = 0, flash = 0, dest = 0;
+    var PLACES = ["rpool/vms", "the green site", "node 23", "the blue site", "rpool/ROOT", "the golden", "a fresh clone"];
+    function seed() { stars = []; for (var i = 0; i < 320; i++) stars.push({ a: rand(0, 6.2832), r: rand(.02, 1), z: rand(.25, 1), t: 0 }); }
+    seed();
+    SCENES.push({
+      pal: ["#bcd8ff", "#ffe9a8", "#6fa8ff"], card: "jump", label: "jumps", layouts: [0, 1, 2, 3, 4],
+      count: function () { return pad(jumps, 2); },
+      init: function () { mode = "cruise"; mt = 0; flash = 0; seed(); },
+      // the event is the jump itself; the beat keeps them coming on their own
+      event: function () { if (mode === "cruise" && mt > 4) { mode = "spool"; mt = 0; dest = (dest + 1) % PLACES.length; allcall("cleared for " + PLACES[dest] + ". stand by"); } },
+      beat: [14, 22],
+      draw: function (t, dt) {
+        var cx0 = right(), cy0 = AY(.5), R = Math.min(AW(), AH()) * .62;
+        mt += dt;
+        if (mode === "spool" && mt > 2.2) { mode = "jump"; mt = 0; flash = 1; jumps++; allcall("jump. " + PLACES[dest] + " in a moment"); }
+        if (mode === "jump" && mt > 2.6) { mode = "drop"; mt = 0; flash = 1; allcall("arrived at " + PLACES[dest] + ". identical to the one we left"); }
+        if (mode === "drop" && mt > 1.4) { mode = "cruise"; mt = 0; seed(); }
+        // how far a star is stretched, 0 at rest and 1 at full lightspeed
+        var k = mode === "spool" ? Math.pow(Math.min(1, mt / 2.2), 3) * .35
+            : mode === "jump" ? .35 + .65 * Math.min(1, mt / .5)
+                : mode === "drop" ? Math.max(0, 1 - mt / 1.4) * .5 : 0;
+        cx.save();
+        cx.beginPath(); cx.rect(AX(0), AY(0), AW(), AH()); cx.clip();
+        cx.globalCompositeOperation = "lighter";
+        stars.forEach(function (s) {
+          s.t += dt * (.06 + k * 3.2) * s.z;
+          var rr = s.r + s.t, len = k * (140 + 420 * s.z) * (.35 + rr);
+          if (rr > 1.25) { s.r = rand(.02, .12); s.t = 0; s.a = rand(0, 6.2832); rr = s.r; len = 0; }
+          var ca = Math.cos(s.a), sa = Math.sin(s.a);
+          var x1 = cx0 + ca * rr * R, y1 = cy0 + sa * rr * R;
+          var x2 = cx0 + ca * (rr * R + len), y2 = cy0 + sa * (rr * R + len);
+          var b = (.5 + .5 * s.z) * (mode === "jump" ? 1 : .9);
+          if (len < 2) { cx.fillStyle = "rgba(220,235,255," + b.toFixed(3) + ")"; cx.fillRect(x1, y1, 2.2 * s.z + 1, 2.2 * s.z + 1); }
+          else {
+            var g = cx.createLinearGradient(x1, y1, x2, y2);
+            g.addColorStop(0, "rgba(120,170,255,0)"); g.addColorStop(.35, "rgba(190,220,255," + (b * .7).toFixed(3) + ")"); g.addColorStop(1, "rgba(255,255,255," + b.toFixed(3) + ")");
+            cx.strokeStyle = g; cx.lineWidth = .8 + 1.6 * s.z; line(x1, y1, x2, y2);
+          }
+        });
+        // the tunnel's own glow at full stretch, and the white snap at each end
+        if (k > .5) {
+          var tg = cx.createRadialGradient(cx0, cy0, 0, cx0, cy0, R * .55);
+          tg.addColorStop(0, "rgba(180,215,255," + ((k - .5) * .5).toFixed(3) + ")"); tg.addColorStop(1, "rgba(0,0,0,0)");
+          cx.fillStyle = tg; cx.fillRect(AX(0), AY(0), AW(), AH());
+        }
+        if (flash > 0) {
+          flash = Math.max(0, flash - dt * 2.2);
+          cx.fillStyle = "rgba(255,255,255," + (flash * flash * .8).toFixed(3) + ")";
+          cx.fillRect(AX(0), AY(0), AW(), AH());
+        }
+        cx.restore();
+        var msg = mode === "cruise" ? "SUBLIGHT" : mode === "spool" ? "SPOOLING" : mode === "jump" ? "LIGHTSPEED" : "ARRIVED";
+        ptext(msg, AX(.5) - textW(msg, 3) / 2, AY(.9), 3, mode === "jump" ? C.ink : C.amber, 10);
+        var d = PLACES[dest].toUpperCase();
+        ptext(d, AX(.5) - textW(d, 2) / 2, AY(.9) + 26, 2, C.beam);
+      }
+    });
+  })();
+
   // Retired 2026-09-14 after a contact sheet of all 23: the rock field and city
   // defense leave most of their area empty, and the tuner's station names run into
   // each other. On review the same day the operator also cut the water ("ripples is
@@ -1754,6 +1818,15 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
       for (var i = 0; i < 6; i++) { var rad = H * (1.05 + i * .16), p = []; for (var a = -1.2; a <= 1.2; a += .04) p.push([c[0] + Math.sin(a) * rad * 1.4, c[1] - Math.cos(a) * rad]); g.traces.push(tr(p, { a: .09 })); }
       for (var j = -4; j <= 4; j++) { var aa = j * .22; g.traces.push(tr([[c[0] + Math.sin(aa) * H * 1.05 * 1.4, c[1] - Math.cos(aa) * H * 1.05], [c[0] + Math.sin(aa) * H * 1.9 * 1.4, c[1] - Math.cos(aa) * H * 1.9]], { a: .07, pulse: false })); }
       g.rings = [{ x: W * .08, y: H * .86, radii: [18, 34, 52], sides: 0, spin: 160, a: .14, dash: true }];
+      return g;
+    },
+    "jump": function (r) { // a course line with its waypoints, and the stars behind it
+      var g = { traces: [], stars: 120 }, y = H * .78;
+      var p = [];
+      for (var x = -20; x <= W + 20; x += 24) p.push([x, y - Math.sin(x / W * 3.14) * H * .1]);
+      g.traces.push(tr(p, { a: .12 }));
+      for (var i = 1; i < 5; i++) { var px = W * (i / 5); g.traces.push(tr([[px, y - 40], [px, y + 40]], { a: .1, via: true, pulse: false })); }
+      g.rings = [{ x: W * .5, y: H * .5, radii: [H * .3, H * .45, H * .62], sides: 0, spin: 200, a: .08, dash: true }];
       return g;
     },
     "neon city": function (r) { // power lines sagging between pylons, current on them, rain falling through
