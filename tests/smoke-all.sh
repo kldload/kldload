@@ -13,6 +13,30 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 
+# --help answers before the root re-exec: asking what a tool does must never
+# need a password, and this one takes no options at all, so the answer is
+# short and cannot drift with a flag change.
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: smoke-all.sh
+
+Run every smoke suite that applies to THIS machine and print one summary
+report. Meant to be run on an installed system, not on the live ISO.
+
+Takes no options. Needs root.
+
+It detects the installed profile itself and runs only the suites that match,
+so a core install does not fail for having no KVM. Each suite's result is
+folded into a single PASS / FAIL / WARN table at the end.
+
+See also: tests/lifecycle.sh (installs into a throwaway VM and then runs this),
+tests/smoke-build.sh (checks the built ISO instead, and needs no VM).
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

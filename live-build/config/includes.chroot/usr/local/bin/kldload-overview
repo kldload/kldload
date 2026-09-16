@@ -12,6 +12,31 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 
+# --help answers before the root re-exec: asking what a tool does must never
+# need a password, and this one takes no options at all, so the answer is
+# short and cannot drift with a flag change.
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kldload-overview
+
+One screen of what is running on this host: libvirt VMs, containers, the
+Kubernetes cluster if there is one, ZFS pools and datasets, GPU, and
+networking.
+
+Takes no options. Needs root, because it reads libvirt, ZFS and the cluster
+admin kubeconfig.
+
+Read-only. Every section degrades on its own -- a host with no cluster, no GPU
+or no containers prints the sections it can and says nothing about the rest,
+rather than failing.
+
+See also: kvm-list, kube-status, kldload-doctor.
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 C="\033[1;36m"

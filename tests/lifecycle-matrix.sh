@@ -28,6 +28,16 @@
 #   $RESULTS_DIR/RESULTS.md               final markdown table
 set -Eeuo pipefail
 
+# --help answers before the root re-exec: asking what a tool does must never
+# need a password. Prints the header banner above, which already carries a
+# Usage section, so there is only ever one copy of the text to keep true.
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
+
 if [[ $EUID -ne 0 ]]; then exec sudo -E "$0" "$@"; fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
