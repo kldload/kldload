@@ -1935,13 +1935,39 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
   SCENES.forEach(function (s, i) { var o = document.createElement("option"); o.value = i; o.textContent = pad(i + 1, 2) + " " + s.card; sel.appendChild(o); });
   sel.onchange = function () { try { localStorage.setItem(LAB_KEY, sel.value); } catch (e) { /* storage blocked */ } start(+sel.value); };
   document.getElementById("next").onclick = advance;
-  // N or the right arrow skips to the next scene, with the normal crossfade: someone at
-  // the machine can look through the scenes without restarting the kiosk, which
-  // flashed tty1's console text between every jump (fiend, 2026-09-15).
-  addEventListener("keydown", function (e) { if (e.key === "n" || e.key === "N" || e.key === "ArrowRight") { e.preventDefault(); advance(); } });
+  // The keyboard. Someone standing at the machine can drive the deck without
+  // restarting the kiosk, which flashed tty1's console text between every jump
+  // (fiend, 2026-09-15). S still changes the scene; N and B are the slides,
+  // because that is what a person watching actually wants to move.
+  //
+  // Ctrl+Alt+F2 is not ours and not hooked here: cage runs with -s, so wlroots
+  // itself switches the VT. It is on the legend because it works, not because
+  // this page does anything about it.
+  function keyHint(msg) { hint = msg; hintT = 4; }
+  addEventListener("keydown", function (e) {
+    var k = e.key;
+    if (k === "n" || k === "N" || k === "ArrowRight") { e.preventDefault(); showNext(); onSlide(); armSlides(); keyHint("next slide"); }
+    else if (k === "b" || k === "B" || k === "ArrowLeft") { e.preventDefault(); showPrev(); armSlides(); keyHint("back a slide"); }
+    else if (k === "s" || k === "S") { e.preventDefault(); advance(); keyHint("next scene"); }
+    else if (k === "+" || k === "=") { e.preventDefault(); dwell = Math.min(DWELL_MAX, dwell + 2000); armSlides(); keyHint("slides every " + Math.round(dwell / 1000) + "s"); }
+    else if (k === "-" || k === "_") { e.preventDefault(); dwell = Math.max(DWELL_MIN, dwell - 2000); armSlides(); keyHint("slides every " + Math.round(dwell / 1000) + "s"); }
+    else if (k === "k" || k === "K" || k === "?") { e.preventDefault(); legendUntil = Date.now() + 20000; }
+  });
   document.getElementById("event").onclick = function () { SCENES[cur].event(); };
   document.getElementById("pause").onclick = function () { paused = !paused; this.textContent = paused ? "run" : "pause"; };
 
+  // The keys are no use if nobody is told about them. The legend shows for the
+  // first half minute after the show comes up, for twenty seconds after K or ?,
+  // and for a few seconds after any key is pressed -- and the all call says it
+  // out loud now and then, because that is the line people actually read
+  // (operator, 2026-09-15: "embed them into messages so user know about them").
+  var LEGEND = "N NEXT SLIDE   B BACK   S SCENE   + - SPEED   CTRL+ALT+F2 TERMINAL";
+  var legendUntil = Date.now() + 30000, hint = "", hintT = 0;
+  function legendAlpha() {
+    var left = (legendUntil - Date.now()) / 1000;
+    if (left <= 0) return 0;
+    return Math.min(1, left / 2) * .55;
+  }
   function hud() {
     var px = Math.max(2, Math.round(Math.min(W, H) / 330)), y = Math.round(H * .045), x = Math.round(W * .05), s = SCENES[cur];
     var up = clock + 2468, hh = pad(up / 3600, 2), mm = pad((up % 3600) / 60, 2), ss = pad(up % 60, 2);
@@ -1962,6 +1988,22 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
       cx.restore();
     }
     document.getElementById("labinfo").textContent = pad(curDur - since, 3) + "s left";
+    // legend, bottom left, above the stage row
+    var la = legendAlpha();
+    if (la > 0) {
+      var lp = Math.max(1, px - 1), lw = textW(LEGEND, lp);
+      if (lw > W * .9) lp = Math.max(1, lp - 1);
+      cx.save(); cx.globalAlpha = la;
+      ptext(LEGEND, Math.round(W * .05), Math.round(H * .905), lp, C.ink);
+      cx.restore();
+    }
+    // and what the last key actually did, where the eye already is
+    if (hintT > 0) {
+      hintT -= 1 / 30;
+      cx.save(); cx.globalAlpha = Math.min(1, hintT) * .8;
+      ptext(hint, Math.round(W * .05), Math.round(H * .905) - 8 * px, px, C.amber, 8);
+      cx.restore();
+    }
   }
 
   // ── backdrops ──────────────────────────────────────────────────────────────
@@ -2920,9 +2962,36 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     si = slideIdx[slideKey(s)];
     wrap.children[si].classList.add("on"); arrive(wrap.children[si]);
   }
+  // 13 s a slide: 10 was too short to read a body (operator, 2026-09-15). The
+  // + and - keys move it between 5 and 40, because someone standing at the
+  // machine reads faster or slower than someone filming it.
+  var DWELL_MIN = 5000, DWELL_MAX = 40000, dwell = 13000, slideTimer = null;
+  function armSlides() { if (slideTimer) clearInterval(slideTimer); slideTimer = setInterval(function () { showNext(); onSlide(); }, dwell); }
+  // Back is a real step back through what was dealt, not a reshuffle: the bag
+  // keeps the order it dealt, so B walks it and N walks forward again.
+  function showPrev() {
+    if (oi <= 0) return;
+    if (wrap.children[si]) wrap.children[si].classList.remove("on");
+    oi--;
+    var s = ORDER[oi];
+    si = slideIdx[slideKey(s)];
+    wrap.children[si].classList.add("on"); arrive(wrap.children[si]);
+  }
   showNext();
-  setInterval(function () { showNext(); onSlide(); },
-    13000); // 13 s a slide: 10 was too short to read a body (operator, 2026-09-15)
+  armSlides();
+  // Every few minutes the all call mentions one of the keys. Rotating, never two
+  // in a row, and only while the build is still running -- by the time it hands
+  // over, nobody needs to be told how to page through a deck that is about to
+  // disappear.
+  var KEY_CALLS = [
+    "press N for the next slide, B to go back",
+    "press S if you would rather see another scene",
+    "plus and minus change how long a slide stays up",
+    "ctrl alt F2 puts you on a terminal. the build keeps going",
+    "press K for the keys"
+  ];
+  var kc = 0;
+  setInterval(function () { allcall(KEY_CALLS[kc]); kc = (kc + 1) % KEY_CALLS.length; }, 240000);
 
   // ── live data ──────────────────────────────────────────────────────────────
   // Both endpoints are plain GETs on this machine's web UI. A failed poll keeps the
