@@ -3070,8 +3070,13 @@ ExecStartPost=/bin/bash -c 'systemctl disable kldload-smoke-firstboot.service'
 # The disable swallows its own failure on purpose: the marker touched just before
 # it is what stops this unit next boot, so the disable is belt to that braces.
 ExecStopPost=/bin/bash -c 'touch /var/lib/kldload/smoke-firstboot-done; systemctl disable kldload-smoke-firstboot.service 2>/dev/null || true'
-StandardOutput=journal
-StandardError=journal
+# NO StandardOutput=journal here. It used to sit on these two lines, left over from
+# 807f07be (April), and systemd takes the LAST directive of a name: it silently beat
+# the `StandardOutput=file:` above, so the suite's output went to the journal and
+# /root/kldload-smoke-report.txt was never created. 3-kvm on build 22 (fiend,
+# 2026-09-16) reported smoke=done and then FAILED verify on the missing report.
+# The file directive above is the one that matters; StandardError=inherit sends
+# stderr to the same file.
 # 6.5 h: the ExecStartPre wait above is up to 6 h, plus the suite itself.
 TimeoutStartSec=23400
 

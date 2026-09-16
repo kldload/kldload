@@ -2764,6 +2764,33 @@ fi
 # A glob now handles drop-ins. This asserts the glob is still there, because the
 # failure it prevents is invisible: the build succeeds, the ISO is short a file,
 # and nothing says so until the behaviour it was meant to change does not.
+# ── Duplicate systemd directives ─────────────────────────────────────────────
+#
+# systemd takes the LAST value of most directives and says nothing about the
+# first. kldload-smoke-firstboot.service had `StandardOutput=file:/root/...`
+# added above a leftover `StandardOutput=journal` from April: the suite ran, the
+# report went to the journal, and 3-kvm FAILED verify on the missing file while
+# the run itself reported smoke=done (fiend, build 22, 2026-09-16). Nothing
+# errors, nothing warns -- systemd-analyze verify is happy with both lines.
+#
+# The checker handles units written from a heredoc inside an installer script,
+# which is where every kldload unit actually lives.
+_section "Duplicate systemd directives"
+
+_ud_script="$ROOT/tests/check-unit-directives.py"
+if [[ ! -r "$_ud_script" ]]; then
+    _didnotrun "duplicate systemd directives" "tests/check-unit-directives.py is missing"
+elif ! command -v python3 >/dev/null 2>&1; then
+    _didnotrun "duplicate systemd directives" "python3 not installed"
+else
+    _ud_out="$(cd "$ROOT" && git ls-files -z | xargs -0 -r python3 "$_ud_script" 2>&1)" && _ud_rc=0 || _ud_rc=$?
+    if [[ "$_ud_rc" -eq 0 ]]; then
+        _pass "duplicate systemd directives: none"
+    else
+        _fail "duplicate systemd directives" "$(printf '%s' "$_ud_out" | grep -E 'set twice' | head -n 3 | tr '\n' ' ')"
+    fi
+fi
+
 _section "systemd drop-ins"
 
 _di_src="$ROOT/live-build/config/includes.chroot/usr/lib/systemd/system"
