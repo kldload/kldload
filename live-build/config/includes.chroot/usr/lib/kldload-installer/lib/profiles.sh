@@ -3736,8 +3736,17 @@ NETXML
     fi
 fi
 virsh -c qemu:///system net-autostart "$_net" >/dev/null
+# _log, not k_log: this runs at FIRST BOOT as a standalone script, where the
+# installer's helpers do not exist -- k_log was `command not found`, which under
+# the errexit above killed the unit outright. And a non-zero net-start is USUALLY
+# harmless: net-autostart above may already have brought it up, and virsh returns
+# 1 for "network is already active". The real gate is the Active+Persistent check
+# below, which is what decides this unit's exit status.
+# HISTORY: 3-kvm FAILED verify on build 22 (fiend, 2026-09-16) with
+# kldload-virbr0.service failed; introduced by 0b6616de the same evening, which
+# replaced a correct `|| true` here with a call to a function that is out of scope.
 virsh -c qemu:///system net-start "$_net" 2>/dev/null ||
-    k_log "WARNING: could not start libvirt network ${_net} — VMs on it will have no bridge"
+    _log "net-start returned non-zero (often 'already active') — the check below decides"
 
 # Final verification: must be Active AND Persistent. Anything else is a fail.
 _status=$(virsh -c qemu:///system net-info "$_net" 2>/dev/null | awk '/^(Active|Persistent):/ {print $1$2}' | sort | xargs)
