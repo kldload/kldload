@@ -52,7 +52,9 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 
-if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+# Rule 9: -h/--help answers before this re-exec. These tools already had
+# perfectly good usage text -- it just could not be reached without root.
+if [[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]]; then exec sudo "$0" "$@"; fi
 
 # ── Configuration ─────────────────────────────────────────────────────────
 POOL="${POOL:-rpool}" # ZFS pool where golden images and clones live
@@ -2259,7 +2261,8 @@ Blue-Green Workflow:
   6. kzfs-lab promote green           # Green -> blue (instant ZFS clone)
   7. kzfs-lab rollback                # Revert if needed (instant)
 EOF
-    exit 1
+    # asked-for help is 0; a usage error stays 1
+    exit "${1:-1}"
 }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────
@@ -2325,6 +2328,11 @@ ebpf-arc)
     ;;
 demo)
     cmd_demo
+    ;;
+-h | --help | help)
+    # An explicit branch so --help is an ANSWER (exit 0). It used to fall
+    # through to *) below, which prints the same text and exits 1.
+    usage 0
     ;;
 *)
     usage

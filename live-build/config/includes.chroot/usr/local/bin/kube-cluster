@@ -41,7 +41,9 @@
 set -euo pipefail
 
 # Re-exec as root — ZFS, virsh, and virt-install all require it
-if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+# Rule 9: -h/--help answers before this re-exec. These tools already had
+# perfectly good usage text -- it just could not be reached without root.
+if [[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]]; then exec sudo "$0" "$@"; fi
 
 # ── Defaults ──────────────────────────────────────────────────────────────
 # All overridable via environment variables or --flags.
@@ -517,7 +519,8 @@ Examples:
   kube-cluster start 1                    # ...but only the CP + 1 worker
   kube-cluster stop                       # power it off, keep the VMs
 EOF
-    exit 1
+    # asked-for help is 0; a usage error stays 1
+    exit "${1:-1}"
 }
 
 # ── Parse args ─────────────────────────────────────────────────────────────
@@ -3670,5 +3673,8 @@ vip-float)
     KUBE_VIP_ADDRESS="${KUBE_VIP_ADDRESS:-$KUBE_VIP_DEFAULT}"
     _vip_float
     ;;
+# An explicit branch so --help is an ANSWER (exit 0). It used to fall
+# through to *) below, which prints the same text and exits 1.
+-h | --help | help) usage 0 ;;
 *) usage ;;
 esac

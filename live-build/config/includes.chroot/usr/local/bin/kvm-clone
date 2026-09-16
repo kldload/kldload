@@ -3,7 +3,9 @@
 set -euo pipefail
 
 # Auto-elevate to root (ZFS + libvirt require it)
-if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+# Rule 9: -h/--help answers before this re-exec. These tools already had
+# perfectly good usage text -- it just could not be reached without root.
+if [[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]]; then exec sudo "$0" "$@"; fi
 
 usage() {
     cat <<EOF
@@ -20,9 +22,11 @@ Examples:
   kvm-clone template webserver-02     # another clone, instant
   kvm-clone myvm test --snap @stable  # clone from named snapshot
 EOF
-    exit 1
+    # asked-for help is 0; a usage error stays 1
+    exit "${1:-1}"
 }
 
+[[ "${1:-}" == -h || "${1:-}" == --help ]] && usage 0
 [[ $# -lt 2 ]] && usage
 SOURCE="$1"
 DEST="$2"

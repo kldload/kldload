@@ -3,7 +3,9 @@
 set -euo pipefail
 
 # Auto-elevate to root (ZFS + libvirt require it)
-if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+# Rule 9: -h/--help answers before this re-exec. These tools already had
+# perfectly good usage text -- it just could not be reached without root.
+if [[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]]; then exec sudo "$0" "$@"; fi
 
 usage() {
     cat <<EOF
@@ -16,9 +18,11 @@ Examples:
   kvm-delete myvm
   kvm-delete myvm --force    # force-stop if running
 EOF
-    exit 1
+    # asked-for help is 0; a usage error stays 1
+    exit "${1:-1}"
 }
 
+[[ "${1:-}" == -h || "${1:-}" == --help ]] && usage 0
 [[ $# -lt 1 ]] && usage
 NAME="$1"
 FORCE="${2:-}"

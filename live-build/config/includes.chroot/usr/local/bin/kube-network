@@ -12,7 +12,9 @@
 #   kube-network nft                      — apply K8s-aware nftables rules
 set -euo pipefail
 
-if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+# Rule 9: -h/--help answers before this re-exec. These tools already had
+# perfectly good usage text -- it just could not be reached without root.
+if [[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]]; then exec sudo "$0" "$@"; fi
 
 MGMT_SUBNET="10.250.0"
 K8S_SUBNET="10.251.0"
@@ -60,7 +62,8 @@ Example — 3-node cluster:
   kube-network pin-kubelet
   kube-network nft
 EOF
-    exit 1
+    # asked-for help is 0; a usage error stays 1
+    exit "${1:-1}"
 }
 
 # ── init ───────────────────────────────────────────────────────────────────
@@ -442,5 +445,8 @@ show-keys) cmd_show_keys ;;
 status) cmd_status ;;
 pin-kubelet) cmd_pin_kubelet ;;
 nft) cmd_nft ;;
+# An explicit branch so --help is an ANSWER (exit 0). It used to fall
+# through to *) below, which prints the same text and exits 1.
+-h | --help | help) usage 0 ;;
 *) usage ;;
 esac
