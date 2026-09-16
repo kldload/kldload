@@ -25,6 +25,9 @@
 # Run: sudo bash smoke-features.sh    (or via smoke-all.sh)
 # Exit: 0 all passed, 1 one or more failed.
 
+set -Eeuo pipefail
+trap 'echo "smoke-features.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-test.sh

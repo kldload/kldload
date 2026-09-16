@@ -4,6 +4,9 @@
 # Requires: common.sh, detect.sh
 # ---------------------------------------------------------------------------
 
+set -Eeuo pipefail
+trap 'echo "security.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 [[ "${_KLDLOAD_SECURITY_LOADED:-0}" == "1" ]] && return 0
 _KLDLOAD_SECURITY_LOADED=1
 

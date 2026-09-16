@@ -3,6 +3,10 @@
 
 # Ensure /usr/local/bin and /usr/local/sbin are in PATH
 # (CentOS/RHEL sudo strips them from secure_path)
+
+set -Eeuo pipefail
+trap 'echo "lib-test.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
 
 PASS=0

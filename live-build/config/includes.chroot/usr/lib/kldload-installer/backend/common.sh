@@ -5,6 +5,10 @@
 # ---------------------------------------------------------------------------
 
 # Defaults — can be overridden by caller before sourcing
+
+set -Eeuo pipefail
+trap 'echo "common.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 KLDLOAD_TARGET="${KLDLOAD_TARGET:-/target}"
 KLDLOAD_LOG_DIR="${KLDLOAD_LOG_DIR:-/var/log/installer}"
 KLDLOAD_LOG="${KLDLOAD_LOG:-}"

@@ -6,6 +6,10 @@
 # ---------------------------------------------------------------------------
 
 # Guard against double-sourcing
+
+set -Eeuo pipefail
+trap 'echo "storage-zfs.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 [[ "${_KLDLOAD_STORAGE_ZFS_LOADED:-0}" == "1" ]] && return 0
 _KLDLOAD_STORAGE_ZFS_LOADED=1
 

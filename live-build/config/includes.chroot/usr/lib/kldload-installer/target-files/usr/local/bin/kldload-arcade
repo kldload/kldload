@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-arcade — the helpers behind the optional "kldload arcade" session.
+#
+# WHAT IT DOES:
+#   session   Set up the environment and exec sway with /etc/kldload-arcade/sway/config.
+#             Adds --unsupported-gpu when the NVIDIA driver is loaded, and carries the
+#             system keyboard layout into sway.
+#   menu      A fuzzel menu of the installed kldload tools (the kldload-*.desktop
+#             entries plus the xplore consoles), launched through gio.
+#   keys      Show the keybindings, read from the "## " help lines in the sway config.
+#   system    Lock, log out, reboot or power off.
+#   browser   Open Chrome, or Firefox when Chrome is not installed.
+#   shot      Screenshot: "region" (select with the mouse) or "full"; saved to
+#             ~/Pictures/Screenshots and copied to the clipboard.
+#
+# WHY: the arcade session is lean on purpose (operator, 2026-09-14: "just the basics"),
+#   so the few things a desktop still needs — a tools menu, a key cheat sheet, a
+#   power menu, screenshots — are one small script instead of more daemons.
+#
+# INPUTS:   /etc/kldload-arcade/sway/config, /usr/share/applications, fuzzel, sway,
+#           grim, slurp, wl-copy, swaylock, gio
+# EXIT:     0 done or cancelled, 1 a required tool is missing, 2 usage
+#
+# Notes:
+#   - Menu entries are launched with `gio launch <file.desktop>`, never by running
+#     the Exec= line through a shell: the desktop file is data, and gio already
+#     implements the field codes and quoting rules correctly.
+#   - Test hooks: KLDLOAD_ARCADE_APPS (applications dir), KLDLOAD_ARCADE_CONFIG,
+#     KLDLOAD_ARCADE_DMENU (command that reads choices on stdin and prints one).
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kldload-arcade: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+APPS="${KLDLOAD_ARCADE_APPS:-/usr/share/applications}"
+CONFIG="${KLDLOAD_ARCADE_CONFIG:-/etc/kldload-arcade/sway/config}"
+
+_say() { printf 'kldload-arcade: %s\n' "$*" >&2; }
+_need() { command -v "$1" >/dev/null 2>&1 || {
+    _say "$1 is not installed"
+    exit 1
+}; }
+
+# _dmenu PROMPT — choices on stdin, the chosen line on stdout, empty on cancel.
+_dmenu() {
+    if [[ -n "${KLDLOAD_ARCADE_DMENU:-}" ]]; then
+        bash -c "${KLDLOAD_ARCADE_DMENU}"
+    else
+        _need fuzzel
+        # swallow: fuzzel exits non-zero when the menu is dismissed, which is a choice, not an error
+        fuzzel --dmenu --prompt "$1 " || true
+    fi
+}
+
+# _entries — "Name<TAB>path" for every kldload tool entry that is meant to be shown.
+_entries() {
+    local f name hidden
+    for f in "${APPS}"/kldload-*.desktop "${APPS}"/zxplore*.desktop "${APPS}"/vmxplore*.desktop \
+        "${APPS}"/wgxplore*.desktop "${APPS}"/ztxplore*.desktop; do
+        [[ -f "$f" ]] || continue
+        name="$(sed -n 's/^Name=//p' "$f" | head -n 1)"
+        hidden="$(sed -n 's/^\(NoDisplay\|Hidden\)=//p' "$f" | head -n 1)"
+        [[ -n "$name" && "$hidden" != true ]] || continue
+        printf '%s\t%s\n' "$name" "$f"
+    done | sort -f -u
+}
+
+cmd_session() {
+    local -a args=(-c "$CONFIG")
+    # NVIDIA's proprietary driver is outside what sway supports by default; recent
+    # drivers work, and without this flag sway refuses to start at all.
+    [[ -d /sys/module/nvidia ]] && args=(--unsupported-gpu "${args[@]}")
+    export XDG_CURRENT_DESKTOP=sway:kldload-arcade XDG_SESSION_DESKTOP=sway
+    export MOZ_ENABLE_WAYLAND=1 QT_QPA_PLATFORM=wayland ELECTRON_OZONE_PLATFORM_HINT=auto
+    local layout
+    layout="$(localectl status 2>/dev/null | sed -n 's/^ *X11 Layout: *//p' | head -n 1)" || layout=""
+    [[ -n "$layout" ]] && export XKB_DEFAULT_LAYOUT="$layout"
+    _need sway
+    exec sway "${args[@]}"
+}
+
+cmd_menu() {
+    local list choice path
+    list="$(_entries)"
+    [[ -n "$list" ]] || {
+        _say "no kldload tools found in ${APPS}"
+        return 0
+    }
+    choice="$(cut -f1 <<<"$list" | _dmenu "kldload>")"
+    [[ -n "$choice" ]] || return 0
+    path="$(awk -F'\t' -v n="$choice" '$1 == n { print $2; exit }' <<<"$list")"
+    [[ -n "$path" ]] || return 0
+    _need gio
+    exec gio launch "$path"
+}
+
+cmd_keys() {
+    [[ -r "$CONFIG" ]] || {
+        _say "no config at ${CONFIG}"
+        return 1
+    }
+    sed -n 's/^## //p' "$CONFIG" | _dmenu "keys>" >/dev/null
+}
+
+cmd_system() {
+    local choice
+    choice="$(printf '%s\n' "Lock" "Log out" "Reboot" "Power off" | _dmenu "system>")"
+    case "$choice" in
+    Lock) exec swaylock -f -c 0b0e12 ;;
+    "Log out") exec swaymsg exit ;;
+    Reboot) exec systemctl reboot ;;
+    "Power off") exec systemctl poweroff ;;
+    *) return 0 ;;
+    esac
+}
+
+cmd_browser() {
+    if command -v google-chrome >/dev/null 2>&1; then
+        exec google-chrome --ozone-platform=wayland
+    fi
+    _need firefox
+    exec firefox
+}
+
+cmd_shot() {
+    local dir="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots" file geom
+    _need grim
+    mkdir -p "$dir"
+    file="$dir/Screenshot-$(date +%Y%m%d-%H%M%S).png"
+    case "${1:-region}" in
+    full) grim "$file" ;;
+    region)
+        _need slurp
+        # swallow: slurp exits non-zero when the selection is cancelled with Escape
+        geom="$(slurp)" || return 0
+        grim -g "$geom" "$file"
+        ;;
+    *)
+        _say "shot takes region or full"
+        return 2
+        ;;
+    esac
+    if command -v wl-copy >/dev/null 2>&1; then wl-copy <"$file"; fi
+}
+
+usage() {
+    cat <<'USAGE'
+usage: kldload-arcade <session|menu|keys|system|browser|shot [region|full]>
+
+  session   exec sway with the kldload arcade config (used by the GDM session entry)
+  menu      pick a kldload tool and launch it
+  keys      show the keybindings
+  system    lock, log out, reboot or power off
+  browser   open Chrome, or Firefox
+  shot      screenshot a region (default) or the full screen
+
+Exit: 0 done or cancelled, 1 a required tool is missing, 2 usage.
+USAGE
+}
+
+case "${1:-}" in
+session) cmd_session ;;
+menu) cmd_menu ;;
+keys) cmd_keys ;;
+system) cmd_system ;;
+browser) cmd_browser ;;
+shot) cmd_shot "${2:-region}" ;;
+-h | --help | help) usage ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac

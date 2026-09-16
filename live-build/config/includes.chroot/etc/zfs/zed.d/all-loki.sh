@@ -3,6 +3,10 @@
 # resilver start/end, trim, spare activation, vdev state changes, etc.)
 # Envs set by zed: ZEVENT_CLASS, ZEVENT_POOL, ZEVENT_VDEV_PATH,
 # ZEVENT_VDEV_STATE_STR, ZEVENT_HISTORY_INTERNAL_STR, ZEVENT_EID, ...
+
+set -Eeuo pipefail
+trap 'echo "all-loki.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 LOKI_URL="${LOKI_URL:-http://127.0.0.1:3100/loki/api/v1/push}"
 
 # Build a compact, grep-friendly log line.

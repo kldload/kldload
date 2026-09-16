@@ -48,7 +48,10 @@
 #     KLDLOAD_SHOW_ONCE (draw one frame and exit).
 # EXIT: always 0.
 # ─────────────────────────────────────────────────────────────────────────────
-# strict-mode: exempt — a display loop beside the install: a failed read or draw must skip a frame, never end the show
+
+set -Eeuo pipefail
+trap 'echo "kldload-initrd-show.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 set -uo pipefail
 export LC_ALL=C
 # No -e: a failed stat or curl mid-download is an ordinary moment, not a reason to

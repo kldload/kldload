@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # audit-full.sh — comprehensive post-install audit
 # Usage: audit-full.sh <ip> <password>
+
+set -Eeuo pipefail
+trap 'echo "audit-full.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 set -uo pipefail
 
 IP="${1:?Usage: audit-full.sh <ip> [password]}"

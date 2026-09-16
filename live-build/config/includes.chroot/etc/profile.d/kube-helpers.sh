@@ -2,10 +2,18 @@
 # kube-helpers.sh — kubectl shortcuts for kldload Kubernetes nodes
 # Sourced automatically via /etc/profile.d/
 
+# No `set -Eeuo pipefail` at the top, and that is not an omission: this file is
+# sourced into every interactive login shell, where errexit would close the
+# terminal on the first command the operator mistypes. Each function below sets
+# the options itself behind `local -`, which bash restores on return, so the
+# helpers are strict and the shell that sourced them is untouched.
+
 # Only load if kubectl is available
 command -v kubectl >/dev/null 2>&1 || return 0
 
 __require_kubectl() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     command -v kubectl >/dev/null 2>&1 || {
         echo "kubectl not found" >&2
         return 1
@@ -23,6 +31,8 @@ _kcur_ns() { kubectl config view --minify -o jsonpath='{..namespace}' 2>/dev/nul
 
 # ── Context & namespace ────────────────────────────────────────────────────
 kc() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     case "${1:-cur}" in
     cur | current | "")
@@ -39,6 +49,8 @@ kc() {
 }
 
 kns() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     local arg="${1:-}" cur
     cur="$(_kcur_ns)"
@@ -53,6 +65,8 @@ kns() {
 }
 
 kn() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     case "${1:-ls}" in
     ls | "") kubectl get ns ;;
@@ -70,6 +84,8 @@ kn() {
 
 # ── Workload views ─────────────────────────────────────────────────────────
 kp() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     case "${1:-}" in
     all | -A) kubectl get pods -A -o wide --sort-by=.metadata.namespace ;;
@@ -78,10 +94,14 @@ kp() {
     esac
 }
 kpa() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     kubectl get pods -A -o wide --sort-by=.metadata.namespace
 }
 ksvc() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     case "${1:-}" in
     all | -A) kubectl get svc -A -o wide ;;
@@ -92,6 +112,8 @@ ksvc() {
 ks() { ksvc "$@"; }
 
 king() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     case "${1:-}" in
     all | -A) kubectl get ing -A -o wide 2>/dev/null || kubectl get ingress -A -o wide ;;
@@ -101,6 +123,8 @@ king() {
 }
 
 kep() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     case "${1:-}" in
     all | -A) kubectl get endpoints -A ;;
@@ -110,20 +134,28 @@ kep() {
 }
 
 kdep() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     kubectl get deploy -o wide
 }
 kno() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     kubectl get nodes -o wide
 }
 kall() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     kubectl get all -o wide
 }
 
 # ── Describe & logs ────────────────────────────────────────────────────────
 kshow() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     local resource="${1:?usage: kshow <resource> [name]}"
     local name="${2:-}"
@@ -135,6 +167,8 @@ kshow() {
 }
 
 klog() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     local pod="${1:?usage: klog <pod> [-f] [-c container]}"
     shift
@@ -142,6 +176,8 @@ klog() {
 }
 
 klogf() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     local pod="${1:?usage: klogf <pod> [-c container]}"
     shift
@@ -150,6 +186,8 @@ klogf() {
 
 # ── Exec into pod ──────────────────────────────────────────────────────────
 kexec() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     local pod="${1:?usage: kexec <pod> [command]}"
     shift
@@ -158,6 +196,8 @@ kexec() {
 
 # ── Health ─────────────────────────────────────────────────────────────────
 khealth() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_kubectl || return
     echo "=== Nodes ==="
     kubectl get nodes -o wide
@@ -174,24 +214,34 @@ khealth() {
 
 # ── Helm shortcuts ─────────────────────────────────────────────────────────
 hl() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_helm || return
     helm list -A
 }
 hs() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_helm || return
     helm status "${1:?usage: hs <release>}" -n "${2:-$(_kcur_ns)}"
 }
 hv() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_helm || return
     helm get values "${1:?usage: hv <release>}" -n "${2:-$(_kcur_ns)}" --all
 }
 hh() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     __require_helm || return
     helm history "${1:?usage: hh <release>}" -n "${2:-$(_kcur_ns)}"
 }
 
 # ── Quick help ─────────────────────────────────────────────────────────────
 khelp() {
+    local - # options restored on return: this file is sourced
+    set -Eeuo pipefail
     cat <<'EOF'
 kldload Kubernetes shortcuts:
 

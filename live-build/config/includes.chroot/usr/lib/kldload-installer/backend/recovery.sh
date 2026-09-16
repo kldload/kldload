@@ -4,6 +4,9 @@
 # Requires: common.sh, bootenv.sh
 # ---------------------------------------------------------------------------
 
+set -Eeuo pipefail
+trap 'echo "recovery.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 [[ "${_KLDLOAD_RECOVERY_LOADED:-0}" == "1" ]] && return 0
 _KLDLOAD_RECOVERY_LOADED=1
 

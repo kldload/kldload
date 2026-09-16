@@ -7,6 +7,10 @@
 # Requires: KLDLOAD_LOG_DIR (set in common.sh)
 
 # Create log directory
+
+set -Eeuo pipefail
+trap 'echo "logging.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 mkdir -p "${KLDLOAD_LOG_DIR}"
 
 # Master installer log

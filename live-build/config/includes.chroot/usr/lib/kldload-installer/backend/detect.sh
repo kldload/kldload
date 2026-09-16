@@ -9,6 +9,9 @@
 # Outputs one /dev/sdX or /dev/nvmeXnX path per line
 # ---------------------------------------------------------------------------
 
+set -Eeuo pipefail
+trap 'echo "detect.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 detect_disks() {
     local dev type
     while IFS= read -r dev; do

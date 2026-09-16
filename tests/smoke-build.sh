@@ -22,6 +22,15 @@ _warn() {
     echo -e "  \033[1;33mWARN\033[0m  $1 — $2"
     ((++WARN))
 }
+# A gate that cannot run is not a gate. It used to call _warn, and _warn does not
+# reach the exit code (`exit $FAIL`), so eighteen checks could announce they had
+# not run and the suite still went green -- which is precisely the silence this
+# file exists to prevent. A missing tool is now a failure; install the tool or
+# state why the check is gone.
+_didnotrun() {
+    echo -e "  \033[1;31mDID NOT RUN\033[0m  $1 — $2"
+    ((++FAIL))
+}
 _section() {
     echo ""
     echo -e "\033[1;36m=== $* ===\033[0m"
@@ -341,7 +350,7 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
         # months and every content gate above -- launchers, shipped tools,
         # kernel pin -- silently skipped, reading as green (found 2026-09-05
         # when the tool gate was added and printed nothing at all).
-        _warn "squashfs content gates" "unsquashfs missing — launcher, shipped-tool and kernel-pin gates DID NOT RUN (dnf install squashfs-tools)"
+        _didnotrun "squashfs content gates" "unsquashfs missing — launcher, shipped-tool and kernel-pin gates DID NOT RUN (dnf install squashfs-tools)"
     fi
 
     # ── Every shipped unit's ExecStart must EXIST in the rootfs ─────────────
@@ -426,7 +435,7 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
                 done < <(grep -hoP '^ExecStart=\K.*' "$_unit" 2>/dev/null)
             done < <(find "$UUNITS/root/usr/lib/systemd/system" -maxdepth 1 -name '*.service' 2>/dev/null)
             if ((_checked == 0)); then
-                _warn "unit ExecStart gate" "no kldload unit ExecStart paths were checked — this gate DID NOT RUN"
+                _didnotrun "unit ExecStart gate" "no kldload unit ExecStart paths were checked — this gate DID NOT RUN"
             elif ((_missing == 0)); then
                 _pass "all ${_checked} kldload unit ExecStart paths exist in the rootfs"
             fi
@@ -487,11 +496,11 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
                 _pass "no MOK private key in the image (/var/lib/dkms/mok.key absent)"
             fi
         else
-            _warn "unit ExecStart gate" "could not list the squashfs — this gate DID NOT RUN"
+            _didnotrun "unit ExecStart gate" "could not list the squashfs — this gate DID NOT RUN"
         fi
         rm -f "$ULIST"
     else
-        _warn "systemd drop-in gate" "unsquashfs missing — gate DID NOT RUN (dnf install squashfs-tools)"
+        _didnotrun "systemd drop-in gate" "unsquashfs missing — gate DID NOT RUN (dnf install squashfs-tools)"
     fi
 
     umount "$MOUNTPOINT" 2>/dev/null
@@ -522,7 +531,7 @@ _section "Observability binaries the installer can actually copy"
 _obs_units="${ROOT}/live-build/config/includes.chroot/usr/lib/systemd/system"
 _obs_prof="${ROOT}/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
 if [[ ! -d "$_obs_units" || ! -f "$_obs_prof" ]]; then
-    _warn "observability copy gate" "units dir or profiles.sh missing — gate DID NOT RUN"
+    _didnotrun "observability copy gate" "units dir or profiles.sh missing — gate DID NOT RUN"
 else
     # The glob list, lifted from the loop itself.
     mapfile -t _obs_globs < <(
@@ -530,7 +539,7 @@ else
             grep -oE '/usr/local/bin/[^ \\;]+'
     )
     if ((${#_obs_globs[@]} == 0)); then
-        _warn "observability copy gate" "could not read the glob list out of profiles.sh — gate DID NOT RUN"
+        _didnotrun "observability copy gate" "could not read the glob list out of profiles.sh — gate DID NOT RUN"
     else
         _obs_bad=0
         _obs_seen=0
@@ -557,7 +566,7 @@ else
             }
         done
         if ((_obs_seen == 0)); then
-            _warn "observability copy gate" "no observability unit named a /usr/local/bin binary — gate DID NOT RUN"
+            _didnotrun "observability copy gate" "no observability unit named a /usr/local/bin binary — gate DID NOT RUN"
         elif ((_obs_bad == 0)); then
             _pass "observability copy gate: all ${_obs_seen} exporter binaries match a profiles.sh copy glob"
         fi
@@ -579,7 +588,7 @@ _section "Grafana dashboards point at a datasource that exists"
 _g_dash="${ROOT}/live-build/config/includes.chroot/var/lib/grafana/dashboards"
 _g_ds="${ROOT}/live-build/config/includes.chroot/etc/grafana/provisioning/datasources"
 if [[ ! -d "$_g_dash" || ! -d "$_g_ds" ]]; then
-    _warn "grafana datasource gate" "dashboards or provisioning dir missing — gate DID NOT RUN"
+    _didnotrun "grafana datasource gate" "dashboards or provisioning dir missing — gate DID NOT RUN"
 else
     # uids the provisioning actually defines.
     mapfile -t _g_have < <(grep -rhoE '^[[:space:]]*uid:[[:space:]]*[A-Za-z0-9_-]+' "$_g_ds" | awk '{print $2}' | sort -u)
@@ -591,7 +600,7 @@ else
             grep -vE '^\$' | sort -u
     )
     if ((${#_g_want[@]} == 0)); then
-        _warn "grafana datasource gate" "no datasource uids found in the dashboards — gate DID NOT RUN"
+        _didnotrun "grafana datasource gate" "no datasource uids found in the dashboards — gate DID NOT RUN"
     else
         _g_bad=0
         for _w in "${_g_want[@]}"; do
@@ -955,7 +964,7 @@ PYSLIDES
         _fail "install slides" "$_sl_out"
     fi
 else
-    _warn "install slides: python3 missing — this check DID NOT RUN"
+    _didnotrun "install slides: python3 missing — this check DID NOT RUN"
 fi
 
 _section "Answers files"
@@ -1349,7 +1358,7 @@ else
                     _pass "gnome extension $_u: every bound key exists in its compiled schema"
             fi
         else
-            _warn "gnome extension $_u schema" "no compiled schema or no gsettings — the bound-key gate DID NOT RUN"
+            _didnotrun "gnome extension $_u schema" "no compiled schema or no gsettings — the bound-key gate DID NOT RUN"
         fi
     done
     [[ $_gse_n -gt 0 ]] || _pass "gnome extensions: none enabled by the keymap"
@@ -1364,7 +1373,7 @@ else
                 _fail "gnome grid layout" "run: gjs -m tests/gnome-grid-layout.test.js"
             fi
         else
-            _warn "gnome grid layout" "gjs not installed — the tiling geometry is UNGATED (this check DID NOT RUN; dnf install gjs)"
+            _didnotrun "gnome grid layout" "gjs not installed — the tiling geometry is UNGATED (this check DID NOT RUN; dnf install gjs)"
         fi
     fi
 fi
@@ -1447,7 +1456,7 @@ if [[ ${#GO_MODS[@]} -eq 0 ]]; then
     _pass "go trees: none tracked, nothing to gate"
 elif ! command -v go >/dev/null 2>&1; then
     # Loud, never silent. A gate that cannot run is reported as not having run.
-    _warn "go trees" "go not installed — ${#GO_MODS[@]} Go tree(s) are UNGATED (this check DID NOT RUN)"
+    _didnotrun "go trees" "go not installed — ${#GO_MODS[@]} Go tree(s) are UNGATED (this check DID NOT RUN)"
 else
     for _gm in "${GO_MODS[@]}"; do
         _gd="$ROOT/$_gm"
@@ -1491,7 +1500,7 @@ else
             _warn "go ${_gm} govulncheck" "govulncheck not installed — dependency advisories are UNGATED"
         elif ! (cd "$_gd" && timeout 180 govulncheck ./... >/tmp/kld-govuln.$$ 2>&1); then
             if grep -qiE 'no such host|dial tcp|timeout|connection refused' /tmp/kld-govuln.$$; then
-                _warn "go ${_gm} govulncheck" "no route to the vulnerability database — this check DID NOT RUN"
+                _didnotrun "go ${_gm} govulncheck" "no route to the vulnerability database — this check DID NOT RUN"
             else
                 _fail "go ${_gm} govulncheck" "$(grep -m1 'Vulnerability #' /tmp/kld-govuln.$$ || echo 'see govulncheck ./...')"
             fi
@@ -2704,19 +2713,34 @@ else
     _sm_baseline="$(tr -cd '0-9' <"$_sm_baseline_file")"
     _sm_now=0
     _sm_list=()
-    _sm_exempt=()
+    _sm_covered=()
     for f in "${SHELL_SCRIPTS[@]}"; do
-        # A script may opt out only by saying why, in a greppable line with a real
-        # reason (a dracut hook sourced into dracut's shell, a generator that must
-        # always exit 0). An exemption without a reason still counts.
-        if grep -qE '^# strict-mode: exempt — .{30,}' "$ROOT/$f"; then
-            _sm_exempt+=("$f")
+        if grep -qE '^[[:space:]]*set -E?euo pipefail' "$ROOT/$f"; then
             continue
         fi
-        if ! grep -qE '^[[:space:]]*set -E?euo pipefail' "$ROOT/$f"; then
-            _sm_now=$((_sm_now + 1))
-            _sm_list+=("$f")
+        # There is no "exempt me" line any more. The operator's words, 2026-09-15:
+        # "make sure that rule REQUIRES this, not omits it". The ONE case where a
+        # file legitimately must not set the options itself is a sourced library --
+        # setting them there changes the shell of whoever sourced it, and for
+        # /etc/profile.d that shell is the operator's login. So a file without the
+        # line has to EARN its pass by proving every caller that sources it is
+        # strict; a library with no callers, or one caller that is soft, counts.
+        _sm_callers=()
+        _sm_soft=0
+        while IFS= read -r _sm_c; do
+            [[ -n "$_sm_c" ]] || continue
+            _sm_callers+=("$_sm_c")
+            grep -qE '^[[:space:]]*set -E?euo pipefail' "$ROOT/$_sm_c" || _sm_soft=1
+            # swallow: grep exits 1 when a library has no callers at all, and that is
+            # the case the loop below is looking for -- no callers means no cover
+        done < <(grep -rlE "(^|[[:space:]])(\.|source)[[:space:]]+[^[:space:]]*$(basename "$f")([[:space:]]|\"|$)" \
+            --include='*' "$ROOT" 2>/dev/null | sed "s#^$ROOT/##" | grep -v "^\.git/" | grep -vx "$f" || true)
+        if ((${#_sm_callers[@]} > 0 && _sm_soft == 0)); then
+            _sm_covered+=("$f")
+            continue
         fi
+        _sm_now=$((_sm_now + 1))
+        _sm_list+=("$f")
     done
     if [[ "$_sm_now" -gt "$_sm_baseline" ]]; then
         _fail "strict-mode ratchet" \
@@ -2726,7 +2750,7 @@ else
     else
         _pass "strict-mode ratchet: ${_sm_now} scripts without strict mode (at baseline, not rising)"
     fi
-    ((${#_sm_exempt[@]} == 0)) || _pass "strict-mode exemptions with a stated reason: ${_sm_exempt[*]}"
+    ((${#_sm_covered[@]} == 0)) || _pass "strict-mode: ${#_sm_covered[@]} sourced libs covered by strict callers: ${_sm_covered[*]}"
 fi
 
 # ── systemd drop-ins reach the ISO ──────────────────────────────────────────

@@ -4,6 +4,9 @@
 # Requires: common.sh
 # ---------------------------------------------------------------------------
 
+set -Eeuo pipefail
+trap 'echo "snapshots.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 [[ "${_KLDLOAD_SNAPSHOTS_LOADED:-0}" == "1" ]] && return 0
 _KLDLOAD_SNAPSHOTS_LOADED=1
 

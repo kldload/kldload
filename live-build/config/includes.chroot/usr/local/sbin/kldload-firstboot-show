@@ -96,7 +96,10 @@
 #     kldload-initrd-show (the netboot console show this one follows),
 #     kldload-buildmon (the same settle rule, in a window).
 # ─────────────────────────────────────────────────────────────────────────────
-# strict-mode: exempt — a display loop beside the build: a failed read or draw must skip a frame, never end the show
+
+set -Eeuo pipefail
+trap 'echo "kldload-firstboot-show: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 set -uo pipefail
 export LC_ALL=C
 
@@ -326,7 +329,9 @@ _build_journal() {
 _log_lines() {
     local n="$1" src lines=""
     if [[ ! -e "${INSTPHASE}" ]]; then
-        lines="$(_build_journal | clean_log | grep -v '^[[:space:]]*$' | tail -n "${n}")"
+        # sed, not grep -v: an empty stream is the normal "nothing logged yet"
+        # case, and grep exits 1 on it, which pipefail turns into a dead logtail
+        lines="$(_build_journal | clean_log | sed '/^[[:space:]]*$/d' | tail -n "${n}")"
         if [[ -n "${lines}" ]]; then
             printf 'journal: first boot, autodeploy, klab\n%s\n' "${lines}"
             return 0
@@ -335,7 +340,7 @@ _log_lines() {
     src="$(_log_path)"
     printf '%s\n' "${src}"
     [[ -r "${src}" ]] || return 0
-    tail -c 131072 "${src}" 2>/dev/null | clean_log | grep -v '^[[:space:]]*$' | tail -n "${n}"
+    tail -c 131072 "${src}" 2>/dev/null | clean_log | sed '/^[[:space:]]*$/d' | tail -n "${n}"
 }
 
 # logtail [N] — see the header.

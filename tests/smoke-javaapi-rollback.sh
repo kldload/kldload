@@ -36,6 +36,9 @@
 # Distro coverage: invoked by smoke-kvm.sh and smoke-server.sh (any kldload
 # profile with a K8s cluster). Not invoked by smoke-core.sh (no cluster).
 
+set -Eeuo pipefail
+trap 'echo "smoke-javaapi-rollback.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

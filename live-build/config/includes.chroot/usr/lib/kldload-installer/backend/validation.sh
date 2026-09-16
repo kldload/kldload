@@ -8,6 +8,9 @@
 # validate_disk — die if dev is not a suitable installation target
 # ---------------------------------------------------------------------------
 
+set -Eeuo pipefail
+trap 'echo "validation.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 validate_disk() {
     local dev="$1"
     [[ -n "$dev" ]] ||

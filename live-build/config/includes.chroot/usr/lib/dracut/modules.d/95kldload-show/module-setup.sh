@@ -1,11 +1,13 @@
 #!/usr/bin/bash
-# strict-mode: exempt — dracut sources this file into its own shell; set -e here would change how dracut itself handles errors
 # dracut module 95kldload-show — the install show during a netboot image download.
 #
 # Installed by builder/build-iso.sh (dracut --add kldload-show) into the live
 # initramfs. Pulls in livenet, because the only thing the show is for is the time
 # livenet spends downloading the root image. It carries no slides: those are the
 # kiosk's, which follows once the live system is up.
+
+set -Eeuo pipefail
+trap 'echo "module-setup.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 check() {
     # Only when asked for by name: never auto-included into an installed system's

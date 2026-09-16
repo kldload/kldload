@@ -2,6 +2,10 @@
 # smoke-all.sh — comprehensive kldloadOS test report
 # Detects profile, runs all applicable tests, generates a summary report
 # Run on an installed system: sudo bash smoke-all.sh
+
+set -Eeuo pipefail
+trap 'echo "smoke-all.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 set -uo pipefail
 
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
