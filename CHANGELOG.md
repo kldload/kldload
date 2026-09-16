@@ -10,8 +10,11 @@ This release is about provisioning and recovery — getting a rack built without
 person at each keyboard, and getting a machine back when one dies. The ratio
 tells the rest of the story: 168 fixes against 60 features. Nearly every fix
 below was found the same way 1.4.2's were, by installing on real hardware and
-measuring what actually landed, and this cycle that meant seven editions
-installed end to end on the same machine, over and over, until they all passed.
+measuring what actually landed. This cycle that meant seven editions installed
+end to end on the same machine, repeatedly: core, server, net and desktop
+verified, and the three that did not — kvm, k8s and full — are what the last
+four fixes below came from. kvm has since verified clean on this build, with
+all ten golden images sealed and a first-boot smoke suite of 191 checks passing.
 
 ### One key provisions the rack
 
