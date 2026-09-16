@@ -445,8 +445,10 @@ setup_kvm() {
     done
     # Storage pool — images directory.
     virsh pool-define-as default dir --target /var/lib/libvirt/images 2>/dev/null || true
-    virsh pool-autostart default 2>/dev/null || true
-    virsh pool-start default 2>/dev/null || true
+    virsh pool-autostart default 2>/dev/null ||
+        log "WARNING: default storage pool not set to autostart — it will be missing after the next reboot"
+    virsh pool-start default 2>/dev/null ||
+        log "WARNING: default storage pool did not start — VM disks have nowhere to go"
     if ! virsh pool-info default >/dev/null 2>&1; then
         log "WARNING: libvirt default pool not defined — klab VM builds will fail"
     fi
@@ -462,9 +464,12 @@ setup_kvm() {
     # Stream 9 fresh boxes it's missing, so klab VM creation fails until
     # firstboot defines it.
     mkdir -p /var/lib/libvirt/isos
+    # swallow: the pool is already defined on a re-run; the start below is what matters
     virsh pool-define-as isos dir --target /var/lib/libvirt/isos 2>/dev/null || true
-    virsh pool-autostart isos 2>/dev/null || true
-    virsh pool-start isos 2>/dev/null || true
+    virsh pool-autostart isos 2>/dev/null ||
+        log "WARNING: isos pool not set to autostart"
+    virsh pool-start isos 2>/dev/null ||
+        log "WARNING: isos pool did not start — installer media will not be listable"
     if ! virsh pool-info isos >/dev/null 2>&1; then
         log "WARNING: libvirt isos pool not defined — klab golden builds will fail with 'missing storage pool target path'"
     fi
@@ -527,14 +532,18 @@ setup_kvm() {
         _existing_uuid="$(virsh pool-uuid "$_pool_name" 2>/dev/null || true)"
         if [[ -n "$_existing_uuid" && "$_existing_uuid" != "$_pool_uuid" ]]; then
             log "  pool $_pool_name has uuid $_existing_uuid (expected $_pool_uuid) — resetting"
+            # swallow: destroying a pool that is not there is the normal first-run case
             virsh pool-destroy "$_pool_name" 2>/dev/null || true
+            # swallow: as above
             virsh pool-undefine "$_pool_name" 2>/dev/null || true
         fi
         if ! virsh pool-uuid "$_pool_name" >/dev/null 2>&1; then
             virsh pool-define "$_pool_xml" 2>/dev/null || log "  WARNING: pool-define $_pool_name failed"
         fi
-        virsh pool-autostart "$_pool_name" 2>/dev/null || true
-        virsh pool-start "$_pool_name" 2>/dev/null || true
+        virsh pool-autostart "$_pool_name" 2>/dev/null ||
+            log "WARNING: ${_pool_name} pool not set to autostart"
+        virsh pool-start "$_pool_name" 2>/dev/null ||
+            log "WARNING: ${_pool_name} pool did not start"
     done
     if virsh pool-info cloud-init >/dev/null 2>&1; then
         log "kldload storage pools ready: cloud-init, cloud-images, vm-iso"
@@ -555,7 +564,8 @@ setup_kvm() {
   </ip>
 </network>
 VNETDEF
-        virsh net-define /tmp/libvirt-default-net.xml 2>/dev/null || true
+        virsh net-define /tmp/libvirt-default-net.xml 2>/dev/null ||
+            log "WARNING: could not define the default libvirt network — guests will have no NAT"
         rm -f /tmp/libvirt-default-net.xml
     fi
     # swallow: pre-defined nets may already have autostart set — harmless
@@ -601,9 +611,11 @@ VNETDEF
 
     # Create /etc/firecracker directory and containerd config stub
     mkdir -p /etc/firecracker /var/lib/firecracker/rootfs /run/firecracker
-    systemctl enable --now containerd 2>/dev/null || true
+    systemctl enable --now containerd 2>/dev/null ||
+        log "WARNING: containerd not enabled — containers will not run after a reboot"
 
-    systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
+    systemctl enable --now kldload-snapshot.timer 2>/dev/null ||
+        log "WARNING: kldload-snapshot.timer not enabled — nothing will prune or take snapshots"
     ok "=== KVM ready (bridge: br0, Firecracker microVM runtime installed) ==="
 }
 
@@ -631,7 +643,8 @@ TGT
     systemctl enable --now tgt
     ok "iSCSI target configured"
 
-    systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
+    systemctl enable --now kldload-snapshot.timer 2>/dev/null ||
+        log "WARNING: kldload-snapshot.timer not enabled — nothing will prune or take snapshots"
     ok "=== STORAGE ready ==="
 }
 
@@ -725,11 +738,13 @@ server {
 NGINX
     ln -sf /etc/nginx/sites-available/kldload-vdi \
         /etc/nginx/sites-enabled/kldload-vdi
+    # swallow: Debian ships this symlink, Fedora does not
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
     systemctl enable --now nginx
     ok "nginx VDI proxy active"
 
-    systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
+    systemctl enable --now kldload-snapshot.timer 2>/dev/null ||
+        log "WARNING: kldload-snapshot.timer not enabled — nothing will prune or take snapshots"
     ok "=== VDI ready ==="
 }
 
@@ -739,7 +754,8 @@ setup_monitoring() {
 
     # Prometheus data dir
     mkdir -p /var/lib/prometheus /etc/prometheus/rules
-    chown -R prometheus:prometheus /var/lib/prometheus 2>/dev/null || true
+    chown -R prometheus:prometheus /var/lib/prometheus 2>/dev/null ||
+        log "WARNING: could not chown /var/lib/prometheus — prometheus will fail to write its TSDB"
 
     # Default prometheus.yml scraping localhost + node exporter
     cat >/etc/prometheus/prometheus.yml <<'PROM'
@@ -764,7 +780,8 @@ scrape_configs:
       - targets: ['localhost:9100']
 PROM
 
-    systemctl enable --now prometheus prometheus-node-exporter prometheus-alertmanager 2>/dev/null || true
+    systemctl enable --now prometheus prometheus-node-exporter prometheus-alertmanager 2>/dev/null ||
+        log "WARNING: the metrics stack did not enable — this machine will report nothing"
 
     # Grafana: set admin password + enable service
     if command -v grafana-server >/dev/null 2>&1 || [[ -f /usr/sbin/grafana-server ]]; then
@@ -779,8 +796,10 @@ PROM
 [Service]
 ExecStartPre=-/usr/bin/python3 -c "import sqlite3,os;p='/var/lib/grafana/grafana.db';c=sqlite3.connect(p) if os.path.exists(p) else None;c and c.execute('DELETE FROM server_lock');c and c.commit()"
 UNLOCK
-        systemctl daemon-reload 2>/dev/null || true
-        systemctl enable --now grafana-server 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null ||
+            log "WARNING: systemctl daemon-reload failed"
+        systemctl enable --now grafana-server 2>/dev/null ||
+            log "WARNING: grafana-server not enabled — the dashboards will not be served"
         log "  Grafana enabled (default login admin/admin — change on first login)"
     else
         log "  WARNING: grafana-server not found — monitoring profile may be incomplete"
@@ -801,7 +820,8 @@ setup_proxmox() {
         echo "deb [signed-by=${PVE_KEYRING}] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
             >/etc/apt/sources.list.d/pve.list
         log "  Proxmox VE repo added — running apt-get install proxmox-ve..."
-        apt-get update -qq 2>/dev/null || true
+        apt-get update -qq 2>/dev/null ||
+            log "WARNING: apt-get update failed — the installs below will use stale lists"
         DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi chrony 2>/dev/null &&
             log "  Proxmox VE installed" ||
             log "  WARNING: Proxmox VE install failed — network may be required"
@@ -1183,6 +1203,7 @@ _try_fetch_hub_env() {
             fi
         fi
     done
+    # swallow: the temp file only exists if the write above got that far
     rm -f "${HUB_ENV}.tmp" 2>/dev/null || true
     log "hub.env not found locally or via discovery — running standalone"
     return 0
@@ -1312,6 +1333,7 @@ LVGT
         local _audir="" _au
         [[ -d /etc/gdm3 ]] && _audir=/etc/gdm3
         [[ -z "$_audir" && -d /etc/gdm ]] && _audir=/etc/gdm
+        # swallow: there may be no uid 1000 on a headless install
         _au=$(id -nu 1000 2>/dev/null || true)
         # ── lightdm autologin ────────────────────────────────────────────────
         # Debian DELIBERATELY runs lightdm, not GDM (profiles.sh: GDM 48 has a
@@ -1320,6 +1342,7 @@ LVGT
         # operator lands on a greeter every boot.
         # HISTORY: 2026-08-14, fiend — first Debian install to reach a desktop.
         if [[ -d /etc/lightdm ]] && command -v lightdm >/dev/null 2>&1; then
+            # swallow: as above
             _au=$(id -nu 1000 2>/dev/null || true)
             if [[ -n "$_au" ]]; then
                 mkdir -p /etc/lightdm/lightdm.conf.d
@@ -1334,7 +1357,8 @@ LIGHTDM
                 # Debian gates autologin on this group; without it lightdm
                 # ignores autologin-user and still shows the greeter.
                 getent group autologin >/dev/null 2>&1 || groupadd -r autologin
-                usermod -aG autologin "$_au" 2>/dev/null || true
+                usermod -aG autologin "$_au" 2>/dev/null ||
+                    log "WARNING: ${_au} not added to the autologin group — the desktop will ask for a password"
                 log "desktop: lightdm autologin configured for ${_au}"
             fi
         fi
@@ -1465,7 +1489,8 @@ _darksite_reclaim() {
     [[ -d /root/darksite ]] || return 0
     if [[ -f /etc/kldload/keep-darksite ]]; then
         log "LAN-mirror mode: keeping all of /root/darksite ($(du -sh /root/darksite 2>/dev/null | cut -f1))"
-        systemctl enable --now kldload-apt-mirror.service 2>/dev/null || true
+        systemctl enable --now kldload-apt-mirror.service 2>/dev/null ||
+            log "WARNING: kldload-apt-mirror not enabled — the darksite mirror will not be served"
         return 0
     fi
     local before after d
@@ -1494,6 +1519,7 @@ _darksite_reclaim() {
         fi
     fi
     _fb_retire_darksite_repo
+    # swallow: disabling a unit this image never installed
     systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
     after="$(du -sh /root/darksite 2>/dev/null | cut -f1)"
     log "Darksite package mirrors removed (${before} → ${after}); helm charts kept for offline k8s deploys"
@@ -1589,9 +1615,12 @@ _fb_install_darksite_binary() {
                 log "  SKIP: download failed"
                 return 0
             }
-            tar -xzf "${tgz}" -C /tmp 2>/dev/null || true
-            find /tmp -name "firecracker-*-x86_64" -exec install -m 0755 {} "${bin_dest}/firecracker" \; 2>/dev/null || true
-            find /tmp -name "jailer-*-x86_64" -exec install -m 0755 {} "${bin_dest}/jailer" \; 2>/dev/null || true
+            tar -xzf "${tgz}" -C /tmp 2>/dev/null ||
+                log "WARNING: could not unpack the firecracker tarball — microVMs will not run"
+            find /tmp -name "firecracker-*-x86_64" -exec install -m 0755 {} "${bin_dest}/firecracker" \; 2>/dev/null ||
+                log "WARNING: firecracker binary not installed"
+            find /tmp -name "jailer-*-x86_64" -exec install -m 0755 {} "${bin_dest}/jailer" \; 2>/dev/null ||
+                log "WARNING: jailer binary not installed — firecracker would have to run as root"
             rm -f "${tgz}"
             ;;
         firectl)
@@ -1752,9 +1781,11 @@ main() {
         _mid="$(cat /etc/machine-id)"
         if [[ -d /var/log/journal ]] && [[ ! -d "/var/log/journal/${_mid}" ]]; then
             mkdir -p "/var/log/journal/${_mid}"
-            chgrp systemd-journal "/var/log/journal/${_mid}" 2>/dev/null || true
+            chgrp systemd-journal "/var/log/journal/${_mid}" 2>/dev/null ||
+                log "WARNING: could not set the journal directory group — journald may not persist logs"
             chmod 2755 "/var/log/journal/${_mid}"
-            systemctl restart systemd-journald 2>/dev/null || true
+            systemctl restart systemd-journald 2>/dev/null ||
+                log "WARNING: journald did not restart — the persistent journal starts at the next boot"
             log "  created persistent journal dir for machine-id ${_mid}"
         fi
     fi
@@ -1920,9 +1951,11 @@ ZRAMCONF
     # to remember the canonical paths. Idempotent: `ln -sfn` replaces
     # whatever was there before.
     if [[ -d /var/log/installer ]]; then
+        # swallow: the log directory is absent on an install that never wrote one
         ln -sfn /var/log/installer /root/install-logs 2>/dev/null || true
     fi
     if [[ -d /var/log/kldload ]] || mkdir -p /var/log/kldload 2>/dev/null; then
+        # swallow: as above
         ln -sfn /var/log/kldload /root/kldload-logs 2>/dev/null || true
     fi
 
@@ -1985,6 +2018,7 @@ ZRAMCONF
         # unsigned! ... Bad exit status from %install". The cert MATCHED, so a
         # repair that only compared certificates skipped it entirely.
         if [[ -f "$_ak_key" ]] && ! getent group akmods >/dev/null 2>&1; then
+            # swallow: the akmods group already exists on an image that carries akmods
             groupadd -r akmods 2>/dev/null || true
         fi
         if [[ -f "$_ak_key" ]] && [[ "$(stat -c '%G' "$_ak_key" 2>/dev/null)" != "akmods" ]]; then
@@ -2018,7 +2052,8 @@ ZRAMCONF
                 cp -f /var/lib/dkms/mok.key /etc/pki/akmods/private/private_key.priv; then
                 chmod 0644 "$_ak_cert"
                 chmod 0640 /etc/pki/akmods/private/private_key.priv
-                chgrp akmods /etc/pki/akmods/private/private_key.priv 2>/dev/null || true
+                chgrp akmods /etc/pki/akmods/private/private_key.priv 2>/dev/null ||
+                    log "WARNING: akmods signing key is not group akmods — modules will build unsigned and Secure Boot will refuse them"
                 ok "akmods re-pointed at the enrolled MOK (was signing with an unenrolled key)"
                 # Anything akmods already built carries the wrong signature and
                 # will never load; force a rebuild against the right key.
@@ -2048,7 +2083,9 @@ ZRAMCONF
         ! compgen -G '/usr/src/nvidia-*' >/dev/null 2>&1 &&
         ! rpm -q akmod-nvidia >/dev/null 2>&1; then
         log "NVIDIA GPU present but no driver installed — attempting install (needs network)"
+        # swallow: neither dnf5 nor dnf on a Debian or Arch target, which the caller checks for
         _dnf="$(command -v dnf5 || command -v dnf || true)"
+        # swallow: rpm is absent off the RPM families
         _fedver="$(rpm -E %fedora 2>/dev/null || true)"
         if [[ -z "$_dnf" ]]; then
             log "WARNING: no package manager on PATH — cannot install NVIDIA driver (desktop stays on nouveau)"
@@ -2099,7 +2136,8 @@ ZRAMCONF
             # the running kernel — that path works reliably even when the
             # chroot path doesn't.
             log "NVIDIA DKMS not built (chroot install failed) — retrying on running kernel ${_nv_ver}"
-            dkms add -m nvidia -v "$_nv_ver" >/dev/null 2>&1 || true
+            dkms add -m nvidia -v "$_nv_ver" >/dev/null 2>&1 ||
+                log "WARNING: dkms add for nvidia ${_nv_ver} failed"
             if dkms autoinstall -k "$(uname -r)" >/dev/null 2>&1; then
                 _fb_nvidia_ko_present &&
                     _nv_ko_present=1
@@ -2160,13 +2198,15 @@ ZRAMCONF
                 /usr/share/X11/xorg.conf.d/*.kldload-disabled-no-dkms \
                 /etc/X11/xorg.conf.d/*.kldload-disabled-no-dkms; do
                 if [[ -f "$_disabled" ]]; then
-                    mv -f "$_disabled" "${_disabled%.kldload-disabled-no-dkms}" 2>/dev/null || true
+                    mv -f "$_disabled" "${_disabled%.kldload-disabled-no-dkms}" 2>/dev/null ||
+                        log "WARNING: could not restore ${_disabled} — that module stays disabled"
                     _nv_restored=1
                 fi
             done
             if [[ $_nv_restored -eq 1 ]]; then
                 ok "NVIDIA DKMS built — restored nvidia modprobe + Xorg configs"
-                depmod -a 2>/dev/null || true
+                depmod -a 2>/dev/null ||
+                    log "WARNING: depmod failed — modules built above may not be found at boot"
                 # Regenerate initramfs to pick up the now-restored nouveau-blacklist
                 # in /usr/lib/modprobe.d/nvidia.conf. Without this, the existing
                 # initramfs (built at install time when nvidia.conf was parked as
@@ -2527,7 +2567,9 @@ ZRAMCONF
         # did; it just wasn't in the grid yet (found on .111, 2026-07-25). Rebuild
         # both so the next login shows it. No-op when nothing healed.
         if [[ "${_healed_any:-0}" == 1 ]]; then
+            # swallow: a cache rebuild the desktop redoes by itself
             update-desktop-database /usr/share/applications 2>/dev/null || true
+            # swallow: as above
             gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
             ok "rebuilt desktop database + icon cache after healing desktop packages"
         fi
@@ -2543,9 +2585,13 @@ ZRAMCONF
         # Enable/disable/mask only (config, instant) and fire the start with
         # --no-block so we never wait on a job; ppd is fully active next boot.
         if rpm -q power-profiles-daemon >/dev/null 2>&1; then
+            # swallow: tlp is only installed on laptops
             systemctl disable tlp tlp-rdw >/dev/null 2>&1 || true
+            # swallow: as above
             systemctl mask tlp >/dev/null 2>&1 || true
-            systemctl enable power-profiles-daemon >/dev/null 2>&1 || true
+            systemctl enable power-profiles-daemon >/dev/null 2>&1 ||
+                log "WARNING: power-profiles-daemon not enabled"
+            # swallow: a restart of something that may not be installed; the enable above warns
             systemctl --no-block restart power-profiles-daemon >/dev/null 2>&1 || true
             ok "power-profiles-daemon enabled (tlp masked; GNOME power slider active next boot)"
         fi
@@ -2628,8 +2674,10 @@ SALT
         # Suppress GNOME Terminal "set as default terminal" nag
         # Find whatever path gnome-terminal registered with update-alternatives
         _gt_alt="$(update-alternatives --list x-terminal-emulator 2>/dev/null |
+            # swallow: grep finds nothing when no gnome-terminal alternative is registered
             grep -i gnome-terminal | head -1 || true)"
         if [[ -n "$_gt_alt" ]]; then
+            # swallow: nothing to set when the grep above came back empty
             update-alternatives --set x-terminal-emulator "$_gt_alt" 2>/dev/null || true
         fi
         unset _gt_alt
@@ -2639,7 +2687,8 @@ SALT
         # kldload-webui alone left that pane 502 on a fresh install (.147,
         # 2026-06-03), so the tile looked like "just a terminal". Enable the trio.
         systemctl enable kldload-webui kldload-proxy ttyd-k9s 2>/dev/null || true
-        systemctl start kldload-webui kldload-proxy ttyd-k9s 2>/dev/null || true
+        systemctl start kldload-webui kldload-proxy ttyd-k9s 2>/dev/null ||
+            log "WARNING: one of kldload-webui, kldload-proxy, ttyd-k9s did not start — the web console may be unreachable"
 
         # Enable the hourly TLS-cert drift-check timer. The cert is generated
         # for the first time via ttyd-k9s.service's ExecStartPre, now ordered
@@ -2696,6 +2745,7 @@ SALT
                 # the not-enrolled case it exists for. The || only swallows
                 # the benign no-match (and mokutil-absent) exit status.
                 _enrolled="$(mokutil --list-enrolled 2>/dev/null | tr -d ':' | tr 'A-Z' 'a-z' | grep -c "$_mok_fp" || true)"
+                # swallow: grep -c exits 1 with no matches, which is the "not pending" answer
                 _pending="$(mokutil --list-new 2>/dev/null | tr -d ':' | tr 'A-Z' 'a-z' | grep -c "$_mok_fp" || true)"
                 if [[ "$_enrolled" == "0" && "$_pending" == "0" ]]; then
                     log "MOK self-heal: current signing cert is neither enrolled nor staged — staging now"
@@ -2754,8 +2804,9 @@ SALT
                     set +e
                     for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
                         _user=$(id -nu "$_uid" 2>/dev/null) || continue
-                        sudo -u "$_user" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
-                            notify-send -i dialog-information "$_title" "$_body" 2>/dev/null || true
+                        sudo -u "$_user" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus"
+                        # swallow: there is no desktop session to notify on a headless install
+                        notify-send -i dialog-information "$_title" "$_body" 2>/dev/null || true
                     done
                 ) 2>/dev/null
                 return 0
@@ -2861,7 +2912,8 @@ OLLAMA
                     fi &&
                         ok "Darksite models copied to /srv/ollama/models" ||
                         log "WARNING: darksite rehydrate failed — will pull from internet"
-                    chown -R ollama:ollama /srv/ollama 2>/dev/null || true
+                    chown -R ollama:ollama /srv/ollama 2>/dev/null ||
+                        log "WARNING: could not chown /srv/ollama — the model service will not start"
                 fi
 
                 systemctl daemon-reload
@@ -3057,6 +3109,7 @@ BOBMODEL
                                 _status "Bob is ready"
                             } ||
                             { log "WARNING: Bob model creation failed — using base llama3.1:8b"; }
+                        # swallow: the snapshot already exists on a re-run
                         zfs snapshot rpool/srv/ollama@bob 2>/dev/null || true
                     else
 
@@ -3223,6 +3276,7 @@ MODELFILE
                             local _text
                             _text="$(curl -fsSL --connect-timeout 10 --max-time 30 "$_url" 2>/dev/null |
                                 sed 's/<[^>]*>//g; s/&nbsp;/ /g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&mdash;/—/g; s/&rsquo;/'\''/g; s/&ldquo;/"/g; s/&rdquo;/"/g' |
+                                # swallow: a tool that prints nothing contributes nothing to the corpus
                                 sed '/^[[:space:]]*$/d' | head -200)" || true
                             if [[ -n "$_text" ]]; then
                                 echo "=== ${_page} ===" >>"$_corpus"
@@ -3235,6 +3289,7 @@ MODELFILE
                         echo "=== kldload tool help ===" >>"$_corpus"
                         for _t in kst ksnap kclone kdf kdir kpkg kexport kbe krecovery kupgrade kldload-help; do
                             echo "--- ${_t} ---" >>"$_corpus"
+                            # swallow: a tool with no --help is skipped, not fatal, for a training corpus
                             ${_t} --help 2>&1 | head -30 >>"$_corpus" || true
                         done
 
@@ -3462,6 +3517,7 @@ KAIREMOTE
                         fi
 
                         if ((_owui_have == 1)); then
+                            # swallow: removing a container that was never created
                             "$_crt" rm -f open-webui >>"${LOG}" 2>&1 || true
                             # swallow: only fails when no such container exists, which is
                             # the normal first-boot case.
@@ -3599,6 +3655,7 @@ CHROMEPOL
                         # Send notification to all logged-in GNOME sessions
                         for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
                             local _user
+                            # swallow: that uid may not exist on this install
                             _user=$(id -nu "$_uid" 2>/dev/null || true)
                             if [[ -n "$_user" ]]; then
                                 sudo -u "$_user" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
@@ -3674,7 +3731,8 @@ AIMOTD
             # and the 'isos' pool (cloud-init ISOs) is still useful — both
             # are set up elsewhere in firstboot.
             systemctl enable libvirtd 2>/dev/null || true
-            systemctl start libvirtd 2>/dev/null || true
+            systemctl start libvirtd 2>/dev/null ||
+                log "WARNING: libvirtd did not start — no VM work can happen on this boot"
             ok "libvirt ready — zvols accessed as raw /dev/zvol/… paths (no pool needed)"
 
             # ── KSM: share identical guest pages ─────────────────────────
@@ -3844,13 +3902,15 @@ AIMOTD
                     # leaving the host on a half-built bridge is the outcome this
                     # whole branch exists to prevent.
                     nmcli connection delete "${_slave}" >/dev/null 2>&1 || true
+                    # swallow: there is no br0 to delete on the first run
                     nmcli connection delete br0 >/dev/null 2>&1 || true
                     if [[ -n "$_owner" ]]; then
                         # swallow x2: this is the restore path and it is already the
                         # error path — there is nothing further to escalate to. Both
                         # are attempted so the host gets its link back either way.
                         nmcli connection modify "${_owner}" connection.autoconnect yes >/dev/null 2>&1 || true
-                        nmcli connection up "${_owner}" >/dev/null 2>&1 || true
+                        nmcli connection up "${_owner}" >/dev/null 2>&1 ||
+                            log "WARNING: could not bring ${_owner} up — this machine may have no network"
                         log "  restored ${_owner} on ${_primary_nic}"
                     fi
                     log "  VMs can still reach the LAN via virbr0 NAT"
@@ -3859,7 +3919,8 @@ AIMOTD
 
             # Enable IP forwarding
             echo "net.ipv4.ip_forward = 1" >/etc/sysctl.d/99-kvm-forward.conf
-            sysctl -p /etc/sysctl.d/99-kvm-forward.conf 2>/dev/null || true
+            sysctl -p /etc/sysctl.d/99-kvm-forward.conf 2>/dev/null ||
+                log "WARNING: sysctl -p failed — IP forwarding may be off and guests will not route"
 
             # Keep default NAT network (virbr0) AND the host bridge (br0) both
             # alive. Previously we destroyed virbr0 here "because we use br0",
@@ -4125,6 +4186,7 @@ WantedBy=multi-user.target
 PROMSVC
                     else
                         log "  WARNING: Prometheus binary download failed (transient/offline) — skipping; metrics plane degraded. Re-run kldload-firstboot later."
+                        # swallow: nothing to clean when the download never unpacked
                         rm -rf /tmp/prometheus-* 2>/dev/null || true
                     fi
                 fi
@@ -4149,6 +4211,7 @@ WantedBy=multi-user.target
 NESVC
                     else
                         log "  WARNING: node_exporter download failed (transient/offline) — skipping; per-node metrics degraded. Re-run kldload-firstboot later."
+                        # swallow: as above
                         rm -rf /tmp/node_exporter-* 2>/dev/null || true
                     fi
                 fi
@@ -4283,7 +4346,8 @@ for p in glob.glob("/var/lib/grafana/dashboards/*.json"):
     txt = txt.replace("${DS_PROMETHEUS}", "prometheus")
     open(p, "w").write(txt)
 PYFIX
-                chown -R grafana:grafana /var/lib/grafana/dashboards 2>/dev/null || true
+                chown -R grafana:grafana /var/lib/grafana/dashboards 2>/dev/null ||
+                    log "WARNING: could not chown the grafana dashboards — grafana will not read them"
 
                 # Anonymous Viewer + iframe embedding — grafana binds loopback HTTP
                 # only. kldload-proxy on :8443 terminates TLS and exposes grafana
@@ -4392,7 +4456,8 @@ GRAFEMBED
                     fi
                     log "Grafana root_url host: ${_graf_host}"
                     sed -i "s|__KLDLOAD_LAN_IP__|${_graf_host}|" /etc/grafana/grafana.ini
-                    systemctl restart grafana-server 2>/dev/null || true
+                    systemctl restart grafana-server 2>/dev/null ||
+                        log "WARNING: grafana-server did not restart"
                     ok "Grafana anonymous + iframe embedding via proxy (/grafana) enabled"
                 fi
 
@@ -4412,7 +4477,8 @@ GRAFEMBED
 kubernetesDashboards = false
 dashboardsV2 = false
 GRAFTOGGLES
-                    systemctl restart grafana-server 2>/dev/null || true
+                    systemctl restart grafana-server 2>/dev/null ||
+                        log "WARNING: grafana-server did not restart"
                     ok "Grafana feature_toggles: kubernetesDashboards/dashboardsV2 off (avoids dashboardsV2 403 on Tetragon/Cilium/Host-Full)"
                 fi
 
@@ -4458,8 +4524,10 @@ KLABEXP
                 # ── Start all services ──
                 systemctl daemon-reload
                 for _svc in prometheus node_exporter grafana-server klab-exporter; do
-                    systemctl enable "$_svc" 2>/dev/null || true
-                    systemctl start "$_svc" 2>/dev/null || true
+                    systemctl enable "$_svc" 2>/dev/null ||
+                        log "WARNING: ${_svc} not enabled — it will not come back after a reboot"
+                    systemctl start "$_svc" 2>/dev/null ||
+                        log "WARNING: ${_svc} did not start"
                 done
                 ok "klab observability: Prometheus :9090, Grafana :3000, klab-exporter :9101"
 
@@ -4532,7 +4600,8 @@ CHROMEPOL
                 else
                     cp -a /root/darksite/ollama/models/. /srv/ollama/models/
                 fi
-                chown -R ollama:ollama /srv/ollama 2>/dev/null || true
+                chown -R ollama:ollama /srv/ollama 2>/dev/null ||
+                    log "WARNING: could not chown /srv/ollama — the model service will not start"
                 log "Ollama models rehydrated: $(du -sh /srv/ollama/models 2>/dev/null | cut -f1)"
             fi
             # Stage the AI interface payload OUT before the darksite dies.
@@ -4563,7 +4632,8 @@ CHROMEPOL
             _fb_retire_darksite_repo
             if [[ -f /etc/kldload/keep-darksite ]]; then
                 log "LAN-mirror mode: keeping /root/darksite ($(du -sh /root/darksite 2>/dev/null | cut -f1)) and enabling kldload-apt-mirror.service"
-                systemctl enable --now kldload-apt-mirror.service 2>/dev/null || true
+                systemctl enable --now kldload-apt-mirror.service 2>/dev/null ||
+                    log "WARNING: kldload-apt-mirror not enabled — the darksite mirror will not be served"
             else
                 _darksite_reclaim
             fi
