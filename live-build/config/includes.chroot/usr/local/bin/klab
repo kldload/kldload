@@ -577,14 +577,35 @@ timer_elapsed_ms() {
 # Golden naming honors KLAB_GOLDEN_KIND env:
 #   unset / "regular" → klab-golden-<distro>   (lean, blue-green)
 #   "ztest"           → klab-ztest-<distro>    (full ZFS test deps)
+#   "desktop"         → klab-desktop-<distro>  (GNOME)
+#   "xfce" / "kde"    → klab-xfce-/klab-kde-<distro>
+#   "db"              → klab-db-<distro>
 # Each distro has exactly one version at a time (CentOS 9 Stream,
 # Fedora 44, Debian 13, Ubuntu 24.04, Rocky 9) — no versioned slug.
+#
+# AN UNKNOWN KIND IS FATAL, and that is the important part of this function.
+# The default arm used to return the BASE lineage's name for anything it did
+# not recognise. When golden-xfce and golden-kde were added (20fe7208) they set
+# KLAB_GOLDEN_KIND without arms here, so both silently resolved to
+# klab-golden-<distro>: the xfce build overwrote onyx's base Debian golden with
+# a desktop image wearing the lean lineage's name, and the kde build that
+# followed saw that name already existed, skipped building entirely, and
+# reported "kde goldens ready: 1/1 sealed". A verb that builds nothing and
+# claims success is the worst outcome available, and a permissive default is
+# what produced it. Caught on onyx 2026-09-16 by a harness that asked for the
+# snapshot BY NAME instead of trusting the exit code.
 golden_name() {
     case "${KLAB_GOLDEN_KIND:-regular}" in
+    regular) echo "${PREFIX}-golden-${1}" ;;
     ztest) echo "${PREFIX}-ztest-${1}" ;;
     desktop) echo "${PREFIX}-desktop-${1}" ;;
+    xfce) echo "${PREFIX}-xfce-${1}" ;;
+    kde) echo "${PREFIX}-kde-${1}" ;;
     db) echo "${PREFIX}-db-${1}" ;;
-    *) echo "${PREFIX}-golden-${1}" ;;
+    *)
+        echo "klab: unknown KLAB_GOLDEN_KIND='${KLAB_GOLDEN_KIND}' — refusing to guess a golden name" >&2
+        return 2
+        ;;
     esac
 }
 
