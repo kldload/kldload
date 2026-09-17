@@ -473,6 +473,23 @@ fi
 
 log "Template: ${TEMPLATE:-<none>} → k8s=${WANT[k8s]}(workers=${K8S_WORKERS}) ai=${WANT[ai]} klab=${WANT[klab]}(${KLAB_GOLDEN_KIND})"
 
+# AI was NOT asked for, so nothing will ever consume /root/darksite/ollama.
+#
+# Both _ai_payload_reclaim call sites live inside the AI phase, which only runs
+# when WANT[ai]=1. On an install with AI off the payload was therefore shipped,
+# never used, and never freed: 3.3 GB stranded forever on every non-AI machine.
+# Caught by smoke-desktop's "darksite ollama payload reclaimed" check on the
+# 1.5.0-rc demo install (fiend, 2026-09-16) -- the check was right and nothing
+# was listening to it.
+#
+# Safe here, unlike the helm charts: the ollama payload's only consumers are the
+# AI install paths, and we have just established they are not going to run. This
+# deliberately runs BEFORE the nothing-requested early-out below, so a plain
+# install reclaims it too.
+if [[ "${WANT[ai]}" != "1" ]]; then
+    _ai_payload_reclaim
+fi
+
 # Early-out if nothing was requested — avoids a green "ready" banner on a
 # plain install that didn't ask for any of these. The ConditionPathExists
 # in the unit prevents re-firing; create the marker with a distinct name.
