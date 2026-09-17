@@ -68,13 +68,37 @@ install -d -m 0700 "$OUT"
 exec > >(tee -a "$OUT/matrix.log") 2>&1
 log() { printf '[%s] %s\n' "$(date +%T)" "$*"; }
 
+# Pick the NEWEST ISO of each kind, by mtime.
+#
+# This used to be a glob with `=~ ^kldload-[0-9.]+-x86_64\.iso$`, and that
+# character class does not match a pre-release version: kldload-1.5.0-rc-x86_64
+# .iso failed it, the loop fell through to the only name that did match, and the
+# matrix ran seven editions against kldload-1.4.2-x86_64.iso -- an ISO from the
+# previous morning. Nothing warned, because falling back to a stale artefact
+# looks exactly like finding the right one (onyx 2026-09-16, caught in the first
+# minute of the run only because the log prints the basename).
+#
+# Two changes: the version part is anything that is not a dash-suffixed variant,
+# and selection is by modification time rather than by whatever the glob happens
+# to sort last. `-net`, `-core` and `-fedora` builds are separate editions and
+# must never be chosen as the full ISO, which is what the trailing anchor does.
+_newest_iso() {
+    local pattern="$1" newest="" f
+    for f in "$REPO"/live-build/output/$pattern; do
+        [[ -f "$f" ]] || continue
+        [[ -z "$newest" || "$f" -nt "$newest" ]] && newest="$f"
+    done
+    printf '%s' "$newest"
+}
+
 FULL_ISO="" NET_ISO=""
 for f in "$REPO"/live-build/output/kldload-*-x86_64.iso; do
-    [[ "$(basename "$f")" =~ ^kldload-[0-9.]+-x86_64\.iso$ ]] && FULL_ISO="$f"
+    [[ -f "$f" ]] || continue
+    # The full ISO is the one with NO variant suffix after the arch.
+    [[ "$(basename "$f")" =~ ^kldload-.+-x86_64\.iso$ ]] || continue
+    [[ -z "$FULL_ISO" || "$f" -nt "$FULL_ISO" ]] && FULL_ISO="$f"
 done
-for f in "$REPO"/live-build/output/kldload-*-x86_64-net.iso; do
-    [[ -f "$f" ]] && NET_ISO="$f"
-done
+NET_ISO="$(_newest_iso 'kldload-*-x86_64-net.iso')"
 [[ -n "$FULL_ISO" ]] || {
     log "no full ISO in live-build/output"
     exit 1
