@@ -93,6 +93,58 @@ many control planes and workers. Same image, different answers.
 
 ---
 
+## Making it yours
+
+The image is not a black box. Four places take your own content, and anything
+you add there ends up inside the image and therefore inside every machine that
+boots from it — still with no network calls at install time.
+
+**Your own container images.** `build/darksite/k8s-images.txt` is a plain list,
+one image per line, 65 of them today. Add yours and the build pulls it, saves
+it as a tarball under the darksite, and imports it into the golden's containerd.
+Your application is then on every node the moment the cluster exists, with
+nothing pulling from a registry.
+
+**Your own packages.** `profiles/*.yaml` groups packages by purpose — `base`,
+`desktop`, `zfs`. Add a package to a group and it is installed on every machine
+built with that profile, from the mirror baked into the image rather than from
+the internet.
+
+**What goes in the image at all.** The build reads `PAYLOAD`, `DARKSITES`
+(debian, fedora, el), `K8S_IMAGES` and `OLLAMA`, so you can cut the image down
+to what you actually provision:
+
+    DARKSITES=fedora OLLAMA=no ./deploy.sh build     # Fedora only, no AI stack
+
+A smaller image is faster to stage and faster for every machine to pull, which
+matters more than it sounds when fifty of them boot at once.
+
+**Per-machine differences.** The answers file — hostname, disk, profile, how
+many control planes and workers. Same image, different answers. This is the one
+to reach for first; rebuilding the image to change a hostname is the wrong
+tool.
+
+### Worth knowing
+
+- The `k8s-images.txt` header documents its own contract. Read it before adding
+  to it.
+- `KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1` bakes the model weights in; they are left
+  out by default because they are large.
+- `KLDLOAD_INCLUDE_UBUNTU_DARKSITE=1` restores the Ubuntu mirror, which is
+  retired by default — without it Ubuntu targets need a network.
+- Arch always needs a network. It is a rolling release, so there is no
+  meaningful mirror to freeze.
+
+### A gap, stated honestly
+
+There is **no drop-in for your own Kubernetes manifests or Helm values** today.
+Charts are staged at build time, but nothing reads a user directory of YAML and
+applies it after the cluster comes up. If you want your workloads to land with
+the cluster rather than after it, that is currently a post-install step you
+script yourself. It is an obvious thing to add and it is not there yet.
+
+---
+
 ## Do not touch it while a boot is in flight
 
 Every failure on 2026-09-16 traces back to changing something mid-boot.
