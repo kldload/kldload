@@ -149,7 +149,25 @@ for e in "${EDITIONS[@]}"; do
     # swallow: a run that stopped before verify has no PASS/FAIL lines to copy, and grep exits 1
     grep -E '^  (PASS|FAIL|WARN|INFO) ' "$OUT/$e.out" | sed "s/^/  [$e] /" || true
     case "${STOP[$e]}" in
-    "stage FAILED" | "arm FAILED" | "boot FAILED" | "watch FAILED" | "installed FAILED")
+    "stage FAILED")
+        # A STAGE failure happens entirely on this server -- copying the ISO
+        # into the netboot tree -- and never touches the target. The machine is
+        # still sitting there running the previous edition, perfectly able to
+        # take the next one, so stopping the whole run is throwing away work
+        # for no reason.
+        #
+        # This used to break alongside the phases below. On 2026-09-17 the net
+        # ISO was deleted out from under a running matrix by a concurrent
+        # build; 7-net could not stage, and 5-desktop, 4-k8s, 3-kvm and 6-full
+        # -- none of which need that ISO -- were reported "not run". Two
+        # verified editions and four hours of machine time were left on the
+        # table because one file was missing.
+        #
+        # arm FAILED is arguably the same shape, since arming also only writes
+        # files here, but that has not actually been seen and is left alone.
+        log "$e could not stage, which never touched the machine — continuing with the remaining editions"
+        ;;
+    "arm FAILED" | "boot FAILED" | "watch FAILED" | "installed FAILED")
         log "stopping the matrix: $e never came up on its new install, so nothing is left to reboot into the next edition"
         break
         ;;
