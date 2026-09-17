@@ -965,6 +965,25 @@ fi
 systemctl set-default graphical.target ||
     echo "klab: could not set graphical.target" >&2
 DESKTOPENABLE
+
+    # ASSERT THE DESKTOP IS ACTUALLY THERE before letting this golden be sealed.
+    #
+    # The block above already detects the failure -- it prints "no display
+    # manager found - the desktop will not start" -- and then returned 0 anyway,
+    # so a desktop golden with no desktop sealed and was reported ready. That is
+    # what happened to klab-desktop-rocky: found 2026-09-17 with no
+    # display-manager.service, no gdm/sddm/lightdm binary, and zero failed
+    # units, while klab-desktop-centos and klab-desktop-fedora on the same
+    # machine each had gdm active. The group name resolves on Rocky, so
+    # something in that one build failed quietly and nothing downstream cared.
+    #
+    # Checked from HERE rather than trusting the remote block's own exit status,
+    # because the thing being verified is what landed on the guest.
+    if ! _ssh_cmd "$ip" 'test -e /etc/systemd/system/display-manager.service' >/dev/null 2>&1; then
+        log "  ${distro}: FAILED — the desktop did not install: no display-manager.service on the guest"
+        return 1
+    fi
+    log "  ${distro}: desktop verified — display-manager.service present"
     return 0
 }
 site_name() { echo "${PREFIX}-${1}-${2}"; } # site_name blue centos
@@ -2292,7 +2311,9 @@ MOKSETUP
     # watchdog — a five-minute silent package install is exactly what that
     # machinery exists for.
     if [[ "${KLAB_DESKTOP:-0}" == "1" ]]; then
-        setup_vm_desktop "$ip" "$distro"
+        # Propagate the failure. This used to discard it, so a desktop that did
+        # not install could not stop the golden being sealed and announced.
+        setup_vm_desktop "$ip" "$distro" || return 1
     fi
     # Same placement, same reason: it inherits the heartbeat and watchdog, and
     # generating a large dataset is exactly the kind of long silent step that
