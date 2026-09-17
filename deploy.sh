@@ -594,14 +594,20 @@ cmd_build() {
     local _ver _prev_iso
     _ver="${KLDLOAD_VERSION:-$(sed -n 's/^VERSION="${KLDLOAD_VERSION:-\(.*\)}"$/\1/p' \
         "$ROOT/builder/build-iso.sh" | head -1)}"
-    if [[ -n "$_ver" ]]; then
-        for _prev_iso in "$ROOT/live-build/output/kldload-${_ver}-${ARCH}.iso" \
-            "$ROOT/live-build/output/kldload-${_ver}-${ARCH}-net.iso"; do
-            [[ -f "$_prev_iso" ]] || continue
-            mv -f "$_prev_iso" "${_prev_iso}.prev" &&
-                log "kept previous image as $(basename "${_prev_iso}.prev")"
-        done
-    else
+    # ONLY the name THIS invocation will write. `deploy.sh build` runs once per
+    # payload -- net, then full -- so rotating both names every time means the
+    # full build renames the net ISO the net build just produced. That is
+    # exactly what happened on build 28: its net image ended up as .prev,
+    # matching its own recorded sha256, while kldload-<ver>-<arch>-net.iso
+    # simply did not exist. A rollback mechanism that eats the artefact it was
+    # meant to protect is worse than none.
+    local _suffix=""
+    [[ "$PAYLOAD" == "net" ]] && _suffix="-net"
+    _prev_iso="$ROOT/live-build/output/kldload-${_ver}-${ARCH}${_suffix}.iso"
+    if [[ -n "$_ver" && -f "$_prev_iso" ]]; then
+        mv -f "$_prev_iso" "${_prev_iso}.prev" &&
+            log "kept previous image as $(basename "${_prev_iso}.prev")"
+    elif [[ -z "$_ver" ]]; then
         log "WARNING: could not derive the ISO version — previous image not preserved"
     fi
 
