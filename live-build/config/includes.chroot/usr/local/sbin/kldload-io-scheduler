@@ -26,6 +26,23 @@
 set -Eeuo pipefail
 trap 'echo "kldload-io-scheduler: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
+# --help answers before anything else and needs no root. Without this the flag
+# was simply ignored and the tool APPLIED THE POLICY instead of describing it,
+# which is the one thing --help must never do. The banner is every consecutive
+# comment line from line 2, which keeps this text and the help output the same
+# thing rather than two copies that drift.
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "kldload-io-scheduler: unknown argument '$1' (it takes none; try --help)" >&2
+    exit 2
+    ;;
+esac
+
 want_for() { # want_for <rotational> -> the scheduler this device should use
     [[ "$1" == "1" ]] && echo bfq || echo none
 }
