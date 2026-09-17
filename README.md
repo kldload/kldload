@@ -331,6 +331,43 @@ klab matrix run script.sh # run a change against every supported distro in paral
 
 ---
 
+## One machine, or the whole rack
+
+The USB installs one machine. The same image, served over the network, installs
+as many as you point at it — and the per-machine work is inventorying a MAC
+address.
+
+```
+kldload-netboot-server arm-install <mac> <answers>.env   # one machine
+kldload-netboot-server arm-all     ./rack/               # every .env in a directory
+kldload-netboot-server status                            # what is armed right now
+```
+
+A target needs nothing but a network port. It pulls the whole system — every
+package, the container images, the lot — from **one image staged once on your
+LAN**. Nothing else leaves the network: no package mirrors, no registries, no
+vendor endpoints. A rack can be built in a room with no uplink, which is the
+entire reason the darksite payload exists. The fiftieth machine costs the same
+to prepare as the second, because nothing is fetched per machine.
+
+**It cannot wipe a machine by accident.** Installing requires a per-MAC consent
+token. A machine that network-boots without one prints that it is continuing the
+boot order and boots from its own disk. `arm-all` refuses duplicate MACs or
+hostnames outright and exits non-zero unless every machine armed, so a
+half-armed rack is an error you hear about rather than discover.
+
+Per-machine differences live in the answers file — hostname, disk, profile, how
+many control planes and workers. Same image, different answers.
+
+Measured end to end on one target: **fifteen minutes** from power-on to a
+six-node HA Kubernetes cluster with all nodes `Ready`, landing on a usable
+desktop, with the six node clones taking **0 bytes** against one 2.32&nbsp;GB
+golden image.
+
+[Arming, the failure modes, and what to check &rarr;](docs/demo/arming-a-node.md)
+
+---
+
 ## What's wired into the image
 
 - **OpenZFS on root** — checksummed, compressed, snapshotted, self-healing on mirrors. lz4 default. Native AES-256-GCM encryption recommended and pre-selected in the installer (TPM2 auto-unlock when the hardware has it, passphrase at boot otherwise); dedup optional.
