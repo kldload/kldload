@@ -310,17 +310,37 @@ if zfs list rpool/vms >/dev/null 2>&1; then
     test_cmd "kldload-vm-snapshot present" "kldload-vm-snapshot"
     _snapmark="smoketest-$$-"
     if kldload-vm-snapshot --root rpool/vms --prefix "$_snapmark" --keep 1 >/dev/null 2>&1; then
+        # grep -c exits 1 when it counts zero, and zero is precisely the
+        # answer this check exists to catch -- the old ExecStart took no
+        # snapshots at all and still reported success. So the failing status is
+        # handled by naming the value it means, rather than swallowed with a
+        # `|| true` that would say nothing about why it is safe.
         _snapn=$(zfs list -H -t snapshot -o name -r rpool/vms 2>/dev/null |
-            grep -c "@${_snapmark}" || true)
+            grep -c "@${_snapmark}") || _snapn=0
         _dsn=$(zfs list -H -o name -r rpool/vms 2>/dev/null | tail -n +2 | wc -l)
         if [[ "${_snapn:-0}" -gt 0 ]] && [[ "${_snapn:-0}" -eq "${_dsn:-0}" ]]; then
             _pass "VM snapshots taken: ${_snapn}/${_dsn} datasets"
         else
             _fail "VM snapshots" "took ${_snapn:-0} snapshots for ${_dsn:-0} datasets"
         fi
-        # Clean up only the snapshots this run named.
-        zfs list -H -t snapshot -o name -r rpool/vms 2>/dev/null |
-            grep "@${_snapmark}" | xargs -r -n1 zfs destroy 2>/dev/null || true
+        # Clean up only the snapshots this run named. A snapshot that will
+        # not destroy is worth saying so about -- it carries this run's marker,
+        # so nothing else will ever clean it up -- but it is not a reason to
+        # fail the KVM suite, which is why this warns rather than failing.
+        # Filter in the loop rather than with grep: when the snapshotter took
+        # nothing -- exactly the case this section exists to catch -- grep
+        # matches nothing and exits 1, and under the ERR trap that printed a
+        # bogus "FAIL at line 36" on top of the real failure. zfs list exits 0
+        # whether or not it lists anything, so the status here means what it
+        # should.
+        while read -r _s; do
+            case "$_s" in
+            *"@${_snapmark}"*) ;;
+            *) continue ;;
+            esac
+            zfs destroy "$_s" 2>/dev/null ||
+                _warn "VM snapshot cleanup" "could not destroy $_s"
+        done < <(zfs list -H -t snapshot -o name -r rpool/vms 2>/dev/null)
     else
         _fail "VM snapshots" "kldload-vm-snapshot could not take a snapshot"
     fi
