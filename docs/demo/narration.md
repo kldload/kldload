@@ -159,8 +159,13 @@ No argument, no comparison, no adjectives. Read the facts and stop.
 >
 > Nobody touched the keyboard.
 >
-> Nothing left the local network. No package mirrors, no container registries,
-> no vendor endpoints. Zero public internet traffic, start to finish.
+> Nothing left the local network. No package mirror. No container registry. No
+> git server. No vendor endpoint. Zero public internet traffic, start to
+> finish.
+>
+> The packages, the twenty-three container images and the Helm charts are all
+> inside that one file already. There is nothing to stand up first, nothing to
+> mirror, nothing to authenticate to. You stage one image and boot machines.
 >
 > Fifty machines would take the same twenty-eight minutes. They boot in
 > parallel, from the same image.

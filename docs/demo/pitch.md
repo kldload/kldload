@@ -23,8 +23,11 @@ one machine and a rack is the length of a directory listing.
 
 **It works with no internet.** The whole operating system, every package and the
 container images ship inside one image that is staged on a server on your LAN.
-No package mirrors, no registries, no vendor endpoints. **Zero public network
-traffic during a build.** A rack can be provisioned in a room with no uplink at
+No package mirror, no container registry, no git server, no vendor endpoint.
+**Zero public network traffic during a build.** Measured on the shipped image:
+the Fedora (3.4 GB) and Debian (2.7 GB) package trees, 23 container images
+(1.5 GB) and the Helm charts are all inside it already, so there is no
+infrastructure to stand up before you can provision anything. A rack can be provisioned in a room with no uplink at
 all. This is not a degraded mode; it is the normal mode.
 
 **You do not pay for it in bandwidth, either.** The image is 13.91 GB and it is
