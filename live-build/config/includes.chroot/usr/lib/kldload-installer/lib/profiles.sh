@@ -1220,7 +1220,7 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service kldload-firstboot-show.service kldload-firstboot-kiosk.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer; do
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service kldload-firstboot-show.service kldload-firstboot-kiosk.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer kldload-io-scheduler.service; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done

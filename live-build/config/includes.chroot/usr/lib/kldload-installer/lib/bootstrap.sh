@@ -399,9 +399,49 @@ k_create_users() {
     rm -f "${admin_auth_keys}.new"
 }
 
+# k_assert_enabled_units_exist TARGET — every enable symlink must point at a
+# unit file that is actually ON THE TARGET.
+#
+# `ln -sf` creates a dangling symlink perfectly happily, so "enabled" and
+# "present" are different facts and the enable step cannot tell them apart.
+# systemd then answers `not-found`, the unit never runs, and nothing said a word
+# at install time.
+#
+# This has now happened at least twice. zexplore-api.service was enabled and
+# never copied (1.4.0-rc2). kldload-io-scheduler.service repeated it exactly on
+# 2026-09-17: the unit shipped in the LIVE image, the enable symlink was written
+# on the target, the unit file was not in the copy list, and a fresh server
+# install came up with six of eight disks still on the wrong I/O scheduler and
+# `is-enabled` answering not-found. The enable had "succeeded".
+#
+# One check catches the whole class, including the next one nobody has made yet.
+k_assert_enabled_units_exist() {
+    local target="${1:?target required}" _l _t _rel _bad=0
+    shopt -s nullglob
+    for _l in "${target}"/etc/systemd/system/*.wants/*; do
+        [[ -L "$_l" ]] || continue
+        _t="$(readlink "$_l")"
+        # An absolute link target is absolute INSIDE the target root.
+        [[ "$_t" == /* ]] && _t="${target}${_t}"
+        [[ -e "$_t" ]] && continue
+        _rel="${_l#"$target"}"
+        k_log "WARNING: ${_rel} is enabled but its unit file is not on the target — systemd will report not-found and it will never run"
+        _bad=$((_bad + 1))
+    done
+    shopt -u nullglob
+    ((_bad == 0)) ||
+        k_log "WARNING: ${_bad} enabled unit(s) have no unit file on the target — add them to the copy loop in k_install_system_files"
+    return 0
+}
+
 k_write_manifest() {
     local target="${KLDLOAD_TARGET_MNT:-${KLDLOAD_TARGET:-/target}}"
     mkdir -p "${target}/etc/kldload"
+
+    # Runs here because k_write_manifest follows k_install_system_files on every
+    # install path, so this is the one place that sees the finished set of
+    # enable symlinks without needing four separate call sites.
+    k_assert_enabled_units_exist "$target"
 
     cat >"${target}/etc/kldload/install-manifest.env" <<EOM
 # KLDLOAD_INSTALLED=1 is the canonical "this box came out of the installer,
