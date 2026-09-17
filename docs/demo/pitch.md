@@ -23,9 +23,16 @@ one machine and a rack is the length of a directory listing.
 
 **It works with no internet.** The whole operating system, every package and the
 container images ship inside one image that is staged on a server on your LAN.
-No package mirrors, no registries, no vendor endpoints during a build. A rack can
-be provisioned in a room with no uplink at all. This is not a degraded mode; it
-is the normal mode.
+No package mirrors, no registries, no vendor endpoints. **Zero public network
+traffic during a build.** A rack can be provisioned in a room with no uplink at
+all. This is not a degraded mode; it is the normal mode.
+
+**You do not pay for it in bandwidth, either.** The image is 13.91 GB and it is
+uploaded once, regardless of how many machines boot from it. Fifty machines
+fetching their own packages from vendor mirrors is roughly 700 GB pulled over
+your internet connection; 250 machines is about 3.4 TB. Here it is 13.91 GB,
+once, and everything after that is LAN traffic you already own. Deploying
+hundreds of nodes costs the same external bandwidth as deploying one.
 
 **The expensive part happens once.** One image is staged and served to every
 machine that asks. Machine fifty does not cost more to prepare than machine two,

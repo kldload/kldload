@@ -159,10 +159,16 @@ No argument, no comparison, no adjectives. Read the facts and stop.
 >
 > Nobody touched the keyboard.
 >
-> Nothing left the local network.
+> Nothing left the local network. No package mirrors, no container registries,
+> no vendor endpoints. Zero public internet traffic, start to finish.
 >
 > Fifty machines would take the same twenty-eight minutes. They boot in
 > parallel, from the same image.
+>
+> That image is thirteen point nine gigabytes, and it is uploaded once. Fifty
+> machines pulling their own packages from the internet is about seven hundred
+> gigabytes. Two hundred and fifty machines is three and a half terabytes. Here
+> it is thirteen point nine gigabytes, once, whatever the number of machines.
 >
 > That is a desktop, on the same machine, on top of all of it.
 >
