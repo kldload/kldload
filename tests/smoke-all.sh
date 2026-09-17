@@ -171,12 +171,26 @@ server | kvm | desktop | ai | zfslab)
     ;;
 esac
 
-# KVM tests for kvm and zfslab profiles
+# KVM tests wherever the machine is ACTUALLY a KVM host.
+#
+# This used to be `case $PROFILE in kvm|zfslab)`, which misses every desktop or
+# server install that set KLDLOAD_ENABLE_KVM=1 -- and that is a full KVM host
+# by every other measure. fiend (2026-09-16) was a desktop profile running 16
+# VMs across 23 VM datasets and never ran one line of this suite; a broken
+# hourly snapshot timer sat there unnoticed for the life of the install because
+# the only test that would have caught it was gated on a profile NAME.
+#
+# Three signals, any one of which means there is something here to test: the
+# profile, what the installer was asked for, and what is on the disk right now.
+_is_kvm_host=0
 case "$PROFILE" in
-kvm | zfslab)
-    run_suite "KVM Tests (Libvirt, virbr0, K8s Tools, Cluster)" "$SCRIPT_DIR/smoke-kvm.sh"
-    ;;
+kvm | zfslab) _is_kvm_host=1 ;;
 esac
+grep -qs '^KLDLOAD_ENABLE_KVM="\?1' /etc/kldload/install-manifest.env && _is_kvm_host=1
+zfs list rpool/vms >/dev/null 2>&1 && _is_kvm_host=1
+if ((_is_kvm_host)); then
+    run_suite "KVM Tests (Libvirt, virbr0, K8s Tools, Cluster)" "$SCRIPT_DIR/smoke-kvm.sh"
+fi
 
 # Desktop tests
 case "$PROFILE" in

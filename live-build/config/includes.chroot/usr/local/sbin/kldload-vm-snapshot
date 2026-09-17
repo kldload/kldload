@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# kldload-vm-snapshot — hourly ZFS snapshots of every VM dataset, with pruning.
+#
+# Usage: kldload-vm-snapshot [--root rpool/vms] [--keep 48] [--prefix auto-] [-n]
+#
+# What it does, in order:
+#   1. Enumerates every dataset and zvol under the VM root.
+#   2. Takes one snapshot per dataset, all sharing a single UTC timestamp, so
+#      an operator can restore a consistent set by name.
+#   3. Prunes that prefix back to --keep per dataset, oldest first.
+#   4. Reports how many it was GIVEN against how many it snapshotted, and
+#      exits non-zero if any of them failed.
+#
+# WHY IT EXISTS AS A SCRIPT: this logic used to be a one-liner inside
+# kvm-snapshot.service's ExecStart=. systemd expands ${VAR} in Exec lines
+# itself, so `${ds}@auto-${TS}` reached bash as the literal `@auto-` and every
+# hourly run called `zfs snapshot @auto-`. zfs printed its usage message, the
+# last command in the chain succeeded anyway, and systemd logged "Finished ...
+# Deactivated successfully" every hour. Found on fiend 2026-09-16: the timer had
+# fired on schedule for the life of the install and rpool/vms carried exactly
+# zero @auto- snapshots. Nothing was ever protected and nothing ever said so.
+#
+# The escaping bug is one `$$` away from returning, so the real fix is to get
+# the logic out of the unit file entirely. A script is also testable on its own,
+# which the Exec line never was.
+#
+# EXIT: 0 every dataset snapshotted, 1 one or more failed, 2 usage error.
+set -Eeuo pipefail
+trap 'echo "kldload-vm-snapshot: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+# --help answers before anything else and needs no root.
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
+
+ROOT="rpool/vms"
+KEEP=48
+PREFIX="auto-"
+DRY=0
+while (($#)); do
+    case "$1" in
+    --root) ROOT="${2:?--root needs a dataset}" && shift 2 ;;
+    --keep) KEEP="${2:?--keep needs a number}" && shift 2 ;;
+    --prefix) PREFIX="${2:?--prefix needs a string}" && shift 2 ;;
+    -n | --dry-run)
+        DRY=1
+        shift
+        ;;
+    *)
+        echo "kldload-vm-snapshot: unknown argument '$1'" >&2
+        exit 2
+        ;;
+    esac
+done
+[[ "$KEEP" =~ ^[0-9]+$ ]] || {
+    echo "kldload-vm-snapshot: --keep must be a number, got '$KEEP'" >&2
+    exit 2
+}
+
+# A missing VM root is not a failure: a machine can carry the timer without
+# ever having hosted a VM. It is reported, never silent.
+zfs list "$ROOT" >/dev/null 2>&1 || {
+    echo "kldload-vm-snapshot: no $ROOT on this machine — nothing to snapshot"
+    exit 0
+}
+
+# One timestamp for the whole run, so a restore can name a consistent set.
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Skip the root itself: it is a container, and snapshotting it adds an entry
+# per hour that no restore ever uses.
+mapfile -t DATASETS < <(zfs list -H -o name -r "$ROOT" | tail -n +2)
+total=${#DATASETS[@]}
+((total)) || {
+    echo "kldload-vm-snapshot: $ROOT has no child datasets — nothing to snapshot"
+    exit 0
+}
+
+took=0
+failed=0
+pruned=0
+for ds in "${DATASETS[@]}"; do
+    snap="${ds}@${PREFIX}${TS}"
+    if ((DRY)); then
+        echo "  would snapshot $snap"
+        took=$((took + 1))
+        continue
+    fi
+    if zfs snapshot "$snap" 2>/dev/null; then
+        took=$((took + 1))
+    elif zfs list -t snapshot "$snap" >/dev/null 2>&1; then
+        # Already there: two runs inside the same second. Idempotent, not a
+        # failure.
+        took=$((took + 1))
+    else
+        echo "kldload-vm-snapshot: FAILED to snapshot $ds" >&2
+        failed=$((failed + 1))
+    fi
+done
+
+# Prune oldest-first, per dataset. `head -n -$KEEP` drops the newest KEEP and
+# leaves the rest; with fewer than KEEP it prints nothing and xargs -r does not
+# run, which is the common case and not an error.
+if ((DRY == 0)); then
+    for ds in "${DATASETS[@]}"; do
+        while read -r old; do
+            [[ -n "$old" ]] || continue
+            zfs destroy "$old" 2>/dev/null && pruned=$((pruned + 1)) ||
+                echo "kldload-vm-snapshot: could not prune $old" >&2
+        done < <(zfs list -H -t snapshot -o name -s creation -d 1 "$ds" 2>/dev/null |
+            grep -F "@${PREFIX}" | head -n "-${KEEP}")
+    done
+fi
+
+# Count against what the loop was GIVEN, never just what it did: "snapshotted 0"
+# has to read as a failure, and under the old one-liner it read as success.
+printf 'kldload-vm-snapshot: %d of %d datasets snapshotted @%s%s' \
+    "$took" "$total" "$PREFIX" "$TS"
+((pruned)) && printf ', %d pruned' "$pruned"
+((failed)) && printf ', %d FAILED' "$failed"
+printf '\n'
+
+((failed == 0))

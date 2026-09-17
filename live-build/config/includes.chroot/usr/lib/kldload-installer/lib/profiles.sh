@@ -1407,6 +1407,21 @@ k_install_system_files() {
             "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" ||
             k_log "WARNING: could not enable kldload-webui.service on the target — it will not start at boot"
 
+        # I/O scheduler policy, as a unit as well as the udev rule.
+        #
+        # 60-kldload-scheduler.rules writes queue/scheduler at device-add
+        # time, which races the device still being claimed: the kernel
+        # answers EBUSY and udev does not retry. Measured on fiend
+        # 2026-09-16 -- six of seven SCSI disks kept mq-deadline despite
+        # the rule, one "Device or resource busy" per disk per boot, and
+        # the distro's own 60-block-scheduler.rules failed identically.
+        # Writing the same value by hand after boot succeeds instantly,
+        # which is what proves it is a race. The rule stays as the fast
+        # path; this is the net under it.
+        ln -sf "/usr/lib/systemd/system/kldload-io-scheduler.service" \
+            "${target}/etc/systemd/system/multi-user.target.wants/kldload-io-scheduler.service" ||
+            k_log "WARNING: could not enable kldload-io-scheduler.service on the target — disks may keep the wrong scheduler"
+
         # ── RHEL firstboot composer build ──────────────────────────────────
         # Wires kldload-rhel-composer.service into multi-user.target.wants/.
         # The unit's ConditionPathExists=/var/lib/klab/.rhel-composer-pending
@@ -3458,7 +3473,10 @@ REPL
 Description=ZFS snapshot all VM datasets
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'TS=$(date -u +%%Y%%m%%dT%%H%%M%%SZ); for ds in $(zfs list -H -o name -r rpool/vms | tail -n+2); do zfs snapshot ${ds}@auto-${TS}; done; for ds in $(zfs list -H -o name -r rpool/vms | tail -n+2); do zfs list -H -t snapshot -o name ${ds} 2>/dev/null | grep @auto- | head -n -48 | xargs -r -n1 zfs destroy; done'
+# The logic lives in a script, not here. systemd expands ${VAR} in an
+# Exec line itself, so the previous one-liner's ${ds} and ${TS} reached bash
+# already emptied and it ran `zfs snapshot @auto-` every hour, exiting 0.
+ExecStart=/usr/local/sbin/kldload-vm-snapshot --root rpool/vms --keep 48
 SNAPSVC
         cat >"${target}/etc/systemd/system/kvm-snapshot.timer" <<'SNAPTMR'
 [Unit]

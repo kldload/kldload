@@ -299,5 +299,36 @@ else
     _pass "No cluster deployed (expected — run kube-cluster bootstrap)"
 fi
 
+# ── VM snapshots actually happen ─────────────────────────────────────────────
+# Not "the timer is enabled" -- it was enabled and firing hourly on fiend while
+# taking nothing at all, because its ExecStart= relied on shell variables that
+# systemd had already expanded away. The only check worth having is to run it
+# and count what came back, so this asserts the OUTCOME: a snapshot with this
+# run's own marker prefix exists afterwards, on a dataset that was there before.
+_section "VM Snapshots"
+if zfs list rpool/vms >/dev/null 2>&1; then
+    test_cmd "kldload-vm-snapshot present" "kldload-vm-snapshot"
+    _snapmark="smoketest-$$-"
+    if kldload-vm-snapshot --root rpool/vms --prefix "$_snapmark" --keep 1 >/dev/null 2>&1; then
+        _snapn=$(zfs list -H -t snapshot -o name -r rpool/vms 2>/dev/null |
+            grep -c "@${_snapmark}" || true)
+        _dsn=$(zfs list -H -o name -r rpool/vms 2>/dev/null | tail -n +2 | wc -l)
+        if [[ "${_snapn:-0}" -gt 0 ]] && [[ "${_snapn:-0}" -eq "${_dsn:-0}" ]]; then
+            _pass "VM snapshots taken: ${_snapn}/${_dsn} datasets"
+        else
+            _fail "VM snapshots" "took ${_snapn:-0} snapshots for ${_dsn:-0} datasets"
+        fi
+        # Clean up only the snapshots this run named.
+        zfs list -H -t snapshot -o name -r rpool/vms 2>/dev/null |
+            grep "@${_snapmark}" | xargs -r -n1 zfs destroy 2>/dev/null || true
+    else
+        _fail "VM snapshots" "kldload-vm-snapshot could not take a snapshot"
+    fi
+    # The timer is what makes it hourly, so it still has to be enabled.
+    test_service_enabled "kvm-snapshot.timer" "kvm-snapshot.timer"
+else
+    _pass "No rpool/vms on this machine (expected — not a VM host)"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 summary
