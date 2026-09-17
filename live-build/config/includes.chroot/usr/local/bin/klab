@@ -65,6 +65,8 @@ Usage:
   klab                                    Interactive menu
   klab golden [distro...|all]             Build golden images
   klab golden-desktop [distro...]         GNOME desktop goldens for instant clones
+  klab golden-xfce [distro...]            Xfce desktop goldens
+  klab golden-kde [distro...]             KDE Plasma desktop goldens
                                           (default: all — one GNOME image per distro)
   klab golden-db [distro...]              PostgreSQL goldens carrying a generated
                                           dataset — clone one per developer
@@ -786,24 +788,52 @@ setup_vm_desktop() {
     # a black-screen risk for exactly the reason `systemctl enable sddm` was —
     # configuring something that does not apply, and breaking the login on the
     # way. Accelerated graphics here is mesa + virtio-gpu, which GNOME pulls.
-    log "  Installing GNOME on ${distro} (~5 min, ~6GB)..."
+    # WHICH DESKTOP: KLAB_DE picks it, GNOME by default so every existing
+    # caller keeps the behaviour it had. The package names below were verified
+    # against a live Fedora 44 host and a running Debian guest on 2026-09-16
+    # rather than remembered -- all three dnf groups resolve, and all three
+    # Debian tasks are at 3.81.
+    local _de="${KLAB_DE:-gnome}"
+    local _dnf_group _apt_task _de_name
+    case "$_de" in
+    gnome)
+        _dnf_group=workstation-product-environment
+        _apt_task=task-gnome-desktop
+        _de_name=GNOME
+        ;;
+    xfce)
+        _dnf_group=xfce-desktop-environment
+        _apt_task=task-xfce-desktop
+        _de_name=Xfce
+        ;;
+    kde)
+        _dnf_group=kde-desktop-environment
+        _apt_task=task-kde-desktop
+        _de_name="KDE Plasma"
+        ;;
+    *)
+        log "  unknown KLAB_DE='${_de}' — valid: gnome xfce kde"
+        return 1
+        ;;
+    esac
+    log "  Installing ${_de_name} on ${distro} (~5 min, ~6GB)..."
     case "$family" in
     dnf)
         # workstation-product-environment, NOT workstation-product: the latter
         # is "Workstation product CORE" — a shell and nothing else. A guest
         # built from it came up with no terminal, no file manager and no
         # browser. Verified id on Fedora and EL10 alike.
-        _ssh_cmd "$ip" bash -s <<'DESKTOPDNF'
+        _ssh_cmd "$ip" bash -s -- "$_dnf_group" <<'DESKTOPDNF'
 set -uo pipefail
-dnf group install -y workstation-product-environment ||
-    echo "klab: GNOME group install FAILED — this golden stays a server" >&2
+dnf group install -y "$1" ||
+    echo "klab: desktop group install FAILED — this golden stays a server" >&2
 DESKTOPDNF
         ;;
     apt)
         # task-gnome-desktop pulls gdm3 itself. noninteractive or tasksel stops
         # to ask about keyboard layout and waits forever with nobody at the
         # console.
-        _ssh_cmd "$ip" bash -s <<'DESKTOPAPT'
+        _ssh_cmd "$ip" bash -s -- "$_apt_task" <<'DESKTOPAPT'
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq || true
@@ -830,7 +860,7 @@ apt-get update -qq || true
 apt-get install -y linux-image-amd64 ||
     echo "klab: generic kernel install FAILED — desktop will not render" >&2
 
-apt-get install -y task-gnome-desktop ||
+apt-get install -y "$1" ||
     echo "klab: GNOME task install FAILED — this golden stays a server" >&2
 
 # VERIFY THE OUTCOME, not the exit code. apt returns 0 for plenty of states
@@ -3127,6 +3157,52 @@ cmd_golden_desktop() {
     log "Desktop goldens ready. Names: klab-desktop-<distro> — clone them for instant desktops."
 }
 
+cmd_golden_xfce() {
+    [[ $# -eq 0 ]] && set -- all
+    export KLAB_GOLDEN_KIND=xfce
+    export KLAB_DE=xfce
+    export KLAB_DESKTOP=1
+    # A desktop adds ~5 min of package install on top of the base build, and
+    # the default per-distro watchdog is 20 min. Raise it so a slow mirror
+    # cannot make a normal desktop build look like a hang — the operator can
+    # still override.
+    export KLAB_GOLDEN_MAX_SECS="${KLAB_GOLDEN_MAX_SECS:-2400}"
+    local _distros=() _expanded
+    # Command substitution, not process substitution: expand_golden_distros
+    # signals a bad argument by exiting 2, and an exit inside <( ) would be
+    # lost. This form gives us its status to propagate.
+    _expanded="$(expand_golden_distros "$@")" || exit $?
+    mapfile -t _distros <<<"$_expanded"
+    log "Building Xfce desktop goldens (target=$*) — separate from blue-green and ztest goldens."
+    # Subshell-isolated: see cmd_golden for the why.
+    run_goldens "DESKTOP" "${_distros[@]}" || true # the count is not the answer; sealing is, checked next
+    report_goldens "xfce" "${_distros[@]}" || return 1
+    log "Xfce goldens ready. Names: klab-xfce-<distro> — clone them for instant desktops."
+}
+
+cmd_golden_kde() {
+    [[ $# -eq 0 ]] && set -- all
+    export KLAB_GOLDEN_KIND=kde
+    export KLAB_DE=kde
+    export KLAB_DESKTOP=1
+    # A desktop adds ~5 min of package install on top of the base build, and
+    # the default per-distro watchdog is 20 min. Raise it so a slow mirror
+    # cannot make a normal desktop build look like a hang — the operator can
+    # still override.
+    export KLAB_GOLDEN_MAX_SECS="${KLAB_GOLDEN_MAX_SECS:-2400}"
+    local _distros=() _expanded
+    # Command substitution, not process substitution: expand_golden_distros
+    # signals a bad argument by exiting 2, and an exit inside <( ) would be
+    # lost. This form gives us its status to propagate.
+    _expanded="$(expand_golden_distros "$@")" || exit $?
+    mapfile -t _distros <<<"$_expanded"
+    log "Building KDE Plasma desktop goldens (target=$*) — separate from blue-green and ztest goldens."
+    # Subshell-isolated: see cmd_golden for the why.
+    run_goldens "DESKTOP" "${_distros[@]}" || true # the count is not the answer; sealing is, checked next
+    report_goldens "kde" "${_distros[@]}" || return 1
+    log "KDE Plasma goldens ready. Names: klab-kde-<distro> — clone them for instant desktops."
+}
+
 # ── Section 6: Site Deploy (Blue-Green) ──────────────────────────────────
 
 deploy_site() {
@@ -4989,6 +5065,8 @@ case "$CMD" in
 golden) cmd_golden "$@" ;;
 golden-ztest) cmd_golden_ztest "$@" ;;
 golden-desktop) cmd_golden_desktop "$@" ;;
+golden-xfce) cmd_golden_xfce "$@" ;;
+golden-kde) cmd_golden_kde "$@" ;;
 golden-db) cmd_golden_db "$@" ;;
 build-all) cmd_build_all ;;
 fetch-rhel-image) cmd_fetch_rhel_image "$@" ;;
