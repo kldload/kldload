@@ -141,6 +141,37 @@ Verified on fiend after this run, 2026-09-16. If a future build changes the
 set, check before narrating it — naming an icon that is not on screen is the
 one mistake a viewer will notice instantly.
 
+### Closing the video — on "is 28 minutes fast?"
+
+Somebody will say they can `kubeadm init` in five minutes. Answer it before
+they ask, because the honest answer is stronger than the boast.
+
+> That took twenty-eight minutes. I want to be precise about what is in them.
+>
+> Three minutes pulling the image. Twelve installing the operating system —
+> from nothing, on a machine that had none. Thirteen building the cluster and
+> everything on it.
+>
+> So when people compare this to spinning up Kubernetes in five minutes, they
+> are starting with six machines that already run Linux, already have their
+> networking and storage sorted, and somebody already logged in. I started with
+> a switched-off box.
+>
+> But speed is not really the claim. **I was not in the room.** There is no
+> step in there where a person has to be present, make a decision, or notice
+> that something went wrong. Twenty-eight unattended minutes beats fifteen
+> attended ones, because the fifteen costs you a person and this costs you
+> nothing.
+>
+> And it does not multiply. Fifty machines is still about twenty-eight minutes,
+> because they all boot in parallel off the same image. That is the number
+> worth remembering.
+
+*Do not say "look how fast". Say what it contains and that nobody was there.
+The first invites an argument you can lose; the second is not arguable.*
+
+---
+
 ### On the mouse itself
 
 If you moved the mouse during the show, the cursor will have appeared over the
