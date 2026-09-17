@@ -1264,6 +1264,56 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                 fi
             fi
 
+            # ── Operator manifests ────────────────────────────────────
+            # Plain YAML, for the things that are not a Helm chart: a
+            # namespace, a Secret, an ArgoCD Application that points at the
+            # rest. Charts already had a drop-in; this is the other half.
+            #
+            # Applied in glob order, so 10-namespace.yaml lands before
+            # 20-deploy.yaml and ordering is the operator's to control by
+            # naming. kubectl apply is idempotent, so a re-run is safe and a
+            # partially applied directory can simply be run again.
+            #
+            # Same failure rule as the charts above: each file is its own
+            # transaction, a failure is logged and skipped, and nothing
+            # optional takes the rest of first boot with it.
+            _mf_dir=/root/darksite/manifests
+            if [[ -d "$_mf_dir" ]]; then
+                shopt -s nullglob
+                _mf_glob=("$_mf_dir"/*.yaml "$_mf_dir"/*.yml)
+                shopt -u nullglob
+                # Sorted ACROSS both extensions rather than left as two globs:
+                # a bare (*.yaml *.yml) puts every .yaml before every .yml, so
+                # 40-x.yaml would run before 10-y.yml and the numeric prefix
+                # would quietly mean nothing.
+                #
+                # The emptiness check comes FIRST because `printf '%s\n'` with
+                # no arguments still prints one newline, which mapfile turns
+                # into a single empty element -- an empty directory then
+                # reported "1/1 applied" for a file that does not exist. That
+                # is the false-success shape this codebase keeps getting bitten
+                # by, and it was caught in test before it shipped.
+                _mf_files=()
+                ((${#_mf_glob[@]})) &&
+                    mapfile -t _mf_files < <(printf '%s\n' "${_mf_glob[@]}" | sort)
+                if ((${#_mf_files[@]} == 0)); then
+                    log "[k8s] no operator manifests in ${_mf_dir} (drop .yaml there to have it applied at first boot)"
+                else
+                    log "[k8s] applying ${#_mf_files[@]} operator manifest(s) from ${_mf_dir}"
+                    _mf_ok=0
+                    for _mf in "${_mf_files[@]}"; do
+                        if kubectl apply -f "$_mf" >>"$LOG_FILE" 2>&1; then
+                            _mf_ok=$((_mf_ok + 1))
+                            log "[k8s]   $(basename "$_mf"): applied"
+                        else
+                            log "[k8s]   $(basename "$_mf"): FAILED — see $LOG_FILE; other manifests continue"
+                        fi
+                    done
+                    # Outcome, not exit code: say how many of how many landed.
+                    log "[k8s] operator manifests: ${_mf_ok}/${#_mf_files[@]} applied"
+                fi
+            fi
+
             # Mark k8s ready HERE, not when the control plane came up.
             #
             # WHY: the marker used to be set immediately after `kube-cluster

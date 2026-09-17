@@ -135,13 +135,40 @@ tool.
 - Arch always needs a network. It is a rolling release, so there is no
   meaningful mirror to freeze.
 
-### A gap, stated honestly
+**Your own workloads, landing with the cluster.** Two drop-ins, both applied at
+first boot once the cluster is up and before it is marked ready, so anything
+waiting on "k8s is done" sees your things too:
 
-There is **no drop-in for your own Kubernetes manifests or Helm values** today.
-Charts are staged at build time, but nothing reads a user directory of YAML and
-applies it after the cluster comes up. If you want your workloads to land with
-the cluster rather than after it, that is currently a post-install step you
-script yourself. It is an obvious thing to add and it is not there yet.
+    /root/darksite/helm-charts/workloads/<name>.tgz
+    /root/darksite/helm-charts/workloads/<name>.values.yaml   # optional
+    /root/darksite/manifests/*.yaml                           # and *.yml
+
+Charts install into a namespace named after the release. Manifests are applied
+in sorted order, so `10-namespace.yaml` lands before `20-deploy.yaml` and you
+control ordering by naming. Both are idempotent and safe to re-run, and both
+follow the same failure rule as everything else on this path: each file is its
+own transaction, a failure is logged and skipped, and nothing optional takes
+the rest of first boot with it. The log says how many of how many landed.
+
+Combined with the image list above, this is the whole loop: your container
+images are already on the node, and your manifests reference them. Nothing is
+pulled from anywhere.
+
+### Ansible, inverted
+
+Ansible normally pushes. A control node holds the inventory, reaches out over
+SSH, and configures machines that already exist — which means the control node
+has to exist first, reach everything, and hold credentials for all of it.
+
+Here it runs the other way. `kube-cluster` and `klab` invoke `ansible-playbook`
+**locally, on the machine, at first boot**, to bring its VMs into existence.
+Nothing is pushed to anything. There is no control node, no inventory to keep
+current, no SSH fan-out and no credentials held centrally for a fleet. Each
+machine pulls the world into existence for itself, from an image it already
+has, and a hundred machines do that simultaneously without coordinating.
+
+The practical consequence is that provisioning does not have a single point of
+failure or a bottleneck in the middle. There is nothing in the middle.
 
 ---
 
