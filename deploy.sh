@@ -256,6 +256,21 @@ cmd_build_fedora_darksite() {
     esac
     mkdir -p "$darksite_dir"
     local fed_release="${FEDORA_RELEASE:-44}"
+
+    # Record what the mirror holds BEFORE the build. This rebuild is
+    # incremental -- it downloads into the existing directory and never prunes
+    # -- so its real risk is not failure, it is silent accumulation.
+    #
+    # On 2026-09-16 a refresh added kernel 6.19.10-300 to a mirror that already
+    # held 7.2.5-200. Nothing failed and nothing warned. The next ISO carried
+    # three kernel versions, the install picked one and the bootloader named
+    # another, and fiend came up at a GRUB menu with "can not load image" and no
+    # timeout -- a machine that had to be recovered by hand. The gate below
+    # exists so that a mirror which gains a second kernel, or loses a package it
+    # used to have, says so instead of shipping.
+    local _mirror_before
+    _mirror_before="$(mktemp)"
+    find "$darksite_dir" -name '*.rpm' -printf '%f\n' 2>/dev/null | sort >"$_mirror_before"
     log "Building Fedora ${fed_release} darksite RPM mirror (${_fed_arch})..."
     "$runtime" run --rm \
         --platform "linux/amd64" \
@@ -269,6 +284,43 @@ cmd_build_fedora_darksite() {
         --name "kldload-darksite-fedora-$$" \
         "registry.fedoraproject.org/fedora:${fed_release}" \
         bash /darksite-build/build-darksite-fedora.sh
+
+    # ── What did the rebuild actually change? ────────────────────────────────
+    local _mirror_after _gone _kvers
+    _mirror_after="$(mktemp)"
+    find "$darksite_dir" -name '*.rpm' -printf '%f\n' 2>/dev/null | sort >"$_mirror_after"
+    log "Mirror: $(wc -l <"$_mirror_before") packages before, $(wc -l <"$_mirror_after") after"
+
+    # A package that VANISHES is the dangerous direction. The build only ever
+    # downloads, so anything that disappeared was removed by hand or by a failed
+    # transaction, and an air-gapped install that needed it has no other source.
+    _gone="$(comm -23 "$_mirror_before" "$_mirror_after" | head -20)"
+    if [[ -n "$_gone" ]]; then
+        log "WARNING: packages present before this rebuild and gone after:"
+        printf '  %s\n' $_gone
+    fi
+
+    # EXACTLY ONE KERNEL. More than one and the installer has a choice to get
+    # wrong -- which is precisely what stranded fiend at a GRUB prompt on
+    # 2026-09-17. This is fatal rather than a warning: an ISO built from a
+    # multi-kernel mirror can produce a machine that does not boot, and that
+    # costs a physical visit.
+    _kvers="$(find "$darksite_dir" -name 'kernel-core-*.rpm' -printf '%f\n' 2>/dev/null |
+        sed -E 's/^kernel-core-(.*)\.[^.]+\.rpm$/\1/' | sort -u)"
+    if [[ "$(wc -l <<<"$_kvers")" -gt 1 ]]; then
+        log "FATAL: the darksite mirror holds more than one kernel:"
+        printf '  %s\n' $_kvers
+        log "Prune it to one before building an ISO — a machine that picks the wrong one will not boot."
+        rm -f "$_mirror_before" "$_mirror_after"
+        return 1
+    fi
+    log "Mirror carries exactly one kernel: ${_kvers:-NONE}"
+    [[ -n "$_kvers" ]] || {
+        log "FATAL: the darksite mirror has NO kernel at all"
+        rm -f "$_mirror_before" "$_mirror_after"
+        return 1
+    }
+    rm -f "$_mirror_before" "$_mirror_after"
     log "Fedora darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
 }
 
@@ -523,6 +575,35 @@ cmd_build() {
         ;;
     esac
     log "Building kldload ISO (PROFILE=$PROFILE EDITION=$EDITION PAYLOAD=$PAYLOAD ARCH=$ARCH RELEASE=$RELEASE)"
+
+    # ── Keep one generation back ─────────────────────────────────────────
+    # The ISO is named after the VERSION, not the build, so every build during a
+    # release cycle writes the same filename. Build 27 overwrote build 26 that
+    # way on 2026-09-17, and when 27 turned out not to boot the newest
+    # known-good image left on disk was a release-old 1.4.2. There was nothing
+    # to roll back to because nothing had been kept.
+    #
+    # Moving the previous ISO aside costs one file of disk and buys a rollback
+    # target for exactly the case that matters: the new build is broken and a
+    # machine needs installing NOW.
+    # ONLY the file this build will overwrite. A glob over kldload-*-ARCH.iso
+    # also matches every OTHER version present -- including the older release
+    # that is serving as the known-good fallback -- and renaming that away is
+    # the opposite of what this is for. So derive the version the builder will
+    # stamp, exactly as builder/build-iso.sh derives it, and rotate that name.
+    local _ver _prev_iso
+    _ver="${KLDLOAD_VERSION:-$(sed -n 's/^VERSION="${KLDLOAD_VERSION:-\(.*\)}"$/\1/p' \
+        "$ROOT/builder/build-iso.sh" | head -1)}"
+    if [[ -n "$_ver" ]]; then
+        for _prev_iso in "$ROOT/live-build/output/kldload-${_ver}-${ARCH}.iso" \
+            "$ROOT/live-build/output/kldload-${_ver}-${ARCH}-net.iso"; do
+            [[ -f "$_prev_iso" ]] || continue
+            mv -f "$_prev_iso" "${_prev_iso}.prev" &&
+                log "kept previous image as $(basename "${_prev_iso}.prev")"
+        done
+    else
+        log "WARNING: could not derive the ISO version — previous image not preserved"
+    fi
 
     # ── Stage 1: APT darksites (Debian + Ubuntu) ─────────────────────────
     # Skip for core edition (no darksites needed — stock distro only) and for
