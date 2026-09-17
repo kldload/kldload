@@ -61,8 +61,11 @@ community edition, not open-core with the useful half withheld.
 - Offline payloads built at build time (Fedora via RPM, Debian via APT)
 
 **Substrates**
-- Eight targets: Alpine, Arch, CentOS Stream, Debian, Fedora, RHEL, Rocky,
-  Ubuntu
+- Works with any **apt**, **dnf** or **pacman** based distribution. The build
+  runs the vendor's own package manager against the vendor's own repositories --
+  `debootstrap`, `dnf --installroot`, `pacstrap` -- so there is no list of
+  blessed distros to fall off the end of
+- Nothing is forked and nothing is patched
 - The component choices are independent of the distro, so the same opinions
   apply wherever you land
 
@@ -98,11 +101,16 @@ bytes from the same LAN server, and nothing else leaves the network. There is
 no per-node licence, no control plane you have to buy, and no dependency on a
 vendor being reachable — or solvent.
 
-What "any landscape" honestly means: eight distributions, bare metal or virtual,
-with or without Secure Boot, connected or completely air-gapped. Not every
-combination is equally exercised, and the offline payloads are strongest on
-Fedora and Debian; EL substrates fall back to the network for some content. That
-is a real limitation and it is better said out loud than discovered.
+What "any landscape" means: any apt, dnf or pacman based distribution, bare
+metal or virtual, with or without Secure Boot, connected or completely
+air-gapped. It is the vendor's package manager doing the work against the
+vendor's repositories, so support is a property of the mechanism rather than a
+list somebody has to keep up to date.
+
+The one caveat worth saying out loud: the *offline* payloads are strongest on
+Fedora and Debian, and some substrates still reach the network for part of their
+content. Air-gapped is fully proven on the two; elsewhere it depends what you
+are pulling.
 
 The constraint you will hit first is not software. It is how fast your switch
 can push one image at however many machines you boot at once — and unlike most
