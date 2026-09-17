@@ -1,0 +1,135 @@
+.Dd September 16, 2026
+.Dt KLDLOAD-VM-SNAPSHOT 8
+.Os
+.Sh NAME
+.Nm kldload-vm-snapshot
+.Nd snapshot every VM dataset, and prune the old ones
+.Sh SYNOPSIS
+.Nm
+.Op Fl -root Ar dataset
+.Op Fl -keep Ar count
+.Op Fl -prefix Ar string
+.Op Fl n
+.Sh DESCRIPTION
+.Nm
+takes one ZFS snapshot of every dataset and zvol beneath a VM root, then prunes
+that prefix back to a retention count.
+It is what
+.Pa kvm-snapshot.service
+runs, hourly, on any machine that hosts virtual machines.
+.Pp
+Every snapshot in a run shares a single UTC timestamp, so an operator restoring
+a set of machines can name one moment and get all of them from it rather than
+reconciling eight datasets taken seconds apart.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl -root Ar dataset
+The dataset whose children are snapshotted.
+The default is
+.Pa rpool/vms .
+The root itself is never snapshotted: it is a container, and an hourly snapshot
+of it is an entry no restore has ever used.
+.Pp
+.Dl # kldload-vm-snapshot --root rpool/snaptest
+.Dl kldload-vm-snapshot: 3 of 3 datasets snapshotted @auto-20260917T051854Z
+.It Fl -keep Ar count
+How many snapshots carrying this prefix to retain per dataset, oldest pruned
+first.
+The default is 48, which is two days at the hourly cadence.
+.Pp
+.Dl # kldload-vm-snapshot --root rpool/snaptest --keep 2
+.Dl kldload-vm-snapshot: 3 of 3 datasets snapshotted @auto-20260917T051856Z, 3 pruned
+.It Fl -prefix Ar string
+The snapshot name prefix.
+The default is
+.Ar auto- .
+Pruning only ever considers snapshots carrying the prefix it was given, so a
+run with a different prefix cannot remove another's, and named snapshots such
+as
+.Ar @golden
+are never at risk.
+.Pp
+.Dl # kldload-vm-snapshot --prefix nightly- --keep 7
+.Dl \&... # a second, independently pruned series alongside the hourly one
+.It Fl n , Fl -dry-run
+Print what would be snapshotted and change nothing.
+Pruning is skipped entirely in this mode.
+.Pp
+.Dl $ sudo kldload-vm-snapshot -n
+.Dl "  would snapshot rpool/vms/kldload-w-2@auto-20260917T051853Z"
+.Dl "  would snapshot rpool/vms/kldload-w-3@auto-20260917T051853Z"
+.Dl kldload-vm-snapshot: 23 of 23 datasets snapshotted @auto-20260917T051853Z
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /usr/lib/systemd/system/kvm-snapshot.service
+The unit that runs this hourly.
+.It Pa /usr/lib/systemd/system/kvm-snapshot.timer
+The hourly trigger.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds
+.It 0
+Every dataset was snapshotted.
+A machine with no VM root, or a VM root with no children, also exits 0 after
+saying so: neither is a failure, and both are normal on a machine that has not
+hosted a virtual machine yet.
+.It 1
+One or more datasets could not be snapshotted.
+Each one is named on standard error.
+.It 2
+A usage error, such as a
+.Fl -keep
+that is not a number.
+.El
+.Sh DIAGNOSTICS
+.Bl -tag -width Ds
+.It "N of M datasets snapshotted"
+The count is deliberately reported against the number of datasets the run was
+.Em given ,
+not merely the number it succeeded at.
+.Sy 0 of 23
+has to read as a failure at a glance; for a long time it did not.
+.It "no rpool/vms on this machine \(em nothing to snapshot"
+There is no VM root here.
+Reported rather than passed over in silence, because a machine that was
+supposed to be a VM host and quietly is not looks exactly the same as one that
+never was.
+.It "FAILED to snapshot Ar dataset"
+That dataset could not be snapshotted; the run continues with the rest and
+exits non-zero at the end.
+.El
+.Sh SEE ALSO
+.Xr kfire 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-delete 8 ,
+.Xr zfs 8
+.Sh HISTORY
+This logic used to live inside
+.Pa kvm-snapshot.service
+as a one-line
+.Va ExecStart= .
+systemd expands
+.Va ${...}
+in an Exec line before the program runs, so the variables holding the timestamp
+and the dataset name were emptied on the way through and the command that
+actually ran, every hour, was
+.Ql zfs snapshot @auto- .
+.Xr zfs 8
+printed its usage message, the last command in the chain succeeded anyway, and
+the unit reported
+.Ql Finished ... Deactivated successfully
+on every run since the machine was installed.
+.Pp
+It was found on 2026-09-16 on a host with twenty-three VM datasets and exactly
+zero snapshots, whose timer had last fired seventeen minutes earlier.
+Moving the logic into a program was the fix: the escaping is one
+.Ql $$
+away from returning, and an Exec line cannot be tested on its own.
+.Sh CAVEATS
+A snapshot is not a backup.
+These are local, on the same pool as the machines they protect, and they
+survive nothing that takes the pool with it.
+Replication is what makes them a backup; see
+.Xr syncoid 1 .
