@@ -141,34 +141,36 @@ Verified on fiend after this run, 2026-09-16. If a future build changes the
 set, check before narrating it — naming an icon that is not on screen is the
 one mistake a viewer will notice instantly.
 
-### Closing the video — on "is 28 minutes fast?"
+### Closing the video — the numbers
 
-Somebody will say they can `kubeadm init` in five minutes. Answer it before
-they ask, because the honest answer is stronger than the boast.
+No argument, no comparison, no adjectives. Read the facts and stop.
 
-> That took twenty-eight minutes. I want to be precise about what is in them.
+> Twenty-eight minutes ago this machine had no operating system on it.
 >
-> Three minutes pulling the image. Twelve installing the operating system —
-> from nothing, on a machine that had none. Thirteen building the cluster and
-> everything on it.
+> Three minutes pulling the image. Twelve installing the operating system.
+> Thirteen building the cluster.
 >
-> So when people compare this to spinning up Kubernetes in five minutes, they
-> are starting with six machines that already run Linux, already have their
-> networking and storage sorted, and somebody already logged in. I started with
-> a switched-off box.
+> It now runs six nodes. Three control planes, three workers. Cilium, with no
+> kube-proxy. Hubble. Tetragon. MetalLB. kube-vip. ArgoCD. metrics-server.
+> Fifty-six workloads running. Zero failed units.
 >
-> But speed is not really the claim. **I was not in the room.** There is no
-> step in there where a person has to be present, make a decision, or notice
-> that something went wrong. Twenty-eight unattended minutes beats fifteen
-> attended ones, because the fifteen costs you a person and this costs you
-> nothing.
+> The six nodes are clones of one two-point-three gigabyte image. Together they
+> use zero additional bytes of disk.
 >
-> And it does not multiply. Fifty machines is still about twenty-eight minutes,
-> because they all boot in parallel off the same image. That is the number
-> worth remembering.
+> Nobody touched the keyboard.
+>
+> Nothing left the local network.
+>
+> Fifty machines would take the same twenty-eight minutes. They boot in
+> parallel, from the same image.
+>
+> That is a desktop, on the same machine, on top of all of it.
+>
+> kldload. BSD 3-Clause. Free.
 
-*Do not say "look how fast". Say what it contains and that nobody was there.
-The first invites an argument you can lose; the second is not arguable.*
+*Every figure above was measured on this run. Say them flatly and let them
+land. Anything added to them reads as a pitch and makes the facts sound less
+certain than they are.*
 
 ---
 
