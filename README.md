@@ -359,6 +359,19 @@ half-armed rack is an error you hear about rather than discover.
 Per-machine differences live in the answers file — hostname, disk, profile, how
 many control planes and workers. Same image, different answers.
 
+**Your own workloads land with the cluster, not after it.** Drop a Helm chart in
+`/root/darksite/helm-charts/workloads/` or plain YAML in
+`/root/darksite/manifests/`, and first boot installs them once the cluster is up
+and before it reports ready. Manifests apply in sorted order, so `10-namespace`
+lands before `20-deploy`. Add your container images to
+`build/darksite/k8s-images.txt` and they are baked in too — so your application
+is on every node with nothing pulled from a registry.
+
+Ansible runs inverted here: `ansible-playbook` executes locally on each machine
+at first boot rather than being pushed from a control node. No inventory to keep
+current, no SSH fan-out, no credentials held centrally. Each machine builds
+itself, and a hundred do it at once without coordinating.
+
 Measured end to end on one target: **fifteen minutes** from power-on to a
 six-node HA Kubernetes cluster with all nodes `Ready`, landing on a usable
 desktop, with the six node clones taking **0 bytes** against one 2.32&nbsp;GB
