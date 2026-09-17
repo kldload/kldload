@@ -1,0 +1,31 @@
+# Apply the I/O scheduler policy once the storage layer has settled.
+#
+# WHY A UNIT AND NOT JUST THE UDEV RULE: udev writes queue/scheduler at
+# device-add time, which races the device still being claimed. The kernel
+# answers EBUSY, udev does not retry, and the rule silently does nothing. On
+# fiend (2026-09-16) six of seven SCSI disks kept mq-deadline despite the rule,
+# and the same failure hit the distro's own 60-block-scheduler.rules. The udev
+# rule stays as the fast path; this is the net underneath it.
+#
+# Ordered after basic.target so udev has finished its first pass, and Wants=
+# nothing so it can never block a boot.
+[Unit]
+Description=kldload I/O scheduler policy
+After=basic.target systemd-udev-settle.service
+DefaultDependencies=no
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/kldload-io-scheduler
+# A scheduler that cannot be set is a performance matter, not a boot failure.
+# The script already exits 0; this is belt and braces for a kernel that offers
+# no scheduler at all.
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

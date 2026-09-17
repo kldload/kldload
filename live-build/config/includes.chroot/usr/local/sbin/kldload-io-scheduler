@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# kldload-io-scheduler — apply the I/O scheduler policy after storage settles.
+#
+# THE POLICY (same as 60-kldload-scheduler.rules, deliberately):
+#   rotational=0  ->  none        no scheduler overhead; hardware queues do it
+#   rotational=1  ->  bfq         fair queuing, better latency under mixed load
+#
+# WHY THIS EXISTS AS WELL AS THE UDEV RULE: udev writes queue/scheduler at
+# device-add time, and on a machine with several disks that write races the
+# device still being claimed. The kernel answers EBUSY and udev does not retry,
+# so the rule silently does nothing. Measured on fiend, 2026-09-16: six of seven
+# SCSI disks kept mq-deadline, and the journal carried one "Device or resource
+# busy" per disk per boot -- for the distro's own 60-block-scheduler.rules as
+# well as ours. Writing the same value by hand after boot succeeds immediately,
+# which is what proves it is a race rather than something holding the queue.
+#
+# So the udev rule stays as the fast path, and this is the net that catches what
+# it missed. Two failsafes on the same intent, which is the rule for anything
+# that only gets one shot at boot.
+#
+# Idempotent: a device already on the right scheduler is left alone and not
+# logged. Safe to run at any time, by hand or from the unit.
+#
+# EXIT: 0 always. A scheduler that cannot be set is a performance matter, never
+# a reason to fail a boot -- it reports and moves on.
+set -Eeuo pipefail
+trap 'echo "kldload-io-scheduler: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+want_for() { # want_for <rotational> -> the scheduler this device should use
+    [[ "$1" == "1" ]] && echo bfq || echo none
+}
+
+changed=0 already=0 failed=0
+
+for q in /sys/block/*/queue/scheduler; do
+    [[ -w "$q" ]] || continue
+    dev="$(basename "$(dirname "$(dirname "$q")")")"
+    # Skip anything that is not a real disk: loop, zram, device-mapper and zvols
+    # have a scheduler attribute and no business being tuned here.
+    case "$dev" in loop* | zram* | dm-* | zd* | sr*) continue ;; esac
+
+    rot="$(cat "/sys/block/${dev}/queue/rotational" 2>/dev/null || echo 0)"
+    want="$(want_for "$rot")"
+    # The attribute reads as a list with the active one in brackets.
+    cur="$(sed -n 's/.*\[\([a-z-]*\)\].*/\1/p' "$q" 2>/dev/null || true)"
+
+    if [[ "$cur" == "$want" ]]; then
+        already=$((already + 1))
+        continue
+    fi
+    # Not offered by this kernel for this device: say so rather than retrying
+    # forever. bfq is built in on the shipped kernel, but a rebuilt one may not
+    # have it.
+    if ! grep -qw -- "$want" "$q" 2>/dev/null; then
+        echo "kldload-io-scheduler: ${dev}: '${want}' not available (offers: $(cat "$q")) — left on '${cur}'"
+        failed=$((failed + 1))
+        continue
+    fi
+    if echo "$want" >"$q" 2>/dev/null; then
+        echo "kldload-io-scheduler: ${dev}: ${cur} -> ${want} (rotational=${rot})"
+        changed=$((changed + 1))
+    else
+        echo "kldload-io-scheduler: ${dev}: could not set '${want}' (still '${cur}') — $(cat /sys/block/"${dev}"/queue/scheduler)"
+        failed=$((failed + 1))
+    fi
+done
+
+# Outcome, not exit code: say what happened to how many.
+echo "kldload-io-scheduler: ${changed} changed, ${already} already correct, ${failed} could not be set"
+exit 0
