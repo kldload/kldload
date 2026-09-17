@@ -1275,6 +1275,24 @@ if ! k_have_func k_apply_profile; then
             #
             # Kernel console blanking off is unrelated to dconf — keep it.
             echo "kernel.consoleblank=0" >"${target}/etc/sysctl.d/99-no-blank.conf"
+        else
+            # EVERY non-desktop profile boots to a console, explicitly.
+            #
+            # This branch did not exist. The desktop case set graphical.target
+            # and nothing set anything otherwise, so a core or server install
+            # simply kept whatever default target its base image shipped -- and
+            # the Fedora image ships graphical.target. A core install therefore
+            # came up asking systemd for a graphical session it has no display
+            # manager for; systemd falls through to a text login, so it LOOKS
+            # right and is not. Seen on fiend 2026-09-17: profile=core,
+            # `systemctl get-default` = graphical.target, no display manager
+            # installed.
+            #
+            # core is the bare-minimum server install by definition, so saying
+            # so is the whole point. lib/profiles.sh's own path already had this
+            # else; this is the fallback path that did not.
+            chroot "${target}" systemctl set-default multi-user.target >>"$log" 2>&1 ||
+                k_log "WARNING: default target not set to multi-user — ${profile} will ask for a graphical session it cannot start"
         fi
 
         k_log "Profile packages installed (${distro}/${profile})"

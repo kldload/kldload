@@ -212,5 +212,24 @@ _section "Debug Bundle Tool"
 test_cmd "kldload-debug-bundle present" "kldload-debug-bundle"
 test_succeeds "kldload-debug-bundle --help works" "kldload-debug-bundle --help >/dev/null 2>&1"
 
+# ── core is the BARE MINIMUM, and boots to a console ─────────────────────────
+# The package set has always been right -- openssh, sudo, curl, vim, networking,
+# no kldload tools and no webui. What was wrong was the default target: the
+# fallback install path set graphical.target for desktop and nothing at all
+# otherwise, so core kept whatever its base image shipped, and the Fedora image
+# ships graphical.target.
+#
+# That failure is invisible from the console. systemd asks for a graphical
+# session, finds no display-manager.service, falls through to a text login, and
+# the machine LOOKS exactly like a correct minimal install. Caught on fiend
+# 2026-09-17 only by asking `systemctl get-default` directly.
+_section "Minimal by construction"
+test_succeeds "default target is multi-user, not graphical" \
+    "[[ \"$(systemctl get-default)\" == multi-user.target ]]"
+test_succeeds "no display manager is installed" \
+    "! test -e /etc/systemd/system/display-manager.service"
+test_succeeds "no desktop session files" \
+    "! ls /usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop >/dev/null 2>&1"
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 summary
