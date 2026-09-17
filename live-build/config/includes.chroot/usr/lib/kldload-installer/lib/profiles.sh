@@ -947,17 +947,34 @@ k_install_arcade_session() {
         return 0
     }
 
-    local _f _rel _missing=0
+    local _f _rel _missing=0 _copied=0
     while IFS= read -r _f; do
         _rel="${_f#"${src}"/}"
-        install -D -m 0644 "$_f" "${target}/${_rel}" || {
+        if install -D -m 0644 "$_f" "${target}/${_rel}"; then
+            _copied=$((_copied + 1))
+        else
             k_log "arcade: could not copy ${_rel}"
             _missing=1
-        }
+        fi
     done < <(find "${src}/etc/kldload-arcade" -type f 2>/dev/null)
 
     ((_missing == 0)) || {
         k_log "arcade: configuration incomplete — session NOT offered"
+        return 0
+    }
+
+    # A loop that ran zero times is not a success. If find matched nothing --
+    # the directory absent, or empty -- every check above passes and the
+    # session would be offered with no configuration behind it, which is the
+    # precise failure this function exists to prevent. So count what landed,
+    # and then name the one file sway cannot start without rather than trusting
+    # the count to imply it.
+    ((_copied > 0)) || {
+        k_log "arcade: no configuration found in target-files — session NOT offered"
+        return 0
+    }
+    [[ -f "${target}/etc/kldload-arcade/sway/config" ]] || {
+        k_log "arcade: the sway config did not land — session NOT offered"
         return 0
     }
 
