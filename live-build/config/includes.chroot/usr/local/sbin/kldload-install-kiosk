@@ -67,6 +67,7 @@ set -Eeuo pipefail
 KIOSK_CMDLINE="${KLDLOAD_KIOSK_CMDLINE:-/proc/cmdline}"
 KIOSK_ROOT="${KLDLOAD_KIOSK_ROOT:-}"
 KIOSK_CAGE="${KLDLOAD_KIOSK_CAGE:-/usr/bin/cage}"
+KIOSK_BLANK_CURSOR="${KLDLOAD_KIOSK_BLANK_CURSOR:-/usr/share/kldload/blank-cursor}"
 KIOSK_PAYLOAD="${KLDLOAD_KIOSK_PAYLOAD:-/usr/local/bin/kldload-webui-launch}"
 
 _say() { printf 'kldload-install-kiosk: %s\n' "$*" >&2; }
@@ -170,6 +171,18 @@ kiosk_run() {
     # the dashboard for the second before its first progress poll answers
     # (operator, fiend netboot 2026-09-13: "a splash of the old UI").
     export KLDLOAD_KIOSK_SHOW=1
+    # The pointer: cage draws its own arrow until a client sets one, and a client
+    # sets one only when the pointer ENTERS it -- which on a machine nobody touches
+    # never happens. The arrow sat dead centre through an entire recorded install
+    # (fiend, 2026-09-18); the page's own cursor:none cannot reach it, and cage
+    # 0.3.1 has no option to hide it. So cage, and the browser under it, load a
+    # theme whose every pointer is transparent (tools/cursor/gen_blank_cursor.py).
+    # Neither show takes input, so a pointer that stays hidden when moved is fine.
+    if [[ -d "${KIOSK_BLANK_CURSOR}/default/cursors" ]]; then
+        export XCURSOR_PATH="${KIOSK_BLANK_CURSOR}" XCURSOR_THEME=default
+    else
+        _say "WARNING: no blank pointer theme at ${KIOSK_BLANK_CURSOR} — an arrow will sit over the show"
+    fi
     if [[ ! -x "${KIOSK_CAGE}" ]]; then
         _say "FATAL: no compositor at ${KIOSK_CAGE} — the install show has nothing to draw on."
         _say "  Install the 'cage' package, or boot with kldload.kiosk=0 for the full desktop."

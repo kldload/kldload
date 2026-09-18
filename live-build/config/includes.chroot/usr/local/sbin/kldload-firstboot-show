@@ -553,6 +553,7 @@ PREFS
 # kiosk_exec — see "kiosk" in the header. Exits non-zero, with the reason, when it
 # cannot start; the unit's Restart= and start limit decide what happens next, and
 # kldload-firstboot-show run notices a unit that has given up.
+KIOSK_BLANK_CURSOR="${KLDLOAD_KIOSK_BLANK_CURSOR:-/usr/share/kldload/blank-cursor}"
 KIOSK_RENDERER_ERR='Unable to create the wlroots renderer'
 kiosk_exec() {
     local browser profile i rc=0 errlog
@@ -593,6 +594,18 @@ kiosk_exec() {
         _say "the page at ${KIOSK_URL} did not answer in ${KIOSK_WAIT}s"
         return 1
     }
+    # The pointer: cage draws its own arrow until a client sets one, and a client
+    # sets one only when the pointer ENTERS it -- which on a machine nobody touches
+    # never happens. The arrow sat dead centre through an entire recorded install
+    # (fiend, 2026-09-18); the page's own cursor:none cannot reach it, and cage
+    # 0.3.1 has no option to hide it. So cage, and the browser under it, load a
+    # theme whose every pointer is transparent (tools/cursor/gen_blank_cursor.py).
+    # Neither show takes input, so a pointer that stays hidden when moved is fine.
+    if [[ -d "${KIOSK_BLANK_CURSOR}/default/cursors" ]]; then
+        export XCURSOR_PATH="${KIOSK_BLANK_CURSOR}" XCURSOR_THEME=default
+    else
+        _say "WARNING: no blank pointer theme at ${KIOSK_BLANK_CURSOR} — an arrow will sit over the show"
+    fi
     export MOZ_ENABLE_WAYLAND=1
     local -a cmd=(/usr/bin/cage -d -s -- "${browser}" --kiosk --no-remote --profile "${profile}" "${KIOSK_URL}")
     if [[ "${WLR_RENDERER:-}" == pixman ]]; then
