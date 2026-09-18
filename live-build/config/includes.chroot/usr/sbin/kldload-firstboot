@@ -2890,26 +2890,19 @@ SALT
         if [[ -x /usr/sbin/kldload-autodeploy ]] &&
             ([[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]] || [[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]] || [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]); then
             log "autodeploy is present — skipping firstboot's AI block (autodeploy will handle it)"
-        # The desktop profile gets the AI stack too, without being asked.
+        # AI when it was asked for: ROLE=ai, or KLDLOAD_ENABLE_AI=1. Nothing else.
         #
-        # HISTORY: 2026-08-13, fiend. A desktop install on a box with an
-        # RTX 3080 rehydrated 2.2 GB of Ollama weights from the darksite —
-        # that copy is NOT gated on role — and then skipped the runtime,
-        # because only ROLE=ai reached this branch. The result was a
-        # machine carrying a full model tree, an Ollama tile in the dash,
-        # and no ollama binary to serve any of it. Weights without an
-        # engine is the same defect as an engine without weights.
-        #
-        # The extra conditions are deliberately narrow. Darksite-present
-        # means the whole install is a local copy: no download, no
-        # first-boot network dependency, so there is no reason to ask. A
-        # GPU with no darksite still qualifies, because that is the
-        # machine someone bought the GPU for — but it is the only case
-        # here that can reach for the network.
-        elif [[ "$ROLE" == "ai" || "${KLDLOAD_ENABLE_AI:-0}" == "1" ]] ||
-            { [[ "$ROLE" == "desktop" ]] &&
-                { [[ -s /root/darksite/ollama/runtime/ollama-linux-amd64.tar.zst ]] ||
-                    lspci 2>/dev/null | grep -qi nvidia; }; }; then
+        # HISTORY: a desktop used to get the AI stack without being asked
+        # whenever the darksite carried the Ollama runtime or the box had an
+        # NVIDIA GPU (2026-08-13: weights rehydrated with no engine to serve
+        # them). That rule outlived its reason -- rehydration now happens only
+        # in autodeploy's AI phase, and autodeploy reclaims the payload when AI
+        # is not wanted (3fcccddb) -- and it overrode an explicit "no": a
+        # 5-desktop install with KLDLOAD_ENABLE_AI=0 spent 6.5 of its 7 first-
+        # boot minutes on Ollama, a 4.9 GB model, whisper.cpp and Open WebUI,
+        # while the first-boot show, which asks autodeploy, saw ai=0 and stood
+        # down (fiend, 2026-09-18). Operator: "obey the answers file".
+        elif [[ "$ROLE" == "ai" || "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
             log "AI profile — installing Ollama and kldload-trained model..."
 
             # Status file — dashboard reads this to show progress

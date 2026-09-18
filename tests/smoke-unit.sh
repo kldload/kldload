@@ -134,6 +134,17 @@ _guard "install-target excludes live disk in auto-pick" "${inst}" '!= "\$live"'
 # autoinstall loop must skip both live medium and seed disk
 _guard "autoinstall skips live medium" "${autoinstall}" '== "\$_live"'
 _guard "autoinstall skips seed disk" "${autoinstall}" '== "\$_seed"'
+# firstboot installs the AI stack only when asked. A desktop used to get it
+# regardless (darksite runtime or an NVIDIA GPU), overriding KLDLOAD_ENABLE_AI=0:
+# 6.5 of 7 first-boot minutes on fiend, 2026-09-18.
+_fbk="${CHROOT}/usr/sbin/kldload-firstboot"
+_guard "firstboot: AI only for role ai or KLDLOAD_ENABLE_AI=1" "${_fbk}" \
+    '^ *elif \[\[ "\$ROLE" == "ai" \|\| "\$\{KLDLOAD_ENABLE_AI:-0\}" == "1" \]\]; then$'
+if grep -Eq '\[\[ "\$ROLE" == "desktop" \]\] &&$' "${_fbk}"; then
+    _fail "firstboot: no implicit desktop AI" "a desktop clause is back on the AI branch -- KLDLOAD_ENABLE_AI=0 would be ignored"
+else
+    _pass "firstboot: no implicit desktop AI"
+fi
 # target-disk wipe must be fail-loud (verify + k_die), not swallowed
 _guard "target wipe verifies and aborts if dirty" "${stor}" 'Refusing to install: could not clear'
 # encrypted installs must use the visible-prompt kernel args (not hardcoded quiet)
