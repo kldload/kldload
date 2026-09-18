@@ -336,19 +336,39 @@ log "Creating repo metadata..."
 # --keep 1 leaves exactly the newest build of each name; repomanage does the
 # RPM version comparison, which is not something to hand-roll in shell.
 log "Evicting superseded RPM versions..."
+# The list is captured and CHECKED, not piped in behind `2>/dev/null || true`.
+# HISTORY 2026-09-18: that form logged "Evicted 0" while 6.19.10 sat beside the
+# pinned 7.2.5 kernel; repomanage run by hand on the same pool listed all seven
+# 6.19 RPMs, so the builder's call produced nothing and said nothing about why.
+# The host gate then refused the mirror -- correctly, but a whole refresh late.
 _old_count=0
+_rm_err="$(mktemp)"
+_rm_rc=0
+_rm_list="$(dnf repomanage --old --keep 1 "${REPO_DIR}" 2>"${_rm_err}")" || _rm_rc=$?
+if ((_rm_rc != 0)); then
+    log "FATAL: dnf repomanage exited ${_rm_rc} — superseded RPMs (a second kernel among them) would stay:" >&2
+    sed 's/^/    /' "${_rm_err}" >&2
+    exit 1
+fi
+rm -f "${_rm_err}"
 while IFS= read -r _old; do
-    [[ -n "$_old" ]] || continue
+    [[ "$_old" == *.rpm ]] || continue # repomanage also prints a progress line
     log "  evicting (superseded): $(basename "$_old")"
     rm -f "$_old"
     # Counter only — ((x++)) returns non-zero from 0 under set -e.
     ((_old_count++)) || true
-done < <(
-    # An empty pool, or a dnf too old for `repomanage`, must not abort the
-    # build — there is simply nothing to evict in either case.
-    dnf repomanage --old --keep 1 "${REPO_DIR}" 2>/dev/null || true
-)
+done <<<"${_rm_list}"
 log "Evicted ${_old_count} superseded RPM(s)"
+
+# One kernel, checked HERE, where the eviction happened: the host gate in
+# deploy.sh checks again, but by then the refresh has run for half an hour.
+_kcores="$(find "${REPO_DIR}" -name 'kernel-core-*.rpm' -printf '%f\n' | sort)"
+if (($(grep -c . <<<"${_kcores}") != 1)); then
+    log "FATAL: after eviction the pool holds $(grep -c . <<<"${_kcores}") kernel-core RPMs, not 1:" >&2
+    sed 's/^/    /' <<<"${_kcores}" >&2
+    exit 1
+fi
+log "Pool carries one kernel: ${_kcores}"
 
 createrepo_c "${REPO_DIR}"
 
