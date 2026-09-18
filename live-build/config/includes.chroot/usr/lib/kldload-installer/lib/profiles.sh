@@ -477,35 +477,9 @@ k_profile_packages() {
         ;;
 
     vdi)
-        # Virtual desktop delivery: Plasma on Wayland + FFmpeg/SRT + mediamtx.
-        #
-        # PLASMA, NOT GNOME (operator's call, 2026-09-18). A delivered desktop
-        # is driven remotely far more than locally, and Plasma keeps a usable
-        # X11 session alongside its Wayland one -- which is what the rdp profile
-        # below needs and what GNOME has been steadily removing. Same desktop on
-        # both profiles means one thing to learn and one thing to support.
-        #
-        # The SESSION here is Wayland: wf-recorder captures a Wayland
-        # compositor, and that capture is the whole delivery mechanism. X11 is
-        # the rdp profile's business, not this one's.
-        #
-        # PER-DISTRO NAMES, and this is why: the previous list named only
-        # `gdm3`. That is the Debian spelling, so every RPM install of this
-        # profile resolved nothing for it and came up with NO DISPLAY MANAGER
-        # AT ALL -- exactly the failure the desktop profile's own comment
-        # documents, repeated here. The package split is real and was checked in
-        # clean containers on 2026-09-18 rather than assumed:
-        #   fedora 44   : plasma-workspace-x11, kwin-x11, sddm-wayland-plasma
-        #                 (kwin-wayland and plasma-workspace-wayland do NOT exist)
-        #   debian trixie: kwin-wayland, kwin-x11
-        #                 (plasma-workspace-x11/-wayland do NOT exist)
-        local _plasma_extra="kwin-wayland kwin-x11"
-        local _dm="sddm"
-        if [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
-            _plasma_extra="kwin-x11 plasma-workspace-x11 sddm-wayland-plasma"
-        fi
+        # Virtual desktop delivery: Wayland + FFmpeg/SRT + mediamtx (binary via hook)
         echo "openssh-server sudo curl ca-certificates vim less iproute2 \
-        plasma-desktop plasma-workspace ${_plasma_extra} ${_dm} \
+        mutter gnome-session gdm3 \
         ffmpeg libsrt1.5 \
         pipewire wireplumber \
         wf-recorder \
@@ -515,47 +489,6 @@ k_profile_packages() {
         nginx \
         nftables chrony \
         salt-minion wireguard-tools"
-        ;;
-
-    rdp)
-        # Remote desktop host: Plasma on X11 + xrdp.
-        #
-        # X11 ON PURPOSE, and it is the whole reason this is separate from vdi.
-        # xrdp drives a real X session through xorgxrdp; Wayland remoting is a
-        # different mechanism with different tooling, and GNOME has been
-        # removing the X11 session this depends on. Plasma still ships both, so
-        # vdi stays Wayland for its capture pipeline while this serves X11 to
-        # RDP clients -- same desktop on both, one thing to support (operator's
-        # call, 2026-09-18).
-        #
-        # dbus-x11 is Debian-only and genuinely needed there: xrdp session
-        # startup shells out to dbus-launch, which that package provides. On the
-        # RPM side the equivalent lives in the base dbus package.
-        #
-        # Names checked in clean containers 2026-09-18, not assumed: xrdp and
-        # xorgxrdp exist on both fedora:44 and debian:trixie under the same
-        # spelling; plasma-workspace-x11 is RPM-only and kwin-wayland is
-        # Debian-only.
-        local _rdp_extra="kwin-x11 dbus-x11"
-        if [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
-            _rdp_extra="kwin-x11 plasma-workspace-x11"
-        fi
-        echo "openssh-server sudo curl ca-certificates vim less iproute2 \
-        plasma-desktop plasma-workspace ${_rdp_extra} sddm \
-        xrdp xorgxrdp \
-        pipewire wireplumber \
-        xdotool xclip \
-        python3-websockets ${_pam} python3-pip \
-        nftables chrony \
-        wireguard-tools"
-        ;;
-
-    proxmox)
-        # Proxmox VE hypervisor node — installs base system; Proxmox repo + packages added by firstboot
-        echo "openssh-server sudo curl ca-certificates vim less iproute2 \
-        nftables chrony \
-        bridge-utils \
-        wireguard-tools"
         ;;
 
     monitoring)

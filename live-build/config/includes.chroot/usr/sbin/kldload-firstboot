@@ -849,66 +849,6 @@ UNLOCK
     ok "=== MONITORING ready (Prometheus :9090  Grafana :3000  Alertmanager :9093) ==="
 }
 
-# ══ PROXMOX ══════════════════════════════════════════════════════════════════
-# Proxmox VE on top of a kldload base. Debian only, and the suite is DERIVED --
-# the repo was pinned to a literal "bookworm" while the Debian base moved to
-# trixie, so this installed PVE 8 packages onto a Debian 13 system and reported
-# success either way (found 2026-09-17, never caught because every failure here
-# was swallowed).
-#
-# Returns 0 only when pveversion is actually on the target. Everything else is a
-# loud failure, because "the profile installed and there is no hypervisor on it"
-# is the outcome this used to produce silently.
-setup_proxmox() {
-    log "=== PROXMOX setup ==="
-
-    local _id _suite
-    _id="$(. /etc/os-release 2>/dev/null && echo "${ID:-}")"
-    _suite="$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")"
-    if [[ "$_id" != "debian" ]]; then
-        log "FATAL: the proxmox profile is Debian-only; this target is '${_id:-unknown}'"
-        return 1
-    fi
-    if [[ -z "$_suite" ]]; then
-        log "FATAL: /etc/os-release carries no VERSION_CODENAME — refusing to guess a Proxmox suite"
-        return 1
-    fi
-
-    local PVE_KEYRING="/usr/share/keyrings/proxmox-release-${_suite}.gpg"
-    if ! curl -fsSL --connect-timeout 10 \
-        "https://enterprise.proxmox.com/debian/proxmox-release-${_suite}.gpg" \
-        -o "${PVE_KEYRING}"; then
-        rm -f "${PVE_KEYRING}"
-        log "FATAL: no Proxmox release key for Debian ${_suite} — either there is no network,"
-        log "  or Proxmox does not publish for this suite yet. Not mixing suites to work around it."
-        log "  Recover with: curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-${_suite}.gpg |"
-        log "    gpg --dearmor -o ${PVE_KEYRING} && apt-get update && apt-get install -y proxmox-ve"
-        return 1
-    fi
-
-    echo "deb [signed-by=${PVE_KEYRING}] http://download.proxmox.com/debian/pve ${_suite} pve-no-subscription" \
-        >/etc/apt/sources.list.d/pve.list
-    log "  Proxmox VE repo added for Debian ${_suite} — installing proxmox-ve"
-
-    if ! apt-get update -qq; then
-        log "FATAL: apt-get update failed after adding the Proxmox repo"
-        return 1
-    fi
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi chrony; then
-        log "FATAL: proxmox-ve did not install"
-        return 1
-    fi
-
-    # The package database records intent; pveversion records fact.
-    if ! command -v pveversion >/dev/null 2>&1; then
-        log "FATAL: apt reported success but pveversion is not on this system"
-        return 1
-    fi
-    log "  Proxmox VE installed: $(pveversion 2>&1 | head -1)"
-
-    ok "=== PROXMOX setup complete ==="
-}
-
 # ══ ZERO TRUST ════════════════════════════════════════════════════════════════
 # Runs after WireGuard is up for all roles.
 # 1. Issue node cert signed by ISO CA (SAN includes all WG IPs + hostname)
@@ -4893,14 +4833,6 @@ CHROMEPOL
         setup_wg_client
         setup_monitoring
         setup_salt_minion
-        ;;
-    proxmox)
-        setup_wg_client
-        # setup_proxmox returns non-zero when there is no network or no Proxmox
-        # repo for this Debian suite. The rest of first boot still has work to
-        # do, so record it loudly rather than aborting under set -e -- but never
-        # let it read as success, which is what the old swallowed install did.
-        setup_proxmox || log "ERROR: PROXMOX setup FAILED — this node has NO hypervisor on it"
         ;;
     server | client | desktop)
         setup_wg_client
