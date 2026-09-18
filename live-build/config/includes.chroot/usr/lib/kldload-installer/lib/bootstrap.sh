@@ -2077,6 +2077,30 @@ CUSTOMREPO
             bridge-utils edk2-ovmf dnsmasq
         )
         ;;
+    storage)
+        # Storage server: NFS, SMB, iSCSI and the node exporter.
+        #
+        # This arm has to be HERE. _dnf_pkgs -- not k_profile_packages -- is
+        # what gets dnf-installed on RPM targets, the same trap the nss-tools
+        # and gnome-terminal notes above describe. profiles.sh has carried a
+        # storage list since fea72f4e and not one package of it ever reached a
+        # Fedora install: 11-storage went VERIFIED on fiend 2026-09-17 with no
+        # NFS server, no Samba and no target daemon, because this case had no
+        # storage arm and the profile fell through to the bare base set.
+        #
+        # RPM spellings, not the Debian ones profiles.sh also carries:
+        # nfs-utils not nfs-kernel-server, targetcli not tgt,
+        # golang-github-prometheus-node-exporter not prometheus-node-exporter.
+        # python3-rtslib is what targetcli drives the kernel target through;
+        # without it targetcli imports and immediately fails.
+        _dnf_pkgs+=(
+            tcpdump socat sysstat net-tools
+            nfs-utils
+            targetcli python3-rtslib
+            samba samba-common
+            golang-github-prometheus-node-exporter
+        )
+        ;;
     core)
         # Core: strip extras — no sanoid, no guest agents, no k* tools
         # WireGuard is a kernel primitive, included in all profiles
