@@ -309,6 +309,15 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
                 TOOL_IN_IMAGE+=("$_img_d/${_t##*/}")
             done
         done
+        # usr/share too, recursively: build-iso.sh copies it a directory at a
+        # time, and build 30 (2026-09-18) left kldload-netboot, the blank
+        # cursor and terminfo behind because nobody had named them. No
+        # symlinked directories under usr/share, so no resolving needed.
+        _us_root="$ROOT/live-build/config/includes.chroot"
+        while IFS= read -r -d '' _t; do
+            TOOL_FILES+=("${_t#"$_us_root"/}")
+            TOOL_IN_IMAGE+=("${_t#"$_us_root"/}")
+        done < <(find "$_us_root/usr/share" -type f -print0)
         # unsquashfs exits non-zero when any requested path is absent, which is
         # exactly what the per-file check below reports.
         unsquashfs -q -f -d "$TOOLEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" "${TOOL_IN_IMAGE[@]}" >/dev/null 2>&1 || true
@@ -320,7 +329,7 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             fi
         done
         if ((_tool_missing == 0)); then
-            _pass "all ${#TOOL_FILES[@]} usr/local/{bin,sbin} tools from includes.chroot are in the squashfs"
+            _pass "all ${#TOOL_FILES[@]} usr/local/{bin,sbin} tools and usr/share files from includes.chroot are in the squashfs"
         fi
         # extracted dirs carry the image's 0555 modes; make them removable
         chmod -R u+w "$TOOLEXTRACT" 2>/dev/null || true

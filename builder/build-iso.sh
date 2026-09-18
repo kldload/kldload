@@ -1766,6 +1766,22 @@ DCONFPROFILE
     else
         die "FATAL: includes.chroot/usr/share/backgrounds/kldload missing — desktop has no branded wallpaper"
     fi
+
+    # ── usr/share trees that need no special handling ───────────────────────
+    # usr/share is copied a directory at a time (the neighbours above and below
+    # each do something to their files), so a new directory that nobody named
+    # never shipped. HISTORY: build 30 (2026-09-18) went out without the
+    # netboot menu picture, the kiosk's blank cursor and ghostty's terminfo,
+    # all committed and all silently left behind. These are plain copies; the
+    # smoke-build gate now checks every file under includes.chroot/usr/share
+    # against the image, so the next unnamed directory is a red gate instead.
+    for _us in kldload kldload-installer kldload-netboot terminfo; do
+        _us_src="/build/live-build/config/includes.chroot/usr/share/${_us}"
+        [[ -d "$_us_src" ]] || die "FATAL: includes.chroot/usr/share/${_us} missing — the copy list is stale"
+        mkdir -p "${ROOTFS}/usr/share/${_us}"
+        cp -a "${_us_src}/." "${ROOTFS}/usr/share/${_us}/"
+    done
+    unset _us _us_src
     # Live-ISO-only overrides — idle=0 to keep the session up indefinitely
     # during install, no auto-lock, suppress GNOME welcome dialog. These
     # ride alongside (not on top of) the source files thanks to the 99-
