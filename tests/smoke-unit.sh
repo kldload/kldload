@@ -602,17 +602,22 @@ else
     for _case in fail ok term; do
         rm -rf "${_xt}/run" "${_xt}/log" && mkdir -p "${_xt}/run" "${_xt}/log"
         printf '[t] ERROR: first\n[t] ERROR: the last error\n' >"${_xt}/log/kldload-installer.log"
-        # swallow: the child is SUPPOSED to exit non-zero in two of the three cases
+        # The child is SUPPOSED to exit non-zero in two of the three cases, so its
+        # status is recorded and checked, not thrown away.
+        _xrc=0
         bash -c 'set -Eeuo pipefail; K_PROGRESS_DIR=$1/run KLDLOAD_LOG_DIR=$1/log KLDLOAD_TARGET_MNT=$1/none
             umount() { :; }; zpool() { :; }; source "$1/funcs.sh"
             trap _install_exit EXIT; trap "exit 143" TERM
             case $2 in fail) exit 1 ;; ok) exit 0 ;; term) kill -TERM $$; sleep 5; echo carried-on >"$1/run/carried-on" ;; esac' \
-            _ "$_xt" "$_case" >/dev/null 2>&1 || true
-        _r="$(cat "${_xt}/run/install-result" 2>/dev/null || true)" # absent is the success case
+            _ "$_xt" "$_case" >/dev/null 2>&1 || _xrc=$?
+        _r=""
+        if [[ -f "${_xt}/run/install-result" ]]; then
+            _r="$(cat "${_xt}/run/install-result")"
+        fi
         case "$_case" in
-        fail) [[ "$_r" == $'failed\t1\t'*$'\tthe last error' ]] || _xbad+=" fail" ;;
-        ok) [[ -z "$_r" ]] || _xbad+=" ok" ;;
-        term) [[ "$_r" == $'failed\t143\t'* && ! -e "${_xt}/run/carried-on" ]] || _xbad+=" term" ;;
+        fail) [[ "$_xrc" == 1 && "$_r" == $'failed\t1\t'*$'\tthe last error' ]] || _xbad+=" fail" ;;
+        ok) [[ "$_xrc" == 0 && -z "$_r" ]] || _xbad+=" ok" ;;
+        term) [[ "$_xrc" == 143 && "$_r" == $'failed\t143\t'* && ! -e "${_xt}/run/carried-on" ]] || _xbad+=" term" ;;
         esac
     done
     if [[ -z "$_xbad" ]]; then

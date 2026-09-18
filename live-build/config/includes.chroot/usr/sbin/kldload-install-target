@@ -2003,10 +2003,13 @@ k_publish_result() {
     mkdir -p "$K_PROGRESS_DIR" 2>/dev/null || return 0
     msg="$(grep -a 'ERROR: ' "${KLDLOAD_LOG_DIR}/kldload-installer.log" 2>/dev/null |
         tail -n 1 | sed 's/^\[[^]]*\] ERROR: //' | tr '\t' ' ')" || msg=""
-    # swallow: progress reporting must never abort anything, least of all a failure path
-    printf 'failed\t%s\t%s\t%s\n' "$rc" "$(date +%s)" "${msg:-the installer exited with status $rc}" \
-        >"$K_PROGRESS_DIR/.install-result.$$" 2>/dev/null &&
+    # Never fatal: this runs on the failure path, where a second failure would only
+    # bury the first. A result that cannot be written is lost, and the log keeps it.
+    if printf 'failed\t%s\t%s\t%s\n' "$rc" "$(date +%s)" "${msg:-the installer exited with status $rc}" \
+        >"$K_PROGRESS_DIR/.install-result.$$" 2>/dev/null; then
+        # swallow: a result that cannot be renamed into place is lost, not fatal (see above)
         mv -f "$K_PROGRESS_DIR/.install-result.$$" "$K_PROGRESS_DIR/install-result" 2>/dev/null || true
+    fi
     return 0
 }
 
