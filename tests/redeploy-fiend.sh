@@ -36,6 +36,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # fiend's identity. The MAC is the onboard Realtek; the disk is the by-id path,
 # never /dev/nvme0n1 -- a kernel name is a ticking time bomb when a card moves.
 MAC="${FIEND_MAC:-f0:2f:74:cd:27:50}"
+# The NIC that carries the download: the X540 10G. Its card has only a
+# legacy-BIOS PXE ROM, so under UEFI the Realtek above must start the boot and
+# this one takes over in the initrd (arm-install --netdev; 2026-09-18, card
+# refitted). --netdev none lets the initrd use whichever NIC routes first.
+NETDEV="${FIEND_NETDEV:-a0:36:9f:9f:10:1c}"
 DISK="${FIEND_DISK:-/dev/disk/by-id/nvme-WD_BLACK_SN850X_HS_2000GB_22303U801021}"
 ANSWERS="${ROOT}/live-build/pxe/answers/$(tr 'A-Z:' 'a-z-' <<<"$MAC").env"
 
@@ -68,6 +73,8 @@ usage: redeploy-fiend.sh [options]
   --build-images         build every golden, klab image and appliance
   --no-build-images      do NOT build them (the default in this copy is ON)
   --password TEXT        admin password (default Passw0rd)
+  --netdev MAC|none      NIC that downloads the root image (default: the X540
+                         10G, a0:36:9f:9f:10:1c); none = no pin
   --dry-run              print the answers file and stop, arming nothing
   --status               show what is armed, then exit
   --disarm               remove fiend's token, then exit
@@ -108,6 +115,7 @@ while (($#)); do
     # there is no way to ask for an install that does not spend its first
     # boot building five goldens and an appliance catalog.
     --no-build-images) BUILD_IMAGES=0 && shift ;;
+    --netdev) NETDEV="${2:?--netdev needs a MAC or none}" && shift 2 ;;
     --dry-run) DRY_RUN=1 && shift ;;
     --status)
         server status
@@ -176,7 +184,8 @@ say "answers: $ANSWERS"
 systemctl is-active --quiet kldload-netboot.service ||
     die "kldload-netboot.service is not running — start it before arming"
 
-server arm-install "$MAC" "$ANSWERS" >/dev/null ||
+[[ "$NETDEV" == none ]] && NETDEV=""
+server arm-install "$MAC" "$ANSWERS" ${NETDEV:+--netdev "$NETDEV"} >/dev/null ||
     die "arm-install failed"
 
 # Outcome, not exit code: fetch what fiend will fetch. A token that exists on
@@ -194,10 +203,17 @@ for path in "armed/${M}.ipxe" "answers/${M}.env" kldload/vmlinuz kldload/initrd.
         die "http://${IP}:${PORT}/${path} returned ${code} — fiend would fail here"
 done
 say "verified: every file fiend needs answers over HTTP"
+if [[ -n "$NETDEV" ]]; then
+    ND="$(tr 'A-Z:' 'a-z-' <<<"$NETDEV")"
+    curl -s --max-time 10 "http://${IP}:${PORT}/armed/${M}.ipxe" | grep -q "BOOTIF=01-${ND}\b" ||
+        die "the armed boot line does not pin the download to ${NETDEV}"
+    say "verified: the boot line pins the download to ${NETDEV}"
+fi
 
 echo
 say "fiend will install: ${DISTRO}/${PROFILE}"
 say "  disk       ${DISK}"
+say "  boots on   ${MAC}, downloads over ${NETDEV:-<whichever NIC routes first>}"
 say "  encrypted  $((ENCRYPT)) $([[ $ENCRYPT == 1 ]] && echo '(passphrase in the seed AND on the target)')"
 say "  secureboot $((SECURE_BOOT)) $([[ $SECURE_BOOT == 1 ]] && echo '(turn it on in firmware AFTER; netboot needs it OFF)')"
 say "  images     $((BUILD_IMAGES))"

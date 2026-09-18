@@ -16,6 +16,8 @@
 #   arm-install <mac> <answers>            — netboot INSTALLS from the mirror.
 #   arm-deploy  <mac> --golden <name> --disk D — netboot RECEIVES a golden
 #                                            ("clone into existence") over HTTP.
+# Both take --netdev <mac2>: <mac> starts the boot, <mac2> carries the root
+# image (BOOTIF=01-<mac2>); see _netdev_arg for why fiend needs it.
 #
 # THE ARMING MECHANISM: boot.ipxe probes net0..net3 and CHAINS the first
 # armed/<mac>.ipxe it finds. That per-MAC snippet is where install and deploy
@@ -30,8 +32,8 @@
 # target needs no ssh identity and the server needs no delegation. That is the
 # whole reason the golden transport is HTTP and not ssh.
 #
-# SUBCOMMANDS: serve | arm-install <mac> <answers> | arm-all <dir> [--dry-run]
-#              | arm-deploy <mac> --golden N --disk D [--hostname H]
+# SUBCOMMANDS: serve | arm-install <mac> <answers> [--netdev M] | arm-all <dir> [--dry-run]
+#              | arm-deploy <mac> --golden N --disk D [--hostname H] [--netdev M]
 #              | golden <dataset> [as <name>] | disarm <mac> | disarm-all | status
 #
 # Inputs : /var/lib/kldload-netboot/{vmlinuz,initrd.img,squashfs.img}
@@ -182,6 +184,40 @@ _mac_norm() {
     m="${m,,}"
     [[ "$m" =~ ^([0-9a-f]{2}-){5}[0-9a-f]{2}$ ]] || die "not a MAC address: $1"
     printf '%s' "$m"
+}
+
+# _netdev_arg <mac> — the kernel argument that pins the initrd's network to ONE
+# NIC: " BOOTIF=01-aa-bb-…" (leading space, so it appends to a boot line), or
+# nothing for an empty argument.
+#
+# WHY: the NIC that PXE-boots and the NIC that should carry the 15 GB root image
+# are not always the same. fiend's X540 10G card has only a legacy-BIOS PXE ROM
+# (Intel Boot Agent XE 2.3.46, no UEFI image), so under UEFI only the onboard 1G
+# Realtek can start the boot (2026-09-18). ISO_ARGS says ip=dhcp, which
+# NetworkManager's initrd generator turns into ONE connection with
+# multi-connect=3 on every ethernet: both NICs lease on the same /24 and the
+# root image rides whichever route wins. BOOTIF binds that connection to one
+# MAC (mac-address= in the generated profile; checked by running the payload
+# initrd's own nm-initrd-generator, 2026-09-18). ifname=<name>:<mac> was the
+# alternative and was rejected: it RENAMES the NIC, and the live system and the
+# installer then see an interface name nothing else expects.
+#
+# Callers validate the MAC with _mac_norm BEFORE writing anything; this checks
+# again and fails rather than print, because a substitution inside printf's
+# arguments is masked by printf's own success -- a bad --netdev printed FATAL
+# and still armed the machine, exit 0 (caught under test, 2026-09-18).
+_netdev_arg() {
+    [[ -n "${1:-}" ]] || return 0
+    local m
+    m="$(_mac_norm "$1")" || return 1
+    printf ' BOOTIF=01-%s' "$m"
+}
+
+# _answers_netdev <answers-file> — KLDLOAD_NETBOOT_NETDEV from an answers file,
+# quotes stripped, last one wins; empty when unset. This is how arm-all and the
+# CI runner, which arm from files alone, pin a machine's download NIC.
+_answers_netdev() {
+    sed -n 's/^KLDLOAD_NETBOOT_NETDEV=//p' "$1" | tail -1 | tr -d "\"'"
 }
 
 # _derive_range <ip> <iface> — a pool in the interface's own subnet, upper half
@@ -550,8 +586,28 @@ _check_answers() {
 }
 
 cmd_arm_install() {
-    local mac="${1:?usage: arm-install <mac> <answers-file>}" answers="${2:?usage: arm-install <mac> <answers-file>}"
+    local usage="usage: arm-install <mac> <answers-file> [--netdev <mac2>]"
+    local mac="${1:?$usage}" answers="${2:?$usage}"
+    shift 2
+    local netdev="" netdev_from="--netdev"
+    while (($#)); do
+        case "$1" in
+        --netdev)
+            netdev="${2:?--netdev needs a MAC}"
+            shift 2
+            ;;
+        *) die "arm-install: unknown argument: $1" ;;
+        esac
+    done
     _check_answers "$answers" || die "refusing to arm $mac"
+    # The flag wins over the file, so a one-off arm can override an estate file.
+    if [[ -z "$netdev" ]]; then
+        netdev="$(_answers_netdev "$answers")"
+        netdev_from="KLDLOAD_NETBOOT_NETDEV"
+    fi
+    [[ -z "$netdev" ]] || _mac_norm "$netdev" >/dev/null
+    local netarg
+    netarg="$(_netdev_arg "$netdev")"
     install -d -m 0755 "$ROOT/answers" "$ROOT/armed"
     local m
     m="$(_mac_norm "$mac")"
@@ -560,13 +616,14 @@ cmd_arm_install() {
     cat >"$ROOT/armed/${m}.ipxe" <<IPXE
 #!ipxe
 # arm-install ${mac}. \${base} comes from boot.ipxe.
-kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img ${ISO_ARGS} ${KIOSK_ARGS} kldload.seed=\${base}/answers/${m}.env
+kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img ${ISO_ARGS} ${KIOSK_ARGS} kldload.seed=\${base}/answers/${m}.env${netarg}
 initrd \${base}/kldload/initrd.img
 boot
 IPXE
     [[ -s "$ROOT/armed/${m}.ipxe" ]] || die "$ROOT/armed/${m}.ipxe did not land"
     log "ARMED-INSTALL $mac — next netboot installs $(sed -n 's/^KLDLOAD_DISTRO=//p' "$answers")/$(sed -n 's/^KLDLOAD_PROFILE=//p' "$answers")"
-    k_audit "ARMED-INSTALL $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) from $answers"
+    [[ -n "$netdev" ]] && log "  root image and seed download over ${netdev} (${netdev_from}); ${mac} only starts the boot"
+    k_audit "ARMED-INSTALL $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) from $answers${netdev:+ netdev=$netdev}"
     if grep -qE '^KLDLOAD_(PASSWORD|ZFS_PASSPHRASE)=.+' "$answers"; then
         log "  WARN: this file carries a password, served unauthenticated to the LAN"
         log "        until you disarm: kldload-netboot-server disarm $mac"
@@ -580,7 +637,7 @@ IPXE
 # deploy verb repartitions it and refuses to guess; identical rack boxes can
 # all take the same kernel name (/dev/nvme0n1), a mixed rack takes by-id.
 cmd_arm_deploy() {
-    local mac="${1:?usage: arm-deploy <mac> --golden <name> --disk D [--hostname H]}" golden="" disk="" host=""
+    local mac="${1:?usage: arm-deploy <mac> --golden <name> --disk D [--hostname H] [--netdev <mac>]}" golden="" disk="" host="" netdev=""
     shift
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -596,6 +653,10 @@ cmd_arm_deploy() {
             host="${2:?--hostname needs a value}"
             shift 2
             ;;
+        --netdev)
+            netdev="${2:?--netdev needs a MAC}"
+            shift 2
+            ;;
         *) die "arm-deploy: unknown argument: $1" ;;
         esac
     done
@@ -607,22 +668,25 @@ cmd_arm_deploy() {
         die "arm-deploy: --disk must be /dev/... (got '$disk')"
     [[ -z "$host" || "$host" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] ||
         die "arm-deploy: --hostname '$host' is not a valid hostname"
+    [[ -z "$netdev" ]] || _mac_norm "$netdev" >/dev/null
     install -d -m 0755 "$ROOT/armed"
     local m
     m="$(_mac_norm "$mac")"
     local diskarg=" kldload.disk=${disk}"
     local hostarg=""
     [[ -n "$host" ]] && hostarg=" kldload.hostname=${host}"
+    local netarg
+    netarg="$(_netdev_arg "$netdev")"
     cat >"$ROOT/armed/${m}.ipxe" <<IPXE
 #!ipxe
 # arm-deploy ${mac} <- golden ${golden}. \${base} comes from boot.ipxe.
-kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img ${ISO_ARGS} kldload.action=deploy kldload.archive-url=\${base}/golden/${golden}.zfs${diskarg}${hostarg}
+kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img ${ISO_ARGS} kldload.action=deploy kldload.archive-url=\${base}/golden/${golden}.zfs${diskarg}${hostarg}${netarg}
 initrd \${base}/kldload/initrd.img
 boot
 IPXE
     [[ -s "$ROOT/armed/${m}.ipxe" ]] || die "$ROOT/armed/${m}.ipxe did not land"
-    log "ARMED-DEPLOY $mac — next netboot RECEIVES golden '${golden}' onto ${disk}${host:+ as $host}"
-    k_audit "ARMED-DEPLOY $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) golden=$golden disk=$disk"
+    log "ARMED-DEPLOY $mac — next netboot RECEIVES golden '${golden}' onto ${disk}${host:+ as $host}${netdev:+, over $netdev}"
+    k_audit "ARMED-DEPLOY $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) golden=$golden disk=$disk${netdev:+ netdev=$netdev}"
 }
 
 # ── golden ───────────────────────────────────────────────────────────────────
@@ -848,7 +912,8 @@ cmd_status() {
             while read -r a; do
                 m="$(basename "$a" .ipxe)"
                 if grep -q 'kldload.action=deploy' "$a"; then mode="deploy ($(sed -nE 's#.*golden/([^ ]*)\.zfs.*#\1#p' "$a" | head -1))"; else mode="install"; fi
-                printf '          %s -> %s\n' "$m" "$mode"
+                nd="$(sed -nE 's/.* BOOTIF=01-([0-9a-f-]+).*/\1/p' "$a" | head -1)"
+                printf '          %s -> %s%s\n' "$m" "$mode" "${nd:+, download over $nd}"
             done
     else
         printf 'armed   : 0 machine(s)\n'
@@ -884,11 +949,18 @@ status) cmd_status ;;
 usage: kldload-netboot-server <command>
 
   serve                      run the PXE server (HTTP + TFTP + proxyDHCP)
-  arm-install <mac> <answers>  next netboot of <mac> INSTALLS from the mirror
+  arm-install <mac> <answers> [--netdev <mac2>]
+                             next netboot of <mac> INSTALLS from the mirror
   arm-all <dir> [--dry-run]  arm every <mac>.env in <dir>; refuses duplicate
                              MACs or hostnames; exit 1 unless all armed
-  arm-deploy <mac> --golden <name> --disk <d> [--hostname <h>]
+  arm-deploy <mac> --golden <name> --disk <d> [--hostname <h>] [--netdev <mac2>]
                              next netboot of <mac> CLONES a golden over HTTP
+
+  --netdev <mac2>  <mac> starts the boot, <mac2> carries the download: the
+                   initrd brings up ONLY <mac2> (BOOTIF=01-<mac2>). For a fast
+                   NIC whose card cannot UEFI-PXE. arm-install also reads
+                   KLDLOAD_NETBOOT_NETDEV=<mac2> from the answers file, so
+                   arm-all pins it per machine; the flag wins over the file.
   golden <dataset> [as <name>]  stage a dataset as a golden stream
   disarm <mac>               remove the consent token; that MAC boots locally
   disarm-all                 disarm every armed machine
