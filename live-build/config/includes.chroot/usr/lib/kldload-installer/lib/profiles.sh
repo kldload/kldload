@@ -590,31 +590,6 @@ k_profile_optional_packages() {
         ;;
     esac
 
-    # ── The arcade session's packages (desktop profile only) ─────────────
-    #
-    # kldload-arcade is the optional lean sway session that sits beside GNOME
-    # at the GDM gear icon. Its launcher and configs have shipped in
-    # target-files/ since 2026-09-14 and nothing ever installed them: checked
-    # on fiend 2026-09-16, a desktop install had no /usr/local/bin/kldload-arcade,
-    # no /etc/kldload-arcade, gnome.desktop as the only wayland-session, and
-    # not one of these nine packages. Written and never wired.
-    #
-    # Optional in the strongest sense -- this list exists so that a name that
-    # does not resolve costs only the arcade session. GNOME, GDM and the kernel
-    # are in a different transaction entirely, which is the whole reason
-    # k_profile_optional_packages is separate (the steam-installer batch that
-    # took linux-image-amd64 with it, fiend 2026-08-15).
-    #
-    # The names are identical across dnf, apt and pacman, which is unusual
-    # enough to be worth stating: sway, waybar, foot, fuzzel, grim, slurp,
-    # swayidle, swaylock and wl-clipboard are spelled the same in Fedora 44,
-    # Debian trixie and Ubuntu noble. On EL they come from EPEL, which the RPM
-    # path already enables; if it is not there they simply do not resolve and
-    # the session is not offered.
-    if [[ "$_profile" == "desktop" ]]; then
-        out+=(sway waybar foot fuzzel grim slurp swayidle swaylock wl-clipboard)
-    fi
-
     # ── Netboot serving: any installed box can provision the next ────────
     #
     # kldload-netboot-server (off by default, one unit to enable) turns an
@@ -919,86 +894,6 @@ k_install_substrate_safety() {
         fi
     done
     return "$bad"
-}
-
-# k_install_arcade_session TARGET — copy the arcade session onto the target.
-#
-# Args:    $1 the target root. Reads KLDLOAD_PROFILE.
-# Returns: 0 always. This is an optional second session; nothing it can fail at
-#          is worth failing an install over, and every failure is logged.
-#
-# THE ORDER HERE IS THE WHOLE DESIGN. The .desktop file that offers the session
-# on the login screen is written LAST, and only once sway is confirmed present
-# on the target. GDM lists whatever is in wayland-sessions without checking that
-# it can run: offering a session that dies the moment it is picked is worse than
-# not offering one, because the operator has no way to tell the difference from
-# a broken machine. So the file that makes the promise goes down only after the
-# thing that keeps it.
-k_install_arcade_session() {
-    local target="${1:?target required}"
-    local _profile="${KLDLOAD_PROFILE:-server}"
-    local src="/usr/lib/kldload-installer/target-files"
-
-    [[ "$_profile" == "desktop" ]] || return 0
-    [[ -x "${src}/usr/local/bin/kldload-arcade" ]] || {
-        k_log "arcade: launcher not in target-files — session not installed"
-        return 0
-    }
-
-    # Ask the target, not the installer: the packages went on in the optional
-    # transaction and may simply not have resolved. Both paths are real --
-    # usrmerge puts sway in /usr/bin, and a distro that has not merged uses
-    # /usr/bin too, but check both rather than assume the layout.
-    if [[ ! -x "${target}/usr/bin/sway" && ! -x "${target}/bin/sway" ]]; then
-        k_log "arcade: sway is not on the target — session NOT offered (this is deliberate: a session GDM cannot start is worse than one it never lists)"
-        return 0
-    fi
-
-    install -D -m 0755 "${src}/usr/local/bin/kldload-arcade" \
-        "${target}/usr/local/bin/kldload-arcade" || {
-        k_log "arcade: could not install the launcher — session NOT offered"
-        return 0
-    }
-
-    local _f _rel _missing=0 _copied=0
-    while IFS= read -r _f; do
-        _rel="${_f#"${src}"/}"
-        if install -D -m 0644 "$_f" "${target}/${_rel}"; then
-            _copied=$((_copied + 1))
-        else
-            k_log "arcade: could not copy ${_rel}"
-            _missing=1
-        fi
-    done < <(find "${src}/etc/kldload-arcade" -type f 2>/dev/null)
-
-    ((_missing == 0)) || {
-        k_log "arcade: configuration incomplete — session NOT offered"
-        return 0
-    }
-
-    # A loop that ran zero times is not a success. If find matched nothing --
-    # the directory absent, or empty -- every check above passes and the
-    # session would be offered with no configuration behind it, which is the
-    # precise failure this function exists to prevent. So count what landed,
-    # and then name the one file sway cannot start without rather than trusting
-    # the count to imply it.
-    ((_copied > 0)) || {
-        k_log "arcade: no configuration found in target-files — session NOT offered"
-        return 0
-    }
-    [[ -f "${target}/etc/kldload-arcade/sway/config" ]] || {
-        k_log "arcade: the sway config did not land — session NOT offered"
-        return 0
-    }
-
-    # Everything it needs is there. Now, and only now, offer it.
-    install -D -m 0644 "${src}/usr/share/wayland-sessions/kldload-arcade.desktop" \
-        "${target}/usr/share/wayland-sessions/kldload-arcade.desktop" || {
-        k_log "arcade: could not install the session file — session NOT offered"
-        return 0
-    }
-    k_log "arcade: session installed and offered at the GDM gear (sway + waybar + foot)"
-    return 0
 }
 
 k_install_system_files() {
@@ -2432,10 +2327,6 @@ OSREL
         ((_extcount == 0)); then
         k_log "WARN: 00-kldload-desktop enables GNOME extensions but none were carried to the target — the workspace and tiling keys will do nothing"
     fi
-
-    # The arcade session goes in beside GNOME, and gates itself on whether
-    # sway actually made it onto the target.
-    k_install_arcade_session "$target"
 
     # ── /etc files that live in includes.chroot but profiles.sh has to
     #    explicitly carry through to /target (build-iso.sh puts them in the

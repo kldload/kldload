@@ -230,27 +230,5 @@ if [[ -f /etc/kldload/keep-darksite ]]; then
     test_service_active "LAN mirror service" "kldload-apt-mirror"
 fi
 
-# ── The arcade session: offered only if it can actually start ────────────────
-# The invariant is one-directional and that is the point. GDM lists whatever is
-# in /usr/share/wayland-sessions without checking it can run, so a session file
-# with no sway behind it gives the operator a login option that dies on
-# selection and looks exactly like a broken machine. Absent is fine and is the
-# correct outcome on any install where the packages did not resolve; offered
-# but unrunnable is the defect.
-#
-# Until 2026-09-16 the whole session was absent from every install: the
-# launcher and configs had been in target-files/ since 2026-09-14 and nothing
-# copied them, and no package set named sway. Written, never wired.
-_section "kldload arcade session (optional)"
-if [[ -f /usr/share/wayland-sessions/kldload-arcade.desktop ]]; then
-    test_succeeds "arcade offered: sway present" "command -v sway"
-    test_succeeds "arcade offered: launcher present" "test -x /usr/local/bin/kldload-arcade"
-    test_succeeds "arcade offered: sway config present" "test -f /etc/kldload-arcade/sway/config"
-    test_succeeds "arcade offered: waybar config present" "test -f /etc/kldload-arcade/waybar/config.jsonc"
-    test_succeeds "arcade --help answers without root" "kldload-arcade --help >/dev/null 2>&1 || kldload-arcade 2>&1 | grep -q ."
-else
-    _pass "arcade session not offered (packages did not resolve — GNOME unaffected)"
-fi
-
 # ── Summary ──────────────────────────────────────────────────────────────────
 summary
