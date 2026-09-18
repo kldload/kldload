@@ -322,6 +322,27 @@ for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-module
 done
 log "Koji kernel pin injected: ${KOJI_KERNEL_NVR} (7 subpackages)"
 
+# ─── The pin decides the kernel ─────────────────────────────────────────────
+# Every kernel subpackage whose version is not the pin goes, by name, here --
+# not left to the generic eviction below. Resolution runs with 7.x excluded,
+# so dnf pulls Fedora's GA 6.19 kernel into the pool before the pin lands.
+# `dnf repomanage` did not see those freshly downloaded RPMs: it evicted 0 in
+# both runs that downloaded 6.19 that same run (the 2026-09-18 standalone
+# refresh and build 30), and evicted all seven only when 6.19 was already on
+# disk from an earlier run. Why is not known; the pin is, so this does not
+# depend on it. kernel-headers is not here: it versions separately.
+_kstale=0
+for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra kernel-devel kernel-devel-matched; do
+    while IFS= read -r _kf; do
+        [[ -n "$_kf" ]] || continue
+        [[ "$(basename "$_kf")" == "${_ksub}-${KOJI_KERNEL_NVR}.${ARCH}.rpm" ]] && continue
+        log "  removing unpinned kernel: $(basename "$_kf")"
+        rm -f "$_kf"
+        ((_kstale++)) || true # counter only: ((x++)) from 0 is non-zero under set -e
+    done < <(find "${REPO_DIR}" -maxdepth 1 -name "${_ksub}-[0-9]*.${ARCH}.rpm")
+done
+log "Removed ${_kstale} unpinned kernel RPM(s)"
+
 log "Creating repo metadata..."
 # ─── Evict superseded RPM versions ───────────────────────────────────────────
 #
