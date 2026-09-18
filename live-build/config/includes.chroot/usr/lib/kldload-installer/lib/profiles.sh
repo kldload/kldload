@@ -3219,6 +3219,19 @@ WPEOF
         else
             k_log "WARNING: no storage daemon found on the target — this machine serves nothing"
         fi
+        # Metrics: the profile installs node-exporter for this box and nothing
+        # enabled it, so :9100 never answered (fiend 2026-09-18, the first
+        # matrix run of storage on Fedora). Same unit name on RPM and Debian.
+        # Kept out of the loop above so it cannot mask "serves nothing".
+        if [[ -e "${target}/usr/lib/systemd/system/prometheus-node-exporter.service" ||
+            -e "${target}/lib/systemd/system/prometheus-node-exporter.service" ]]; then
+            mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
+            ln -sf /usr/lib/systemd/system/prometheus-node-exporter.service \
+                "${target}/etc/systemd/system/multi-user.target.wants/prometheus-node-exporter.service" ||
+                k_log "WARNING: could not enable prometheus-node-exporter — :9100 will not answer"
+        else
+            k_log "WARNING: prometheus-node-exporter.service not on the target — no host metrics"
+        fi
 
         # Open the ports those daemons listen on. A storage server whose
         # firewall drops NFS is the same failure as one with no NFS installed,
@@ -3230,10 +3243,11 @@ WPEOF
 #         statd/mountd ports, which nfs-utils sets in /etc/nfs.conf)
 #   445   SMB
 #   3260  iSCSI
+#   9100  node-exporter host metrics
 table inet kldload_storage {
     chain input {
         type filter hook input priority 0; policy accept;
-        tcp dport { 2049, 445, 3260 } accept
+        tcp dport { 2049, 445, 3260, 9100 } accept
         udp dport { 2049 } accept
     }
 }
