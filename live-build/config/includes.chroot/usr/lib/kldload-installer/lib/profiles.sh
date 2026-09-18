@@ -520,6 +520,30 @@ k_profile_packages() {
     esac
 }
 
+# _autodeploy_wants <key> — 0 if kldload-autodeploy --want reports <key>=1 for
+# this install (k8s, klab or ai). On the live image autodeploy reads the
+# installer's effective-config.env, so the rule lives in one file, and the
+# installer, first boot and the first-boot show cannot disagree about it.
+# KLDLOAD_FBSHOW_WANT (a command printing the want line) is the test hook,
+# the same one kldload-firstboot-show honours. When --want cannot answer, the
+# answer is no, loudly: building nothing is the safe default for an hour of
+# downloads.
+_autodeploy_wants() {
+    local _want
+    if [[ -n "${KLDLOAD_FBSHOW_WANT:-}" ]]; then
+        _want="$(bash -c "${KLDLOAD_FBSHOW_WANT}")" || return 1
+    elif [[ -x /usr/sbin/kldload-autodeploy ]]; then
+        if ! _want="$(/usr/sbin/kldload-autodeploy --want 2>/dev/null)"; then
+            k_log "WARNING: kldload-autodeploy --want failed — treating ${1}=0"
+            return 1
+        fi
+    else
+        k_log "WARNING: no kldload-autodeploy on the live image — treating ${1}=0"
+        return 1
+    fi
+    [[ " ${_want} " == *" ${1}=1 "* ]]
+}
+
 # k_profile_optional_packages — emit additional packages gated by web UI
 # checkboxes (eBPF, ZFS, KVM, K8s) and auto-detected hypervisor guest tools.
 # These are appended to k_profile_packages output before the install command.
@@ -4117,7 +4141,15 @@ KUBEBANNER
     # testing. Like the K8s bootstrap, this runs on first boot because it needs
     # a running libvirtd and network access to download ISOs. The build phase
     # creates golden images, then "deploy blue" instantiates the blue site VMs.
-    if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" == "1" || "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]]; then
+    #
+    # WHEN is kldload-autodeploy's decision (--want klab=1), not a copy of it.
+    # This used to be ENABLE_DEVOPS=1 || BUILD_IMAGES=1, and ENABLE_DEVOPS is the
+    # DevOps TOOLS checkbox: a 5-desktop install with BUILD_IMAGES=0 started
+    # five golden builds and a blue/green deploy three minutes after first boot,
+    # while autodeploy -- and the first-boot show, which asks it -- said klab=0
+    # (fiend, 2026-09-18). Every server/desktop/kvm/k8s/ai preset in the netboot
+    # menu sets ENABLE_DEVOPS=1, so all of them would have done the same.
+    if _autodeploy_wants klab; then
         k_log "Enabling klab first-boot deployment..."
         cat >"${target}/etc/systemd/system/klab-firstboot.service" <<'KLABFB'
 [Unit]

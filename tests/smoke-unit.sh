@@ -560,6 +560,26 @@ else
     rm -rf "${_ft}"
 fi
 
+# ─── klab golden builds follow autodeploy, not the DevOps checkbox ────────────
+# The installer enabled klab-firstboot on ENABLE_DEVOPS=1, the DevOps TOOLS
+# checkbox, so a desktop with BUILD_IMAGES=0 built five goldens (fiend,
+# 2026-09-18). The gate is now kldload-autodeploy --want klab=1.
+_section "klab golden builds"
+_prof="${CHROOT}/usr/lib/kldload-installer/lib/profiles.sh"
+_guard "installer: the klab first-boot timer follows autodeploy --want" "${_prof}" '^    if _autodeploy_wants klab; then$'
+_kw() { # $1 want-line command
+    KLDLOAD_FBSHOW_WANT="$1" bash -c 'k_log() { :; }; source <(sed -n "/^_autodeploy_wants() {/,/^}/p" "$1"); _autodeploy_wants klab' _ "${_prof}"
+}
+_kbad=""
+_kw 'echo k8s=0 klab=1 ai=0' || _kbad+=" klab-wanted-not-built"
+_kw 'echo k8s=1 klab=0 ai=1' && _kbad+=" built-without-klab"
+_kw 'exit 3' && _kbad+=" built-when-want-failed"
+if [[ -z "${_kbad}" ]]; then
+    _pass "installer: klab goldens only when autodeploy wants klab, never when --want fails"
+else
+    _fail "installer klab gate" "${_kbad}"
+fi
+
 # ─── a failed install reports itself ─────────────────────────────────────────
 # kldload-install-target's EXIT trap was silently replaced in main, so a failed
 # install neither cleaned up nor told anyone, and the install show played on over
