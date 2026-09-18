@@ -359,6 +359,13 @@ half-armed rack is an error you hear about rather than discover.
 Per-machine differences live in the answers file — hostname, disk, profile, how
 many control planes and workers. Same image, different answers.
 
+**Boot on one NIC, download on a faster one.** Many 10G cards carry no UEFI
+PXE code, so only the onboard port can start the boot. `--netdev <mac>` (or
+`KLDLOAD_NETBOOT_NETDEV=<mac>` in the answers file, which is how `arm-all`
+takes it) hands the multi-gigabyte image to the fast card instead. After the
+install, the host bridge goes on the fastest linked NIC and the others stay up
+as fallbacks.
+
 **Your own workloads land with the cluster, not after it.** Drop a Helm chart in
 `/root/darksite/helm-charts/workloads/` or plain YAML in
 `/root/darksite/manifests/`, and first boot installs them once the cluster is up

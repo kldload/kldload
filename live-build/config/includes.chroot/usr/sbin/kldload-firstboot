@@ -1663,6 +1663,44 @@ _fb_install_darksite_binary() {
     fi
 }
 
+# _fb_pick_uplink — the ethernet NIC that br0 should own: on stdout, one
+# device name, or nothing when there is no ethernet at all.
+#
+# Ranked: physical NIC (has a PCI/USB device behind it) over virtual, link up
+# over link down, then the fastest negotiated speed; a tie keeps nmcli's order,
+# which is what the old `head -1` picked, so a single-NIC host is unchanged.
+#
+# WHY: `head -1` bridged fiend's onboard 1G Realtek and left the 10G X540
+# beside it idle with no address (2026-09-18) — nmcli lists by PCI order, not
+# by anything that matters. The operator's rule is that the fast NIC is always
+# used first. The 1G is not given up: the br0 section gives it its own lease
+# as a fallback, and br0's route metric is what makes the fast one win.
+#
+# Reads nmcli and /sys/class/net (_FB_SYSNET overrides the latter, for tests).
+# speed reads -1 or fails on a link that is down; both rank as 0.
+_fb_pick_uplink() {
+    local sys="${_FB_SYSNET:-/sys/class/net}" dev best="" best_key=-1 key phys carrier speed
+    while IFS=: read -r dev _; do
+        [[ -n "$dev" && "$dev" != br0 ]] || continue
+        phys=0 carrier=0 speed=0
+        [[ -e "$sys/$dev/device" ]] && phys=1
+        # carrier/speed raise EINVAL on an interface that is administratively
+        # down; that is "no link", which is what 0 already says.
+        carrier="$(cat "$sys/$dev/carrier" 2>/dev/null)" || carrier=0
+        [[ "$carrier" == 1 ]] || carrier=0
+        speed="$(cat "$sys/$dev/speed" 2>/dev/null)" || speed=0
+        [[ "$speed" =~ ^[0-9]+$ ]] || speed=0
+        ((carrier)) || speed=0
+        # One sortable number: physical, then link, then Mb/s (below 10^7).
+        key=$((phys * 100000000 + carrier * 10000000 + speed))
+        if ((key > best_key)); then
+            best="$dev"
+            best_key=$key
+        fi
+    done < <(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ':ethernet$')
+    printf '%s' "$best"
+}
+
 # _fb_install_firecracker — the three binaries, then the fact: is firecracker
 # on PATH. kfire refuses to run without it and says so; this is the earlier,
 # louder place to say it.
@@ -3877,7 +3915,7 @@ AIMOTD
             # link to a half-built bridge is unreachable and unfixable
             # remotely, which is strictly worse than having no bridge at all.
             local _primary_nic
-            _primary_nic=$(nmcli -t -f DEVICE,TYPE device | grep ':ethernet' | head -1 | cut -d: -f1)
+            _primary_nic="$(_fb_pick_uplink)"
             if [[ -z "$_primary_nic" || "$_primary_nic" == "br0" ]]; then
                 log "No ethernet device to bridge — VMs will use virbr0 NAT"
             elif [[ -n "$(ls -A /sys/class/net/br0/brif 2>/dev/null)" ]]; then
@@ -3930,6 +3968,14 @@ AIMOTD
                 nmcli connection modify br0 bridge.stp no \
                     ${_mac:+bridge.mac-address "$_mac"} >/dev/null 2>&1 ||
                     log "  note: could not re-assert stp/mac on br0"
+                # WHY metric 50: a second NIC left out of the bridge can hold its
+                # own lease on the same LAN as plain ethernet at NM's default
+                # metric 100 (kldload-dhcp, or the fallback made below), while a
+                # bridge defaults to 425 -- so the SLOWER NIC would own the
+                # default route and every download. 50 puts br0 (the fastest
+                # NIC, see _fb_pick_uplink) first (fiend, 2026-09-18).
+                nmcli connection modify br0 ipv4.route-metric 50 ipv6.route-metric 50 >/dev/null 2>&1 ||
+                    log "  WARN: could not set br0's route metric — a second NIC may carry the default route"
                 if [[ "$_method" == "manual" && -n "$_owner" ]]; then
                     nmcli connection modify br0 \
                         ipv4.addresses "$(nmcli -g ipv4.addresses connection show "${_owner}" 2>/dev/null)" \
@@ -3973,7 +4019,62 @@ AIMOTD
                 done
 
                 if [[ "$_bridged" == "1" ]]; then
-                    ok "Bridge br0 up on ${_primary_nic} ($(ip -4 -br addr show br0 | awk '{print $3}'))"
+                    ok "Bridge br0 up on ${_primary_nic} ($(ip -4 -br addr show br0 | awk '{print $3}'), $(cat "/sys/class/net/${_primary_nic}/speed" 2>/dev/null || echo '?') Mb/s)"
+                    # Two NICs holding addresses on one LAN answer ARP for EACH
+                    # OTHER's address by default (Linux's weak host model), so a
+                    # peer can cache the 1G's MAC for br0's address and every
+                    # inbound transfer rides the slow link. arp_ignore=1 answers
+                    # only on the interface that owns the address; arp_announce=2
+                    # sources ARP from it. Written only when a second linked
+                    # physical NIC exists: a single-NIC host keeps the defaults.
+                    #
+                    # Each other linked wired NIC is also given its own DHCP
+                    # profile at metric 200 when nothing holds it. Without one it
+                    # has NO address: NetworkManager makes no automatic "Wired
+                    # connection" for a NIC while any compatible profile exists,
+                    # and the unbound kldload-dhcp counts even stood down -- fiend's
+                    # 10G sat with no address beside br0 exactly that way
+                    # (2026-09-18). The fallback is what keeps the host reachable
+                    # when the fast link drops; br0's metric 50 keeps it second.
+                    local _other _others=0 _fb_con
+                    for _other in /sys/class/net/*; do
+                        _other="${_other##*/}"
+                        [[ "$_other" != "$_primary_nic" && -e "/sys/class/net/${_other}/device" ]] || continue
+                        [[ "$(cat "/sys/class/net/${_other}/carrier" 2>/dev/null)" == 1 ]] || continue
+                        [[ -d "/sys/class/net/${_other}/wireless" ]] && continue
+                        _others=$((_others + 1))
+                        _fb_con="$(nmcli -g GENERAL.CONNECTION device show "$_other" 2>/dev/null)" || _fb_con=""
+                        [[ -z "$_fb_con" ]] || continue
+                        # swallow: the profile already exists on a re-run; the up
+                        # and the address check below decide the outcome.
+                        nmcli connection add type ethernet ifname "$_other" con-name "kldload-fallback-${_other}" \
+                            connection.autoconnect yes ipv4.method auto ipv4.route-metric 200 \
+                            ipv6.method auto ipv6.route-metric 200 >/dev/null 2>&1 ||
+                            log "  note: kldload-fallback-${_other} profile already existed"
+                        # swallow: DHCP may settle after `up` returns; the loop decides.
+                        nmcli connection up "kldload-fallback-${_other}" >/dev/null 2>&1 || true
+                        for _try in $(seq 1 15); do
+                            ip -4 addr show "$_other" 2>/dev/null | grep -q 'inet ' && break
+                            sleep 2
+                        done
+                        if ip -4 addr show "$_other" 2>/dev/null | grep -q 'inet '; then
+                            ok "fallback ${_other}: $(ip -4 -br addr show "$_other" | awk '{print $3}') at metric 200, behind br0"
+                        else
+                            log "WARNING: ${_other} has link but got no address — no fallback if ${_primary_nic} drops"
+                        fi
+                    done
+                    if ((_others > 0)); then
+                        printf '%s\n' \
+                            '# kldload-firstboot: more than one NIC on the LAN; see the br0 section.' \
+                            'net.ipv4.conf.all.arp_ignore = 1' \
+                            'net.ipv4.conf.all.arp_announce = 2' >/etc/sysctl.d/60-kldload-multihome.conf
+                        if sysctl -p /etc/sysctl.d/60-kldload-multihome.conf >/dev/null 2>&1 &&
+                            [[ "$(sysctl -n net.ipv4.conf.all.arp_ignore)" == 1 ]]; then
+                            ok "multi-NIC host: arp_ignore=1, arp_announce=2 (${_others} other linked NIC(s))"
+                        else
+                            log "WARNING: could not apply /etc/sysctl.d/60-kldload-multihome.conf — inbound traffic may use the slower NIC"
+                        fi
+                    fi
                 else
                     # ROLL BACK: restore the profile that was working and take
                     # the half-built bridge out of the way, so the next boot
