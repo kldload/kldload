@@ -1372,7 +1372,7 @@ cmd_pxe_serve() {
             # name.
             printf 'set distro fedora\n'
             printf 'set profile server\n'
-            printf 'set tz America/Los_Angeles\n'
+            printf 'set tz America/Vancouver\n' # operator's zone (2026-09-18); the menu below offers the rest
             printf 'set user admin\n'
             printf 'set host kld-${net0/mac:hexhyp}\n'
             printf 'set sb 0\n'
@@ -1424,7 +1424,7 @@ cmd_pxe_serve() {
             printf ':tzmenu\n'
             printf 'menu Timezone\n'
             local _z
-            for _z in America/Los_Angeles America/Denver America/Chicago America/New_York UTC Europe/London Europe/Berlin; do
+            for _z in America/Vancouver America/Los_Angeles America/Denver America/Chicago America/New_York UTC Europe/London Europe/Berlin; do
                 printf 'item %s   %s\n' "$_z" "$_z"
             done
             printf 'choose --default ${tz} z || goto top\n'

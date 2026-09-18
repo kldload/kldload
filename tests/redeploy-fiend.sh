@@ -151,7 +151,7 @@ done
     printf 'KLDLOAD_HOSTNAME=fiend\n'
     printf 'KLDLOAD_USERNAME=admin\n'
     printf 'KLDLOAD_PASSWORD=%s\n' "$PASSWORD"
-    printf 'KLDLOAD_TIMEZONE=America/Los_Angeles\n'
+    printf 'KLDLOAD_TIMEZONE=America/Vancouver\n'
     printf 'KLDLOAD_LOCALE=en_US.UTF-8\n'
     printf 'KLDLOAD_ENABLE_ZFS=1\n'
     printf 'KLDLOAD_ZFS_ENCRYPT=%s\n' "$ENCRYPT"
