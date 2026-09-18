@@ -74,14 +74,47 @@ if [[ ! -x "$REAL" ]]; then
     exit 1
 fi
 
-VERB="${1:-}"
+# The verb is the first word that is not an option -- NOT simply $1. With $1,
+# `dnf -y install tree` had the verb "-y", which is not mutating, so it took no
+# snapshot; options before the verb are how scripts and muscle memory write it
+# (`dnf -y install`, `apt-get -y install`, `dnf --refresh upgrade`). dnf has no
+# hook behind this wrapper the way apt has apt.conf.d, so it was unprotected
+# (fiend, 2026-09-18: 12 snapshots before and after a `dnf -y -q install`).
+# Options that take their value as the NEXT word are skipped with it, or
+# `dnf --repo fedora install x` would read "fedora" as the verb.
+_find_verb() {
+    local a skip=0
+    for a in "$@"; do
+        if ((skip)); then
+            skip=0
+            continue
+        fi
+        case "$a" in
+        -c | -o | -t | -a | -d | -e | -x | --config | --installroot | --releasever | \
+            --repo | --repoid | --enablerepo | --disablerepo | --setopt | --exclude | \
+            --forcearch | --comment | --downloaddir | --destdir | --debuglevel | \
+            --errorlevel | --rpmverbosity | --target-release | --host-architecture | --option)
+            skip=1
+            ;;
+        -*) ;;
+        *)
+            printf '%s\n' "$a"
+            return 0
+            ;;
+        esac
+    done
+    return 0
+}
+VERB="$(_find_verb "$@")"
 
 # ─── rollback: the QoL verb ────────────────────────────────────────────────
 # Not a package-manager operation at all, so it never reaches the real binary.
 # Bare `apt rollback` means the obvious thing: undo the last transaction. It
 # only STAGES the change, so a mistyped rollback costs a `cancel`, not a
 # rebuild.
-if [[ "$VERB" == "rollback" ]]; then
+# rollback is kldload's own verb and is taken from $1 only, because it is
+# shifted off below.
+if [[ "${1:-}" == "rollback" ]]; then
     shift
     if [[ ! -x /usr/sbin/kldload-rollback ]]; then
         printf 'kldload-pkg-wrapper: kldload-rollback is not installed\n' >&2

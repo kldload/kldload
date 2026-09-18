@@ -560,6 +560,25 @@ else
     rm -rf "${_ft}"
 fi
 
+# ─── the package wrapper finds the verb behind the options ───────────────────
+# It took the verb from $1, so `dnf -y install x` ("-y") took no snapshot, and
+# dnf has no other hook (fiend, 2026-09-18). Run its _find_verb on real argv.
+_section "package wrapper verb"
+_pw="${CHROOT}/usr/local/bin/kldload-pkg-wrapper"
+_pv() { bash -c 'source <(sed -n "/^_find_verb() {/,/^}/p" "$1"); shift; _find_verb "$@"' _ "${_pw}" "$@"; }
+_pbad=""
+[[ "$(_pv -y -q install tree)" == install ]] || _pbad+=" -y-install"
+[[ "$(_pv --refresh upgrade)" == upgrade ]] || _pbad+=" --refresh-upgrade"
+[[ "$(_pv --repo fedora install x)" == install ]] || _pbad+=" --repo-value"
+[[ "$(_pv -o Dpkg::Options::=--force-confold -y dist-upgrade)" == dist-upgrade ]] || _pbad+=" apt-o"
+[[ "$(_pv -q list installed)" == list ]] || _pbad+=" list"
+[[ -z "$(_pv --help)" ]] || _pbad+=" help-has-verb"
+if [[ -z "${_pbad}" ]]; then
+    _pass "package wrapper: the verb is found behind options, so dnf -y install snapshots"
+else
+    _fail "package wrapper verb" "wrong verb for:${_pbad}"
+fi
+
 # ─── klab golden builds follow autodeploy, not the DevOps checkbox ────────────
 # The installer enabled klab-firstboot on ENABLE_DEVOPS=1, the DevOps TOOLS
 # checkbox, so a desktop with BUILD_IMAGES=0 built five goldens (fiend,
