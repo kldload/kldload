@@ -11831,7 +11831,21 @@ async def main_async(args):
 
             # The install wins if both are present: it means this is the live
             # environment, and autodeploy state belongs to a previous machine.
-            _stage = "install" if _phase else ("converge" if _plan or _cphase else "")
+            # A failed install (kldload-install-target's exit trap, or the
+            # unit's ExecStopPost backstop): "failed<TAB>rc<TAB>epoch<TAB>msg".
+            # Before this nothing reported failure, and the show played on
+            # over a dead installer (fiend, 2026-09-18).
+            _failed, _rc, _error = False, None, ""
+            try:
+                with open("/run/kldload/install-result") as _fh:
+                    _r = _fh.read().rstrip("\n").split("\t", 3)
+                if _r and _r[0] == "failed":
+                    _failed = True
+                    _rc = int(_r[1]) if len(_r) > 1 and _r[1].isdigit() else None
+                    _error = _r[3] if len(_r) > 3 else ""
+            except OSError:
+                pass  # no result file: the install is running, finished, or never started
+            _stage = "install" if (_phase or _failed) else ("converge" if _plan or _cphase else "")
             _done = sum(1 for _x in _plan if _x["state"] == "done")
 
             # "running" is IN PROGRESS, not "state exists".
@@ -11852,7 +11866,7 @@ async def main_async(args):
             # ones -- the all-ready file firstboot touches when everything has
             # settled, and the phase name itself, "ready" being autodeploy's
             # last. Either one ends the show.
-            _running = bool(_stage)
+            _running = bool(_stage) and not _failed
             if _stage == "converge":
                 if os.path.exists("/var/lib/kldload/all-ready") or _cphase == "ready":
                     _running = False
@@ -11874,6 +11888,9 @@ async def main_async(args):
                 "done": _done,
                 "total": len(_plan),
                 "running": _running,
+                "failed": _failed,
+                "rc": _rc,
+                "error": _error,
             }).encode()
             return WsResponse(200, "OK", WsHeaders([
                 ("Content-Type", "application/json"),

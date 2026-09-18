@@ -13,7 +13,8 @@ set -Eeuo pipefail
 # perfectly good installs. EXIT-only fires once, when bash actually exits,
 # with the real final rc — no false alarms.
 _emergency_cleanup() {
-    local exit_code=$?
+    # $1 when _install_exit calls it with the status it already captured.
+    local exit_code=${1:-$?}
     [[ $exit_code -eq 0 ]] && return
     printf '\n\e[1;31m  ✖   Installation failed (exit %d) — cleaning up mounts\e[0m\n' "$exit_code" >&2
     local mnt="${KLDLOAD_TARGET_MNT:-/target}"
@@ -1991,6 +1992,37 @@ K_PROGRESS_DIR="${K_PROGRESS_DIR:-/run/kldload}"
 # k_progress_publish <kind> <text...> — never fatal. A progress file that
 # cannot be written must not take an install with it, so failures here are
 # swallowed DELIBERATELY; the install log is the real record.
+# k_publish_result <rc> — record a FAILED install where the show can see it:
+# /run/kldload/install-result, "failed<TAB>rc<TAB>epoch<TAB>message". The show
+# decided "running" from install-phase alone, and nothing removed that file
+# when the installer died, so a failed install went on playing the slides --
+# fiend, 2026-09-18, for an hour, over an installer that had stopped at 19:04Z.
+# The message is the last ERROR line k_die logged. Never fatal, like the rest.
+k_publish_result() {
+    local rc="$1" msg
+    mkdir -p "$K_PROGRESS_DIR" 2>/dev/null || return 0
+    msg="$(grep -a 'ERROR: ' "${KLDLOAD_LOG_DIR}/kldload-installer.log" 2>/dev/null |
+        tail -n 1 | sed 's/^\[[^]]*\] ERROR: //' | tr '\t' ' ')" || msg=""
+    # swallow: progress reporting must never abort anything, least of all a failure path
+    printf 'failed\t%s\t%s\t%s\n' "$rc" "$(date +%s)" "${msg:-the installer exited with status $rc}" \
+        >"$K_PROGRESS_DIR/.install-result.$$" 2>/dev/null &&
+        mv -f "$K_PROGRESS_DIR/.install-result.$$" "$K_PROGRESS_DIR/install-result" 2>/dev/null || true
+    return 0
+}
+
+# _install_exit — the ONE exit trap once main has started. bash keeps a single
+# EXIT trap, and main used to set `trap 'rm -f .../installer-busy' EXIT INT
+# TERM HUP`, which silently replaced _emergency_cleanup: from then on a failed
+# install neither unmounted nor printed that it had failed, and nothing told
+# the show (found 2026-09-18). All three jobs now live here.
+_install_exit() {
+    local rc=$?
+    rm -f /var/run/kldload/installer-busy
+    ((rc == 0)) && return 0
+    k_publish_result "$rc"
+    _emergency_cleanup "$rc"
+}
+
 k_progress_publish() {
     local kind="$1"
     shift
@@ -2461,7 +2493,12 @@ main() {
     # is removed on ANY exit path — success, failure, Ctrl-C, OOM.
     mkdir -p /var/run/kldload 2>/dev/null
     : >/var/run/kldload/installer-busy
-    trap 'rm -f /var/run/kldload/installer-busy' EXIT INT TERM HUP
+    trap '_install_exit' EXIT
+    # A signal ENDS the install; the EXIT trap then cleans up and reports. The
+    # old trap ran `rm` on TERM and let the script carry on.
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
 
     mkdir -p "${KLDLOAD_LOG_DIR}"
     for _l in kldload-installer storage zfs security network bootstrap bootloader; do

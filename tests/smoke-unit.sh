@@ -530,6 +530,49 @@ else
     rm -rf "${_ft}"
 fi
 
+# ─── a failed install reports itself ─────────────────────────────────────────
+# kldload-install-target's EXIT trap was silently replaced in main, so a failed
+# install neither cleaned up nor told anyone, and the install show played on over
+# a dead installer for an hour (fiend, 2026-09-18). Run the real functions, taken
+# from the script, through a failure, a success and a TERM.
+_section "installer exit trap"
+_it="${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-install-target"
+_xt="$(mktemp -d)"
+{
+    sed -n '/^_emergency_cleanup() {/,/^}/p' "$_it"
+    sed -n '/^k_publish_result() {/,/^}/p' "$_it"
+    sed -n '/^_install_exit() {/,/^}/p' "$_it"
+} >"${_xt}/funcs.sh"
+if [[ "$(grep -c '() {' "${_xt}/funcs.sh")" -ne 3 ]]; then
+    _fail "installer exit trap" "could not find _emergency_cleanup, k_publish_result and _install_exit in kldload-install-target"
+elif ! grep -q "^    trap '_install_exit' EXIT" "$_it"; then
+    _fail "installer exit trap" "main does not set trap '_install_exit' EXIT -- a failed install would not report"
+else
+    _xbad=""
+    for _case in fail ok term; do
+        rm -rf "${_xt}/run" "${_xt}/log" && mkdir -p "${_xt}/run" "${_xt}/log"
+        printf '[t] ERROR: first\n[t] ERROR: the last error\n' >"${_xt}/log/kldload-installer.log"
+        # swallow: the child is SUPPOSED to exit non-zero in two of the three cases
+        bash -c 'set -Eeuo pipefail; K_PROGRESS_DIR=$1/run KLDLOAD_LOG_DIR=$1/log KLDLOAD_TARGET_MNT=$1/none
+            umount() { :; }; zpool() { :; }; source "$1/funcs.sh"
+            trap _install_exit EXIT; trap "exit 143" TERM
+            case $2 in fail) exit 1 ;; ok) exit 0 ;; term) kill -TERM $$; sleep 5; echo carried-on >"$1/run/carried-on" ;; esac' \
+            _ "$_xt" "$_case" >/dev/null 2>&1 || true
+        _r="$(cat "${_xt}/run/install-result" 2>/dev/null || true)" # absent is the success case
+        case "$_case" in
+        fail) [[ "$_r" == $'failed\t1\t'*$'\tthe last error' ]] || _xbad+=" fail" ;;
+        ok) [[ -z "$_r" ]] || _xbad+=" ok" ;;
+        term) [[ "$_r" == $'failed\t143\t'* && ! -e "${_xt}/run/carried-on" ]] || _xbad+=" term" ;;
+        esac
+    done
+    if [[ -z "$_xbad" ]]; then
+        _pass "installer exit trap: failure writes install-result with the last ERROR, success writes none, TERM ends and reports"
+    else
+        _fail "installer exit trap" "wrong outcome for:${_xbad}"
+    fi
+fi
+rm -rf "${_xt}"
+
 # ─── summary ─────────────────────────────────────────────────────────────────
 printf "\n  \e[1m%d passed\e[0m, %s\n" "${PASS}" \
     "$([[ ${FAILN} -gt 0 ]] && printf '\e[1;31m%d failed\e[0m' "${FAILN}" || printf '0 failed')"

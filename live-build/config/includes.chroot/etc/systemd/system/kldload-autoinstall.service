@@ -18,6 +18,13 @@ StandardError=journal+console
 RemainAfterExit=yes
 # Give udev time to settle and label disks before scanning
 ExecStartPre=/bin/sleep 3
+# Backstop for failures no trap can see -- SIGKILL, the OOM killer, a refusal
+# in kldload-autoinstall before it execs the installer: the install show must
+# say the install stopped (fiend, 2026-09-18, played on for an hour). Only when
+# the unit failed and the installer left no result of its own. A live boot
+# with no seed exits 0 ("skipping autoinstall"), so it never trips this.
+# "-": a failed write here must not turn into a second failure.
+ExecStopPost=-/bin/sh -c 'test "$$SERVICE_RESULT" = success || test -e /run/kldload/install-result || { mkdir -p /run/kldload && printf "failed\t%%s\t%%s\tkldload-autoinstall.service ended: %%s (%%s)\n" "$$EXIT_STATUS" "$$(date +%%s)" "$$SERVICE_RESULT" "$$EXIT_CODE" >/run/kldload/install-result; }'
 
 [Install]
 WantedBy=multi-user.target

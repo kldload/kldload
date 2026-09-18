@@ -195,6 +195,18 @@ html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background
 .ishow-ph.failed{color:#ffd4d4;background:rgba(255,95,95,.12);border-color:rgba(255,95,95,.4)}
 .ishow-ph.failed::before{content:"\2717";color:#ff5f5f;font-weight:700}
 .ishow-ph.pending::before{content:"\00b7";color:#55647a;font-weight:700}
+/* A failed install: the header goes red and a plain panel replaces the slides.
+   The show used to play on over a dead installer (fiend, 2026-09-18). */
+#ishow-fail{display:none}
+#install-show.failed #ishow-slides{display:none}
+#install-show.failed #ishow-fail{position:relative;z-index:2;flex:1;display:flex;
+  flex-direction:column;justify-content:center;gap:1.1rem;width:min(64rem,86vw);margin:0 auto}
+#install-show.failed #ishow-live{color:#ff5f5f}
+.ishow-fail-t{font-size:2.6rem;font-weight:700;color:#ffd4d4}
+#ishow-fail-msg{font-family:ui-monospace,monospace;font-size:1.15rem;color:#ff9f9f;
+  background:rgba(255,95,95,.08);border:1px solid rgba(255,95,95,.35);border-radius:6px;
+  padding:1rem 1.2rem;white-space:pre-wrap;word-break:break-word}
+.ishow-fail-h{font-size:1rem;color:#9fb0c4;line-height:1.6}
 #ishow-brand{position:absolute;bottom:6.6rem;left:3.2rem;z-index:2;display:flex;
   align-items:center;gap:.7rem;font-size:.74rem;letter-spacing:.34em;
   text-transform:uppercase;color:#6d7f93;font-weight:700}
@@ -11993,6 +12005,13 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     </div>
   </div>
   <div id="ishow-slides"></div>
+  <div id="ishow-fail" role="alert">
+    <div class="ishow-fail-t">The install stopped</div>
+    <div id="ishow-fail-msg"></div>
+    <div class="ishow-fail-h">Nothing was rebooted, and the disk is not bootable yet.
+      The full logs are in /var/log/installer on this machine. Fix the cause and
+      netboot it again: the install starts from the beginning.</div>
+  </div>
   <div id="ishow-strip">
     <canvas id="ishow-scroller" aria-hidden="true"></canvas>
     <div id="ishow-phase">Starting…</div>
@@ -12604,6 +12623,19 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
           b.textContent = s.label; d.textContent = ' ' + s.detail;
           return '<span class="ishow-step">' + b.outerHTML + d.outerHTML + '</span>';
         }).join('');
+
+        // Last, so it overrides "INSTALLING" and the !running hide above.
+        show.classList.toggle('failed', !!p.failed);
+        if (p.failed) {
+          show.style.display = 'flex';
+          document.getElementById('ishow-live').textContent = 'INSTALL FAILED';
+          document.getElementById('ishow-count').textContent =
+            p.rc === null || p.rc === undefined ? '' : 'EXIT ' + p.rc;
+          document.getElementById('ishow-fail-msg').textContent =
+            p.error || 'The installer stopped without a message.';
+          document.getElementById('ishow-phase').textContent =
+            'stopped' + (p.phase ? ' during: ' + p.phase : '');
+        }
       })
       .catch(function () { /* the route is absent on older images; stay hidden */ });
   }
