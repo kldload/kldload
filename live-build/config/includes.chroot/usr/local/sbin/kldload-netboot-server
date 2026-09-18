@@ -374,10 +374,18 @@ cmd_serve() {
 # undionly.kpxe, so the copy normalises rather than the config guessing.
 # UEFI is mandatory (every board on the rack); BIOS is a warning, because a
 # missing undionly.kpxe costs only legacy boxes and says so.
+#
+# /usr/share/kldload-netboot comes FIRST: build-iso.sh compiles an upstream
+# ipxe.efi there because Fedora's has no console/colour commands, and the menu
+# drawn by _write_armed needs them. menu.png, the picture it draws on, ships in
+# the same directory. Either one missing still serves -- the armed script
+# falls back to plain text -- but says so, because an unstyled menu is the
+# thing that was called "terrible" on fiend (2026-09-18).
 # IPXE_DIRS is overridable so the function can be exercised on a fake tree.
 _stage_ipxe() {
-    local d uefi="" bios=""
-    for d in ${IPXE_DIRS:-/usr/share/ipxe /usr/lib/ipxe}; do
+    local d uefi="" bios="" png=""
+    for d in ${IPXE_DIRS:-/usr/share/kldload-netboot /usr/share/ipxe /usr/lib/ipxe}; do
+        [[ -z "$png" && -s "$d/menu.png" ]] && png="$d/menu.png"
         [[ -z "$uefi" && -f "$d/ipxe-x86_64.efi" ]] && uefi="$d/ipxe-x86_64.efi"
         [[ -z "$uefi" && -f "$d/ipxe.efi" ]] && uefi="$d/ipxe.efi"
         [[ -z "$bios" && -f "$d/undionly.kpxe" ]] && bios="$d/undionly.kpxe"
@@ -391,6 +399,15 @@ _stage_ipxe() {
         log "WARN: no undionly.kpxe found — legacy-BIOS machines cannot netboot from here (UEFI is fine)"
     fi
     log "ipxe     UEFI $(basename "$uefi") from $(dirname "$uefi")${bios:+, BIOS undionly.kpxe}"
+    [[ "$uefi" == */kldload-netboot/* ]] ||
+        log "WARN: serving the distro's iPXE, which has no colour support — armed machines get a plain-text menu"
+    if [[ -n "$png" ]]; then
+        cp -f "$png" "$ROOT/ipxe/menu.png"
+        [[ -s "$ROOT/ipxe/menu.png" ]] || die "menu.png did not land in $ROOT/ipxe"
+    else
+        rm -f "$ROOT/ipxe/menu.png"
+        log "WARN: no menu.png found — armed machines get a plain-text menu"
+    fi
 }
 
 # boot.ipxe: probe every NIC and CHAIN the first armed/<mac>.ipxe; an armed
@@ -602,7 +619,7 @@ _check_answers() {
     return 0
 }
 
-# _write_armed <m> <mac> <action-label> <kernel-args> <netarg>
+# _write_armed <m> <mac> <action> <hint> <kernel-args> <netarg> <netdev> <host>
 #
 # The per-MAC token: an iPXE menu with the armed action as its default, a live
 # desktop, the local disk and an iPXE shell. It runs BEFORE anything large is
@@ -623,22 +640,69 @@ _check_answers() {
 #     installs nothing (unless a KLDLOADSEED disk is plugged in, exactly as
 #     from the USB). It carries <netarg> too, so it also downloads over the
 #     fast NIC.
+#
+# THE LOOK: a 1024x768 console over ipxe/menu.png, text confined to the panel
+# drawn in it (NB_CONSOLE must match tools/netboot/gen_menu_bg.py), colours
+# from the web UI. Every styling command ends `|| goto plain`: the distro's
+# iPXE has no `console`, and without the guard the first unknown command
+# would end the script and the machine would boot locally -- an armed install
+# silently not happening. iPXE splits words on whitespace with no quoting, so
+# the second column's padding is a run of spaces smuggled in as a hex setting
+# (${pN:string}), which expands AFTER the split.
 # Writes $ROOT/armed/<m>.ipxe and dies if it did not land.
+NB_CONSOLE="--x 1024 --y 768 --left 160 --right 160 --top 256 --bottom 288"
+
+# _ipxe_text <string> — strip anything iPXE would interpret (${, ||, #) from
+# text that came from an answers file.
+_ipxe_text() { printf '%s' "$1" | tr -cd 'A-Za-z0-9 ._:/()-'; }
+
+# _ipxe_pad <n> — n spaces as an iPXE hex setting value: 20:20:...; n >= 1.
+_ipxe_pad() {
+    local n=$1 out="20" i
+    for ((i = 1; i < n; i++)); do out+=":20"; done
+    printf '%s' "$out"
+}
+
+# _answer_val <answers-file> <KEY> — the last KEY= value, quotes stripped.
+_answer_val() { sed -n "s/^${2}=//p" "$1" | tail -1 | tr -d "\"'"; }
+
 _write_armed() {
-    local m="$1" mac="$2" label="$3" args="$4" netarg="$5" tok="$ROOT/armed/$1.ipxe"
+    local m="$1" mac="$2" action tip args="$5" netarg="$6" netdev="$7" host tok="$ROOT/armed/$1.ipxe"
+    action="$(_ipxe_text "$3")"
+    tip="$(_ipxe_text "$4")"
+    host="$(_ipxe_text "${8:-}")"
     [[ "$MENU_TIMEOUT" =~ ^[0-9]+$ ]] || die "NETBOOT_MENU_TIMEOUT must be whole seconds, got '$MENU_TIMEOUT'"
-    local choose="goto armed"
-    ((MENU_TIMEOUT > 0)) && choose="choose --timeout $((MENU_TIMEOUT * 1000)) --default armed target || goto local
-goto \${target}"
+    local live="Live desktop" w
+    w=$((${#action} > ${#live} ? ${#action} : ${#live}))
+    w=$((w + 4))
+    local skip=""
+    ((MENU_TIMEOUT > 0)) || skip="goto armed"
     cat >"$tok" <<IPXE
 #!ipxe
-# kldload armed ${mac}: ${label}. \${base} comes from boot.ipxe.
-menu kldload netboot  ${mac}
-item armed ${label}
-item live  Live desktop (installs nothing)
+# kldload armed ${mac}: ${action}. \${base} comes from boot.ipxe.
+${skip}
+console ${NB_CONSOLE} --picture \${base}/ipxe/menu.png || goto plain
+colour --rgb 0xd0d8e8 7 || goto plain
+colour --rgb 0xf0f4fa 3 || goto plain
+colour --rgb 0x326ce5 4 || goto plain
+colour --rgb 0x5a6a85 6 || goto plain
+cpair --foreground 7 --background 9 0 || goto plain
+cpair --foreground 7 --background 9 1 || goto plain
+cpair --foreground 3 --background 4 2 || goto plain
+cpair --foreground 6 --background 9 3 || goto plain
+:plain
+set p0:hex 20:20
+set p1:hex $(_ipxe_pad $((w - ${#action})))
+set p2:hex $(_ipxe_pad $((w - ${#live})))
+menu ${host:+${host}\${p0:string}}${mac}
+item --gap ${netdev:+downloads over ${netdev}}
+item --gap
+item armed ${action}\${p1:string}${tip}
+item live ${live}\${p2:string}installs nothing
 item local Boot from local disk
 item shell iPXE shell
-${choose}
+choose --timeout $((MENU_TIMEOUT * 1000)) --default armed target || goto local
+goto \${target}
 
 :armed
 kernel \${base}/kldload/vmlinuz initrd=initrd.img root=live:\${base}/kldload/squashfs.img ${args}${netarg}
@@ -688,9 +752,9 @@ cmd_arm_install() {
     m="$(_mac_norm "$mac")"
     install -m 0644 "$answers" "$ROOT/answers/${m}.env"
     [[ -s "$ROOT/answers/${m}.env" ]] || die "$ROOT/answers/${m}.env did not land"
-    _write_armed "$m" "$mac" \
-        "Install $(sed -n 's/^KLDLOAD_DISTRO=//p' "$answers" | tail -1 | tr -d "\"'")/$(sed -n 's/^KLDLOAD_PROFILE=//p' "$answers" | tail -1 | tr -d "\"'") (WIPES THE DISK)" \
-        "${ISO_ARGS} ${KIOSK_ARGS} kldload.seed=\${base}/answers/${m}.env" "$netarg"
+    _write_armed "$m" "$mac" "Install $(_answer_val "$answers" KLDLOAD_DISTRO)/$(_answer_val "$answers" KLDLOAD_PROFILE)" \
+        "wipes the disk" "${ISO_ARGS} ${KIOSK_ARGS} kldload.seed=\${base}/answers/${m}.env" "$netarg" "$netdev" \
+        "$(_answer_val "$answers" KLDLOAD_HOSTNAME)"
     log "ARMED-INSTALL $mac — next netboot installs $(sed -n 's/^KLDLOAD_DISTRO=//p' "$answers")/$(sed -n 's/^KLDLOAD_PROFILE=//p' "$answers")"
     [[ -n "$netdev" ]] && log "  root image and seed download over ${netdev} (${netdev_from}); ${mac} only starts the boot"
     k_audit "ARMED-INSTALL $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) from $answers${netdev:+ netdev=$netdev}"
@@ -747,8 +811,8 @@ cmd_arm_deploy() {
     [[ -n "$host" ]] && hostarg=" kldload.hostname=${host}"
     local netarg
     netarg="$(_netdev_arg "$netdev")"
-    _write_armed "$m" "$mac" "Deploy golden ${golden} to ${disk} (WIPES IT)" \
-        "${ISO_ARGS} kldload.action=deploy kldload.archive-url=\${base}/golden/${golden}.zfs${diskarg}${hostarg}" "$netarg"
+    _write_armed "$m" "$mac" "Deploy golden ${golden}" "wipes ${disk##*/}" \
+        "${ISO_ARGS} kldload.action=deploy kldload.archive-url=\${base}/golden/${golden}.zfs${diskarg}${hostarg}" "$netarg" "$netdev" "$host"
     log "ARMED-DEPLOY $mac — next netboot RECEIVES golden '${golden}' onto ${disk}${host:+ as $host}${netdev:+, over $netdev}"
     k_audit "ARMED-DEPLOY $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) golden=$golden disk=$disk${netdev:+ netdev=$netdev}"
 }
