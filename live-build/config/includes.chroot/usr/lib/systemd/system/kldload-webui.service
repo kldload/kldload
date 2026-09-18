@@ -37,6 +37,12 @@ Environment=KUBECONFIG=/root/.kube/config
 # traverses it to reach the 0660 socket.
 ExecStart=/usr/local/bin/kldload-webui --unix-socket /run/kldload/webui.sock --no-tls --no-browser
 RuntimeDirectory=kldload
+# Preserve: systemd deletes a RuntimeDirectory when the unit stops, and
+# /run/kldload is not only ours -- the installer keeps install-phase,
+# install-steps, install-result and installer-busy there. A webui restart
+# mid-install wiped them (seen on fiend's live system, 2026-09-18, which went
+# from "Installing" to no stage at all). The stale socket is unlinked at start.
+RuntimeDirectoryPreserve=yes
 # Post-condition: the socket exists before dependents proceed. Keeps systemd
 # from marking the unit "started" before the server is accept()-ing.
 ExecStartPost=/bin/bash -c 'for i in $(seq 1 60); do [ -S /run/kldload/webui.sock ] && exit 0; sleep 1; done; exit 1'
