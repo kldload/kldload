@@ -338,7 +338,7 @@ for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-module
         [[ "$(basename "$_kf")" == "${_ksub}-${KOJI_KERNEL_NVR}.${ARCH}.rpm" ]] && continue
         log "  removing unpinned kernel: $(basename "$_kf")"
         rm -f "$_kf"
-        ((_kstale++)) || true # counter only: ((x++)) from 0 is non-zero under set -e
+        _kstale=$((_kstale + 1))
     done < <(find "${REPO_DIR}" -maxdepth 1 -name "${_ksub}-[0-9]*.${ARCH}.rpm")
 done
 log "Removed ${_kstale} unpinned kernel RPM(s)"
