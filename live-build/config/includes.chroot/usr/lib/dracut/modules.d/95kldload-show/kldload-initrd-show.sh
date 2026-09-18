@@ -39,6 +39,8 @@
 #     uses full and shaded blocks, the stage strip a light horizontal line and a
 #     square.
 #   - Colours: the Linux console's 16, nothing else; no 256-colour or RGB codes.
+#     Six of the 16 are repainted to the netboot menu's colours (PALETTE below), so
+#     the download looks like the menu that started it.
 #   - LC_ALL=C, and every row's visible width is passed to set_row explicitly: a
 #     block glyph is three bytes but one column, so no ${#string} of a row that
 #     carries one can be trusted, whatever locale the initramfs happens to have.
@@ -131,7 +133,19 @@ read_size() {
 read_size || :
 
 E=$'\e'
-RESET="${E}[0m" DIM="${E}[2m" GREEN="${E}[1;32m" GRN="${E}[32m" WHITE="${E}[1;37m"
+RESET="${E}[0m" DIM="${E}[2m" ACCENT_B="${E}[1;34m" ACCENT="${E}[34m" WHITE="${E}[1;37m"
+
+# The netboot menu's colours (kldload-netboot-server _write_armed, from the web
+# UI's app.css), put into the console's own palette with ESC ] P n rrggbb:
+#   0 background #0c0e14   7 text #d0d8e8   15 bold text #f0f4fa
+#   4 blue #326ce5 (the menu's selection bar)   12 bold blue #8fb0ff (the scanner)
+#   8 grey #5a6a85, made the console's dim colour with ESC [ 2 ; 8 ], so every
+#     ${DIM} on this screen is the menu's note grey.
+# The bar was green until 2026-09-18 (operator: "change the download bar from
+# green to the same blue and colors of the menu"). Sent with every full frame, not
+# once: the framebuffer takeover resets the palette along with the font, the same
+# reason the frame itself is repainted. ESC ] R on exit puts the defaults back.
+PALETTE="${E}]P00c0e14${E}]P7d0d8e8${E}]Pff0f4fa${E}]P4326ce5${E}]Pc8fb0ff${E}]P85a6a85${E}[2;8]"
 
 # ─── frame ───────────────────────────────────────────────────────────────────
 # The whole screen is repainted every second: every row written out to full width
@@ -170,7 +184,7 @@ paint() {
         ((n < 0)) && n=0
         out+="${E}[${r};1H${frame[r]:-}${blank:0:n}"
     done
-    printf '%s[?25l%s' "$E" "$out" >>"$TTY"
+    printf '%s%s[?25l%s' "$PALETTE" "$E" "$out" >>"$TTY"
 }
 
 # ─── download status ─────────────────────────────────────────────────────────
@@ -190,9 +204,9 @@ stage_strip() {
             w=$((w + 6))
         fi
         if ((k < cur)); then
-            out+="${GRN}√ ${name}${RESET}"
+            out+="${ACCENT}√ ${name}${RESET}"
         elif ((k == cur)); then
-            out+="${GREEN}■ ${name}${RESET}"
+            out+="${ACCENT_B}■ ${name}${RESET}"
         else
             out+="${DIM}· ${name}${RESET}"
         fi
@@ -235,7 +249,7 @@ draw_status() {
         line="$(fmt_gb "$have") / $(fmt_gb "$total") GB   $((rate / 1048576)) MB/s   ${left}   from ${src}"
     fi
     line="${line:0:cols-1-margin}"
-    set_row $((rows - 1)) "${pad}${GRN}${line}${RESET}" $((margin + ${#line}))
+    set_row $((rows - 1)) "${pad}${ACCENT}${line}${RESET}" $((margin + ${#line}))
 }
 
 # current_size — sets SIZE (bytes on disk so far) and IMG_PATH (the file dracut's
@@ -254,7 +268,7 @@ current_size() {
 
 # ─── animation ───────────────────────────────────────────────────────────────
 # Three effects. The first two are drawn from real state, nothing canned:
-#   the bar   green fill with a soft scanner light gliding end to end and back, a
+#   the bar   blue fill with a soft scanner light gliding end to end and back, a
 #             fading tail behind it, only while bytes are arriving;
 #   the wire  a hexdump -C view of the last bytes that actually landed in the image
 #             file, with magenta offsets, blue bytes and zero bytes dimmed;
@@ -269,10 +283,10 @@ BAR_ROW=0 BAR_CELLS=0 BAR_N=0 BAR_PCT=0 BAR_LIVE=0 FX_POS=0 FX_DIR=1 TICK=0
 HAVE_HEX=0
 command -v od >/dev/null 2>&1 && command -v dd >/dev/null 2>&1 && HAVE_HEX=1
 # The scanner's light and its tail: the head, then the cells it just left. On the fill
-# the tail is intensity only (bold green, then normal); on the empty track it is
+# the tail is intensity only (bold blue, then normal); on the empty track it is
 # shading, so it reads as light passing over, not as progress.
-SCAN_FILL=("${GREEN}█" "${GREEN}▓" "${GRN}▓")
-SCAN_TRACK=("${GREEN}▓" "${GRN}▒" "${GRN}░")
+SCAN_FILL=("${ACCENT_B}█" "${ACCENT_B}▓" "${ACCENT}▓")
+SCAN_TRACK=("${ACCENT_B}▓" "${ACCENT}▒" "${ACCENT}░")
 
 # draw_fx — the bar row: fill, scanner, track, percent. One write.
 # The scanner moves one cell a tick (ten a second) across the whole bar and bounces
@@ -300,7 +314,7 @@ draw_fx() {
                 out+="${SCAN_TRACK[k]}"
             fi
         elif ((c < BAR_N)); then
-            out+="${GRN}█"
+            out+="${ACCENT}█"
         else
             out+="${RESET}${DIM}░"
         fi
@@ -595,7 +609,7 @@ draw_hex() {
 }
 
 # ─── main loop ───────────────────────────────────────────────────────────────
-trap 'printf "%s[?25h" "$E" >>"$TTY"' EXIT
+trap 'printf "%s[?25h%s]R" "$E" "$E" >>"$TTY"' EXIT
 # Speed is measured over the last few seconds, not from zero: the first sample
 # would otherwise count everything already on disk as one second's transfer
 # (the first frame read "4768 MB/s, 0m 1s left" in testing, 2026-09-13).
