@@ -456,9 +456,35 @@ k_profile_packages() {
         ;;
 
     vdi)
-        # Virtual desktop delivery: Wayland + FFmpeg/SRT + mediamtx (binary via hook)
+        # Virtual desktop delivery: Plasma on Wayland + FFmpeg/SRT + mediamtx.
+        #
+        # PLASMA, NOT GNOME (operator's call, 2026-09-18). A delivered desktop
+        # is driven remotely far more than locally, and Plasma keeps a usable
+        # X11 session alongside its Wayland one -- which is what the rdp profile
+        # below needs and what GNOME has been steadily removing. Same desktop on
+        # both profiles means one thing to learn and one thing to support.
+        #
+        # The SESSION here is Wayland: wf-recorder captures a Wayland
+        # compositor, and that capture is the whole delivery mechanism. X11 is
+        # the rdp profile's business, not this one's.
+        #
+        # PER-DISTRO NAMES, and this is why: the previous list named only
+        # `gdm3`. That is the Debian spelling, so every RPM install of this
+        # profile resolved nothing for it and came up with NO DISPLAY MANAGER
+        # AT ALL -- exactly the failure the desktop profile's own comment
+        # documents, repeated here. The package split is real and was checked in
+        # clean containers on 2026-09-18 rather than assumed:
+        #   fedora 44   : plasma-workspace-x11, kwin-x11, sddm-wayland-plasma
+        #                 (kwin-wayland and plasma-workspace-wayland do NOT exist)
+        #   debian trixie: kwin-wayland, kwin-x11
+        #                 (plasma-workspace-x11/-wayland do NOT exist)
+        local _plasma_extra="kwin-wayland kwin-x11"
+        local _dm="sddm"
+        if [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
+            _plasma_extra="kwin-x11 plasma-workspace-x11 sddm-wayland-plasma"
+        fi
         echo "openssh-server sudo curl ca-certificates vim less iproute2 \
-        mutter gnome-session gdm3 \
+        plasma-desktop plasma-workspace ${_plasma_extra} ${_dm} \
         ffmpeg libsrt1.5 \
         pipewire wireplumber \
         wf-recorder \
