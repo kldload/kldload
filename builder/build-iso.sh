@@ -2205,7 +2205,12 @@ HELMCHARTS
         rm -rf /tmp/ipxe-src
         cp -a "$_ipxe_cache" /tmp/ipxe-src
         _ipxe_commit="$(git -C /tmp/ipxe-src rev-parse HEAD)"
-        if make -C /tmp/ipxe-src/src -j"$(nproc)" bin-x86_64-efi/ipxe.efi >>"$LOG_FILE" 2>&1 &&
+        # WHY env -u: iPXE's Makefile reads PROFILE as a make variable
+        # (-DPROFILING=$(PROFILE)), and this script runs with PROFILE=desktop
+        # in its environment. Every object then failed on "'desktop'
+        # undeclared", and build 30 (2026-09-18) shipped Fedora's stock iPXE
+        # with one warning in the log. A hand build had no PROFILE and worked.
+        if env -u PROFILE make -C /tmp/ipxe-src/src -j"$(nproc)" bin-x86_64-efi/ipxe.efi >>"$LOG_FILE" 2>&1 &&
             install -Dm0644 /tmp/ipxe-src/src/bin-x86_64-efi/ipxe.efi "${ROOTFS}/usr/share/kldload-netboot/ipxe.efi"; then
             printf '%s\n' "$_ipxe_commit" >"${ROOTFS}/etc/kldload/ipxe-commit"
             log "iPXE ${_ipxe_commit:0:12} built for the netboot menu ($(stat -c%s "${ROOTFS}/usr/share/kldload-netboot/ipxe.efi") bytes)"
