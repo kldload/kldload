@@ -341,7 +341,8 @@ else
     # AI models count as build work since 2026-09-14 ("unless it's core, server or
     # a desktop with no options").
     _fcheck 'echo k8s=0 klab=0 ai=1' || _fbad+=" ai-install-not-shown"
-    _fcheck 'echo k8s=0 klab=0 ai=0' && _fbad+=" plain-install-shown"
+    # Every first boot since 2026-09-18 ("show a slide or 2, and hit the desktop").
+    _fcheck 'echo k8s=0 klab=0 ai=0' || _fbad+=" plain-install-not-shown"
     _fcheck 'exit 3' && _fbad+=" shown-when-want-failed"
     echo 'root=zfs kldload.firstboot_show=0' >"${_ft}/cmdline"
     _fcheck 'echo k8s=1 klab=1 ai=0' && _fbad+=" escape-hatch-ignored"
@@ -350,9 +351,25 @@ else
     _fcheck 'echo k8s=1 klab=1 ai=0' && _fbad+=" shown-on-live"
     rm -r "${_ft}/root/run"
     if [[ -z "${_fbad}" ]]; then
-        _pass "kldload-firstboot-show check: shows for k8s/klab/ai, not for plain installs, live or kldload.firstboot_show=0"
+        _pass "kldload-firstboot-show check: shows on every installed first boot, not on live or with kldload.firstboot_show=0"
     else
         _fail "kldload-firstboot-show check" "wrong decision:${_fbad}"
+    fi
+
+    # A plain install shows part 2 too, so the show must END for one: first boot
+    # done and autodeploy "nothing-requested" is settled. If this broke, a plain
+    # desktop would sit behind the show for ever.
+    _fbad=""
+    rm -f "${_ft}/state/firstboot-done" "${_ft}/state/current-phase"
+    [[ "$(env "${_fenv[@]}" bash "${_fbs}" status 2>/dev/null)" == building ]] || _fbad+=" not-building-before-firstboot"
+    : >"${_ft}/state/firstboot-done"
+    echo nothing-requested >"${_ft}/state/current-phase"
+    [[ "$(env "${_fenv[@]}" bash "${_fbs}" status 2>/dev/null)" == ok ]] || _fbad+=" plain-install-never-settles"
+    rm -f "${_ft}/state/firstboot-done" "${_ft}/state/current-phase"
+    if [[ -z "${_fbad}" ]]; then
+        _pass "kldload-firstboot-show status: a plain install settles when first boot is done with nothing requested"
+    else
+        _fail "kldload-firstboot-show status" "${_fbad}"
     fi
 
     _fstatus() { env "${_fenv[@]}" bash "${_fbs}" status 2>/dev/null; }
@@ -497,8 +514,9 @@ else
         _fail "kldload-firstboot-show kiosk" "${_fbad}"
     fi
 
-    # The installer carries the kiosk's packages only for installs that build, and
-    # only for families whose offline mirror has cage and a real firefox package.
+    # The installer carries the kiosk's packages on every install (part 2 plays on
+    # every first boot since 2026-09-18), but only for families whose offline
+    # mirror has cage and a real firefox package.
     _fpk() { # $1 want line, $2 distro
         KLDLOAD_LOG_DIR="${_ft}" KLDLOAD_STATE_DIR="${_ft}" KLDLOAD_FBSHOW_WANT="echo $1" \
             KLDLOAD_DISTRO="$2" KLDLOAD_PROFILE=kvm \
@@ -511,11 +529,12 @@ else
     _fpk "k8s=0 klab=0 ai=1" debian | grep -qx firefox-esr || _fbad+=" debian-ai-no-firefox-esr"
     _fpk "k8s=0 klab=1 ai=0" fedora | grep -qx systemd-pam || _fbad+=" fedora-build-no-systemd-pam"
     _fpk "k8s=0 klab=1 ai=0" debian | grep -qx libpam-systemd || _fbad+=" debian-build-no-libpam-systemd"
-    _fpk "k8s=0 klab=0 ai=0" fedora | grep -qx cage && _fbad+=" plain-install-got-cage"
+    _fpk "k8s=0 klab=0 ai=0" fedora | grep -qx cage || _fbad+=" plain-fedora-no-cage"
+    _fpk "k8s=0 klab=0 ai=0" debian | grep -qx cage || _fbad+=" plain-debian-no-cage"
     _fpk "k8s=1 klab=1 ai=0" rocky | grep -qx cage && _fbad+=" el-claimed-cage"
     _fpk "k8s=1 klab=1 ai=0" ubuntu | grep -qxE 'cage|firefox' && _fbad+=" ubuntu-claimed-kiosk"
     if [[ -z "${_fbad}" ]]; then
-        _pass "installer: kiosk packages (cage, firefox) only for installs that build, on Fedora and Debian"
+        _pass "installer: kiosk packages (cage, firefox) on every Fedora and Debian install, never claimed for EL or Ubuntu"
     else
         _fail "installer kiosk packages" "${_fbad}"
     fi

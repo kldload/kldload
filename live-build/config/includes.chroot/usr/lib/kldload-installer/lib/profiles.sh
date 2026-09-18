@@ -525,25 +525,6 @@ k_profile_packages() {
 # These are appended to k_profile_packages output before the install command.
 # Package names differ across distros because upstream projects ship under
 # different names (e.g., bpfcc-tools on Debian/Ubuntu vs. bpftool on RHEL).
-# _fbshow_builds — 0 if this install asks first boot to build something, which is
-# exactly when kldload-firstboot-show holds the screen. Asks kldload-autodeploy,
-# which on the live image reads the installer's effective-config.env, so the rule
-# lives in one file. KLDLOAD_FBSHOW_WANT (a command printing the want line) is the
-# test hook, the same one kldload-firstboot-show honours.
-_fbshow_builds() {
-    local _want
-    if [[ -n "${KLDLOAD_FBSHOW_WANT:-}" ]]; then
-        _want="$(bash -c "${KLDLOAD_FBSHOW_WANT}")" || return 1
-    elif [[ -x /usr/sbin/kldload-autodeploy ]]; then
-        _want="$(/usr/sbin/kldload-autodeploy --want 2>/dev/null)" || return 1
-    else
-        return 1
-    fi
-    case " ${_want} " in
-    *" k8s=1 "* | *" klab=1 "* | *" ai=1 "*) return 0 ;;
-    esac
-    return 1
-}
 
 k_profile_optional_packages() {
     local out=()
@@ -619,13 +600,14 @@ k_profile_optional_packages() {
 
     # ── Part 2 of the install show on first boot ─────────────────────────
     #
-    # An install that builds something (Kubernetes, golden images, AI models)
-    # reboots into part 2 of the show until the build settles, instead of a
-    # terminal (operator, 2026-09-14: "after first reboot the slide show, part 2,
-    # should resume ASAP, unless it's core, server or a desktop with no options").
-    # That needs a compositor, a browser and the fonts the page names, on
-    # profiles that otherwise have no graphics at all -- so only when the install
-    # builds, and the decision is kldload-autodeploy's own (--want), not a copy.
+    # EVERY install reboots into part 2 of the show until first boot settles --
+    # a slide or two when there is little to do, the whole deck for a build
+    # (operator, 2026-09-18: "adding a few things or ai means a 20 second update,
+    # show a slide or 2, and hit the desktop"). Until then it was only installs
+    # that built, and a plain desktop's seven minutes of first boot went by
+    # under the build monitor instead. That needs a compositor, a browser and
+    # the fonts the page names, on profiles that otherwise have no graphics, so
+    # every Fedora and Debian install carries them.
     #
     # Firefox, not Chrome: Chrome comes from Google's online repo and is in no
     # offline mirror; Firefox is in the Fedora and Debian ones. Names verified
@@ -638,13 +620,11 @@ k_profile_optional_packages() {
     # 3-kvm on build 17, 2026-09-15). Not claimed: EL (cage is not in its
     # mirror) and Ubuntu (its firefox is a snap). Those keep the console screen,
     # which is the designed fallback, not a failure.
-    if _fbshow_builds; then
-        case "$_distro" in
-        fedora) out+=(cage firefox mesa-dri-drivers dejavu-sans-mono-fonts systemd-pam) ;;
-        debian) out+=(cage firefox-esr libgl1-mesa-dri fonts-dejavu-core libpam-systemd) ;;
-        *) : ;;
-        esac
-    fi
+    case "$_distro" in
+    fedora) out+=(cage firefox mesa-dri-drivers dejavu-sans-mono-fonts systemd-pam) ;;
+    debian) out+=(cage firefox-esr libgl1-mesa-dri fonts-dejavu-core libpam-systemd) ;;
+    *) : ;;
+    esac
 
     # ── Swap: a zram runway on every host, whatever the profile ──────────
     #
@@ -2599,31 +2579,11 @@ LOCKS
         done
     fi
 
-    # The build monitor is copied EXPLICITLY, from the staging tree rather than
-    # from the live session's autostart dir, because it is deliberately not in
-    # that dir: the "your post-install build is still running, do not reboot"
-    # window describes a state the live ISO can never be in, so autostarting it
-    # there put a progress window over the installer for a build that was not
-    # happening.
-    #
-    # It is boot-critical in the b653 sense — an operator who reboots mid-build
-    # lands in the interrupted-firstboot state that took hours to unpick — so
-    # a failure to place it is logged FATAL-loud rather than swallowed.
-    # (moved out of the live autostart dir 2026-08-17, operator request.)
-    _bm_src="/usr/lib/kldload-installer/target-files/etc/xdg/autostart/kldload-build-monitor.desktop"
-    if [[ -f "$_bm_src" ]]; then
-        mkdir -p "${target}/etc/xdg/autostart"
-        if install -m 0644 "$_bm_src" \
-            "${target}/etc/xdg/autostart/kldload-build-monitor.desktop"; then
-            k_log "build-monitor autostart installed on target (live session stays clear)"
-        else
-            k_log "FATAL: could not install the build-monitor autostart — first boot" \
-                "will look finished while the build is still running"
-        fi
-    else
-        k_log "FATAL: ${_bm_src} missing from the ISO — first boot will give no" \
-            "on-screen build progress and an operator may reboot mid-build"
-    fi
+    # The build monitor is NOT autostarted on the target (2026-09-18). It used to
+    # be, to stop an operator rebooting mid-build; part 2 of the show now holds
+    # the screen through every first boot until it settles, which does that job,
+    # and the monitor opens from its icon only (operator: "the build/audit tool
+    # should basically only ever be run manually from its icon").
 
     # ── Live-only artifacts never ship installed ──────────────────────────────
     # build-iso.sh stamps the live rootfs with `-live`-suffixed surface bits:

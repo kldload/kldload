@@ -1481,29 +1481,11 @@ GDMCONF
 if [[ "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
     mkdir -p "${ROOTFS}/etc/xdg/autostart"
 
-    # The build monitor is NOT installed into the live session's autostart.
-    #
-    # WHY: it exists to tell an operator "the post-install build is still
-    # running, do not reboot" — a state that cannot exist on the live ISO,
-    # because nothing has been installed yet. Autostarting it there opened a
-    # progress window over the installer for a build that was not happening.
-    #
-    # It used to live in includes.chroot/etc/xdg/autostart/ and be copied here,
-    # which put it in the LIVE session's autostart dir — and the installer's
-    # glob-copy of /etc/xdg/autostart/kldload-*.desktop then carried it to the
-    # target. So the live copy was doing double duty as the staging copy, and
-    # simply deleting it would have taken the installed behaviour with it.
-    #
-    # It now lives under the installer's target-files/ tree, which reaches the
-    # ISO via the /usr/lib/kldload-installer copy further down and is installed
-    # onto the TARGET explicitly by profiles.sh. Staged, never live-active.
-    # (operator request, 2026-08-17.)
-    _bm_staged=/build/live-build/config/includes.chroot/usr/lib/kldload-installer/target-files/etc/xdg/autostart/kldload-build-monitor.desktop
-    if [[ -f "$_bm_staged" ]]; then
-        log "Build-progress monitor staged for install (not autostarted on live)."
-    else
-        die "kldload-build-monitor.desktop missing from target-files — an installed system would give no on-screen build progress"
-    fi
+    # The build monitor autostarts nowhere: not on the live session (nothing is
+    # being built there) and, since 2026-09-18, not on an installed system
+    # either -- part 2 of the show holds the screen through every first boot,
+    # and the monitor opens only from its icon (operator: "the build/audit tool
+    # should basically only ever be run manually from its icon").
 
     cat >"${ROOTFS}/etc/xdg/autostart/kldload-webui.desktop" <<'AUTOSTART'
 [Desktop Entry]
