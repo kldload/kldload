@@ -356,21 +356,21 @@ boot order and boots from its own disk. `arm-all` refuses duplicate MACs or
 hostnames outright and exits non-zero unless every machine armed, so a
 half-armed rack is an error you hear about rather than discover.
 
-An armed machine shows a menu before it fetches anything large: every
-profile — core, server, desktop, kvm, k8s, storage, ai — with the armed one
-as the default (taken after `NETBOOT_MENU_TIMEOUT` seconds, 10 unless set),
-then a live desktop that installs nothing, the local disk, or an iPXE shell.
-Each other profile is the armed answers file with that profile's settings
-swapped in, so the disk, hostname and password stay the machine's own. With
-more than one distro in `NETBOOT_DISTROS` (default `fedora`; list only the
-ones you have verified), picking a profile opens a distro screen. Then a
-security screen: standard, Secure Boot, or — when the answers file carries
-`KLDLOAD_ZFS_PASSPHRASE`, which never goes on the kernel command line —
-encrypted, or both. Encryption asks for the passphrase at every boot and
-Secure Boot asks for the key to be enrolled on the first reboot, so both need
-someone at the console once the install finishes. Esc goes
-back, then boots the local disk, so a machine netbooted by mistake can be
-sent back to its own disk without it being wiped or pulling the image.
+An armed machine shows a summary of what it was armed with and counts down
+(`NETBOOT_MENU_TIMEOUT` seconds, 10 unless set) before fetching anything large.
+Left alone, it installs exactly the armed answers file. Any key opens the
+manual override: pick a profile (core, server, desktop, kvm, k8s, storage, ai
+-- each the armed file with that profile's settings), a distro (from
+`NETBOOT_DISTROS`, default `fedora`; list only the ones you have verified),
+then tick options -- ZFS encryption, Secure Boot, KVM, golden images,
+Kubernetes, the ZFS lab, AI -- and change the hostname, user, time zone or
+keyboard. Golden images, Kubernetes and the ZFS lab need KVM, so ticking one
+ticks it. Secrets never go through the menu: a login password or encryption
+passphrase the answers file lacks is asked for on the machine's own screen,
+before anything is erased. Encryption asks for the passphrase at every boot
+and Secure Boot asks for the key to be enrolled on the first reboot. Esc goes
+back, then boots the local disk, so a machine netbooted by mistake can be sent
+back to its own disk without it being wiped or pulling the image.
 
 Per-machine differences live in the answers file — hostname, disk, profile, how
 many control planes and workers. Same image, different answers.

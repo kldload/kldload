@@ -560,6 +560,83 @@ else
     rm -rf "${_ft}"
 fi
 
+# ─── netboot manual override: the installer's side ──────────────────────────
+# The menu passes its choices as kldload.<key>= and never a secret; the
+# installer asks on its own screen for what the answers lack. Run the real
+# kldload-autoinstall through its test hooks (2026-09-18).
+_section "netboot override: installer keys and on-screen secrets"
+_ai="${CHROOT}/usr/local/sbin/kldload-autoinstall"
+_at="$(mktemp -d)"
+_ar() { # _ar <cmdline> [extra env...] -> stdout of the run; status in _arc
+    echo "$1" >"${_at}/c"
+    shift
+    _arc=0
+    env KLDLOAD_AUTOINSTALL_CMDLINE="${_at}/c" KLDLOAD_AUTOINSTALL_LOG="${_at}/log" \
+        KLDLOAD_AUTOINSTALL_RUNDIR="${_at}/run" "$@" bash "${_ai}" >"${_at}/out" 2>&1 || _arc=$?
+}
+_abad=""
+_ar 'kldload.distro=fedora kldload.kvm=1 kldload.k8s=1 kldload.k8sbootstrap=1 kldload.zfsdev=1 kldload.ai=1 kldload.template=k8s' KLDLOAD_AUTOINSTALL_DRYRUN=1
+for _kv in KLDLOAD_ENABLE_KVM=1 KLDLOAD_ENABLE_K8S=1 KLDLOAD_K8S_BOOTSTRAP=1 KLDLOAD_KLAB_ZFS_DEV=1 KLDLOAD_ENABLE_AI=1 KLDLOAD_TEMPLATE=k8s; do
+    grep -qx "${_kv}" "${_at}/out" || _abad+=" missing-${_kv%%=*}"
+done
+_ar 'kldload.template=none kldload.ai=0' KLDLOAD_AUTOINSTALL_DRYRUN=1
+grep -qx 'KLDLOAD_TEMPLATE=' "${_at}/out" || _abad+=" template-none-not-cleared"
+_ar 'kldload.seed=http://a/x.env kldload.hostname=x kldload.seed=http://b/y.env' KLDLOAD_AUTOINSTALL_DRYRUN=1
+[[ "$_arc" == 1 ]] && grep -q 'REFUSING: 2 kldload.seed=' "${_at}/out" || _abad+=" two-seeds-accepted"
+_ar 'kldload.kvm=yes' KLDLOAD_AUTOINSTALL_DRYRUN=1
+[[ "$_arc" == 1 ]] || _abad+=" bad-value-accepted"
+# The handshake: encryption asked for, no password or passphrase anywhere.
+rm -rf "${_at}/run" && mkdir -p "${_at}/run"
+(
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -s "${_at}/run/install-needs" ]] && break
+        sleep 0.5
+    done
+    printf "KLDLOAD_PASSWORD=' p w '\nKLDLOAD_ZFS_PASSPHRASE='eight chars'\nKLDLOAD_EVIL=1\n" >"${_at}/run/.s"
+    mv "${_at}/run/.s" "${_at}/run/install-secrets"
+) &
+_ar 'kldload.distro=fedora kldload.disk=/dev/vdz kldload.encrypt=1' KLDLOAD_AUTOINSTALL_STOP_BEFORE_EXEC=1 KLDLOAD_SECRETS_TIMEOUT=20
+wait
+[[ "$_arc" == 0 ]] || _abad+=" handshake-rc-${_arc}"
+grep -qx "KLDLOAD_PASSWORD=' p w '" "${_at}/out" || _abad+=" password-not-merged"
+grep -qx "KLDLOAD_ZFS_PASSPHRASE='eight chars'" "${_at}/out" || _abad+=" passphrase-not-merged"
+grep -q '^KLDLOAD_EVIL' "${_at}/out" && _abad+=" extra-key-merged"
+[[ -z "$(ls -A "${_at}/run")" ]] || _abad+=" rundir-not-cleaned"
+rm -rf "${_at}"
+if [[ -z "${_abad}" ]]; then
+    _pass "autoinstall: menu keys land, template=none clears, one seed only, secrets wait and merge only what was asked"
+else
+    _fail "autoinstall netboot override" "${_abad}"
+fi
+
+# ─── netboot manual override: the menu ───────────────────────────────────────
+_section "netboot override: the menu"
+_nbs="${CHROOT}/usr/local/sbin/kldload-netboot-server"
+_nt="$(mktemp -d)"
+mkdir -p "${_nt}/root/armed" "${_nt}/root/answers"
+printf 'KLDLOAD_DISTRO=fedora\nKLDLOAD_PROFILE=desktop\nKLDLOAD_HOSTNAME=n1\nKLDLOAD_DISK=/dev/vdz\nKLDLOAD_PASSWORD=x\nKLDLOAD_TIMEZONE=America/Vancouver\n' >"${_nt}/a.env"
+_nbad=""
+if env NETBOOT_ROOT="${_nt}/root" NETBOOT_MENU_TIMEOUT=10 KLDLOAD_ANSWERS_LIB="${CHROOT}/usr/lib/kldload-installer/lib/answers.sh" \
+    bash "${_nbs}" arm-install 52:54:00:00:00:01 "${_nt}/a.env" >/dev/null 2>&1; then
+    _tok="${_nt}/root/armed/52-54-00-00-00-01.ipxe"
+    grep -q '^prompt --timeout 10000 .* && goto top || goto armed$' "${_tok}" || _nbad+=" no-countdown"
+    grep -q '^:armed$' "${_tok}" && sed -n '/^:armed$/,/^goto install$/p' "${_tok}" | grep -q '^clear margs$' || _nbad+=" armed-path-not-plain"
+    for _o in o_enc o_sb o_kvm o_img o_k8s o_zfs o_ai v_host v_user v_tz v_kb go; do
+        grep -q "^item ${_o} " "${_tok}" || _nbad+=" no-${_o}"
+    done
+    [[ "$(sed -n '/^menu options/,/^choose /p' "${_tok}" | grep -c '^item ')" -le 14 ]] || _nbad+=" options-too-long"
+    grep -q '^:img_on$' "${_tok}" && sed -n '/^:img_on$/,/^goto opts$/p' "${_tok}" | grep -q '^set kvm 1$' || _nbad+=" goldens-without-kvm"
+    grep -qE 'kldload\.(password|passphrase)=' "${_tok}" && _nbad+=" secret-on-cmdline"
+else
+    _nbad+=" arm-failed"
+fi
+rm -rf "${_nt}"
+if [[ -z "${_nbad}" ]]; then
+    _pass "netboot menu: countdown to the armed file, manual options with KVM dependencies, no secret on the cmdline"
+else
+    _fail "netboot override menu" "${_nbad}"
+fi
+
 # ─── the package wrapper finds the verb behind the options ───────────────────
 # It took the verb from $1, so `dnf -y install x` ("-y") took no snapshot, and
 # dnf has no other hook (fiend, 2026-09-18). Run its _find_verb on real argv.

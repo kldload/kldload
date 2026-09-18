@@ -1480,6 +1480,70 @@ def _pam_authenticate(user, password):
         return False
 
 
+async def _install_secrets(websocket, msg):
+    """Secrets kldload-autoinstall is waiting for, typed on this machine's screen.
+
+    autoinstall names what it needs in /run/kldload/install-needs (password,
+    passphrase) and waits for /run/kldload/install-secrets. This writes that
+    file, 0600 and atomically, then autoinstall merges it into the answers.
+
+    LOCAL ONLY, and deliberately stricter than the rest of the socket: on the
+    live image WEBUI_LIVE_MODE authenticates every client, remote ones too, and
+    whoever sets the pool passphrase owns the machine's data. Only the kiosk on
+    this machine's own screen (nginx-forwarded 127.0.0.1) may answer.
+
+    Values are single-quoted: the answers loader trims unquoted values and
+    refuses an unquoted " #". Nothing about the values is ever logged.
+    Replies install_secrets_ok, or install_secrets_error with a reason.
+    """
+    async def _no(reason):
+        await websocket.send(json.dumps({"type": "install_secrets_error", "msg": reason}))
+
+    if not _ws_is_local(websocket):
+        LOG.warning("install_secrets refused: not from this machine's screen (%s)",
+                    _ws_client_ip(websocket) or "?")
+        await _no("Secrets can only be entered on this machine's own screen.")
+        return
+    try:
+        with open("/run/kldload/install-needs") as fh:
+            needs = fh.read().split()
+    except OSError:
+        await _no("The installer is not waiting for anything.")
+        return
+    keys = {"password": "KLDLOAD_PASSWORD", "passphrase": "KLDLOAD_ZFS_PASSPHRASE"}
+    lines = []
+    for name in needs:
+        if name not in keys:
+            continue
+        val = msg.get(name)
+        if not isinstance(val, str) or not val:
+            await _no(f"The {name} is empty.")
+            return
+        if any(c in val for c in "\n\r\0") or len(val) > 256:
+            await _no(f"The {name} has a line break or is longer than 256 characters.")
+            return
+        if name == "passphrase" and len(val) < 8:
+            await _no("ZFS needs a passphrase of at least 8 characters.")
+            return
+        lines.append(f"{keys[name]}='{val}'\n")
+    tmp = "/run/kldload/.install-secrets.tmp"
+    try:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass  # no leftover from an earlier attempt: the usual case
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write("".join(lines))
+        os.replace(tmp, "/run/kldload/install-secrets")
+    except OSError as e:
+        LOG.error("install_secrets: could not write the secrets file: %s", e.strerror)
+        await _no("Could not hand the secrets to the installer: " + (e.strerror or "I/O error"))
+        return
+    LOG.info("install_secrets: handed %s to the installer", " ".join(needs))
+    await websocket.send(json.dumps({"type": "install_secrets_ok"}))
+
+
 async def ws_handler(websocket):
     _ip = _ws_client_ip(websocket)
     LOG.info("WebSocket client connected: %s (X-Real-IP=%s)", websocket.remote_address, _ip or "?")
@@ -1564,6 +1628,8 @@ async def ws_handler(websocket):
                     }))
                 elif action == "install":
                     await _run_install(websocket, msg)
+                elif action == "install_secrets":
+                    await _install_secrets(websocket, msg)
                 elif action == "wifi_connect":
                     await _wifi_connect(websocket, msg)
                 elif action == "test_rhel_cdn":
@@ -11845,7 +11911,14 @@ async def main_async(args):
                     _error = _r[3] if len(_r) > 3 else ""
             except OSError:
                 pass  # no result file: the install is running, finished, or never started
-            _stage = "install" if (_phase or _failed) else ("converge" if _plan or _cphase else "")
+            # What the installer is waiting for, typed on this screen (see
+            # _install_secrets). Waiting is part of the install, before any phase.
+            try:
+                with open("/run/kldload/install-needs") as _fh:
+                    _needs = _fh.read().split()
+            except OSError:
+                _needs = []  # not waiting for anything: the usual case
+            _stage = "install" if (_phase or _failed or _needs) else ("converge" if _plan or _cphase else "")
             _done = sum(1 for _x in _plan if _x["state"] == "done")
 
             # "running" is IN PROGRESS, not "state exists".
@@ -11866,7 +11939,7 @@ async def main_async(args):
             # ones -- the all-ready file firstboot touches when everything has
             # settled, and the phase name itself, "ready" being autodeploy's
             # last. Either one ends the show.
-            _running = bool(_stage) and not _failed
+            _running = (bool(_stage) and not _failed) or bool(_needs)
             if _stage == "converge":
                 if os.path.exists("/var/lib/kldload/all-ready") or _cphase == "ready":
                     _running = False
@@ -11891,6 +11964,7 @@ async def main_async(args):
                 "failed": _failed,
                 "rc": _rc,
                 "error": _error,
+                "needs": _needs,
             }).encode()
             return WsResponse(200, "OK", WsHeaders([
                 ("Content-Type", "application/json"),

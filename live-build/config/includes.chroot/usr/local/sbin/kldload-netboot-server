@@ -19,12 +19,15 @@
 # Both take --netdev <mac2>: <mac> starts the boot, <mac2> carries the root
 # image (BOOTIF=01-<mac2>); see _netdev_arg for why fiend needs it.
 #
-# THE MENU: an armed token is a menu, shown before the kernel or root image is
-# fetched. arm-install lists every profile (core server desktop kvm k8s storage
-# ai), then -- with more than one NETBOOT_DISTROS -- a distro screen, then a
-# security screen (standard, encrypted, Secure Boot, both); the armed choice on
-# each is the default after NETBOOT_MENU_TIMEOUT s. Plus a live
-# desktop, the local disk and an iPXE shell. See _write_armed_install;
+# THE MENU: an armed token shows, before the kernel or root image is fetched, a
+# summary card of the armed install and a NETBOOT_MENU_TIMEOUT countdown. No key:
+# the armed answers file, exactly. Any key: the manual override -- profile (core
+# server desktop kvm k8s storage ai), distro (with more than one NETBOOT_DISTROS),
+# then options: checkboxes for encryption, Secure Boot, KVM, golden images,
+# Kubernetes, the ZFS lab and AI, and the hostname, user, time zone and keyboard.
+# Choices ride the cmdline as kldload.<key>=; secrets never do -- the installer
+# asks for a missing password or passphrase on the machine's own screen. Plus a
+# live desktop, the local disk and an iPXE shell. See _write_armed_install;
 # arm-deploy's menu is _write_armed.
 #
 # THE ARMING MECHANISM: boot.ipxe probes net0..net3 and CHAINS the first
@@ -668,7 +671,7 @@ _check_answers() {
 # seven. It always CENTRES the title (menu_ui.c:302), so a title padded to
 # NB_TITLE_W = 78 - 6 columns starts in column 3, where the item labels start.
 # Writes $ROOT/armed/<m>.ipxe and dies if it did not land.
-NB_CONSOLE="--x 1024 --y 768 --left 160 --right 160 --top 236 --bottom 190"
+NB_CONSOLE="--x 1024 --y 768 --left 160 --right 160 --top 216 --bottom 172"
 
 # _ipxe_text <string> — strip anything iPXE would interpret (${, ||, #) from
 # text that came from an answers file.
@@ -864,12 +867,16 @@ _nb_write_profile_answers() {
 # `|| goto plain` styling rules are _write_armed's, for the same reasons.
 _write_armed_install() {
     local m="$1" mac="$2" answers="$3" key prefix="$5" netarg="$6" netdev="$7"
-    local tok="$ROOT/armed/$1.ipxe" host distro disk title tlen p desc seed i=0 d
+    local tok="$ROOT/armed/$1.ipxe" host distro disk user tz kb title tlen p desc f i=0 d
     key="$(_ipxe_text "$4")"
     host="$(_ipxe_text "$(_answer_val "$answers" KLDLOAD_HOSTNAME)")"
     distro="$(_ipxe_text "$(_answer_val "$answers" KLDLOAD_DISTRO)")"
     disk="$(_ipxe_text "$(_answer_val "$answers" KLDLOAD_DISK)")"
     disk="${disk##*/}"
+    user="$(_ipxe_text "$(_answer_val "$answers" KLDLOAD_USERNAME)")"
+    # Time zones carry underscores (America/Los_Angeles), which _ipxe_text drops.
+    tz="$(_answer_val "$answers" KLDLOAD_TIMEZONE | tr -cd 'A-Za-z0-9/_+-')"
+    kb="$(_answer_val "$answers" KLDLOAD_KEYBOARD_LAYOUT | tr -cd 'a-z0-9-')"
     [[ "$MENU_TIMEOUT" =~ ^[0-9]+$ ]] || die "NETBOOT_MENU_TIMEOUT must be whole seconds, got '$MENU_TIMEOUT'"
 
     local -a profs=() dists=()
@@ -880,53 +887,62 @@ _write_armed_install() {
     local multi=0
     ((${#dists[@]} > 1)) && multi=1
 
-    # Title pieces are joined by ${s3:string}: iPXE collapses literal runs of
-    # spaces when it splits the line, so they cannot be typed.
     title="${host:+${host}\${s3:string}}${mac}"
     tlen=$((${#mac} + ${host:+3} + ${#host}))
-    if ((!multi)); then
-        title+="\${s3:string}${distro}"
-        tlen=$((tlen + 3 + ${#distro}))
-    fi
     if [[ -n "$netdev" ]]; then
         title+="\${s3:string}via ${netdev}"
         tlen=$((tlen + 7 + ${#netdev}))
     fi
 
-    local skip=""
-    ((MENU_TIMEOUT > 0)) || skip="goto armed"
-    local ms=$((MENU_TIMEOUT * 1000))
-    # The armed security combination, as s_<encrypt><secureboot>, and whether
-    # the encrypted ones can be offered at all.
-    local enc sb have_pp=0 sec
+    # The armed install, in words, for the summary card.
+    local enc sb what
     enc="$(_answer_val "$answers" KLDLOAD_ZFS_ENCRYPT)"
     sb="$(_answer_val "$answers" KLDLOAD_ENABLE_SECURE_BOOT)"
-    [[ "$enc" == 1 ]] || enc=0
-    [[ "$sb" == 1 ]] || sb=0
-    grep -qE '^KLDLOAD_ZFS_PASSPHRASE=.+' "$answers" && have_pp=1
+    # Separators are ${s3:string}: iPXE collapses typed runs of spaces.
+    local sep='${s3:string}'
+    what="${key}${sep}${distro}"
+    case "${enc:-0}${sb:-0}" in
+    11) what+="${sep}encrypted + Secure Boot" ;;
+    10) what+="${sep}encrypted" ;;
+    01) what+="${sep}Secure Boot" ;;
+    *) what+="${sep}not encrypted, Secure Boot off" ;;
+    esac
+
+    local ms=$((MENU_TIMEOUT * 1000))
     {
         printf '#!ipxe\n'
-        printf '# kldload armed %s: install menu, default %s/%s. ${base} comes from boot.ipxe.\n' "$mac" "$distro" "$key"
-        printf '%s\n' "$skip"
+        printf '# kldload armed %s: %s/%s. ${base} comes from boot.ipxe.\n' "$mac" "$key" "$distro"
+        ((MENU_TIMEOUT > 0)) || printf 'goto armed\n'
         printf '%s\n' "console ${NB_CONSOLE} --picture \${base}/ipxe/menu.png || goto plain" \
             'colour --rgb 0xd0d8e8 7 || goto plain' 'colour --rgb 0xf0f4fa 3 || goto plain' \
             'colour --rgb 0x326ce5 4 || goto plain' 'colour --rgb 0x5a6a85 6 || goto plain' \
             'cpair --foreground 7 --background 9 0 || goto plain' 'cpair --foreground 7 --background 9 1 || goto plain' \
             'cpair --foreground 3 --background 4 2 || goto plain' 'cpair --foreground 6 --background 9 3 || goto plain' \
             ':plain'
-        printf 'set s2:hex %s\nset s3:hex %s\n' "$(_ipxe_pad 2)" "$(_ipxe_pad 3)"
+        printf 'set s2:hex %s\nset s3:hex %s\nset off:hex 5b:20:5d\n' "$(_ipxe_pad 2)" "$(_ipxe_pad 3)"
         _nb_title_pad "$tlen"
         for p in "${profs[@]}" "Live desktop"; do
             printf 'set q%d:hex %s\n' "$i" "$(_ipxe_pad $((15 - ${#p})))"
             i=$((i + 1))
         done
-        # The security screen's columns, as fixed names q9..q12 (at most eight
-        # profiles plus Live desktop come first, so q0..q8 are theirs).
-        printf 'set q9:hex %s\nset q10:hex %s\nset q11:hex %s\nset q12:hex %s\n' \
-            "$(_ipxe_pad 7)" "$(_ipxe_pad 6)" "$(_ipxe_pad 4)" "$(_ipxe_pad 11)"
 
+        # ── the default: a summary card and a countdown ─────────────────────
+        # Operator, 2026-09-18: "if nothing is pressed it boots the env
+        # configuration for whatever the mac was; if a button is pressed it
+        # gives you the manual override." prompt succeeds on a key, fails on
+        # the timeout, so the timeout path is the armed file byte for byte.
+        printf '\n:summary\n'
+        printf 'echo\necho %s\necho\n' "$title"
+        printf 'echo ${s3:string}%s\n' "$what"
+        printf 'echo ${s3:string}disk${s3:string}%s${s3:string}(erased)\n' "${disk:-auto-picked}"
+        printf 'echo ${s3:string}host${s3:string}%s${s3:string}user${s3:string}%s\n' "${host:-auto}" "${user:-admin}"
+        printf 'echo ${s3:string}tz${s3:string}%s\n' "${tz:-UTC}"
+        printf 'echo\n'
+        printf 'prompt --timeout %d ${s3:string}Installing in %d s. Press any key to change it. && goto top || goto armed\n' "$ms" "$MENU_TIMEOUT"
+
+        # ── the manual override: profile ────────────────────────────────────
         printf '\n:top\nmenu %s${tp:string}\n' "$title"
-        printf 'item --gap BASE${s3:string}erases %s\n' "${disk:-the disk it picks}"
+        printf 'item --gap install${s3:string}erases %s\n' "${disk:-the disk it picks}"
         i=0
         for p in "${profs[@]}"; do
             desc="$(_nb_preset "$p")" || desc="as armed|"
@@ -938,22 +954,30 @@ _write_armed_install() {
         printf 'item --gap\n'
         printf 'item live Live desktop${q%d:string}installs nothing\n' "$i"
         printf 'item local Boot from local disk\nitem shell iPXE shell\n'
-        printf 'choose --timeout %d --default m_%s target || goto local\ngoto ${target}\n' "$ms" "$key"
+        printf 'choose --default m_%s target || goto local\ngoto ${target}\n' "$key"
 
+        # Each profile starts the options from ITS answers file, so ticking
+        # nothing installs exactly that profile's matrix edition.
         for p in "${profs[@]}"; do
-            seed="${m}-${p}.env"
-            [[ "$p" == "$key" ]] && seed="${m}.env"
-            printf '\n:m_%s\nset pf %s\nset sf %s\ngoto distro\n' "$p" "$p" "$seed"
+            f="$ROOT/answers/${m}-${p}.env"
+            [[ "$p" == "$key" ]] && f="$answers"
+            printf '\n:m_%s\nset pf %s\nset sf %s\n' "$p" "$p" "${f##*/}"
+            local k v
+            for k in enc:KLDLOAD_ZFS_ENCRYPT sb:KLDLOAD_ENABLE_SECURE_BOOT kvm:KLDLOAD_ENABLE_KVM \
+                img:KLDLOAD_BUILD_IMAGES k8s:KLDLOAD_K8S_BOOTSTRAP zfs:KLDLOAD_KLAB_ZFS_DEV ai:KLDLOAD_ENABLE_AI; do
+                v="$(_answer_val "$f" "${k#*:}")"
+                [[ "$v" == 1 ]] || v=0
+                printf 'set %s %s\n' "${k%%:*}" "$v"
+            done
+            printf 'goto distro\n'
         done
 
-        printf '\n:armed\nset sf %s.env\nclear dargs\nclear sargs\ngoto install\n' "$m"
+        # ── distro ──────────────────────────────────────────────────────────
         printf '\n:distro\n'
         if ((multi)); then
-            # Its own pad setting: sharing tp shifted the main title two
-            # columns left after Back (qemu, 2026-09-18).
             _nb_title_pad 6 td
             printf 'menu distro${td:string}\n'
-            printf 'item --gap assemble ${pf} on\n'
+            printf 'item --gap install ${pf} on\n'
             for d in "${dists[@]}"; do
                 if [[ "$d" == "$distro" ]]; then
                     printf 'item d_%s %s${s3:string}[armed]\n' "$d" "$d"
@@ -962,56 +986,101 @@ _write_armed_install() {
                 fi
             done
             printf 'item --gap\nitem top Back\n'
-            printf 'choose --timeout %d --default d_%s dsel || goto top\ngoto ${dsel}\n' "$ms" "$distro"
+            printf 'choose --default d_%s dsel || goto top\ngoto ${dsel}\n' "$distro"
             for d in "${dists[@]}"; do
-                if [[ "$d" == "$distro" ]]; then
-                    printf '\n:d_%s\nclear dargs\ngoto security\n' "$d"
-                else
-                    printf '\n:d_%s\nset dargs kldload.distro=%s\ngoto security\n' "$d" "$d"
-                fi
+                printf '\n:d_%s\nset dist %s\ngoto opts\n' "$d" "$d"
             done
         else
-            printf 'clear dargs\ngoto security\n'
+            printf 'set dist %s\ngoto opts\n' "$distro"
         fi
 
-        # s_<encrypt><secureboot>. The armed one clears sargs, so the timeout
-        # boots exactly the armed file; the others state both values.
-        printf '\n:security\n'
-        _nb_title_pad 8 ts
-        printf 'menu security${ts:string}\n'
-        printf 'item --gap assemble ${pf} with\n'
-        for sec in 00 10 01 11; do
-            [[ "$sec" == 1? && $have_pp == 0 ]] && continue
-            case "$sec" in
-            00) desc='standard${q9:string}no encryption, Secure Boot off' ;;
-            10) desc='encrypted${q10:string}ZFS native encryption, passphrase at every boot' ;;
-            01) desc='Secure Boot${q11:string}signed boot chain, enroll the key on first boot' ;;
-            11) desc='both${q12:string}encrypted and Secure Boot' ;;
-            esac
-            [[ "$sec" == "${enc}${sb}" ]] && desc+='${s2:string}[armed]'
-            printf 'item s_%s %s\n' "$sec" "$desc"
+        # ── options: checkboxes and the vitals ──────────────────────────────
+        # Each item flips its setting and redraws. Golden images, Kubernetes and
+        # the ZFS lab need KVM (rpool/vms exists only with it -- the "0 goldens,
+        # reported ready" defect), so ticking one ticks KVM, and unticking KVM
+        # unticks them. Secrets are never typed here: iPXE could only carry
+        # them on the kernel cmdline or in a URL, both world-readable; the
+        # installer asks on the machine's own screen for what the file lacks.
+        printf '\n:opts\n'
+        local o
+        for o in enc sb kvm img k8s zfs ai; do
+            printf 'iseq ${%s} 1 && set x%s [x] || set x%s ${off:string}\n' "$o" "$o" "$o"
         done
-        ((have_pp)) || printf 'item --gap encryption needs KLDLOAD_ZFS_PASSPHRASE in the answers file\n'
-        printf 'item --gap\nitem top Back\n'
-        printf 'choose --timeout %d --default s_%s ssel || goto top\ngoto ${ssel}\n' "$ms" "${enc}${sb}"
-        for sec in 00 10 01 11; do
-            if [[ "$sec" == "${enc}${sb}" ]]; then
-                printf '\n:s_%s\nclear sargs\ngoto install\n' "$sec"
-            else
-                printf '\n:s_%s\nset sargs kldload.encrypt=%s kldload.secureboot=%s\ngoto install\n' "$sec" "${sec:0:1}" "${sec:1:1}"
-            fi
+        _nb_title_pad 7 to
+        # Exactly 13 items, iPXE's LINES - 5: at 16 (a header gap and Back) it
+        # scrolled to the default and hid every checkbox behind "..." (qemu,
+        # 2026-09-18). Esc is Back, as the key hints say.
+        printf 'menu options${to:string}\n'
+        printf 'item o_enc ${xenc}${s2:string}ZFS encryption\n'
+        printf 'item o_sb ${xsb}${s2:string}Secure Boot\n'
+        printf 'item o_kvm ${xkvm}${s2:string}KVM hypervisor\n'
+        printf 'item o_img ${ximg}${s2:string}golden images (klab)\n'
+        printf 'item o_k8s ${xk8s}${s2:string}Kubernetes cluster\n'
+        printf 'item o_zfs ${xzfs}${s2:string}ZFS test lab (zfslab)\n'
+        printf 'item o_ai ${xai}${s2:string}AI, local models\n'
+        printf 'item --gap\n'
+        printf 'item v_host hostname${s3:string}${host}\n'
+        printf 'item v_user user${s3:string}${user}\n'
+        printf 'item v_tz time zone${s3:string}${tz}\n'
+        printf 'item v_kb keyboard${s3:string}${kb}\n'
+        printf 'item --gap\n'
+        printf 'item go Install ${pf} on ${dist} now\n'
+        printf 'choose --default go osel || goto top\ngoto ${osel}\n'
+        printf '\n:o_enc\niseq ${enc} 1 && set enc 0 || set enc 1\ngoto opts\n'
+        printf '\n:o_sb\niseq ${sb} 1 && set sb 0 || set sb 1\ngoto opts\n'
+        printf '\n:o_kvm\niseq ${kvm} 1 && goto kvm_off || set kvm 1\ngoto opts\n'
+        printf ':kvm_off\nset kvm 0\nset img 0\nset k8s 0\nset zfs 0\ngoto opts\n'
+        for o in img k8s zfs; do
+            printf '\n:o_%s\niseq ${%s} 1 && set %s 0 || goto %s_on\ngoto opts\n' "$o" "$o" "$o" "$o"
+            printf ':%s_on\nset %s 1\nset kvm 1\ngoto opts\n' "$o" "$o"
         done
+        printf '\n:o_ai\niseq ${ai} 1 && set ai 0 || set ai 1\ngoto opts\n'
+        # read edits the current value in place; an empty answer keeps it.
+        printf '\n:v_host\necho -n Hostname:${s2:string}\nread host\ngoto opts\n'
+        printf '\n:v_user\necho -n User:${s2:string}\nread user\ngoto opts\n'
+        printf '\n:v_tz\n'
+        _nb_title_pad 9 tz_
+        printf 'menu time zone${tz_:string}\n'
+        for d in America/Vancouver America/Los_Angeles America/Denver America/Chicago America/New_York \
+            America/Toronto America/Halifax UTC Europe/London Europe/Berlin Europe/Paris Asia/Tokyo Australia/Sydney; do
+            printf 'item %s %s\n' "$d" "$d"
+        done
+        printf 'choose --default ${tz} tz || goto opts\ngoto opts\n'
+        printf '\n:v_kb\n'
+        _nb_title_pad 8 kb_
+        printf 'menu keyboard${kb_:string}\n'
+        for d in us gb ca de fr es it se no dk fi; do printf 'item %s %s\n' "$d" "$d"; done
+        printf 'choose --default ${kb} kb || goto opts\ngoto opts\n'
+
+        # ── install now: every choice on the cmdline, the file for the rest ─
+        # template follows the boxes, strongest last: a k8s answers file must
+        # not bring Kubernetes back after it was unticked. "none" becomes an
+        # empty template in kldload-autoinstall.
+        printf '\n:go\nset tpl none\n'
+        printf 'iseq ${kvm} 1 && set tpl kvm || clear _nb\n'
+        printf 'iseq ${zfs} 1 && set tpl zfslab || clear _nb\n'
+        printf 'iseq ${k8s} 1 && set tpl k8s || clear _nb\n'
+        printf 'set margs kldload.distro=${dist} kldload.encrypt=${enc} kldload.secureboot=${sb} kldload.kvm=${kvm} kldload.buildimages=${img} kldload.k8s=${k8s} kldload.k8sbootstrap=${k8s} kldload.zfsdev=${zfs} kldload.ai=${ai} kldload.template=${tpl} kldload.hostname=${host} kldload.username=${user} kldload.timezone=${tz} kldload.keyboard=${kb}\n'
+        printf 'goto install\n'
+
+        # The armed path: the armed file, nothing else.
+        printf '\n:armed\nset sf %s.env\nclear margs\ngoto install\n' "$m"
 
         printf '\n:install\n'
-        printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s kldload.seed=${base}/answers/${sf} ${dargs} ${sargs}%s\n' "$prefix" "$netarg"
+        printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s kldload.seed=${base}/answers/${sf} ${margs}%s\n' "$prefix" "$netarg"
         printf 'initrd ${base}/kldload/initrd.img\nboot\n'
         printf '\n:live\n'
         printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s%s\n' "$ISO_ARGS" "$netarg"
         printf 'initrd ${base}/kldload/initrd.img\nboot\n'
         printf '\n:local\necho kldload: booting from local disk\nexit\n\n:shell\nshell\n'
     } >"$tok"
+    # The vitals start from the answers file; set them before the first use.
+    local pre
+    pre="$(printf 'set host %s\nset user %s\nset tz %s\nset kb %s\n' "${host:-kldload}" "${user:-admin}" "${tz:-UTC}" "${kb:-us}")"
+    sed -i "/^:plain\$/r /dev/stdin" "$tok" <<<"$pre"
     [[ -s "$tok" ]] || die "$tok did not land"
     grep -q "^:m_${key}\$" "$tok" || die "$tok has no entry for the armed profile $key"
+    grep -q '^prompt --timeout' "$tok" || die "$tok has no summary countdown"
 }
 
 cmd_arm_install() {
@@ -1399,13 +1468,14 @@ run by hand; a variable already set in the environment wins):
   NETBOOT_IFACE  interface to serve on (default: the one holding the default
                  route). Set this when provisioning runs on its own NIC, which
                  has no default route and would otherwise not be chosen.
-  NETBOOT_MENU_TIMEOUT  seconds an armed machine shows its menu before taking
-                 the armed action. arm-install's menu lists every profile
-                 (core server desktop kvm k8s storage ai; each one the armed
-                 answers file with that profile's matrix settings), then a live
-                 desktop, the local disk and an iPXE shell. A profile leads to a
-                 security screen: standard, Secure Boot, and -- only when the
-                 answers file has KLDLOAD_ZFS_PASSPHRASE -- encrypted and both.
+  NETBOOT_MENU_TIMEOUT  seconds the summary card counts down before installing
+                 the armed answers file exactly. Any key opens the manual
+                 override: profile (core server desktop kvm k8s storage ai,
+                 each the armed file with that profile's matrix settings),
+                 distro, then options -- encryption, Secure Boot, KVM, golden
+                 images, Kubernetes, ZFS lab, AI (the last three tick KVM), and
+                 hostname, user, time zone, keyboard. A password or passphrase
+                 the answers lack is asked for on the machine's own screen.
                  Esc goes back, then to the local disk. Default 10; 0 = no menu.
                  Read when arming: re-arm to change an armed machine.
   NETBOOT_DISTROS  distros the install menu offers, space-separated; only ones

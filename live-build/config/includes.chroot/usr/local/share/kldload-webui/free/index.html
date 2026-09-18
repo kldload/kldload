@@ -207,6 +207,23 @@ html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background
   background:rgba(255,95,95,.08);border:1px solid rgba(255,95,95,.35);border-radius:6px;
   padding:1rem 1.2rem;white-space:pre-wrap;word-break:break-word}
 .ishow-fail-h{font-size:1rem;color:#9fb0c4;line-height:1.6}
+/* Secrets the installer is waiting for, typed on this machine only (the web UI
+   refuses them from anywhere else). Replaces the slides while it waits. */
+#ishow-secrets{display:none}
+#install-show.needs #ishow-slides{display:none}
+#install-show.needs #ishow-secrets{position:relative;z-index:2;flex:1;display:flex;
+  flex-direction:column;justify-content:center;gap:1rem;width:min(46rem,86vw);margin:0 auto}
+#install-show.needs #ishow-live{color:#8fb0ff}
+#ishow-sform{display:flex;flex-direction:column;gap:1rem}
+#ishow-sform label{display:flex;flex-direction:column;gap:.45rem;color:#d0d8e8;font-size:1rem}
+#ishow-sform label[hidden]{display:none}
+#ishow-sform input{font:inherit;font-size:1.1rem;padding:.6rem .8rem;border-radius:6px;
+  border:1px solid #283040;background:#0c0e14;color:#f0f4fa}
+#ishow-sform input:focus{outline:2px solid #326ce5;border-color:#326ce5}
+#ishow-sform button{align-self:flex-start;font:inherit;font-size:1.05rem;padding:.65rem 1.4rem;
+  border:0;border-radius:6px;background:#326ce5;color:#f0f4fa;cursor:pointer}
+#ishow-serr{min-height:1.4rem;color:#ff9f9f;font-size:.95rem}
+#ishow-serr.ok{color:#8fe0a8}
 #ishow-brand{position:absolute;bottom:6.6rem;left:3.2rem;z-index:2;display:flex;
   align-items:center;gap:.7rem;font-size:.74rem;letter-spacing:.34em;
   text-transform:uppercase;color:#6d7f93;font-weight:700}
@@ -4611,6 +4628,22 @@ function handle(msg) {
         });
         if (prev) nicSel.value = prev;
       }
+      break;
+    }
+
+    case 'install_secrets_ok': {
+      const e = document.getElementById('ishow-serr');
+      e.className = 'ok';
+      e.textContent = 'Accepted. The install continues.';
+      ['ishow-pw1', 'ishow-pw2', 'ishow-pp1', 'ishow-pp2'].forEach(function (id) {
+        document.getElementById(id).value = '';
+      });
+      break;
+    }
+    case 'install_secrets_error': {
+      const e = document.getElementById('ishow-serr');
+      e.className = '';
+      e.textContent = msg.msg || 'The installer refused that.';
       break;
     }
 
@@ -12005,6 +12038,21 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     </div>
   </div>
   <div id="ishow-slides"></div>
+  <div id="ishow-secrets" role="dialog" aria-label="The installer needs you">
+    <div class="ishow-fail-t">Before this machine installs</div>
+    <div class="ishow-fail-h">The install was chosen at the netboot menu, and these never travel over
+      the network: type them here, on this machine. Nothing has been erased yet.</div>
+    <form id="ishow-sform" autocomplete="off">
+      <label data-need="password">Login password
+        <input type="password" id="ishow-pw1" autocomplete="new-password">
+        <input type="password" id="ishow-pw2" autocomplete="new-password" placeholder="again"></label>
+      <label data-need="passphrase">ZFS encryption passphrase (at least 8 characters, asked at every boot)
+        <input type="password" id="ishow-pp1" autocomplete="new-password">
+        <input type="password" id="ishow-pp2" autocomplete="new-password" placeholder="again"></label>
+      <div id="ishow-serr"></div>
+      <button type="submit">Continue the install</button>
+    </form>
+  </div>
   <div id="ishow-fail" role="alert">
     <div class="ishow-fail-t">The install stopped</div>
     <div id="ishow-fail-msg"></div>
@@ -12559,6 +12607,29 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     document.getElementById('install-show').style.display = 'none';
   });
 
+  // Hand the typed secrets to the installer: over the page's own socket, which
+  // the web UI accepts for this only from this machine's screen.
+  document.getElementById('ishow-sform').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var err = document.getElementById('ishow-serr');
+    err.className = '';
+    var needs = (window._ishowNeeds || '').split(' ').filter(Boolean);
+    var out = { action: 'install_secrets' };
+    var pairs = { password: ['ishow-pw1', 'ishow-pw2'], passphrase: ['ishow-pp1', 'ishow-pp2'] };
+    for (var i = 0; i < needs.length; i++) {
+      var ids = pairs[needs[i]];
+      if (!ids) continue;
+      var a = document.getElementById(ids[0]).value, b = document.getElementById(ids[1]).value;
+      if (!a) { err.textContent = 'The ' + needs[i] + ' is empty.'; return; }
+      if (a !== b) { err.textContent = 'The two ' + needs[i] + ' entries do not match.'; return; }
+      if (needs[i] === 'passphrase' && a.length < 8) { err.textContent = 'ZFS needs at least 8 characters.'; return; }
+      out[needs[i]] = a;
+    }
+    if (typeof wsReady !== 'undefined' && !wsReady) { err.textContent = 'Not connected to the installer yet. Try again in a moment.'; return; }
+    err.textContent = 'Handing it to the installer...';
+    send(out);
+  });
+
   function poll() {
     if (APP_WINDOW) return;
     fetch('/api/install-progress', { cache: 'no-store' })
@@ -12623,6 +12694,27 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
           b.textContent = s.label; d.textContent = ' ' + s.detail;
           return '<span class="ishow-step">' + b.outerHTML + d.outerHTML + '</span>';
         }).join('');
+
+        // The installer is waiting for secrets typed here. Only the fields it
+        // named are shown, and they are touched only when that list changes,
+        // so the 2-second poll never wipes what is being typed.
+        var needs = p.needs || [];
+        show.classList.toggle('needs', needs.length > 0);
+        if (needs.length) {
+          show.style.display = 'flex';
+          document.getElementById('ishow-live').textContent = 'WAITING FOR YOU';
+          var nk = needs.join(' ');
+          if (window._ishowNeeds !== nk) {
+            window._ishowNeeds = nk;
+            document.querySelectorAll('#ishow-sform label[data-need]').forEach(function (l) {
+              l.hidden = needs.indexOf(l.getAttribute('data-need')) < 0;
+            });
+            var first = document.querySelector('#ishow-sform label:not([hidden]) input');
+            if (first) first.focus();
+          }
+        } else {
+          window._ishowNeeds = '';
+        }
 
         // Last, so it overrides "INSTALLING" and the !running hide above.
         show.classList.toggle('failed', !!p.failed);

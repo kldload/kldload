@@ -13,9 +13,20 @@
 #   ./deploy.sh seed-disk --answers /etc/kldload/answers/zfs-single-disk.env
 #
 # Exits 0 silently if no seed disk is found (safe to enable unconditionally).
+#
+# Test hooks (tests/smoke-unit.sh), all unset in real use:
+#   KLDLOAD_AUTOINSTALL_CMDLINE  a file to read instead of /proc/cmdline
+#   KLDLOAD_AUTOINSTALL_LOG      a log path instead of /var/log/installer
+#   KLDLOAD_AUTOINSTALL_DRYRUN=1 print the assembled answers and exit 0 before
+#                                anything is installed
+#   KLDLOAD_AUTOINSTALL_RUNDIR   instead of /run/kldload, for the secrets handshake
+#   KLDLOAD_AUTOINSTALL_STOP_BEFORE_EXEC=1  print the final answers and exit 0
+#                                where the installer would be exec'd
+#   KLDLOAD_SECRETS_TIMEOUT      seconds to wait for secrets typed on screen (3600)
 set -Eeuo pipefail
 
-LOG=/var/log/installer/autoinstall.log
+LOG="${KLDLOAD_AUTOINSTALL_LOG:-/var/log/installer/autoinstall.log}"
+_CMDLINE_FILE="${KLDLOAD_AUTOINSTALL_CMDLINE:-/proc/cmdline}"
 mkdir -p "$(dirname "$LOG")"
 exec > >(tee -a "$LOG") 2>&1
 
@@ -66,9 +77,18 @@ _live_disk() {
 # quietly install something else instead -- and a 404 is the normal, expected
 # answer for a machine that is simply not armed.
 ANSWERS_TMP=""
+# One seed, or none. The netboot menu puts typed text (a hostname) on this
+# cmdline, and the parse below takes the LAST kldload.seed= -- so a second one
+# typed into a field would silently replace the armed answers. A machine whose
+# cmdline names two answer sources installs from neither (2026-09-18).
+_seed_count="$(tr ' ' '\n' <"$_CMDLINE_FILE" 2>/dev/null | grep -c '^kldload\.seed=' || true)" # grep -c prints 0 and exits 1 on no match, the normal case
+if [[ "${_seed_count:-0}" -gt 1 ]]; then
+    log "REFUSING: ${_seed_count} kldload.seed= on the kernel cmdline — expected one. NOT installing."
+    exit 1
+fi
 # (^|.*space), not just (space): an iPXE-built cmdline can put kldload.seed
 # first with nothing before it. Caught by the parser test, not by reading it.
-SEED_URL="$(sed -nE 's/(^|.*[[:space:]])kldload\.seed=([^[:space:]]*).*/\2/p' /proc/cmdline 2>/dev/null || true)"
+SEED_URL="$(sed -nE 's/(^|.*[[:space:]])kldload\.seed=([^[:space:]]*).*/\2/p' "$_CMDLINE_FILE" 2>/dev/null || true)"
 if [[ -n "$SEED_URL" ]]; then
     case "$SEED_URL" in
     http://* | https://*) ;;
@@ -166,7 +186,7 @@ fi
 # kldload-install-target keeps a fallback that SOURCES the file under `set -a`
 # when that library is missing, and there an unvalidated value is code execution
 # as root during a disk wipe.
-_cmdline_raw="$(cat /proc/cmdline 2>/dev/null || true)"
+_cmdline_raw="$(cat "$_CMDLINE_FILE" 2>/dev/null || true)"
 
 # Refuse secrets LOUDLY. Checked before anything else so the message is the
 # first thing in the log rather than buried under accepted keys.
@@ -345,7 +365,13 @@ for _spec in \
     "topology:KLDLOAD_ZFS_TOPOLOGY:^[a-z0-9]{1,16}$" \
     "secureboot:KLDLOAD_ENABLE_SECURE_BOOT:^[01]$" \
     "buildimages:KLDLOAD_BUILD_IMAGES:^[01]$" \
-    "keepnetboot:KLDLOAD_KEEP_NETBOOT:^[01]$"; do
+    "keepnetboot:KLDLOAD_KEEP_NETBOOT:^[01]$" \
+    "kvm:KLDLOAD_ENABLE_KVM:^[01]$" \
+    "k8s:KLDLOAD_ENABLE_K8S:^[01]$" \
+    "k8sbootstrap:KLDLOAD_K8S_BOOTSTRAP:^[01]$" \
+    "zfsdev:KLDLOAD_KLAB_ZFS_DEV:^[01]$" \
+    "ai:KLDLOAD_ENABLE_AI:^[01]$" \
+    "template:KLDLOAD_TEMPLATE:^(none|kvm|k8s|zfslab)$"; do
     _k="${_spec%%:*}"
     _rest="${_spec#*:}"
     _var="${_rest%%:*}"
@@ -356,13 +382,17 @@ for _spec in \
     [[ -n "$_val" ]] || continue
     if ! [[ "$_val" =~ $_re ]]; then
         log "REFUSING: kldload.${_k}=${_val} does not match ${_re}"
-        log "  An answers file is sourced as shell during a disk wipe. NOT installing."
+        log "  An answers file is read as root just before a disk wipe. NOT installing."
         exit 1
     fi
     if [[ -z "$ANSWERS_TMP" ]]; then
         ANSWERS_TMP="$(mktemp /tmp/kldload-answers.XXXXXX.env)"
         log "Building answers from the kernel cmdline (no seed file present)"
     fi
+    # template=none CLEARS the template: the netboot menu's checkboxes decide
+    # what builds, and a k8s answers file must not bring Kubernetes back after
+    # it was unticked (autodeploy turns the template itself into build work).
+    [[ "$_k" == template && "$_val" == none ]] && _val=""
     if grep -q "^${_var}=" "$ANSWERS_TMP"; then
         sed -i "s|^${_var}=.*|${_var}=${_val}|" "$ANSWERS_TMP"
     else
@@ -372,6 +402,11 @@ for _spec in \
     _cmdline_applied=$((_cmdline_applied + 1))
 done
 ((_cmdline_applied == 0)) || log "Applied ${_cmdline_applied} answer(s) from the kernel cmdline"
+if [[ -n "${KLDLOAD_AUTOINSTALL_DRYRUN:-}" && -n "$ANSWERS_TMP" ]]; then
+    cat "$ANSWERS_TMP"
+    rm -f "$ANSWERS_TMP"
+    exit 0
+fi
 
 if [[ -z "$ANSWERS_TMP" ]]; then
     log "No answers file found (no seed disk, no cmdline keys, no /etc/kldload/autoinstall.env) — skipping autoinstall"
@@ -609,6 +644,66 @@ if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
     else
         echo "KLDLOAD_DISK=${_DETECTED_ID}" >>"$ANSWERS_TMP"
     fi
+fi
+
+# ─── secrets the answers do not carry: asked for on this machine's screen ────
+# The netboot menu's manual override can tick encryption on a machine whose
+# answers file has no passphrase, and never carries a secret itself: iPXE could
+# only put it on the kernel cmdline (world-readable on the installed system for
+# ever) or in a URL. So the machine asks. This names what it needs in
+# $_RUN/install-needs, the install show draws a form, the web UI -- from this
+# machine's own screen only -- writes $_RUN/install-secrets (0600), and the
+# install goes on. Nothing has touched a disk yet. (operator, 2026-09-18: "it
+# never prompted me for enc".)
+_RUN="${KLDLOAD_AUTOINSTALL_RUNDIR:-/run/kldload}"
+_ans() { sed -n "s/^${1}=//p" "$ANSWERS_TMP" | tail -n 1 | sed -E "s/^([\"'])(.*)\1\$/\2/"; }
+_need=()
+[[ -n "$(_ans KLDLOAD_PASSWORD)" ]] || _need+=(password)
+if [[ "$(_ans KLDLOAD_ZFS_ENCRYPT)" == 1 && -z "$(_ans KLDLOAD_ZFS_PASSPHRASE)" ]]; then
+    _need+=(passphrase)
+fi
+if ((${#_need[@]})); then
+    install -d -m 0755 "$_RUN"
+    rm -f "$_RUN/install-secrets"
+    printf '%s\n' "${_need[*]}" >"$_RUN/.install-needs.$$"
+    mv -f "$_RUN/.install-needs.$$" "$_RUN/install-needs"
+    log "Waiting for ${_need[*]}, typed on this machine's screen (the install show asks)"
+    _limit="${KLDLOAD_SECRETS_TIMEOUT:-3600}"
+    _waited=0
+    while [[ ! -s "$_RUN/install-secrets" ]]; do
+        if ((_waited >= _limit)); then
+            rm -f "$_RUN/install-needs"
+            log "REFUSING: no ${_need[*]} after ${_limit}s — NOT installing. Netboot it again."
+            exit 1
+        fi
+        sleep 2
+        _waited=$((_waited + 2))
+    done
+    # Only the two keys this asked for, each replacing any line the answers
+    # already had. The values never reach the log.
+    _got=0
+    while IFS= read -r _line; do
+        case "$_line" in
+        KLDLOAD_PASSWORD=?* | KLDLOAD_ZFS_PASSPHRASE=?*)
+            _k="${_line%%=*}"
+            awk -v k="${_k}=" 'index($0, k) != 1' "$ANSWERS_TMP" >"${ANSWERS_TMP}.new"
+            printf '%s\n' "$_line" >>"${ANSWERS_TMP}.new"
+            mv -f "${ANSWERS_TMP}.new" "$ANSWERS_TMP"
+            _got=$((_got + 1))
+            ;;
+        esac
+    done <"$_RUN/install-secrets"
+    rm -f "$_RUN/install-secrets" "$_RUN/install-needs"
+    if ((_got != ${#_need[@]})); then
+        log "REFUSING: asked for ${#_need[*]} secret(s) (${_need[*]}), received ${_got} — NOT installing."
+        exit 1
+    fi
+    log "Received ${_need[*]} from the screen"
+fi
+
+if [[ -n "${KLDLOAD_AUTOINSTALL_STOP_BEFORE_EXEC:-}" ]]; then
+    cat "$ANSWERS_TMP"
+    exit 0
 fi
 
 log "Starting unattended install..."

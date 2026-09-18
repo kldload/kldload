@@ -29,7 +29,7 @@ W, H = 1024, 768
 # LINES - 5 = 13 item rows (menu_ui.c MENU_ROWS) -- the install menu's seven
 # profiles, live, local, shell and its gaps, plus one armed profile outside
 # the seven.
-LEFT, RIGHT, TOP, BOTTOM = 160, 160, 236, 190
+LEFT, RIGHT, TOP, BOTTOM = 160, 160, 216, 172
 BG = "#0c0e14"
 CARD = "#161a24"
 BORDER = "#283040"
@@ -47,12 +47,11 @@ def main(out: str) -> None:
     sub = ImageFont.truetype(FONT_REG, 20)
     hint = ImageFont.truetype(FONT_REG, 16)
 
-    # The action is the headline and kldload the maker's mark: the menu is a
-    # build step (operator, 2026-09-18: "more like its a build tool ... not just
-    # call everything kldload").
-    d.text((LEFT - 8, 84), "assemble", font=word, fill=BRIGHT)
-    d.rectangle((LEFT - 8, 164, LEFT + 56, 167), fill=ACCENT)
-    d.text((LEFT - 8, 178), "kldload network boot", font=sub, fill=DIM)
+    # "kldload netboot": operator, 2026-09-18, after a day of "assemble":
+    # "the assemble in the network boot screen looks dumb .. call it kldload netboot".
+    d.text((LEFT - 8, 64), "kldload netboot", font=word, fill=BRIGHT)
+    d.rectangle((LEFT - 8, 144, LEFT + 56, 147), fill=ACCENT)
+    d.text((LEFT - 8, 158), "any key to change the armed install", font=sub, fill=DIM)
 
     # The panel sits 16 px outside the text area on every side.
     d.rounded_rectangle(
@@ -61,7 +60,7 @@ def main(out: str) -> None:
     )
     d.text(
         (LEFT - 8, H - BOTTOM + 40),
-        "Up/Down  choose      Enter  assemble      Esc  back, then local disk",
+        "Up/Down  choose      Enter  select      Esc  back, then local disk",
         font=hint, fill=DIM,
     )
     img.save(out, optimize=True)
