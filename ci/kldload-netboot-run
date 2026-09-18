@@ -295,7 +295,11 @@ fi
 # pipe makes sort fail and the assignment with it (2026-09-13, first service run).
 ISO="" _iso_t=0
 for _f in "$REPO"/live-build/output/kldload-*-x86_64.iso; do
-    [[ -f "$_f" && "$(basename "$_f")" =~ ^kldload-[0-9.]+-x86_64\.iso$ ]] || continue
+    # ^kldload-.+-x86_64\.iso$, as kldload-netboot-matrix has had since 812497ef:
+    # [0-9.]+ cannot match 1.5.0-rc, so a standalone run skipped build 31 and
+    # staged kldload-1.4.2-x86_64.iso (onyx, 2026-09-18 12:56; stopped before
+    # anything booted it). Editions (-net, -core, -fedora) end after x86_64.
+    [[ -f "$_f" && "$(basename "$_f")" =~ ^kldload-.+-x86_64\.iso$ ]] || continue
     _t="$(stat -c %Y "$_f")"
     ((_t >= BUILD_T0 && _t > _iso_t)) && ISO="$_f" _iso_t="$_t"
 done
