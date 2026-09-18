@@ -2226,8 +2226,16 @@ HELMCHARTS
         # in its environment. Every object then failed on "'desktop'
         # undeclared", and build 30 (2026-09-18) shipped Fedora's stock iPXE
         # with one warning in the log. A hand build had no PROFILE and worked.
-        if env -u PROFILE make -C /tmp/ipxe-src/src -j"$(nproc)" bin-x86_64-efi/ipxe.efi >>"$LOG_FILE" 2>&1 &&
-            install -Dm0644 /tmp/ipxe-src/src/bin-x86_64-efi/ipxe.efi "${ROOTFS}/usr/share/kldload-netboot/ipxe.efi"; then
+        # WHY snponly.efi, installed under the name ipxe.efi: the full ipxe.efi
+        # carries iPXE's own USB host drivers and takes the controller from the
+        # firmware, and on fiend the USB keyboard went dead at the menu -- the
+        # countdown ran, no key did anything, and it installed the default
+        # (2026-09-18). snponly drives only the NIC the firmware booted from,
+        # through the firmware's own SNP, and leaves the keyboard alone; the
+        # arrows worked on the next boot. qemu never showed it: its keyboard
+        # is PS/2.
+        if env -u PROFILE make -C /tmp/ipxe-src/src -j"$(nproc)" bin-x86_64-efi/snponly.efi >>"$LOG_FILE" 2>&1 &&
+            install -Dm0644 /tmp/ipxe-src/src/bin-x86_64-efi/snponly.efi "${ROOTFS}/usr/share/kldload-netboot/ipxe.efi"; then
             printf '%s\n' "$_ipxe_commit" >"${ROOTFS}/etc/kldload/ipxe-commit"
             log "iPXE ${_ipxe_commit:0:12} built for the netboot menu ($(stat -c%s "${ROOTFS}/usr/share/kldload-netboot/ipxe.efi") bytes)"
         else
