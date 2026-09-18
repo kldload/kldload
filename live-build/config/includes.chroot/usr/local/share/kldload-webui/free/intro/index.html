@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kldload intro</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  kldload intro -- a demoscene tribute, real time, one file, no assets.
+
+  WHAT IT IS: one continuous raymarched shot over a slow plasma. A liquid form
+  calms into a torus, the torus squares off into a solid cube, and the cube
+  carves itself into a Menger sponge one level at a time, and holds there.
+  Every surface, light and backdrop is computed by the shader; nothing is
+  fetched.
+
+  WHY IT LOOKS LIKE THIS: the first cut had four loud retro scenes (copper bars
+  and a title, the shapes, a tunnel with greetings, credits). The operator kept
+  the cube, the morph and the credits' plasma, and asked for them much slower,
+  filling the whole clip, ending on the complete cube -- "elegant and tasteful
+  and classy ... clean, smooth ... pro" (onyx, 2026-09-18). So: muted palette,
+  no scanlines, restrained bloom, and supersampled edges for the video. The
+  other scenes are in git history.
+
+  TWO WAYS TO RUN IT:
+    live      open it: requestAnimationFrame drives the clock.
+    ?t=SECS   render exactly one frame at that time, then set
+              window.__ready = true: stills for review, and frame-by-frame
+              stepping for the video render (rendered, never screen-captured).
+    ?aa=N     N x N samples per pixel (default 1 live, 2 with ?t=). The video
+              uses 2 or 3: raymarched edges crawl without it.
+    ?res=0.5  render scale (live only): a kiosk may be software-rendered.
+    ?nopost   debug: the shot without the post pass.
+
+  THE TIMELINE is STAGES below; LENGTH is the whole clip.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #05060a; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+
+// ─── The timeline, in seconds ───────────────────────────────────────────────
+// Each boundary is a uniform, so retiming -- or syncing to the soundtrack -- is
+// a change here and nothing in the shader.
+const LENGTH = 140;
+const STAGES = {
+  formToTorus: [26, 50],   // the liquid form holds, then becomes a torus
+  torusToCube: [62, 80],   // the torus squares off into a solid cube
+  carve1:      [86, 96],   // the cube's largest openings
+  carve2:      [95, 106],  // the next level down
+  carve3:      [105, 118], // the finest: the complete sponge, just before the close
+};
+
+// ─── The tribute ────────────────────────────────────────────────────────────
+// Parties, one at a time, over the shot. Name, city, founding year as listed by
+// Wikipedia's "Demoparty" article (read 2026-09-18) -- where a party has moved,
+// the city is where that list places it. No logos, no end years: a tribute to
+// the gatherings, not a claim about them.
+const PARTIES = [
+  ["THE PARTY", "AARS", 1991],
+  ["ASSEMBLY", "HELSINKI", 1992],
+  ["THE GATHERING", "HAMAR", 1992],
+  ["MEKKA & SYMPOSIUM", "FALLINGBOSTEL", 1996],
+  ["EVOKE", "COLOGNE", 1997],
+  ["SILLY VENTURE", "GDA\u0143SK", 2000],
+  ["SOLSKOGEN", "FLATEBY", 2002],
+  ["BREAKPOINT", "BINGEN", 2003],
+  ["FUNCTION", "BUDAPEST", 2003],
+  ["OUTLINE", "OMMEN", 2004],
+  ["REVISION", "SAARBR\u00DCCKEN", 2011],
+  ["NORDLICHT", "BREMEN", 2012],
+  ["DEADLINE", "BERLIN", 2014],
+  ["LOVEBYTE", "ONLINE", 2021],
+];
+const TRIBUTE = { start: 6, each: 4.2 };   // first party at 6 s, one every 4.2 s
+
+// Greetings, sent the way a production sends them: from the group. EDIT THIS
+// LIST -- greets are personal, the groups you knew. The starter set is classic
+// C64/Amiga/PC-era groups; Future Crew, The Judges, 1001 Crew, The Black Lotus,
+// Farbrausch and Conspiracy are named in Wikipedia's "Demoscene" article, the
+// rest are from the scene's history and want the operator's eye.
+const GREETS = { from: "NORTH STAR", start: 67, each: 4.5, perCard: 3, groups: [
+  "FUTURE CREW", "FAIRLIGHT", "RAZOR 1911",
+  "TRSI", "KEFRENS", "SANITY",
+  "SPACEBALLS", "COMPLEX", "THE BLACK LOTUS",
+  "SCOOPEX", "PHENOMENA", "SILENTS",
+  "TRITON", "ORANGE", "HAUJOBB",
+  "MELON DEZIGN", "ANARCHY", "BOOZE DESIGN",
+  "OXYRON", "CENSOR DESIGN", "THE JUDGES",
+  "1001 CREW", "FARBRAUSCH", "CONSPIRACY",
+] };
+// The close, over the finished sponge. National inventories of intangible
+// cultural heritage that list the demoscene, per the Art of Coding initiative
+// and Aalto University (read 2026-09-18).
+const CLOSE = { at: 121, title: "A TRIBUTE TO THE DEMOSCENE",
+  sub: "LIVING HERITAGE  \u00B7  FINLAND 2020  \u00B7  GERMANY 2021  \u00B7  POLAND 2021  \u00B7  " +
+       "NETHERLANDS 2023  \u00B7  SWITZERLAND 2023  \u00B7  SWEDEN 2025  \u00B7  FRANCE 2025" };
+
+// ─── GL plumbing ────────────────────────────────────────────────────────────
+const Q = new URLSearchParams(location.search);
+const FIXED_T = Q.has("t") ? parseFloat(Q.get("t")) : null;
+const NOPOST = Q.has("nopost");
+const RES = Math.min(1, Math.max(0.25, parseFloat(Q.get("res") || "1")));
+const AA = Math.min(4, Math.max(1, parseInt(Q.get("aa") || (FIXED_T !== null ? "2" : "1"), 10)));
+const cv = document.getElementById("c");
+const gl = cv.getContext("webgl2", { antialias: false, preserveDrawingBuffer: FIXED_T !== null });
+if (!gl) { document.body.textContent = "WebGL2 is not available"; throw new Error("no webgl2"); }
+
+const VS = `#version 300 es
+in vec2 p; out vec2 uv;
+void main(){ uv = p*.5+.5; gl_Position = vec4(p,0,1); }`;
+
+function compile(src, type) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s) + "\n" + src.split("\n").map((l, i) => (i + 1) + ": " + l).join("\n"));
+  return s;
+}
+function program(fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(VS, gl.VERTEX_SHADER));
+  gl.attachShader(p, compile(fs, gl.FRAGMENT_SHADER));
+  gl.bindAttribLocation(p, 0, "p"); gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const a = gl.getActiveUniform(p, i); u[a.name] = gl.getUniformLocation(p, a.name); }
+  return { p, u };
+}
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+let fbo = null, fboTex = null, fw = 0, fh = 0;
+function resize() {
+  const dpr = FIXED_T !== null ? 1 : Math.min(2, window.devicePixelRatio || 1);
+  // innerWidth, not clientWidth: a frame drawn before layout read 0 and rendered
+  // the whole shot into a 2x2 buffer stretched to the screen (stills, 2026-09-18).
+  const w = Math.max(2, Math.floor(innerWidth * dpr * RES)), h = Math.max(2, Math.floor(innerHeight * dpr * RES));
+  if (w === fw && h === fh) return;
+  cv.width = w; cv.height = h; fw = w; fh = h;
+  if (fbo) { gl.deleteFramebuffer(fbo); gl.deleteTexture(fboTex); }
+  fboTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, fboTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fboTex, 0);
+}
+
+// ─── Type ───────────────────────────────────────────────────────────────────
+// A card is drawn once with Canvas2D (wide-tracked light sans) into a texture
+// the size of the screen, and faded in the post pass. Cached per card.
+const cardCache = new Map();
+const tcv = document.createElement("canvas"), tctx = tcv.getContext("2d");
+function track(ctx, str, x, y, spacing) {    // letter-spaced text, centred on x
+  let w = 0; for (const ch of str) w += ctx.measureText(ch).width + spacing; w -= spacing;
+  let cx = x - w / 2;
+  for (const ch of str) { ctx.fillText(ch, cx, y); cx += ctx.measureText(ch).width + spacing; }
+}
+function card(key, draw) {
+  const id = key + "@" + fw + "x" + fh;
+  if (cardCache.has(id)) return cardCache.get(id);
+  tcv.width = fw; tcv.height = fh;
+  tctx.clearRect(0, 0, fw, fh);
+  tctx.textBaseline = "alphabetic"; tctx.fillStyle = "#fff";
+  draw(tctx, fw, fh);
+  // Unit 3 is scratch: a card first built mid-frame used to land on unit 0 and
+  // replace the rendered shot the post pass was about to sample -- every frame
+  // with type on it came out black behind the words (stills, 2026-09-18).
+  gl.activeTexture(gl.TEXTURE3);
+  const tx = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tx);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tcv);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  cardCache.set(id, tx);
+  return tx;
+}
+const FONT = '"Inter", "Helvetica Neue", "DejaVu Sans", sans-serif';
+function partyCard(i) {
+  const [name, city, year] = PARTIES[i];
+  return card("p" + i, (c, w, h) => {
+    c.font = `300 ${Math.round(h * .036)}px ${FONT}`; track(c, name, w / 2, h * .83, h * .012);
+    c.globalAlpha = .78;
+    c.font = `300 ${Math.round(h * .017)}px ${FONT}`; track(c, city + "   " + year, w / 2, h * .875, h * .006);
+  });
+}
+function greetHeadCard() {
+  return card("gh", (c, w, h) => {
+    c.globalAlpha = .6;
+    c.font = `300 ${Math.round(h * .017)}px ${FONT}`; track(c, "SENDS GREETINGS TO", w / 2, h * .875, h * .008);
+    c.globalAlpha = 1;
+    c.font = `300 ${Math.round(h * .036)}px ${FONT}`; track(c, GREETS.from, w / 2, h * .83, h * .016);
+  });
+}
+function greetCard(i) {
+  const names = GREETS.groups.slice(i * GREETS.perCard, (i + 1) * GREETS.perCard);
+  return card("g" + i, (c, w, h) => {
+    c.font = `300 ${Math.round(h * .026)}px ${FONT}`;
+    track(c, names.join("     \u00B7     "), w / 2, h * .85, h * .01);
+  });
+}
+function closeCard() {
+  return card("close", (c, w, h) => {
+    c.font = `200 ${Math.round(h * .05)}px ${FONT}`; track(c, CLOSE.title, w / 2, h * .82, h * .02);
+    c.globalAlpha = .5;
+    c.font = `300 ${Math.round(h * .0145)}px ${FONT}`; track(c, CLOSE.sub, w / 2, h * .875, h * .004);
+  });
+}
+// Which card is up at time t, and how visible: [texture, alpha] or null.
+function cardAt(t) {
+  const ease = x => x * x * (3 - 2 * x);
+  if (t >= CLOSE.at) return [closeCard(), ease(Math.min(1, (t - CLOSE.at) / 3))];
+  // a run of cards: [start, seconds each, count, card(i)]
+  const runs = [
+    [TRIBUTE.start, TRIBUTE.each, PARTIES.length, partyCard],
+    [GREETS.start, GREETS.each, 1 + Math.ceil(GREETS.groups.length / GREETS.perCard),
+      i => i === 0 ? greetHeadCard() : greetCard(i - 1)],
+  ];
+  for (const [start, each, count, make] of runs) {
+    const k = (t - start) / each, i = Math.floor(k);
+    if (k < 0 || i >= count) continue;
+    const f = (k - i) * each;                         // seconds into this card
+    const a = Math.min(1, f / 1.2, (each - f) / 1.2);
+    return a > 0 ? [make(i), ease(Math.max(0, a))] : null;
+  }
+  return null;
+}
+
+// ─── The shot ───────────────────────────────────────────────────────────────
+const S_SHOT = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o;
+uniform vec2 uRes; uniform float uT; uniform int uAA;
+uniform vec2 uFormToTorus, uTorusToCube, uCarve1, uCarve2, uCarve3;
+#define PI 3.14159265
+mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+// 0 before the window, 1 after it; smootherstep, so every change starts and
+// ends at rest -- the difference between motion that looks pro and motion
+// that looks keyframed.
+float stage(vec2 w){ float x = clamp((uT-w.x)/(w.y-w.x), 0., 1.); return x*x*x*(x*(x*6.-15.)+10.); }
+
+float sdTorus(vec3 p, vec2 t){ vec2 q=vec2(length(p.xz)-t.x,p.y); return length(q)-t.y; }
+float sdBox(vec3 p, vec3 b){ vec3 q=abs(p)-b; return length(max(q,0.))+min(max(q.x,max(q.y,q.z)),0.); }
+
+// The Menger sponge, each level's openings grown by its own amount. A hole is
+// carved where c > d; pulling c down by (1-k)*1.2/s keeps a level sealed until
+// its k rises, so the openings grow from nothing instead of popping in.
+float menger(vec3 p, vec3 k){
+  float d = sdBox(p, vec3(1.)), s = 1.;
+  for(int m=0; m<3; m++){
+    vec3 a = mod(p*s, 2.)-1.; s *= 3.; vec3 r = abs(1.-3.*abs(a));
+    float da=max(r.x,r.y), db=max(r.y,r.z), dc=max(r.z,r.x);
+    float c = (min(da,min(db,dc))-1.)/s;
+    float km = m==0 ? k.x : (m==1 ? k.y : k.z);
+    // A level whose turn has not come is SKIPPED, not merely held shut: held
+    // shut, its near-zero distances leaked through the torus-to-cube morph as
+    // jagged patches (stills at 69 s, 2026-09-18).
+    if(km <= 0.) continue;
+    d = max(d, c - (1.-km)*1.2/s);
+  }
+  return d;
+}
+
+float map(vec3 p){
+  p.xz *= rot(uT*.11); p.xy *= rot(uT*.06);
+  float calm = stage(uFormToTorus);
+  float amp = mix(.16, .0, calm);
+  // the liquid form: long, low-frequency swells, never noisy
+  float form = length(p) - 1.2
+    + amp*sin(p.x*2.6+uT*.55)*sin(p.y*2.4-uT*.45)*sin(p.z*2.8+uT*.35)
+    + amp*.35*sin(p.x*5.-uT*.6)*sin(p.z*4.6+uT*.5);
+  float torus = sdTorus(p, vec2(1.1, .42));
+  vec3 k = vec3(stage(uCarve1), stage(uCarve2), stage(uCarve3));
+  float cube = menger(p*1.05, k)/1.05;
+  return mix(mix(form, torus, calm), cube, stage(uTorusToCube));
+}
+vec3 nrm(vec3 p){ vec2 e=vec2(.001,0);
+  return normalize(vec3(map(p+e.xyy)-map(p-e.xyy), map(p+e.yxy)-map(p-e.yxy), map(p+e.yyx)-map(p-e.yyx))); }
+
+// The backdrop: the credits' plasma, slowed and muted to a deep wash.
+vec3 plasma(vec2 p){
+  float v = sin(p.x*2.2+uT*.12) + sin(p.y*2.6-uT*.1)
+          + sin((p.x+p.y)*1.8+uT*.15) + sin(length(p*2.8)-uT*.2);
+  vec3 a = vec3(.05,.06,.1), b = vec3(.2,.1,.26), c = vec3(.05,.15,.22);
+  return mix(mix(a, b, .5+.5*sin(v*.8)), c, .5+.5*cos(v*.6+1.3));
+}
+// What the surface reflects: a soft studio -- two broad lights and the wash.
+vec3 env(vec3 rd){
+  vec3 c = mix(vec3(.02,.025,.04), vec3(.08,.07,.12), smoothstep(-.4,.8,rd.y));
+  c += vec3(.9,.85,.8)*smoothstep(.9,.99, dot(rd, normalize(vec3(.7,.6,-.4))))*1.6;    // key softbox
+  c += vec3(.35,.45,.8)*smoothstep(.85,.99, dot(rd, normalize(vec3(-.8,.2,.3))))*.6;   // cool rim
+  return c;
+}
+
+vec3 shade(vec2 p){
+  // back far enough that a tumbling cube's corners (sqrt 3) stay in frame
+  vec3 ro = vec3(0,0,mix(-6.8,-6.1, smoothstep(0.,120.,uT))), rd = normalize(vec3(p, 1.7));
+  float t = 0.; bool hit = false;
+  for(int i=0;i<150;i++){ float d = map(ro+rd*t); if(d<.0006){hit=true;break;} t += d*.8; if(t>14.) break; }
+  vec3 bg = plasma(p);
+  if(!hit) return bg;
+  vec3 pos = ro+rd*t, n = nrm(pos);
+  // soft occlusion
+  float ao = 0.;
+  for(int k=1;k<6;k++){ float h=.05*float(k); ao += (h-map(pos+n*h))/float(k); }
+  ao = clamp(1.-ao*2.5, 0., 1.);
+  // dark glossy metal with a restrained pearl sheen that follows the view angle
+  float ndv = max(dot(n,-rd),0.);
+  vec3 sheen = .5+.5*cos(2.*PI*(vec3(0.,.33,.67) + ndv*.6 + .08));
+  vec3 base = mix(vec3(.1,.11,.14), sheen*.45, .5);
+  vec3 L = normalize(vec3(.7,.6,-.4));
+  float dif = max(dot(n,L),0.);
+  float fre = .04 + .96*pow(1.-ndv, 5.);
+  vec3 refl = env(reflect(rd,n));
+  float spec = pow(max(dot(reflect(-L,n),-rd),0.), 90.);
+  vec3 c = base*(.25+1.1*dif)*ao + refl*mix(.35,1.2,fre)*ao + vec3(1.)*spec;
+  // fog into the backdrop at the far edge, so the silhouette sits IN the wash
+  return mix(c, bg, smoothstep(8.,11.,t));
+}
+
+void main(){
+  vec3 c = vec3(0.);
+  for(int j=0;j<4;j++) for(int i=0;i<4;i++){
+    if(i>=uAA || j>=uAA) continue;
+    vec2 off = (vec2(i,j)+.5)/float(uAA) - .5;
+    // the object sits a little above centre, clear of the type in the lower third
+    c += shade((gl_FragCoord.xy + off - .5*uRes)/uRes.y - vec2(0., .07));
+  }
+  o = vec4(c/float(uAA*uAA), 1.);
+}`;
+
+// ─── Post: soft bloom, gentle vignette, a trace of film grain ───────────────
+const S_POST = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o;
+uniform sampler2D uSrc, uCard; uniform vec2 uRes; uniform float uT, uFade, uCardA;
+float h1(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+void main(){
+  vec2 d = uv-.5;
+  vec3 c = texture(uSrc, uv).rgb;
+  vec3 b = vec3(0.);
+  for(int i=0;i<16;i++){ float a=float(i)*.3927; for(float r=1.;r<5.;r++){
+    b += max(texture(uSrc, uv + vec2(cos(a),sin(a))*r*.007*vec2(uRes.y/uRes.x,1.)).rgb-.6, 0.); } }
+  c += b/64.*.9;
+  c *= 1. - .35*dot(d,d)*1.8;                          // vignette
+  c = c/(1.+c*.15);                                    // gentle shoulder, no clipping
+  vec4 k = texture(uCard, uv);                          // the type, over everything
+  c = mix(c, vec3(.93,.95,1.), k.a*uCardA*.92);
+  c = pow(c, vec3(.95));
+  c += (h1(gl_FragCoord.xy + fract(uT*.37)*100.)-.5)*.012;   // a trace of grain
+  o = vec4(c*uFade, 1.);
+}`;
+
+const SHOT = program(S_SHOT), POST = program(S_POST);
+const blankTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, blankTex);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+
+function frame(t) {
+  resize();
+  t = Math.max(0, t);   // past LENGTH the finished sponge keeps turning
+  gl.bindFramebuffer(gl.FRAMEBUFFER, NOPOST ? null : fbo); gl.viewport(0, 0, fw, fh);
+  gl.useProgram(SHOT.p); const u = SHOT.u;
+  gl.uniform2f(u.uRes, fw, fh); gl.uniform1f(u.uT, t); gl.uniform1i(u.uAA, AA);
+  gl.uniform2fv(u.uFormToTorus, STAGES.formToTorus);
+  gl.uniform2fv(u.uTorusToCube, STAGES.torusToCube);
+  gl.uniform2fv(u.uCarve1, STAGES.carve1);
+  gl.uniform2fv(u.uCarve2, STAGES.carve2);
+  gl.uniform2fv(u.uCarve3, STAGES.carve3);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  if (NOPOST) return;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, fw, fh);
+  gl.useProgram(POST.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, fboTex); gl.uniform1i(POST.u.uSrc, 0);
+  gl.uniform2f(POST.u.uRes, fw, fh); gl.uniform1f(POST.u.uT, t);
+  const cd = cardAt(t);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, cd ? cd[0] : blankTex); gl.uniform1i(POST.u.uCard, 1);
+  gl.uniform1f(POST.u.uCardA, cd ? cd[1] : 0);
+  const x = Math.min(1, t / 4);
+  gl.uniform1f(POST.u.uFade, x * x * (3 - 2 * x));   // a slow fade up; no fade out
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+window.__length = LENGTH;
+if (FIXED_T !== null) {
+  // After layout, so the frame is drawn at the size the screenshot captures.
+  addEventListener("load", () => requestAnimationFrame(() => {
+    frame(FIXED_T); gl.finish();
+    window.__ready = true; document.title = "ready";
+  }));
+} else {
+  const t0 = performance.now();
+  const tick = () => { frame((performance.now() - t0) / 1000); requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+}
+</script>
+</body>
+</html>
