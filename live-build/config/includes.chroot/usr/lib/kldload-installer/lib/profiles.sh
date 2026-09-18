@@ -2924,8 +2924,11 @@ picture-uri='file://${_wp_day}'
 picture-uri-dark='file://${_wp_dark}'
 picture-options='zoom'
 WPEOF
+        # WARN, as the comment above says. This was k_die, so an unrelated dconf
+        # syntax error (enabled-extensions=[], fiend 2026-09-18) killed an
+        # otherwise-good desktop install at the wallpaper step.
         if ! chroot "${target}" dconf update; then
-            k_die "01-kldload-wallpaper: dconf update failed on target — wallpaper override will not apply"
+            k_log "WARN: 01-kldload-wallpaper: dconf update failed on target — wallpaper override will not apply until kldload-firstboot's retry succeeds"
         fi
         k_log "wallpaper: ${KLDLOAD_DISTRO:-centos} native default set (${_wp_day})"
     elif [[ -n "$_wp_day" ]]; then

@@ -1351,6 +1351,31 @@ fi
 # desktop ran with the extension enabled and absent, and Super+Arrow had been
 # a dead key since it shipped. Found on fiend by hand. These gates make the
 # next instance loud instead.
+_section "dconf databases compile"
+
+# Every shipped keyfile directory must compile. The installer runs `dconf
+# update` on the target, and one bad value fails the WHOLE database: a bare
+# enabled-extensions=[] (no type for an empty array) did exactly that and the
+# desktop install died at the wallpaper step (fiend, 2026-09-18). dconf compile
+# is the same parser, run here instead of on somebody's machine.
+if ! command -v dconf >/dev/null 2>&1; then
+    _didnotrun "dconf compile" "dconf not installed — the shipped dconf keyfiles are UNCHECKED (this check DID NOT RUN)"
+else
+    _dc_n=0
+    for _dc_dir in "$ROOT"/live-build/config/includes.chroot/etc/dconf/db/*.d; do
+        [[ -d "$_dc_dir" ]] || continue
+        _dc_n=$((_dc_n + 1))
+        _dc_tmp="$(mktemp)"
+        if _dc_err="$(dconf compile "$_dc_tmp" "$_dc_dir" 2>&1)" && [[ -z "$_dc_err" ]]; then
+            _pass "dconf ${_dc_dir##*/} compiles"
+        else
+            _fail "dconf ${_dc_dir##*/}" "dconf compile: ${_dc_err:-no output, non-zero exit}"
+        fi
+        rm -f "$_dc_tmp"
+    done
+    ((_dc_n > 0)) || _fail "dconf compile" "no etc/dconf/db/*.d directories found — the path moved and this gate checked nothing"
+fi
+
 _section "GNOME shell extensions"
 
 _gse_dconf="$ROOT/live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop"
@@ -1359,7 +1384,7 @@ if [[ ! -f "$_gse_dconf" ]]; then
     _pass "gnome extensions: no desktop keymap shipped, nothing to check"
 else
     # Every UUID the keymap enables must exist as a real extension.
-    _gse_uuids=$(sed -n "s/^enabled-extensions=\[\(.*\)\]$/\1/p" "$_gse_dconf" |
+    _gse_uuids=$(sed -n "s/^enabled-extensions=\(@as \)\{0,1\}\[\(.*\)\]$/\2/p" "$_gse_dconf" |
         tr -d "'\"" | tr ',' ' ')
     _gse_n=0
     for _u in $_gse_uuids; do
