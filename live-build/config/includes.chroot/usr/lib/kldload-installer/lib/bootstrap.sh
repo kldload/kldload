@@ -4270,18 +4270,38 @@ EOH
     k_log_to "$log" "SSH host keys generated"
 
     local _profile="${KLDLOAD_PROFILE:-server}"
-    if [[ "$_profile" == "desktop" ]]; then
-        chroot "${target}" systemctl enable gdm 2>/dev/null ||
-            k_log_to "$log" "WARNING: gdm not enabled — a desktop install will boot to a console"
+    # WHICH display manager, and IS there one? Naming gdm here was fine while
+    # desktop was the only graphical profile. vdi and rdp run Plasma with sddm,
+    # so `systemctl enable gdm` is a no-op on them and they would install a
+    # display manager and then boot to a console -- the exact inverse of the
+    # core defect where a headless profile asked for graphical.target.
+    #
+    # So ask the target what it actually has rather than deriving it from the
+    # profile name, the same way the smoke suites now pick themselves.
+    local _dm_unit=""
+    for _c in gdm gdm3 sddm lightdm; do
+        if [[ -e "${target}/usr/lib/systemd/system/${_c}.service" ||
+            -e "${target}/lib/systemd/system/${_c}.service" ]]; then
+            _dm_unit="$_c"
+            break
+        fi
+    done
+    if [[ -n "$_dm_unit" ]]; then
+        chroot "${target}" systemctl enable "$_dm_unit" 2>/dev/null ||
+            k_log_to "$log" "WARNING: ${_dm_unit} not enabled — this install will boot to a console"
         chroot "${target}" systemctl set-default graphical.target 2>/dev/null ||
             k_log_to "$log" "WARNING: default target not set to graphical"
-        # GDM first-boot hang fix — add a short delay so the display driver
-        # is fully initialized before GDM tries to start
-        mkdir -p "${target}/etc/systemd/system/gdm.service.d"
-        cat >"${target}/etc/systemd/system/gdm.service.d/10-wait-for-display.conf" <<'GDMFIX'
+        # GDM first-boot hang fix — a short delay so the display driver is
+        # initialised before GDM starts. Scoped to GDM: writing a
+        # gdm.service.d drop-in on an sddm machine leaves a directory that
+        # nothing reads, and implies a fix is in place that is not.
+        if [[ "$_dm_unit" == gdm || "$_dm_unit" == gdm3 ]]; then
+            mkdir -p "${target}/etc/systemd/system/${_dm_unit}.service.d"
+            cat >"${target}/etc/systemd/system/${_dm_unit}.service.d/10-wait-for-display.conf" <<'GDMFIX'
 [Service]
 ExecStartPre=/usr/bin/sleep 3
 GDMFIX
+        fi
     else
         chroot "${target}" systemctl set-default multi-user.target 2>/dev/null ||
             k_log_to "$log" "WARNING: default target not set to multi-user"

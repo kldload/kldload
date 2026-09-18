@@ -444,13 +444,34 @@ k_profile_packages() {
         ;;
 
     storage)
-        # ZFS storage server: NFS + iSCSI exports, managed by Salt minion
-        # ZFS datasets are the core — nfs-kernel-server + targetcli serve them
+        # ZFS storage server: NFS + iSCSI exports, managed by Salt minion.
+        # ZFS datasets are the core — NFS and an iSCSI target serve them.
+        #
+        # EVERY STORAGE PACKAGE HERE WAS DEBIAN-ONLY. nfs-kernel-server,
+        # nfs-common, tgt and prometheus-node-exporter do not exist in the
+        # Fedora repositories, so an RPM install of this profile resolved none
+        # of them and came up as a "storage server" with no NFS server and no
+        # iSCSI target at all -- while the install reported success. Only samba
+        # and salt-minion happened to share a spelling.
+        #
+        # Caught 2026-09-18 while the profile was installing on Fedora for the
+        # first time; it had never been in the matrix before. Same failure the
+        # desktop profile documents three hundred lines above, and the same one
+        # vdi had with gdm3. Names checked in a clean fedora:44 container.
+        local _nfs="nfs-kernel-server nfs-common"
+        local _iscsi="tgt"
+        local _nodeexp="prometheus-node-exporter"
+        if [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
+            # nfs-utils is both server and client on the RPM side.
+            _nfs="nfs-utils"
+            _iscsi="targetcli"
+            _nodeexp="golang-github-prometheus-node-exporter"
+        fi
         echo "openssh-server sudo curl ca-certificates vim less iproute2 \
-        nfs-kernel-server nfs-common \
-        tgt \
+        ${_nfs} \
+        ${_iscsi} \
         samba \
-        prometheus-node-exporter \
+        ${_nodeexp} \
         nftables chrony \
         salt-minion wireguard-tools"
         ;;
@@ -494,6 +515,39 @@ k_profile_packages() {
         nginx \
         nftables chrony \
         salt-minion wireguard-tools"
+        ;;
+
+    rdp)
+        # Remote desktop host: Plasma on X11 + xrdp.
+        #
+        # X11 ON PURPOSE, and it is the whole reason this is separate from vdi.
+        # xrdp drives a real X session through xorgxrdp; Wayland remoting is a
+        # different mechanism with different tooling, and GNOME has been
+        # removing the X11 session this depends on. Plasma still ships both, so
+        # vdi stays Wayland for its capture pipeline while this serves X11 to
+        # RDP clients -- same desktop on both, one thing to support (operator's
+        # call, 2026-09-18).
+        #
+        # dbus-x11 is Debian-only and genuinely needed there: xrdp session
+        # startup shells out to dbus-launch, which that package provides. On the
+        # RPM side the equivalent lives in the base dbus package.
+        #
+        # Names checked in clean containers 2026-09-18, not assumed: xrdp and
+        # xorgxrdp exist on both fedora:44 and debian:trixie under the same
+        # spelling; plasma-workspace-x11 is RPM-only and kwin-wayland is
+        # Debian-only.
+        local _rdp_extra="kwin-x11 dbus-x11"
+        if [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
+            _rdp_extra="kwin-x11 plasma-workspace-x11"
+        fi
+        echo "openssh-server sudo curl ca-certificates vim less iproute2 \
+        plasma-desktop plasma-workspace ${_rdp_extra} sddm \
+        xrdp xorgxrdp \
+        pipewire wireplumber \
+        xdotool xclip \
+        python3-websockets ${_pam} python3-pip \
+        nftables chrony \
+        wireguard-tools"
         ;;
 
     proxmox)

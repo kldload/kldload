@@ -1239,18 +1239,27 @@ if ! k_have_func k_apply_profile; then
             fi
         fi
 
-        # Enable display manager for desktop
-        if [[ "${profile}" == "desktop" ]]; then
-            if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
-                # swallow: gdm3 is the Debian name; the RPM branch below covers the others, and
-                # set-default reports if neither took
-                chroot "${target}" systemctl enable gdm3 >>"$log" 2>&1 || true
-            else
-                # swallow: gdm is the RPM name; see the gdm3 branch above
-                chroot "${target}" systemctl enable gdm >>"$log" 2>&1 || true
+        # Enable whichever display manager is ACTUALLY on the target.
+        #
+        # This used to try gdm3 on Debian and gdm elsewhere, gated on
+        # profile == desktop. Both assumptions have since broken: vdi and rdp
+        # run Plasma with sddm, so the enable would be a no-op and the machine
+        # would install a display manager and then boot to a console. Detecting
+        # it removes the guess, and a profile that grows a GUI later is picked
+        # up without anyone editing this.
+        _dm_unit=""
+        for _c in gdm gdm3 sddm lightdm; do
+            if [[ -e "${target}/usr/lib/systemd/system/${_c}.service" ||
+                -e "${target}/lib/systemd/system/${_c}.service" ]]; then
+                _dm_unit="$_c"
+                break
             fi
+        done
+        if [[ -n "$_dm_unit" ]]; then
+            chroot "${target}" systemctl enable "$_dm_unit" >>"$log" 2>&1 ||
+                k_log "WARNING: ${_dm_unit} not enabled — this install will boot to a console"
             chroot "${target}" systemctl set-default graphical.target >>"$log" 2>&1 ||
-                k_log "WARNING: default target not set to graphical — a desktop install will boot to a console"
+                k_log "WARNING: default target not set to graphical — a graphical install will boot to a console"
 
             # NOTE: this fallback k_apply_profile USED to write its own stub
             # 00-kldload-desktop dconf override here — hardcoded Adwaita
