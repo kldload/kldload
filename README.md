@@ -363,7 +363,12 @@ then a live desktop that installs nothing, the local disk, or an iPXE shell.
 Each other profile is the armed answers file with that profile's settings
 swapped in, so the disk, hostname and password stay the machine's own. With
 more than one distro in `NETBOOT_DISTROS` (default `fedora`; list only the
-ones you have verified), picking a profile opens a distro screen. Esc goes
+ones you have verified), picking a profile opens a distro screen. Then a
+security screen: standard, Secure Boot, or — when the answers file carries
+`KLDLOAD_ZFS_PASSPHRASE`, which never goes on the kernel command line —
+encrypted, or both. Encryption asks for the passphrase at every boot and
+Secure Boot asks for the key to be enrolled on the first reboot, so both need
+someone at the console once the install finishes. Esc goes
 back, then boots the local disk, so a machine netbooted by mistake can be
 sent back to its own disk without it being wiped or pulling the image.
 

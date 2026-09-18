@@ -21,8 +21,9 @@
 #
 # THE MENU: an armed token is a menu, shown before the kernel or root image is
 # fetched. arm-install lists every profile (core server desktop kvm k8s storage
-# ai), then -- with more than one NETBOOT_DISTROS -- a distro screen; the armed
-# profile and distro are the default after NETBOOT_MENU_TIMEOUT s. Plus a live
+# ai), then -- with more than one NETBOOT_DISTROS -- a distro screen, then a
+# security screen (standard, encrypted, Secure Boot, both); the armed choice on
+# each is the default after NETBOOT_MENU_TIMEOUT s. Plus a live
 # desktop, the local disk and an iPXE shell. See _write_armed_install;
 # arm-deploy's menu is _write_armed.
 #
@@ -849,7 +850,16 @@ _nb_write_profile_answers() {
 # _write_armed_install <m> <mac> <answers> <key> <prefix-args> <netarg> <netdev>
 #
 # The install token: every profile, then (with more than one verified distro)
-# a distro screen, then the kernel. <prefix-args> is ISO_ARGS + KIOSK_ARGS;
+# a distro screen, then a security screen, then the kernel.
+#
+# SECURITY SCREEN (operator, 2026-09-18: "we also have to include encryption
+# and secure boot"): standard, encrypted, Secure Boot, or both, as
+# kldload.encrypt= / kldload.secureboot=, which the installer already takes
+# from the cmdline. The passphrase never goes there -- /proc/cmdline is world-
+# readable on the installed system and kldload-autoinstall refuses it -- so the
+# encrypted choices exist only when the answers file carries
+# KLDLOAD_ZFS_PASSPHRASE. Both need someone at the console afterwards: the
+# passphrase at every boot, and MokManager's enrollment on the first reboot. <prefix-args> is ISO_ARGS + KIOSK_ARGS;
 # the seed and kldload.distro= are added per choice. Timeout, Esc and the
 # `|| goto plain` styling rules are _write_armed's, for the same reasons.
 _write_armed_install() {
@@ -886,6 +896,14 @@ _write_armed_install() {
     local skip=""
     ((MENU_TIMEOUT > 0)) || skip="goto armed"
     local ms=$((MENU_TIMEOUT * 1000))
+    # The armed security combination, as s_<encrypt><secureboot>, and whether
+    # the encrypted ones can be offered at all.
+    local enc sb have_pp=0 sec
+    enc="$(_answer_val "$answers" KLDLOAD_ZFS_ENCRYPT)"
+    sb="$(_answer_val "$answers" KLDLOAD_ENABLE_SECURE_BOOT)"
+    [[ "$enc" == 1 ]] || enc=0
+    [[ "$sb" == 1 ]] || sb=0
+    grep -qE '^KLDLOAD_ZFS_PASSPHRASE=.+' "$answers" && have_pp=1
     {
         printf '#!ipxe\n'
         printf '# kldload armed %s: install menu, default %s/%s. ${base} comes from boot.ipxe.\n' "$mac" "$distro" "$key"
@@ -902,9 +920,13 @@ _write_armed_install() {
             printf 'set q%d:hex %s\n' "$i" "$(_ipxe_pad $((15 - ${#p})))"
             i=$((i + 1))
         done
+        # The security screen's columns, as fixed names q9..q12 (at most eight
+        # profiles plus Live desktop come first, so q0..q8 are theirs).
+        printf 'set q9:hex %s\nset q10:hex %s\nset q11:hex %s\nset q12:hex %s\n' \
+            "$(_ipxe_pad 7)" "$(_ipxe_pad 6)" "$(_ipxe_pad 4)" "$(_ipxe_pad 11)"
 
         printf '\n:top\nmenu %s${tp:string}\n' "$title"
-        printf 'item --gap Install${s3:string}erases %s\n' "${disk:-the disk it picks}"
+        printf 'item --gap BASE${s3:string}erases %s\n' "${disk:-the disk it picks}"
         i=0
         for p in "${profs[@]}"; do
             desc="$(_nb_preset "$p")" || desc="as armed|"
@@ -924,14 +946,14 @@ _write_armed_install() {
             printf '\n:m_%s\nset pf %s\nset sf %s\ngoto distro\n' "$p" "$p" "$seed"
         done
 
-        printf '\n:armed\nset sf %s.env\nclear dargs\ngoto install\n' "$m"
+        printf '\n:armed\nset sf %s.env\nclear dargs\nclear sargs\ngoto install\n' "$m"
         printf '\n:distro\n'
         if ((multi)); then
             # Its own pad setting: sharing tp shifted the main title two
             # columns left after Back (qemu, 2026-09-18).
-            _nb_title_pad 15 td
-            printf 'menu Choose a distro${td:string}\n'
-            printf 'item --gap Install ${pf} with\n'
+            _nb_title_pad 6 td
+            printf 'menu distro${td:string}\n'
+            printf 'item --gap assemble ${pf} on\n'
             for d in "${dists[@]}"; do
                 if [[ "$d" == "$distro" ]]; then
                     printf 'item d_%s %s${s3:string}[armed]\n' "$d" "$d"
@@ -943,17 +965,45 @@ _write_armed_install() {
             printf 'choose --timeout %d --default d_%s dsel || goto top\ngoto ${dsel}\n' "$ms" "$distro"
             for d in "${dists[@]}"; do
                 if [[ "$d" == "$distro" ]]; then
-                    printf '\n:d_%s\nclear dargs\ngoto install\n' "$d"
+                    printf '\n:d_%s\nclear dargs\ngoto security\n' "$d"
                 else
-                    printf '\n:d_%s\nset dargs kldload.distro=%s\ngoto install\n' "$d" "$d"
+                    printf '\n:d_%s\nset dargs kldload.distro=%s\ngoto security\n' "$d" "$d"
                 fi
             done
         else
-            printf 'clear dargs\ngoto install\n'
+            printf 'clear dargs\ngoto security\n'
         fi
 
+        # s_<encrypt><secureboot>. The armed one clears sargs, so the timeout
+        # boots exactly the armed file; the others state both values.
+        printf '\n:security\n'
+        _nb_title_pad 8 ts
+        printf 'menu security${ts:string}\n'
+        printf 'item --gap assemble ${pf} with\n'
+        for sec in 00 10 01 11; do
+            [[ "$sec" == 1? && $have_pp == 0 ]] && continue
+            case "$sec" in
+            00) desc='standard${q9:string}no encryption, Secure Boot off' ;;
+            10) desc='encrypted${q10:string}ZFS native encryption, passphrase at every boot' ;;
+            01) desc='Secure Boot${q11:string}signed boot chain, enroll the key on first boot' ;;
+            11) desc='both${q12:string}encrypted and Secure Boot' ;;
+            esac
+            [[ "$sec" == "${enc}${sb}" ]] && desc+='${s2:string}[armed]'
+            printf 'item s_%s %s\n' "$sec" "$desc"
+        done
+        ((have_pp)) || printf 'item --gap encryption needs KLDLOAD_ZFS_PASSPHRASE in the answers file\n'
+        printf 'item --gap\nitem top Back\n'
+        printf 'choose --timeout %d --default s_%s ssel || goto top\ngoto ${ssel}\n' "$ms" "${enc}${sb}"
+        for sec in 00 10 01 11; do
+            if [[ "$sec" == "${enc}${sb}" ]]; then
+                printf '\n:s_%s\nclear sargs\ngoto install\n' "$sec"
+            else
+                printf '\n:s_%s\nset sargs kldload.encrypt=%s kldload.secureboot=%s\ngoto install\n' "$sec" "${sec:0:1}" "${sec:1:1}"
+            fi
+        done
+
         printf '\n:install\n'
-        printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s kldload.seed=${base}/answers/${sf} ${dargs}%s\n' "$prefix" "$netarg"
+        printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s kldload.seed=${base}/answers/${sf} ${dargs} ${sargs}%s\n' "$prefix" "$netarg"
         printf 'initrd ${base}/kldload/initrd.img\nboot\n'
         printf '\n:live\n'
         printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s%s\n' "$ISO_ARGS" "$netarg"
@@ -1353,8 +1403,10 @@ run by hand; a variable already set in the environment wins):
                  the armed action. arm-install's menu lists every profile
                  (core server desktop kvm k8s storage ai; each one the armed
                  answers file with that profile's matrix settings), then a live
-                 desktop, the local disk and an iPXE shell; Esc goes back, then
-                 to the local disk. Default 10; 0 = no menu.
+                 desktop, the local disk and an iPXE shell. A profile leads to a
+                 security screen: standard, Secure Boot, and -- only when the
+                 answers file has KLDLOAD_ZFS_PASSPHRASE -- encrypted and both.
+                 Esc goes back, then to the local disk. Default 10; 0 = no menu.
                  Read when arming: re-arm to change an armed machine.
   NETBOOT_DISTROS  distros the install menu offers, space-separated; only ones
                  the matrix has verified belong here. Default "fedora". With
