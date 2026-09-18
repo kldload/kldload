@@ -223,13 +223,23 @@ test_succeeds "kldload-debug-bundle --help works" "kldload-debug-bundle --help >
 # session, finds no display-manager.service, falls through to a text login, and
 # the machine LOOKS exactly like a correct minimal install. Caught on fiend
 # 2026-09-17 only by asking `systemctl get-default` directly.
+#
+# CORE ONLY, behind the same gate as the absent-tools block above, and for the
+# same reason: this suite runs on every profile, and a desktop is SUPPOSED to be
+# graphical. Added outside the gate, it failed the first desktop to reach it --
+# "default target is multi-user" and "no display manager" on a working GNOME
+# (fiend 5-desktop, build 32, 2026-09-18).
 _section "Minimal by construction"
-test_succeeds "default target is multi-user, not graphical" \
-    "[[ \"$(systemctl get-default)\" == multi-user.target ]]"
-test_succeeds "no display manager is installed" \
-    "! test -e /etc/systemd/system/display-manager.service"
-test_succeeds "no desktop session files" \
-    "! ls /usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop >/dev/null 2>&1"
+if [[ "$_kld_profile" == "core" ]]; then
+    test_succeeds "default target is multi-user, not graphical" \
+        "[[ \"$(systemctl get-default)\" == multi-user.target ]]"
+    test_succeeds "no display manager is installed" \
+        "! test -e /etc/systemd/system/display-manager.service"
+    test_succeeds "no desktop session files" \
+        "! ls /usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop >/dev/null 2>&1"
+else
+    _pass "minimal-by-construction checks: core only (this is ${_kld_profile})"
+fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 summary
