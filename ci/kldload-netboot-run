@@ -582,6 +582,32 @@ v="$(dnf versionlock list 2>/dev/null | grep -c 'Package name' || true)"; ((v > 
 logger -t kldload-verify "probe-$$"; sleep 2
 journalctl -t kldload-verify --no-pager 2>/dev/null | grep -q "probe-$$" && r PASS "journal records" "" || r FAIL "journal records" "probe not returned"
 v="$(systemctl --failed --no-legend 2>/dev/null | awk '{print $2}' | tr '\n' ' ')"; [[ -z "${v// /}" ]] && r PASS "no failed units" "" || r FAIL "no failed units" "$v"
+
+# A machine that asks systemd for a graphical session must have one. 13-vdi went
+# VERIFIED on fiend 2026-09-17 with get-default=graphical.target, ZERO session
+# packages, no gdm/sddm/lightdm unit file anywhere, and a DANGLING
+# /etc/systemd/system/display-manager.service symlink -- the vdi profile named
+# the Debian package gdm3 on a Fedora target, so the install silently did
+# nothing. Every check above passed it: "no failed units" cannot fail on a unit
+# that was never installed, and nothing else looked at the graphical stack at
+# all. The display-manager assertions live in tests/smoke-desktop.sh, which the
+# matrix does not run.
+#
+# Keyed on the default target rather than a list of profile names, so a new
+# desktop-class profile is covered the day it is added and a server profile
+# never trips it.
+v="$(systemctl get-default 2>/dev/null)"
+if [[ "$v" == graphical.target ]]; then
+    dm="$(systemctl is-enabled display-manager.service 2>&1)"
+    if [[ "$dm" == enabled || "$dm" == alias || "$dm" == "enabled-runtime" ]]; then
+        r PASS "graphical session has a display manager" "display-manager.service $dm -> $(basename "$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null)" 2>/dev/null)"
+    else
+        # swallow: ls exits 1 with no session files, which is the failing case being reported
+        r FAIL "graphical session has a display manager" "get-default=graphical.target but display-manager.service is '${dm}'; unit files: $(systemctl list-unit-files 'gdm*.service' 'sddm*.service' 'lightdm*.service' --no-legend 2>/dev/null | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//'; true); sessions: $(ls /usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop 2>/dev/null | wc -l)"
+    fi
+else
+    r INFO "default target" "$v"
+fi
 [[ -f /etc/wireguard/wg0.pub || "$WG" != 1 ]] && r PASS "wireguard key" "$( [[ "$WG" == 1 ]] && echo present || echo not requested)" || r FAIL "wireguard key" "/etc/wireguard/wg0.pub missing"
 if [[ "$KEEP" == 1 ]]; then [[ -s /var/lib/kldload-netboot/squashfs.img ]] && r PASS "netboot payload kept" "$(du -h /var/lib/kldload-netboot/squashfs.img | cut -f1)" || r FAIL "netboot payload kept" "missing"; fi
 if [[ "$K8S" == 1 ]]; then
