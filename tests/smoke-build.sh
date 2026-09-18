@@ -1127,6 +1127,15 @@ done
 _section "Git State"
 
 cd "$ROOT"
+# git refuses a repo owned by someone else ("dubious ownership") unless the run
+# is under sudo, which it trusts through SUDO_UID. Run as root from a systemd
+# unit, the `git status | wc -l` below failed under pipefail and ended the whole
+# suite here, silently, before any shell gate ran (build 31, onyx 2026-09-18).
+# Say it, and stop: the gates after this select their files with git.
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    _fail "Git state" "git cannot read $ROOT as $(id -un) (not under sudo? set safe.directory) -- the shell gates select files with git and cannot run"
+    exit 1
+fi
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
 DIRTY=$(git status --porcelain 2>/dev/null | wc -l)
@@ -1486,6 +1495,11 @@ if [[ ${#GO_MODS[@]} -eq 0 ]]; then
 elif ! command -v go >/dev/null 2>&1; then
     # Loud, never silent. A gate that cannot run is reported as not having run.
     _didnotrun "go trees" "go not installed — ${#GO_MODS[@]} Go tree(s) are UNGATED (this check DID NOT RUN)"
+elif [[ "$(go env GOCACHE 2>/dev/null)" == off ]]; then
+    # No HOME (root from a systemd unit), so go has no build cache and every
+    # vet and test fails before looking at the code. The output below goes to
+    # /dev/null, so that read as four broken Go trees (build 31, 2026-09-18).
+    _didnotrun "go trees" "go has no build cache (HOME and GOCACHE unset) — ${#GO_MODS[@]} Go tree(s) are UNGATED (this check DID NOT RUN)"
 else
     for _gm in "${GO_MODS[@]}"; do
         _gd="$ROOT/$_gm"
@@ -1503,7 +1517,7 @@ else
         if [[ -z "$_go_bad" ]]; then
             _pass "go ${_gm}: gofmt, vet and test clean (both flavors)"
         else
-            _fail "go ${_gm}" "failing:${_go_bad} — run 'cd ${_gm} && make check'"
+            _fail "go ${_gm}" "failing:${_go_bad} — in ${_gm}: gofmt -l . ; go vet [-tags gui] ./... ; go test [-tags gui] ./..."
         fi
 
         # staticcheck is separate because it catches the class the others miss
