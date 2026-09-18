@@ -19,9 +19,12 @@
 # Both take --netdev <mac2>: <mac> starts the boot, <mac2> carries the root
 # image (BOOTIF=01-<mac2>); see _netdev_arg for why fiend needs it.
 #
-# THE MENU: an armed token is a menu -- the armed action (default, after
-# NETBOOT_MENU_TIMEOUT s), a live desktop, the local disk, an iPXE shell -- shown
-# before the kernel or root image is fetched. See _write_armed.
+# THE MENU: an armed token is a menu, shown before the kernel or root image is
+# fetched. arm-install lists every profile (core server desktop kvm k8s storage
+# ai), then -- with more than one NETBOOT_DISTROS -- a distro screen; the armed
+# profile and distro are the default after NETBOOT_MENU_TIMEOUT s. Plus a live
+# desktop, the local disk and an iPXE shell. See _write_armed_install;
+# arm-deploy's menu is _write_armed.
 #
 # THE ARMING MECHANISM: boot.ipxe probes net0..net3 and CHAINS the first
 # armed/<mac>.ipxe it finds. That per-MAC snippet is where install and deploy
@@ -120,6 +123,11 @@ DHCP_MODE="${NETBOOT_DHCP:-proxy}"
 # because iPXE reads `choose --timeout 0` as "wait forever", and an unattended
 # matrix run would sit at the menu until someone noticed.
 MENU_TIMEOUT="${NETBOOT_MENU_TIMEOUT:-10}"
+# Distros the install menu offers. VERIFIED ONLY (operator, 2026-09-18): a
+# distro goes in when its matrix edition has passed on this payload, not
+# because the ISO happens to carry a mirror for it. One entry = no distro
+# screen; the armed distro is always offered even if it is not listed.
+NB_DISTROS="${NETBOOT_DISTROS:-fedora}"
 DHCP_RANGE="${NETBOOT_DHCP_RANGE:-}"
 
 # Kernel args every entry shares — the ISO's own hard-won line (selinux=0 or
@@ -649,8 +657,17 @@ _check_answers() {
 # silently not happening. iPXE splits words on whitespace with no quoting, so
 # the second column's padding is a run of spaces smuggled in as a hex setting
 # (${pN:string}), which expands AFTER the split.
+#
+# The text area is 704 x 342 px. iPXE's framebuffer console draws each cell
+# 9 x 19 px here, NOT the 8 x 16 of its font -- measured from a qemu
+# screenshot on 2026-09-18, where a panel sized for 8 x 16 showed 10 item rows
+# and "..." instead of 13 -- so the area is 78 x 18 cells. iPXE gives a menu
+# LINES - 5 item rows (menu_ui.c: MENU_ROWS = LINES - 2 - MENU_ROW), so 13:
+# the install menu's twelve items plus an armed profile outside the usual
+# seven. It always CENTRES the title (menu_ui.c:302), so a title padded to
+# NB_TITLE_W = 78 - 6 columns starts in column 3, where the item labels start.
 # Writes $ROOT/armed/<m>.ipxe and dies if it did not land.
-NB_CONSOLE="--x 1024 --y 768 --left 160 --right 160 --top 256 --bottom 288"
+NB_CONSOLE="--x 1024 --y 768 --left 160 --right 160 --top 236 --bottom 190"
 
 # _ipxe_text <string> — strip anything iPXE would interpret (${, ||, #) from
 # text that came from an answers file.
@@ -666,6 +683,21 @@ _ipxe_pad() {
 # _answer_val <answers-file> <KEY> — the last KEY= value, quotes stripped.
 _answer_val() { sed -n "s/^${2}=//p" "$1" | tail -1 | tr -d "\"'"; }
 
+NB_TITLE_W=72
+
+# _nb_title_pad <visible-length> [setting] — the `set <setting>:hex ...` line
+# that pads a title to NB_TITLE_W, or clears it when already that long.
+# Setting defaults to tp; a second menu in the same script needs its own, or
+# it re-pads the first menu's title when Back redraws it.
+_nb_title_pad() {
+    local name="${2:-tp}"
+    if (($1 < NB_TITLE_W)); then
+        printf 'set %s:hex %s\n' "$name" "$(_ipxe_pad $((NB_TITLE_W - $1)))"
+    else
+        printf 'clear %s\n' "$name"
+    fi
+}
+
 _write_armed() {
     local m="$1" mac="$2" action tip args="$5" netarg="$6" netdev="$7" host tok="$ROOT/armed/$1.ipxe"
     action="$(_ipxe_text "$3")"
@@ -675,8 +707,10 @@ _write_armed() {
     local live="Live desktop" w
     w=$((${#action} > ${#live} ? ${#action} : ${#live}))
     w=$((w + 4))
-    local skip=""
+    local skip="" tlen
     ((MENU_TIMEOUT > 0)) || skip="goto armed"
+    tlen=${#mac}
+    [[ -z "$host" ]] || tlen=$((tlen + 2 + ${#host}))
     cat >"$tok" <<IPXE
 #!ipxe
 # kldload armed ${mac}: ${action}. \${base} comes from boot.ipxe.
@@ -694,7 +728,8 @@ cpair --foreground 6 --background 9 3 || goto plain
 set p0:hex 20:20
 set p1:hex $(_ipxe_pad $((w - ${#action})))
 set p2:hex $(_ipxe_pad $((w - ${#live})))
-menu ${host:+${host}\${p0:string}}${mac}
+$(_nb_title_pad "$tlen")
+menu ${host:+${host}\${p0:string}}${mac}\${tp:string}
 item --gap ${netdev:+downloads over ${netdev}}
 item --gap
 item armed ${action}\${p1:string}${tip}
@@ -724,6 +759,211 @@ IPXE
     [[ -s "$tok" ]] || die "$tok did not land"
 }
 
+# ── The install menu: any profile, then any verified distro ────────────────
+# Operator, 2026-09-18: "list all 7 profiles and allow the user to simply
+# boot/install whatever they like", then a distro screen, netboot.xyz-style.
+#
+# WHY per-profile answers files and not cmdline keys: kldload.distro= already
+# overrides the seed from the cmdline, but a profile is a BUNDLE -- kvm is
+# ENABLE_KVM + BUILD_IMAGES + TEMPLATE, k8s adds ENABLE_K8S and the node
+# counts, ai adds ENABLE_AI -- and most of those have no cmdline key. So
+# arming writes answers/<m>-<profile>.env for every other profile: the armed
+# file with each NB_PRESET_KEYS line removed and that profile's preset
+# appended. The ARMED profile keeps the original <m>.env untouched, so the
+# timeout (the matrix, CI, anyone not watching) fetches exactly what was armed.
+#
+# The presets are the matrix editions' own values (live-build/pxe/matrix/
+# N-<edition>, read 2026-09-18) minus anything machine-specific, so each item
+# installs what its edition verified. Change an edition, change it here.
+NB_PROFILES=(core server desktop kvm k8s storage ai)
+NB_PRESET_KEYS="PROFILE TEMPLATE ENABLE_KVM ENABLE_K8S K8S_BOOTSTRAP K8S_CONTROL_PLANES K8S_WORKERS BUILD_IMAGES ENABLE_AI ENABLE_DEVOPS ENABLE_EBPF ENABLE_WEBUI WIREGUARD"
+
+# _nb_preset <profile> — "description|KEY=VAL ..." on stdout (keys without the
+# KLDLOAD_ prefix); exit 1 for a profile with no preset.
+_nb_preset() {
+    case "$1" in
+    core) echo "minimal ZFS-on-root base|PROFILE=core ENABLE_DEVOPS=0 ENABLE_AI=0 K8S_BOOTSTRAP=0 BUILD_IMAGES=0" ;;
+    server) echo "headless, web UI and devops tools|PROFILE=server ENABLE_DEVOPS=1 ENABLE_EBPF=1 ENABLE_WEBUI=1 WIREGUARD=1 ENABLE_AI=0 K8S_BOOTSTRAP=0 BUILD_IMAGES=0" ;;
+    desktop) echo "GNOME workstation|PROFILE=desktop ENABLE_DEVOPS=1 WIREGUARD=1 ENABLE_AI=0 K8S_BOOTSTRAP=0 BUILD_IMAGES=0" ;;
+    kvm) echo "hypervisor, VMs on ZFS, golden images|PROFILE=kvm TEMPLATE=kvm ENABLE_KVM=1 BUILD_IMAGES=1 ENABLE_DEVOPS=1 ENABLE_EBPF=1 WIREGUARD=1 ENABLE_AI=0 K8S_BOOTSTRAP=0" ;;
+    k8s) echo "kvm plus a 3+3 HA Kubernetes cluster|PROFILE=kvm TEMPLATE=k8s ENABLE_KVM=1 ENABLE_K8S=1 K8S_BOOTSTRAP=1 K8S_CONTROL_PLANES=3 K8S_WORKERS=3 BUILD_IMAGES=1 ENABLE_DEVOPS=1 ENABLE_EBPF=1 WIREGUARD=1 ENABLE_AI=0" ;;
+    storage) echo "NFS, SMB and iSCSI file server|PROFILE=storage ENABLE_WEBUI=1 ENABLE_EBPF=1 WIREGUARD=1 ENABLE_DEVOPS=0 ENABLE_AI=0 K8S_BOOTSTRAP=0 BUILD_IMAGES=0" ;;
+    ai) echo "local models behind the web UI|PROFILE=ai ENABLE_AI=1 ENABLE_WEBUI=1 ENABLE_DEVOPS=1 ENABLE_EBPF=1 WIREGUARD=1 K8S_BOOTSTRAP=0 BUILD_IMAGES=0" ;;
+    *) return 1 ;;
+    esac
+}
+
+# _nb_check_distros — die unless every NETBOOT_DISTROS entry is a distro the
+# installer accepts (kldload-autoinstall's own list). Called BEFORE arming
+# writes anything: the first version checked while drawing the menu, after the
+# profile answers files -- password and all -- were already being served.
+_nb_check_distros() {
+    local d
+    for d in $NB_DISTROS; do
+        [[ "$d" =~ ^(arch|centos|debian|fedora|rhel|rocky|ubuntu)$ ]] ||
+            die "NETBOOT_DISTROS: '$d' is not a distro the installer knows"
+    done
+}
+
+# _nb_menu_key <answers> — which menu item an answers file IS. k8s is not a
+# profile: the web installer sends it as profile kvm + template k8s.
+_nb_menu_key() {
+    local p t
+    p="$(_answer_val "$1" KLDLOAD_PROFILE)"
+    t="$(_answer_val "$1" KLDLOAD_TEMPLATE)"
+    [[ "$p" == kvm && "$t" == k8s ]] && p=k8s
+    printf '%s\n' "${p:-server}"
+}
+
+# _nb_write_profile_answers <m> <answers> <armed-key>
+# Writes $ROOT/answers/<m>-<profile>.env for every NB_PROFILES entry except the
+# armed one, after removing any left by an earlier arm of this MAC. Each file
+# is built in a private temp dir (it carries the password), installed 0644
+# like the armed file (nginx serves it), and put through _check_answers.
+# Dies unless the number written is the number expected.
+_nb_write_profile_answers() {
+    local m="$1" answers="$2" key="$3" p pre kv td re n=0 want=0
+    re="^KLDLOAD_(${NB_PRESET_KEYS// /|})="
+    rm -f "$ROOT/answers/${m}"-*.env
+    td="$(mktemp -d)"
+    for p in "${NB_PROFILES[@]}"; do
+        [[ "$p" == "$key" ]] && continue
+        want=$((want + 1))
+        pre="$(_nb_preset "$p")"
+        {
+            awk -v re="$re" '$0 !~ re' "$answers"
+            for kv in ${pre#*|}; do printf 'KLDLOAD_%s\n' "$kv"; done
+        } >"$td/$p.env"
+        install -m 0644 "$td/$p.env" "$ROOT/answers/${m}-${p}.env"
+        [[ "$(_nb_menu_key "$ROOT/answers/${m}-${p}.env")" == "$p" ]] ||
+            die "answers/${m}-${p}.env did not land as profile $p"
+        _check_answers "$ROOT/answers/${m}-${p}.env" >/dev/null ||
+            die "the generated $p answers failed their own check"
+        n=$((n + 1))
+    done
+    rm -rf "$td"
+    ((n == want)) || die "wrote ${n} of ${want} profile answers files for $m"
+    log "  menu: ${n} other profiles armed beside $key (answers/${m}-*.env)"
+}
+
+# _write_armed_install <m> <mac> <answers> <key> <prefix-args> <netarg> <netdev>
+#
+# The install token: every profile, then (with more than one verified distro)
+# a distro screen, then the kernel. <prefix-args> is ISO_ARGS + KIOSK_ARGS;
+# the seed and kldload.distro= are added per choice. Timeout, Esc and the
+# `|| goto plain` styling rules are _write_armed's, for the same reasons.
+_write_armed_install() {
+    local m="$1" mac="$2" answers="$3" key prefix="$5" netarg="$6" netdev="$7"
+    local tok="$ROOT/armed/$1.ipxe" host distro disk title tlen p desc seed i=0 d
+    key="$(_ipxe_text "$4")"
+    host="$(_ipxe_text "$(_answer_val "$answers" KLDLOAD_HOSTNAME)")"
+    distro="$(_ipxe_text "$(_answer_val "$answers" KLDLOAD_DISTRO)")"
+    disk="$(_ipxe_text "$(_answer_val "$answers" KLDLOAD_DISK)")"
+    disk="${disk##*/}"
+    [[ "$MENU_TIMEOUT" =~ ^[0-9]+$ ]] || die "NETBOOT_MENU_TIMEOUT must be whole seconds, got '$MENU_TIMEOUT'"
+
+    local -a profs=() dists=()
+    _nb_preset "$key" >/dev/null || profs=("$key")
+    profs+=("${NB_PROFILES[@]}")
+    read -r -a dists <<<"$NB_DISTROS"
+    [[ " ${dists[*]} " == *" ${distro} "* ]] || dists=("$distro" "${dists[@]}")
+    local multi=0
+    ((${#dists[@]} > 1)) && multi=1
+
+    # Title pieces are joined by ${s3:string}: iPXE collapses literal runs of
+    # spaces when it splits the line, so they cannot be typed.
+    title="${host:+${host}\${s3:string}}${mac}"
+    tlen=$((${#mac} + ${host:+3} + ${#host}))
+    if ((!multi)); then
+        title+="\${s3:string}${distro}"
+        tlen=$((tlen + 3 + ${#distro}))
+    fi
+    if [[ -n "$netdev" ]]; then
+        title+="\${s3:string}via ${netdev}"
+        tlen=$((tlen + 7 + ${#netdev}))
+    fi
+
+    local skip=""
+    ((MENU_TIMEOUT > 0)) || skip="goto armed"
+    local ms=$((MENU_TIMEOUT * 1000))
+    {
+        printf '#!ipxe\n'
+        printf '# kldload armed %s: install menu, default %s/%s. ${base} comes from boot.ipxe.\n' "$mac" "$distro" "$key"
+        printf '%s\n' "$skip"
+        printf '%s\n' "console ${NB_CONSOLE} --picture \${base}/ipxe/menu.png || goto plain" \
+            'colour --rgb 0xd0d8e8 7 || goto plain' 'colour --rgb 0xf0f4fa 3 || goto plain' \
+            'colour --rgb 0x326ce5 4 || goto plain' 'colour --rgb 0x5a6a85 6 || goto plain' \
+            'cpair --foreground 7 --background 9 0 || goto plain' 'cpair --foreground 7 --background 9 1 || goto plain' \
+            'cpair --foreground 3 --background 4 2 || goto plain' 'cpair --foreground 6 --background 9 3 || goto plain' \
+            ':plain'
+        printf 'set s2:hex %s\nset s3:hex %s\n' "$(_ipxe_pad 2)" "$(_ipxe_pad 3)"
+        _nb_title_pad "$tlen"
+        for p in "${profs[@]}" "Live desktop"; do
+            printf 'set q%d:hex %s\n' "$i" "$(_ipxe_pad $((15 - ${#p})))"
+            i=$((i + 1))
+        done
+
+        printf '\n:top\nmenu %s${tp:string}\n' "$title"
+        printf 'item --gap Install${s3:string}erases %s\n' "${disk:-the disk it picks}"
+        i=0
+        for p in "${profs[@]}"; do
+            desc="$(_nb_preset "$p")" || desc="as armed|"
+            desc="${desc%%|*}"
+            [[ "$p" == "$key" ]] && desc+="\${s2:string}[armed]"
+            printf 'item m_%s %s${q%d:string}%s\n' "$p" "$p" "$i" "$desc"
+            i=$((i + 1))
+        done
+        printf 'item --gap\n'
+        printf 'item live Live desktop${q%d:string}installs nothing\n' "$i"
+        printf 'item local Boot from local disk\nitem shell iPXE shell\n'
+        printf 'choose --timeout %d --default m_%s target || goto local\ngoto ${target}\n' "$ms" "$key"
+
+        for p in "${profs[@]}"; do
+            seed="${m}-${p}.env"
+            [[ "$p" == "$key" ]] && seed="${m}.env"
+            printf '\n:m_%s\nset pf %s\nset sf %s\ngoto distro\n' "$p" "$p" "$seed"
+        done
+
+        printf '\n:armed\nset sf %s.env\nclear dargs\ngoto install\n' "$m"
+        printf '\n:distro\n'
+        if ((multi)); then
+            # Its own pad setting: sharing tp shifted the main title two
+            # columns left after Back (qemu, 2026-09-18).
+            _nb_title_pad 15 td
+            printf 'menu Choose a distro${td:string}\n'
+            printf 'item --gap Install ${pf} with\n'
+            for d in "${dists[@]}"; do
+                if [[ "$d" == "$distro" ]]; then
+                    printf 'item d_%s %s${s3:string}[armed]\n' "$d" "$d"
+                else
+                    printf 'item d_%s %s\n' "$d" "$d"
+                fi
+            done
+            printf 'item --gap\nitem top Back\n'
+            printf 'choose --timeout %d --default d_%s dsel || goto top\ngoto ${dsel}\n' "$ms" "$distro"
+            for d in "${dists[@]}"; do
+                if [[ "$d" == "$distro" ]]; then
+                    printf '\n:d_%s\nclear dargs\ngoto install\n' "$d"
+                else
+                    printf '\n:d_%s\nset dargs kldload.distro=%s\ngoto install\n' "$d" "$d"
+                fi
+            done
+        else
+            printf 'clear dargs\ngoto install\n'
+        fi
+
+        printf '\n:install\n'
+        printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s kldload.seed=${base}/answers/${sf} ${dargs}%s\n' "$prefix" "$netarg"
+        printf 'initrd ${base}/kldload/initrd.img\nboot\n'
+        printf '\n:live\n'
+        printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s%s\n' "$ISO_ARGS" "$netarg"
+        printf 'initrd ${base}/kldload/initrd.img\nboot\n'
+        printf '\n:local\necho kldload: booting from local disk\nexit\n\n:shell\nshell\n'
+    } >"$tok"
+    [[ -s "$tok" ]] || die "$tok did not land"
+    grep -q "^:m_${key}\$" "$tok" || die "$tok has no entry for the armed profile $key"
+}
+
 cmd_arm_install() {
     local usage="usage: arm-install <mac> <answers-file> [--netdev <mac2>]"
     local mac="${1:?$usage}" answers="${2:?$usage}"
@@ -739,6 +979,7 @@ cmd_arm_install() {
         esac
     done
     _check_answers "$answers" || die "refusing to arm $mac"
+    _nb_check_distros
     # The flag wins over the file, so a one-off arm can override an estate file.
     if [[ -z "$netdev" ]]; then
         netdev="$(_answers_netdev "$answers")"
@@ -752,10 +993,11 @@ cmd_arm_install() {
     m="$(_mac_norm "$mac")"
     install -m 0644 "$answers" "$ROOT/answers/${m}.env"
     [[ -s "$ROOT/answers/${m}.env" ]] || die "$ROOT/answers/${m}.env did not land"
-    _write_armed "$m" "$mac" "Install $(_answer_val "$answers" KLDLOAD_DISTRO)/$(_answer_val "$answers" KLDLOAD_PROFILE)" \
-        "wipes the disk" "${ISO_ARGS} ${KIOSK_ARGS} kldload.seed=\${base}/answers/${m}.env" "$netarg" "$netdev" \
-        "$(_answer_val "$answers" KLDLOAD_HOSTNAME)"
-    log "ARMED-INSTALL $mac — next netboot installs $(sed -n 's/^KLDLOAD_DISTRO=//p' "$answers")/$(sed -n 's/^KLDLOAD_PROFILE=//p' "$answers")"
+    local key
+    key="$(_nb_menu_key "$answers")"
+    _nb_write_profile_answers "$m" "$answers" "$key"
+    _write_armed_install "$m" "$mac" "$answers" "$key" "${ISO_ARGS} ${KIOSK_ARGS}" "$netarg" "$netdev"
+    log "ARMED-INSTALL $mac — next netboot shows the install menu; default $(_answer_val "$answers" KLDLOAD_DISTRO)/${key}"
     [[ -n "$netdev" ]] && log "  root image and seed download over ${netdev} (${netdev_from}); ${mac} only starts the boot"
     k_audit "ARMED-INSTALL $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) from $answers${netdev:+ netdev=$netdev}"
     if grep -qE '^KLDLOAD_(PASSWORD|ZFS_PASSPHRASE)=.+' "$answers"; then
@@ -864,6 +1106,13 @@ cmd_disarm() {
         rm -f "$ROOT/answers/${m}.env"
         gone=1
     }
+    # The install menu's other profiles: the same password, one file each.
+    local extra
+    for extra in "$ROOT/answers/${m}"-*.env; do
+        [[ -f "$extra" ]] || continue
+        rm -f "$extra"
+        gone=1
+    done
     if ((gone)); then
         log "disarmed $mac"
         k_audit "DISARMED $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?"))"
@@ -1100,10 +1349,17 @@ run by hand; a variable already set in the environment wins):
   NETBOOT_IFACE  interface to serve on (default: the one holding the default
                  route). Set this when provisioning runs on its own NIC, which
                  has no default route and would otherwise not be chosen.
-  NETBOOT_MENU_TIMEOUT  seconds an armed machine shows its menu (armed action,
-                 live desktop, local disk, iPXE shell) before taking the armed
-                 action; Esc boots the local disk. Default 10; 0 = no menu.
+  NETBOOT_MENU_TIMEOUT  seconds an armed machine shows its menu before taking
+                 the armed action. arm-install's menu lists every profile
+                 (core server desktop kvm k8s storage ai; each one the armed
+                 answers file with that profile's matrix settings), then a live
+                 desktop, the local disk and an iPXE shell; Esc goes back, then
+                 to the local disk. Default 10; 0 = no menu.
                  Read when arming: re-arm to change an armed machine.
+  NETBOOT_DISTROS  distros the install menu offers, space-separated; only ones
+                 the matrix has verified belong here. Default "fedora". With
+                 more than one, each profile opens a distro screen (default:
+                 the armed distro). Read when arming.
 
 notes:
   ipxe.efi is UNSIGNED: a target with Secure Boot enabled will refuse it.

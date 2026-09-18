@@ -5,7 +5,7 @@ The picture iPXE puts behind the armed-machine menu (kldload-netboot-server
 _write_armed). iPXE cannot draw anything but 8x16 text, so the header, the
 panel and the key hint live in this picture, and the menu text is confined to
 the panel with `console --left/--right/--top/--bottom`. The geometry below and
-PANEL_* in kldload-netboot-server must agree: change one, change both.
+NB_CONSOLE in kldload-netboot-server must agree: change one, change both.
 
 Colours are the web UI's (free/css/app.css), so a machine booting over the
 network looks like the same product as the page that armed it.
@@ -23,10 +23,13 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1024, 768
-# Text area handed to iPXE, in pixels from each edge. 704 x 224 px = 88 x 14
-# cells of the 8x16 font: title on row 1, items from row 3, and the last two
-# rows are iPXE's scroll markers -- at 12 rows the sixth item became "...".
-LEFT, RIGHT, TOP, BOTTOM = 160, 160, 256, 288
+# Text area handed to iPXE, in pixels from each edge. iPXE draws 9 x 19 px
+# cells here (measured, 2026-09-18 -- not the 8 x 16 its font suggests), so
+# 704 x 342 px = 78 x 18 cells: title on row 1, items from row 3, and
+# LINES - 5 = 13 item rows (menu_ui.c MENU_ROWS) -- the install menu's seven
+# profiles, live, local, shell and its gaps, plus one armed profile outside
+# the seven.
+LEFT, RIGHT, TOP, BOTTOM = 160, 160, 236, 190
 BG = "#0c0e14"
 CARD = "#161a24"
 BORDER = "#283040"
@@ -44,9 +47,9 @@ def main(out: str) -> None:
     sub = ImageFont.truetype(FONT_REG, 20)
     hint = ImageFont.truetype(FONT_REG, 16)
 
-    d.text((LEFT - 8, 104), "kldload", font=word, fill=BRIGHT)
-    d.rectangle((LEFT - 8, 184, LEFT + 56, 187), fill=ACCENT)
-    d.text((LEFT - 8, 198), "network boot", font=sub, fill=DIM)
+    d.text((LEFT - 8, 84), "kldload", font=word, fill=BRIGHT)
+    d.rectangle((LEFT - 8, 164, LEFT + 56, 167), fill=ACCENT)
+    d.text((LEFT - 8, 178), "network boot", font=sub, fill=DIM)
 
     # The panel sits 16 px outside the text area on every side.
     d.rounded_rectangle(
@@ -55,7 +58,7 @@ def main(out: str) -> None:
     )
     d.text(
         (LEFT - 8, H - BOTTOM + 40),
-        "Up/Down  choose      Enter  boot      Esc  local disk",
+        "Up/Down  choose      Enter  select      Esc  back, then local disk",
         font=hint, fill=DIM,
     )
     img.save(out, optimize=True)
