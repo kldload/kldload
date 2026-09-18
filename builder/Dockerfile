@@ -13,6 +13,14 @@ FROM registry.fedoraproject.org/fedora:44
 # repos so no extra repo enable step is needed.
 # ---------------------------------------------------------------------------
 
+# make + perl-interpreter: build-iso.sh compiles iPXE for the netboot menu
+# (gcc alone was enough for everything before it; those two are all iPXE's
+# EFI target adds, checked in a bare fedora:44 on 2026-09-18).
+#
+# DL3041 (pin versions) is off on purpose: the builder takes whatever Fedora 44
+# ships on the day, and the kernel/ZFS stack it builds is derived at build time
+# and recorded in the ISO. Pinned literals here would go stale silently.
+# hadolint ignore=DL3041
 RUN dnf install -y --allowerasing \
         lorax \
         createrepo_c \
@@ -38,6 +46,8 @@ RUN dnf install -y --allowerasing \
         python3-pyyaml \
         golang \
         gcc \
+        make \
+        perl-interpreter \
         pkgconf-pkg-config \
         mesa-libGL-devel \
         libX11-devel \

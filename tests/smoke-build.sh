@@ -247,6 +247,26 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             _fail "first-boot show part 2 in the image" "missing:${_fb2_bad} — installs that build will show the console fallback"
         fi
 
+        # ── The netboot menu's own iPXE, its picture and its source stamp ──
+        # build-iso.sh compiles ipxe.efi because Fedora's has no colour
+        # commands, and only WARNS when that fails: a menu in iPXE's stock
+        # blue and red is not a reason to refuse an ISO. So this is the place
+        # a failed iPXE build gets seen -- as a warning here, not a surprise on
+        # the first machine that netboots from the key (2026-09-18).
+        declare -a NB_FILES=(usr/share/kldload-netboot/ipxe.efi
+            usr/share/kldload-netboot/menu.png etc/kldload/ipxe-commit)
+        _nb_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${NB_FILES[@]}" 2>/dev/null)" || _nb_list="" # absent paths make unsquashfs exit non-zero; the loop below names them
+        _nb_bad=""
+        for _df in "${NB_FILES[@]}"; do
+            awk -v p="squashfs-root/$_df" '$NF == p && $1 ~ /^-/ {f = 1} END {exit !f}' <<<"$_nb_list" ||
+                _nb_bad+=" $_df"
+        done
+        if [[ -z "$_nb_bad" ]]; then
+            _pass "netboot menu iPXE in the image (ipxe.efi, menu.png, ipxe-commit)"
+        else
+            _warn "netboot menu iPXE in the image" "missing:${_nb_bad} — a key built from this serves a plain-text menu"
+        fi
+
         # ── Every tool in includes.chroot/usr/local/{bin,sbin} must ship ────
         # The builder copies bin/ by glob and, since 2026-09-05, sbin/ too.
         # Before that sbin/ was an allow-list, and the list dropped a new tool

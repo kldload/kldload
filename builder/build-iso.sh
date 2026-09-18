@@ -2165,6 +2165,60 @@ HELMCHARTS
             log "  WARNING netboot: ${_nb_need} is missing from the live rootfs — serve will die there"
     done
 
+    # ── iPXE, built here, for the netboot menu ──────────────────────────────
+    # Fedora's ipxe-bootimgs-x86 is compiled without the console command, so
+    # the armed-machine menu could only draw in iPXE's stock blue and red; the
+    # operator's verdict on seeing it on fiend was "its terrible" (2026-09-18).
+    # Upstream's EFI defaults already carry console/colour/cpair and PNG, so a
+    # stock `make bin-x86_64-efi/ipxe.efi` is all this needs -- no config
+    # overrides to keep in step. The distro package above stays: it still
+    # supplies undionly.kpxe for BIOS clients, and it is the fallback that
+    # kldload-netboot-server serves (unstyled, with a warning) if this fails.
+    #
+    # Same source policy as zxplore: tracks upstream master unless IPXE_REF
+    # pins a tag or branch, cached at live-build/ipxe-cache so a darksite
+    # builder ships the cached commit with a warning, and the commit is baked
+    # into /etc/kldload/ipxe-commit. Unlike zxplore it does NOT die: a netboot
+    # menu in the wrong colours is not a reason to refuse an ISO.
+    IPXE_REF="${IPXE_REF:-}"
+    _ipxe_cache="/build/live-build/ipxe-cache"
+    _ipxe_fresh=0
+    if [[ -d "${_ipxe_cache}/.git" ]]; then
+        if (git -C "$_ipxe_cache" fetch --depth 1 origin "${IPXE_REF:-master}" &&
+            git -C "$_ipxe_cache" reset --hard FETCH_HEAD) >>"$LOG_FILE" 2>&1; then
+            _ipxe_fresh=1
+        fi
+    else
+        _ipxe_clone=(git clone --depth 1)
+        [[ -n "$IPXE_REF" ]] && _ipxe_clone+=(--branch "$IPXE_REF")
+        if "${_ipxe_clone[@]}" https://github.com/ipxe/ipxe.git "$_ipxe_cache" >>"$LOG_FILE" 2>&1; then
+            _ipxe_fresh=1
+        fi
+    fi
+    if [[ ! -d "${_ipxe_cache}/.git" ]]; then
+        log "  WARNING iPXE: no network AND no cached source at live-build/ipxe-cache — the netboot menu will be unstyled"
+    else
+        ((_ipxe_fresh)) ||
+            log "  WARNING iPXE refresh failed (offline/darksite builder?) — building CACHED commit $(git -C "$_ipxe_cache" rev-parse --short HEAD)"
+        # A throwaway copy, so objects never dirty the cache and a cache left
+        # half-built by an interrupted run cannot leak stale objects in.
+        rm -rf /tmp/ipxe-src
+        cp -a "$_ipxe_cache" /tmp/ipxe-src
+        _ipxe_commit="$(git -C /tmp/ipxe-src rev-parse HEAD)"
+        if make -C /tmp/ipxe-src/src -j"$(nproc)" bin-x86_64-efi/ipxe.efi >>"$LOG_FILE" 2>&1 &&
+            install -Dm0644 /tmp/ipxe-src/src/bin-x86_64-efi/ipxe.efi "${ROOTFS}/usr/share/kldload-netboot/ipxe.efi"; then
+            printf '%s\n' "$_ipxe_commit" >"${ROOTFS}/etc/kldload/ipxe-commit"
+            log "iPXE ${_ipxe_commit:0:12} built for the netboot menu ($(stat -c%s "${ROOTFS}/usr/share/kldload-netboot/ipxe.efi") bytes)"
+        else
+            log "  WARNING iPXE build failed (see ${LOG_FILE}) — the netboot menu will be unstyled"
+        fi
+        rm -rf /tmp/ipxe-src
+    fi
+    # The picture the styled menu draws on; shipped by includes.chroot. Its
+    # absence means the menu falls back to plain text, which serve also warns.
+    [[ -s "${ROOTFS}/usr/share/kldload-netboot/menu.png" ]] ||
+        log "  WARNING netboot: menu.png is missing from the live rootfs — the menu will be unstyled"
+
     # ── cage: the install show without a desktop under it ────────────────────
     # A Wayland compositor that runs exactly ONE client, full screen, and
     # nothing else — no shell, no dash, no app grid, no second window. That is
