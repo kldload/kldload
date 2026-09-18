@@ -192,12 +192,30 @@ if ((_is_kvm_host)); then
     run_suite "KVM Tests (Libvirt, virbr0, K8s Tools, Cluster)" "$SCRIPT_DIR/smoke-kvm.sh"
 fi
 
-# Desktop tests
+# Desktop tests, wherever the machine ACTUALLY has a desktop.
+#
+# This used to be `case $PROFILE in desktop|ai)`, and the `ai` arm was simply
+# wrong: that profile is "core + WireGuard + Python + tmux + modern CLI, Ollama
+# on firstboot" and ships no GUI packages whatsoever. So every ai install ran
+# the GNOME suite and failed seven checks it could never pass -- gnome-shell,
+# gnome-session, gnome-terminal, nautilus, gdm, a chromium browser and
+# PyGObject, none of which it is meant to have. Caught 2026-09-18 on the first
+# ai install the matrix has ever done; the edition was reported FAILED while
+# ollama was active and every other check passed.
+#
+# Same shape as the KVM suite being gated on a profile NAME rather than on
+# whether the machine is a KVM host. Ask the machine instead: a display manager
+# on disk is what "this is a desktop" means, and it is true for the desktop
+# profile, for vdi, and for anything else that grows a GUI later without anyone
+# remembering to edit this list.
+_is_desktop=0
 case "$PROFILE" in
-desktop | ai)
-    run_suite "Desktop Tests (GNOME, GDM, Firefox)" "$SCRIPT_DIR/smoke-desktop.sh"
-    ;;
+desktop | vdi) _is_desktop=1 ;;
 esac
+[[ -e /etc/systemd/system/display-manager.service ]] && _is_desktop=1
+if ((_is_desktop)); then
+    run_suite "Desktop Tests (GNOME, GDM, Firefox)" "$SCRIPT_DIR/smoke-desktop.sh"
+fi
 
 # K8s cluster test if cluster is deployed
 if virsh list --name 2>/dev/null | grep -q kldload-cp; then
