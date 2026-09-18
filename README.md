@@ -356,6 +356,12 @@ boot order and boots from its own disk. `arm-all` refuses duplicate MACs or
 hostnames outright and exits non-zero unless every machine armed, so a
 half-armed rack is an error you hear about rather than discover.
 
+An armed machine shows a menu before it fetches anything large: the armed
+install (the default, after `NETBOOT_MENU_TIMEOUT` seconds, 10 unless set), a
+live desktop that installs nothing, the local disk, or an iPXE shell. Esc
+boots the local disk, so a machine netbooted by mistake can be sent back to
+its own disk without it being wiped or pulling the image.
+
 Per-machine differences live in the answers file — hostname, disk, profile, how
 many control planes and workers. Same image, different answers.
 
