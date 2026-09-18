@@ -3332,6 +3332,91 @@ WPEOF
         fi
     fi
 
+    # ── Storage profile: the dataset shares live on, and the daemons that
+    #    actually serve them ────────────────────────────────────────────────────
+    #
+    # The profile installed nfs-utils, targetcli and samba and then did nothing
+    # with them: no dataset to share, no service enabled, no firewall opened. It
+    # produced a machine with the software for a storage server and none of the
+    # behaviour, and the matrix passed it because no check asks whether a storage
+    # server can serve storage (2026-09-18, first time this profile was ever
+    # installed).
+    if [[ "$_profile" == "storage" ]]; then
+        k_log "Configuring ZFS storage host"
+
+        # One parent for everything served, so exports, snapshots and
+        # replication all have a single obvious root. canmount=off: this is a
+        # container, the children are what get mounted and shared.
+        zfs create -o canmount=off -o mountpoint=none \
+            -o compression=lz4 \
+            rpool/srv 2>/dev/null ||
+            k_log "WARNING: could not create rpool/srv — shares will land on the root dataset"
+
+        # The first share, ready to export. The properties are the point:
+        #
+        #   xattr=sa          extended attributes in the inode instead of a
+        #                     hidden directory. SMB stores its DOS attributes
+        #                     and ACLs as xattrs, and dir-based xattrs cost an
+        #                     extra lookup on every single file operation.
+        #   acltype=posixacl  without it Samba and NFSv4 cannot store an ACL at
+        #                     all and silently fall back to mode bits, which is
+        #                     how "permissions keep resetting" starts.
+        #   recordsize=1M     a file server moves whole files, not database
+        #                     pages. Large records compress better and cut the
+        #                     per-record overhead on sequential reads.
+        #   atime=off         every read otherwise becomes a write. On a share
+        #                     with many readers that is pure amplification.
+        zfs create -o mountpoint=/srv/share \
+            -o xattr=sa \
+            -o acltype=posixacl \
+            -o recordsize=1M \
+            -o atime=off \
+            -o compression=lz4 \
+            rpool/srv/share 2>/dev/null ||
+            k_log "WARNING: could not create rpool/srv/share"
+
+        # Enable whichever daemons are actually installed. Both spellings are
+        # tried because the split is real -- nfs-server on RPM,
+        # nfs-kernel-server on Debian -- and assuming one is exactly how this
+        # profile shipped with no NFS at all.
+        local _svc _enabled=()
+        for _svc in nfs-server nfs-kernel-server smbd smb target tgt; do
+            if [[ -e "${target}/usr/lib/systemd/system/${_svc}.service" ||
+                -e "${target}/lib/systemd/system/${_svc}.service" ]]; then
+                mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
+                ln -sf "/usr/lib/systemd/system/${_svc}.service" \
+                    "${target}/etc/systemd/system/multi-user.target.wants/${_svc}.service" &&
+                    _enabled+=("$_svc") ||
+                    k_log "WARNING: could not enable ${_svc} — it will not start at boot"
+            fi
+        done
+        if ((${#_enabled[@]})); then
+            k_log "storage daemons enabled: ${_enabled[*]}"
+        else
+            k_log "WARNING: no storage daemon found on the target — this machine serves nothing"
+        fi
+
+        # Open the ports those daemons listen on. A storage server whose
+        # firewall drops NFS is the same failure as one with no NFS installed,
+        # and harder to see.
+        mkdir -p "${target}/etc/nftables.d"
+        cat >"${target}/etc/nftables.d/kldload-storage.nft" <<'STORAGENFT'
+# kldload storage profile — the ports this machine serves on.
+#   2049  NFSv4 (v3 additionally needs rpcbind on 111 and the fixed
+#         statd/mountd ports, which nfs-utils sets in /etc/nfs.conf)
+#   445   SMB
+#   3260  iSCSI
+table inet kldload_storage {
+    chain input {
+        type filter hook input priority 0; policy accept;
+        tcp dport { 2049, 445, 3260 } accept
+        udp dport { 2049 } accept
+    }
+}
+STORAGENFT
+        k_log "storage: rpool/srv/share created, daemons enabled, nftables opened for nfs/smb/iscsi"
+    fi
+
     # ── KVM Host profile: ZFS datasets, ARC tuning, sysctl, replication ────────
     if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
         k_log "Configuring KVM host with ZFS-optimized storage"

@@ -2474,6 +2474,77 @@ ZRAMCONF
     # dropped, same family of issue as the htopnet-tools typo). Recover
     # here, then re-run kldload-trust-cert --system to seed /etc/skel + all
     # existing users immediately.
+    # ── storage: make the machine actually SERVE something ────────────────
+    #
+    # The installer creates rpool/srv/share and enables the daemons, but an
+    # export list cannot be written at install time: it needs the subnet this
+    # machine ends up on, and that is not known until the network is up. A
+    # storage server whose nfs-server runs against an empty /etc/exports is
+    # indistinguishable from a broken one -- the daemon is active, the dataset
+    # is there, and nothing is reachable.
+    #
+    # Exports are scoped to the machine's own /24 rather than the world.
+    # "Ready to roll" and "readable by anyone who can route to it" are not the
+    # same thing, and the second is not a default anyone should ship.
+    if [[ "${ROLE}" == "storage" || "${KLDLOAD_PROFILE:-}" == "storage" ]]; then
+        if [[ -d /srv/share ]]; then
+            # ASK THE KERNEL for the connected network rather than deriving it
+            # from the host address. Zeroing the last octet is only correct for
+            # a /24: on a /16, 172.16.5.9/16 would become 172.16.5.0/16 and
+            # export to the wrong network entirely. The scope-link route IS the
+            # network, already in CIDR form, for any prefix length.
+            _st_if="$(ip -o -4 route show default 2>/dev/null | awk '{print $5}' | head -1)"
+            _st_net="$(ip -o -4 route show dev "${_st_if:-none}" scope link 2>/dev/null |
+                awk '{print $1}' | head -1)"
+            case "$_st_net" in
+            */*) ;;
+            *) _st_net="" ;;
+            esac
+
+            if [[ -n "$_st_net" ]] && command -v exportfs >/dev/null 2>&1; then
+                # root_squash: a client's root must not be this server's root.
+                # no_subtree_check: the documented default for a whole-dataset
+                # export, and it avoids the rename races subtree checking has.
+                if ! grep -q '^/srv/share' /etc/exports 2>/dev/null; then
+                    printf '/srv/share %s(rw,sync,no_subtree_check,root_squash)\n' \
+                        "$_st_net" >>/etc/exports
+                fi
+                exportfs -ra >>"$LOG" 2>&1 &&
+                    ok "NFS: /srv/share exported to ${_st_net}" ||
+                    log "WARNING: exportfs -ra failed — /srv/share is not exported"
+            else
+                log "WARNING: no default route or no exportfs — NFS export not written"
+            fi
+
+            # Samba needs no subnet: the share is authenticated, so it is safe
+            # to offer on every interface the firewall already allows.
+            if command -v smbd >/dev/null 2>&1 &&
+                [[ -f /etc/samba/smb.conf ]] &&
+                ! grep -q '^\[share\]' /etc/samba/smb.conf 2>/dev/null; then
+                cat >>/etc/samba/smb.conf <<'SMBSHARE'
+
+[share]
+   comment = kldload storage
+   path = /srv/share
+   browseable = yes
+   read only = no
+   # No guest access. An unauthenticated writable share is how a storage
+   # server becomes someone else's storage server.
+   guest ok = no
+SMBSHARE
+                systemctl reload-or-restart smbd >>"$LOG" 2>&1 &&
+                    ok "SMB: [share] -> /srv/share, authenticated" ||
+                    log "WARNING: smbd would not reload — the SMB share is defined but not live"
+            fi
+
+            # Say what is actually being served, so the first-boot log answers
+            # the question without anyone having to go looking.
+            log "storage: $(exportfs -v 2>/dev/null | wc -l) NFS export line(s); smbd $(systemctl is-active smbd 2>/dev/null); nfs $(systemctl is-active nfs-server 2>/dev/null || systemctl is-active nfs-kernel-server 2>/dev/null)"
+        else
+            log "WARNING: /srv/share is missing — the storage profile did not create its dataset"
+        fi
+    fi
+
     if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
         command -v dnf >/dev/null 2>&1; then
         if ! command -v certutil >/dev/null 2>&1; then
