@@ -2090,7 +2090,10 @@ CUSTOMREPO
         #
         # RPM spellings, not the Debian ones profiles.sh also carries:
         # nfs-utils not nfs-kernel-server, targetcli not tgt,
-        # golang-github-prometheus-node-exporter not prometheus-node-exporter.
+        # node-exporter not prometheus-node-exporter -- and NOT
+        # golang-github-prometheus-node-exporter either, which is the EL/Debian
+        # spelling and is absent from Fedora 44 (checked in a fedora:44
+        # container; the first mirror refresh skipped it as unavailable).
         # python3-rtslib is what targetcli drives the kernel target through;
         # without it targetcli imports and immediately fails.
         _dnf_pkgs+=(
@@ -2098,7 +2101,7 @@ CUSTOMREPO
             nfs-utils
             targetcli python3-rtslib
             samba samba-common
-            golang-github-prometheus-node-exporter
+            node-exporter
         )
         ;;
     core)

@@ -465,7 +465,7 @@ k_profile_packages() {
             # nfs-utils is both server and client on the RPM side.
             _nfs="nfs-utils"
             _iscsi="targetcli"
-            _nodeexp="golang-github-prometheus-node-exporter"
+            _nodeexp="node-exporter"
         fi
         echo "openssh-server sudo curl ca-certificates vim less iproute2 \
         ${_nfs} \
