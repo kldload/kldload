@@ -1437,6 +1437,30 @@ sslclientkey=/etc/pki/entitlement/entitlement-key.pem
 sslclientcert=/etc/pki/entitlement/entitlement.pem
 RHELREPO
             k_log_to "$log" "RHEL repos configured with entitlement certs"
+            # Registered is not entitled. fiend 2026-09-19: register succeeded
+            # (Simple Content Access, cert valid to 2027), then the CDN answered 403
+            # for BaseOS, AppStream and CRB alike -- the org had no active RHEL
+            # subscription -- and the install died at the repo pre-flight blaming
+            # "rhel-10-crb: Usable URL not found", which sent the reader after the
+            # wrong repo. So ask the CDN the question dnf is about to ask, with the
+            # same cert. NOT `subscription-manager repos --list`: it lists only
+            # repos for installed RHEL product certs, and this live system is
+            # Fedora with none, so it says 0 whether or not the account is entitled.
+            local _rh_code
+            _rh_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+                --cacert "$_ca_cert" --cert "$_ent_cert" --key "$_ent_key" \
+                "https://cdn.redhat.com/content/dist/rhel${release}/${release}/x86_64/baseos/os/repodata/repomd.xml")" ||
+                _rh_code="none"
+            k_log_to "$log" "Red Hat CDN, BaseOS for RHEL ${release} with this registration: HTTP ${_rh_code}"
+            case "$_rh_code" in
+            200) ;;
+            403)
+                k_die "Registered with Red Hat, but the account is not entitled to RHEL ${release} content (the CDN refused BaseOS: 403). It needs an active RHEL subscription -- a Developer subscription must be renewed every year. Check console.redhat.com > Subscriptions, then netboot again."
+                ;;
+            *)
+                k_log_to "$log" "WARNING: could not confirm RHEL content (HTTP ${_rh_code}); the repo pre-flight below decides"
+                ;;
+            esac
         else
             # No entitlement certs — Simple Content Access may work without them
             # Fall back to subscription-manager in the chroot
