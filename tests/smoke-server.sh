@@ -105,23 +105,7 @@ test_output_contains "WireGuard module available" "modprobe wireguard && lsmod" 
 # ── Package Snapshot Integration ─────────────────────────────────────────────
 _section "Package Snapshot Integration"
 
-SNAP_BEFORE=$(zfs list -t snapshot -H 2>/dev/null | wc -l)
-
-if [[ "$DISTRO" == "deb" ]]; then
-    # Install a tiny package to trigger snapshot
-    test_succeeds "kpkg install succeeds" "kpkg install -y file >/dev/null 2>&1"
-else
-    test_succeeds "kpkg install succeeds" "kpkg install -y file >/dev/null 2>&1"
-fi
-
-sleep 1
-SNAP_AFTER=$(zfs list -t snapshot -H 2>/dev/null | wc -l)
-
-if [[ $SNAP_AFTER -gt $SNAP_BEFORE ]]; then
-    _pass "kpkg created snapshot before install ($SNAP_BEFORE → $SNAP_AFTER)"
-else
-    _fail "kpkg snapshot on install" "no new snapshot after kpkg install ($SNAP_BEFORE → $SNAP_AFTER)"
-fi
+check_kpkg_snapshot
 
 # Check if a kpkg snapshot exists
 if zfs list -t snapshot -H -o name 2>/dev/null | grep -q "kpkg-"; then

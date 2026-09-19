@@ -195,16 +195,7 @@ fi
 # ── Package Snapshot Test ────────────────────────────────────────────────────
 _section "Package Snapshot Integration"
 
-SNAP_BEFORE=$(zfs list -t snapshot -H 2>/dev/null | wc -l)
-kpkg install -y file >/dev/null 2>&1 || true
-sleep 1
-SNAP_AFTER=$(zfs list -t snapshot -H 2>/dev/null | wc -l)
-
-if [[ $SNAP_AFTER -gt $SNAP_BEFORE ]]; then
-    _pass "kpkg snapshot on install ($SNAP_BEFORE → $SNAP_AFTER)"
-else
-    _fail "kpkg snapshot on install" "no new snapshot ($SNAP_BEFORE → $SNAP_AFTER)"
-fi
+check_kpkg_snapshot
 
 # ── Darksite ─────────────────────────────────────────────────────────────────
 # Darksite is intentionally REMOVED on first boot by kldload-firstboot

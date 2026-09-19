@@ -122,6 +122,28 @@ detect_distro() {
     else echo "unknown"; fi
 }
 
+# check_kpkg_snapshot — install a tiny package through kpkg and pass only if a
+# pre-install snapshot (dnf-pre-* / apt-pre-*) was CREATED during it. Not "the
+# snapshot total grew": snapshot-create.sh keeps ten per prefix and prunes
+# after each new one, so at the cap the total never moves. fiend's RHEL 10
+# re-run (2026-09-19) failed "no new snapshot (58 -> 58)" while dnf-pre
+# snapshots were being taken every run. Creation time comes from ZFS itself.
+check_kpkg_snapshot() {
+    local t0 new
+    t0="$(date +%s)"
+    if ! kpkg install -y file >/dev/null 2>&1; then
+        _fail "kpkg install" "kpkg install -y file failed"
+        return 0
+    fi
+    new="$(zfs list -Hp -t snapshot -o creation,name 2>/dev/null |
+        awk -v t="$t0" '$1 >= t && $2 ~ /@(dnf|apt)-pre-/ {n = $2} END {print n}')"
+    if [[ -n "$new" ]]; then
+        _pass "kpkg snapshot on install (${new})"
+    else
+        _fail "kpkg snapshot on install" "no dnf-pre/apt-pre snapshot created since $(date -d "@$t0" +%T)"
+    fi
+}
+
 # Print summary
 summary() {
     local total=$((PASS + FAIL + WARN))
