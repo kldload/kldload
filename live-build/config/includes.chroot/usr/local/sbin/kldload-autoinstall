@@ -672,12 +672,28 @@ fi
 # install goes on. Nothing has touched a disk yet. (operator, 2026-09-18: "it
 # never prompted me for enc".)
 _RUN="${KLDLOAD_AUTOINSTALL_RUNDIR:-/run/kldload}"
+
+# _answers_put <KEY> <line> — replace KEY's line in $ANSWERS_TMP with <line>.
+# SAFETY: the replacement is created under umask 077. It used to be written
+# with the default 022 and mv'd over the 0600 mktemp file, so the answers went
+# WORLD-READABLE at the exact moment they gained a secret: fiend 2026-09-19,
+# /tmp/kldload-answers.*.env at 0644 holding the Red Hat password, readable by
+# the live user (password "live", sshd up). The rm clears a stale .new, whose
+# old mode a truncating redirect would otherwise keep.
+_answers_put() {
+    rm -f "${ANSWERS_TMP}.new"
+    (
+        umask 077
+        awk -v k="${1}=" 'index($0, k) != 1' "$ANSWERS_TMP" >"${ANSWERS_TMP}.new"
+        printf '%s\n' "$2" >>"${ANSWERS_TMP}.new"
+    )
+    mv -f "${ANSWERS_TMP}.new" "$ANSWERS_TMP"
+}
+
 # The menu's secrets first: single-quoted for the loader, replacing any line the
 # seed had (the menu is this boot's intent).
 for _k in "${!_menu_secret[@]}"; do
-    awk -v k="${_k}=" 'index($0, k) != 1' "$ANSWERS_TMP" >"${ANSWERS_TMP}.new"
-    printf "%s='%s'\n" "$_k" "${_menu_secret[$_k]}" >>"${ANSWERS_TMP}.new"
-    mv -f "${ANSWERS_TMP}.new" "$ANSWERS_TMP"
+    _answers_put "$_k" "${_k}='${_menu_secret[$_k]}'"
 done
 unset _menu_secret
 _ans() { sed -n "s/^${1}=//p" "$ANSWERS_TMP" | tail -n 1 | sed -E "s/^([\"'])(.*)\1\$/\2/"; }
@@ -716,10 +732,7 @@ if ((${#_need[@]})); then
     while IFS= read -r _line; do
         case "$_line" in
         KLDLOAD_PASSWORD=?* | KLDLOAD_ZFS_PASSPHRASE=?* | KLDLOAD_RHEL_USERNAME=?* | KLDLOAD_RHEL_PASSWORD=?*)
-            _k="${_line%%=*}"
-            awk -v k="${_k}=" 'index($0, k) != 1' "$ANSWERS_TMP" >"${ANSWERS_TMP}.new"
-            printf '%s\n' "$_line" >>"${ANSWERS_TMP}.new"
-            mv -f "${ANSWERS_TMP}.new" "$ANSWERS_TMP"
+            _answers_put "${_line%%=*}" "$_line"
             _got=$((_got + 1))
             ;;
         esac
