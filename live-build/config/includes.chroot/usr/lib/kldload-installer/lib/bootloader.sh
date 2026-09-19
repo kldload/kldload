@@ -156,8 +156,10 @@ k_chroot_tool() {
 # matches the image format we just built. lsinitrd (dracut) is the fallback for
 # an EL/Fedora target. If neither exists we say so rather than guess.
 k_initramfs_lists_key() {
+    # $3 is the path to look for, so Arch can ask about its own key
+    # (etc/kldload/zfs-key) without a second copy of this function.
     local target="$1" img="$2"
-    local want='etc/zfs/kldload-rpool.key'
+    local want="${3:-etc/zfs/kldload-rpool.key}"
     local listing=""
 
     # Cascade rather than pick one: a tool being PRESENT is not the same as it
@@ -171,10 +173,14 @@ k_initramfs_lists_key() {
     # systemd-run with PATH=/usr/local/bin:/usr/bin, so anything in sbin is
     # invisible and fails as "No such file or directory". Same trap that took
     # out update-initramfs on .104 (2026-08-20).
-    local _t
-    for _t in /usr/bin/lsinitramfs /usr/sbin/lsinitramfs /usr/bin/lsinitrd /usr/sbin/lsinitrd; do
+    local _t _a
+    for _t in /usr/bin/lsinitramfs /usr/sbin/lsinitramfs /usr/bin/lsinitrd /usr/sbin/lsinitrd /usr/bin/lsinitcpio; do
         [[ -x "${target}${_t}" ]] || continue
-        listing="$(chroot "${target}" "$_t" "/boot/$(basename "$img")" 2>/dev/null)"
+        # lsinitcpio (Arch) prints a summary without -l; the others list by default.
+        _a=""
+        [[ "$_t" == */lsinitcpio ]] && _a="-l"
+        # shellcheck disable=SC2086 # _a is one optional flag, deliberately unquoted
+        listing="$(chroot "${target}" "$_t" ${_a} "/boot/$(basename "$img")" 2>/dev/null)"
         [[ -n "$listing" ]] && break
     done
     if [[ -z "$listing" ]] && command -v lsinitramfs >/dev/null 2>&1; then
@@ -254,14 +260,62 @@ k_install_initramfs_zfs_key() {
         k_log "Secure Boot on — not embedding a pool key (the ESP copy is unencrypted)"
         return 0
     fi
+    # mkinitcpio (Arch) has its own mechanism, and on Arch it is not a comfort
+    # feature: /usr/lib/initcpio/hooks/zfs `exit 1`s when it cannot get a key,
+    # and an initramfs whose PID 1 exits is a kernel panic -- "attempted to kill
+    # init, exit 0x00000100", which is exactly how fiend's first encrypted Arch
+    # install died (2026-09-19). The hook reads keylocation=file://... and falls
+    # back to prompting on its own if the file is missing or wrong, so this is
+    # strictly safer than leaving it at prompt.
+    if [[ ! -d "${target}/etc/initramfs-tools" && -f "${target}/etc/mkinitcpio.conf" ]]; then
+        local archkey="${target}/etc/kldload/zfs-key"
+        local encroot_a="${KLDLOAD_ZFS_POOL:-rpool}"
+        install -d -m 0700 "${target}/etc/kldload"
+        (
+            umask 077
+            printf '%s' "$pass" >"$archkey"
+        )
+        chmod 0400 "$archkey"
+        # Prove it unwraps the pool before anything boots depends on it.
+        if ! zfs load-key -n -L "file://${archkey}" "$encroot_a" >&7 2>&1; then
+            k_log "WARNING: staged passphrase does not unlock ${encroot_a} — leaving keylocation=prompt"
+            rm -f "$archkey"
+            return 0
+        fi
+        sed -i 's|^FILES=.*|FILES=(/etc/kldload/zfs-key)|' "${target}/etc/mkinitcpio.conf"
+        grep -qx 'FILES=(/etc/kldload/zfs-key)' "${target}/etc/mkinitcpio.conf" ||
+            k_log "WARNING: FILES= did not land in mkinitcpio.conf — the initramfs will not carry the key"
+        zfs set keylocation="file:///etc/kldload/zfs-key" "$encroot_a" >&7 2>&1 ||
+            k_log "WARNING: could not set keylocation on ${encroot_a} — the initramfs will prompt"
+        # Rebuild, because bootstrap.sh already built one without the key.
+        k_chroot_tool "${target}" mkinitcpio -P ||
+            k_log "WARNING: mkinitcpio -P failed — the initramfs may not carry the key"
+        # Outcome, not exit code: the key must be INSIDE the image that boots.
+        # Called INSIDE an `if`: this library runs under errexit, where a bare
+        # call that returns 1 (key absent) or 2 (no lister) would end the
+        # install instead of logging -- it silently did, in the first version.
+        local _lk=0
+        if k_initramfs_lists_key "${target}" "${target}/boot/initramfs-linux.img" 'etc/kldload/zfs-key'; then
+            k_log "mkinitcpio: the initramfs carries the pool key — one prompt, at ZFSBootMenu"
+        else
+            _lk=$?
+            if ((_lk == 1)); then
+                k_log "WARNING: the rebuilt initramfs does NOT carry /etc/kldload/zfs-key — the hook will prompt"
+            else
+                k_log "WARNING: could not inspect the initramfs — cannot confirm the key reached it"
+            fi
+        fi
+        return 0
+    fi
     if [[ ! -d "${target}/etc/initramfs-tools" ]]; then
-        # dracut and mkinitcpio targets need their own mechanism and do not
-        # have one yet: zfs-dracut's 90zfs/module-setup.sh installs zpool.cache,
-        # hostid and vdev_id.conf and NO keyfile, so an EL/Fedora/Arch install
-        # asks for the passphrase at ZFSBootMenu and again in the initramfs,
-        # every boot, by design. Say so plainly — an operator comparing two
-        # machines deserves to know why one asks once and the other twice.
-        k_log "NOTE: ${KLDLOAD_DISTRO:-target} uses dracut/mkinitcpio, not initramfs-tools"
+        # dracut targets need their own mechanism and do not have one yet:
+        # zfs-dracut's 90zfs/module-setup.sh installs zpool.cache, hostid and
+        # vdev_id.conf and NO keyfile, so an EL/Fedora install asks for the
+        # passphrase at ZFSBootMenu and again in the initramfs, every boot, by
+        # design. Say so plainly — an operator comparing two machines deserves
+        # to know why one asks once and the other twice. (Fedora/EL survive it;
+        # dracut prompts. Arch does not, which is why it is handled above.)
+        k_log "NOTE: ${KLDLOAD_DISTRO:-target} uses dracut, not initramfs-tools"
         k_log "  single-prompt unlock is not implemented there — this boot will ask for the passphrase TWICE"
         return 0
     fi
