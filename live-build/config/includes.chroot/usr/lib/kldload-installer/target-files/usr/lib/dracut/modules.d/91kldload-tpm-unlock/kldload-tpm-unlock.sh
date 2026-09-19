@@ -11,6 +11,12 @@
 # passphrase, never a boot.
 #
 # Never prints the key. Never fails the boot: every path returns 0.
+#
+# NO `set -Eeuo pipefail`, and the one file the strict-mode ratchet counts on
+# purpose (baseline 1 -> 2, 2026-09-19). dracut SOURCES this into its init at
+# boot: errexit would turn any failing probe into an aborted boot, breaking the
+# promise above, and -E and pipefail do not exist in POSIX sh. Every command's
+# status is checked by hand instead.
 
 [ -e /bin/systemctl ] || [ -e /usr/bin/systemctl ] || return 0
 [ -r /etc/kldload/tpm/zfs.cred ] || return 0
