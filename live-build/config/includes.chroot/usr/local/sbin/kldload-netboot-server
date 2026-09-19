@@ -920,6 +920,8 @@ _write_armed_install() {
             'cpair --foreground 3 --background 4 2 || goto plain' 'cpair --foreground 6 --background 9 3 || goto plain' \
             ':plain'
         printf 'set s2:hex %s\nset s3:hex %s\nset off:hex 5b:20:5d\n' "$(_ipxe_pad 2)" "$(_ipxe_pad 3)"
+        # "asked on screen", with its spaces smuggled in like the others.
+        printf 'set ask:hex %s\n' "$(printf '%s' 'asked on screen' | od -An -tx1 | tr -s ' \n' ':' | sed 's/^://; s/:$//')"
         _nb_title_pad "$tlen"
         for p in "${profs[@]}" "Live desktop"; do
             printf 'set q%d:hex %s\n' "$i" "$(_ipxe_pad $((15 - ${#p})))"
@@ -959,9 +961,19 @@ _write_armed_install() {
         # Each profile starts the options from ITS answers file, so ticking
         # nothing installs exactly that profile's matrix edition.
         for p in "${profs[@]}"; do
+            # f is read for this profile's values; the seed NAME is the copy the
+            # server serves. They differ for the armed profile: its values come
+            # from the answers file given to arm-install, which is served as
+            # <mac>.env. Using f's name sent "answers/manual.env" to the
+            # installer -- a 404 (qemu, 2026-09-18); fiend only worked because
+            # its file happened to be named after its MAC.
             f="$ROOT/answers/${m}-${p}.env"
-            [[ "$p" == "$key" ]] && f="$answers"
-            printf '\n:m_%s\nset pf %s\nset sf %s\n' "$p" "$p" "${f##*/}"
+            local sfile="${m}-${p}.env"
+            if [[ "$p" == "$key" ]]; then
+                f="$answers"
+                sfile="${m}.env"
+            fi
+            printf '\n:m_%s\nset pf %s\nset sf %s\n' "$p" "$p" "$sfile"
             local k v
             for k in enc:KLDLOAD_ZFS_ENCRYPT sb:KLDLOAD_ENABLE_SECURE_BOOT kvm:KLDLOAD_ENABLE_KVM \
                 img:KLDLOAD_BUILD_IMAGES k8s:KLDLOAD_K8S_BOOTSTRAP zfs:KLDLOAD_KLAB_ZFS_DEV ai:KLDLOAD_ENABLE_AI; do
@@ -988,10 +1000,10 @@ _write_armed_install() {
             printf 'item --gap\nitem top Back\n'
             printf 'choose --default d_%s dsel || goto top\ngoto ${dsel}\n' "$distro"
             for d in "${dists[@]}"; do
-                printf '\n:d_%s\nset dist %s\ngoto opts\n' "$d" "$d"
+                printf '\n:d_%s\nset dist %s\nset osel o_enc\ngoto opts\n' "$d" "$d"
             done
         else
-            printf 'set dist %s\ngoto opts\n' "$distro"
+            printf 'set dist %s\nset osel o_enc\ngoto opts\n' "$distro"
         fi
 
         # ── options: checkboxes and the vitals ──────────────────────────────
@@ -1007,9 +1019,10 @@ _write_armed_install() {
             printf 'iseq ${%s} 1 && set x%s [x] || set x%s ${off:string}\n' "$o" "$o" "$o"
         done
         _nb_title_pad 7 to
-        # Exactly 13 items, iPXE's LINES - 5: at 16 (a header gap and Back) it
-        # scrolled to the default and hid every checkbox behind "..." (qemu,
-        # 2026-09-18). Esc is Back, as the key hints say.
+        # 15 items at most: iPXE pages a menu by LINES - 5 rows, and at 16 on the
+        # old 18-row panel it paged to the default and hid every checkbox behind
+        # "..." (qemu, 2026-09-18). The panel is 20 rows now; Back is an item
+        # again because Esc was not discoverable ("no way to go back").
         printf 'menu options${to:string}\n'
         printf 'item o_enc ${xenc}${s2:string}ZFS encryption\n'
         printf 'item o_sb ${xsb}${s2:string}Secure Boot\n'
@@ -1023,9 +1036,14 @@ _write_armed_install() {
         printf 'item v_user user${s3:string}${user}\n'
         printf 'item v_tz time zone${s3:string}${tz}\n'
         printf 'item v_kb keyboard${s3:string}${kb}\n'
-        printf 'item --gap\n'
+        printf 'isset ${pw} && set xcred set || set xcred ${ask:string}\n'
+        printf 'item v_cred credentials${s3:string}${xcred}\n'
         printf 'item go Install ${pf} on ${dist} now\n'
-        printf 'choose --default go osel || goto top\ngoto ${osel}\n'
+        printf 'item top Back\n'
+        # --default ${osel}: the item just toggled stays selected. It was "go",
+        # so every tick threw the cursor to the bottom (operator, 2026-09-18:
+        # "every selection the cursor goes to the bottom, that's annoying").
+        printf 'choose --default ${osel} osel || goto top\ngoto ${osel}\n'
         printf '\n:o_enc\niseq ${enc} 1 && set enc 0 || set enc 1\ngoto opts\n'
         printf '\n:o_sb\niseq ${sb} 1 && set sb 0 || set sb 1\ngoto opts\n'
         printf '\n:o_kvm\niseq ${kvm} 1 && goto kvm_off || set kvm 1\ngoto opts\n'
@@ -1038,6 +1056,36 @@ _write_armed_install() {
         # read edits the current value in place; an empty answer keeps it.
         printf '\n:v_host\necho -n Hostname:${s2:string}\nread host\ngoto opts\n'
         printf '\n:v_user\necho -n User:${s2:string}\nread user\ngoto opts\n'
+        # ── credentials: a masked iPXE form, never echoed ────────────────────
+        # Operator, 2026-09-18: asked during the install menu, not after. The
+        # values ride the LIVE kernel cmdline URI-encoded (${x:uristring}); the
+        # live system is RAM, and kldload-autoinstall decodes them into its 0600
+        # answers and never logs them. Anything left empty is still asked on the
+        # machine's screen before anything is erased. The Red Hat fields appear
+        # for rhel only: registration uses them once, the effective config the
+        # installed system keeps has them redacted.
+        printf '\n:v_cred\n'
+        printf 'form credentials\n'
+        printf 'item --secret pw Login password\n'
+        printf 'item --secret pw2 Login password again\n'
+        printf 'item --secret pp ZFS passphrase, 8 or more\n'
+        printf 'item --secret pp2 ZFS passphrase again\n'
+        # Two forms, not one: iPXE refuses a form that needs more than LINES - 6
+        # rows (a label, an edit box and an error line per field), and all six
+        # fields in one returned -ERANGE, so Enter on "credentials" did nothing
+        # (qemu, 2026-09-18). Four fields fit; the Red Hat pair is its own form.
+        printf 'present || goto opts\n'
+        printf 'iseq ${pw} ${pw2} || goto v_cred_bad\n'
+        printf 'iseq ${pp} ${pp2} || goto v_cred_bad\n'
+        printf 'iseq ${dist} rhel || goto v_cred_done\n'
+        printf 'form Red Hat login, used once to register\n'
+        printf 'item rhu Red Hat username\nitem --secret rhp Red Hat password\n'
+        printf 'present || goto opts\n'
+        printf ':v_cred_done\nset osel v_cred\ngoto opts\n'
+        printf ':v_cred_bad\nclear pw\nclear pw2\nclear pp\nclear pp2\n'
+        printf 'echo\necho${s3:string}The two entries did not match. Nothing was kept.\n'
+        printf 'prompt${s3:string}Press any key to type them again.\ngoto v_cred\n'
+
         printf '\n:v_tz\n'
         _nb_title_pad 9 tz_
         printf 'menu time zone${tz_:string}\n'
@@ -1060,7 +1108,11 @@ _write_armed_install() {
         printf 'iseq ${kvm} 1 && set tpl kvm || clear _nb\n'
         printf 'iseq ${zfs} 1 && set tpl zfslab || clear _nb\n'
         printf 'iseq ${k8s} 1 && set tpl k8s || clear _nb\n'
-        printf 'set margs kldload.distro=${dist} kldload.encrypt=${enc} kldload.secureboot=${sb} kldload.kvm=${kvm} kldload.buildimages=${img} kldload.k8s=${k8s} kldload.k8sbootstrap=${k8s} kldload.zfsdev=${zfs} kldload.ai=${ai} kldload.template=${tpl} kldload.hostname=${host} kldload.username=${user} kldload.timezone=${tz} kldload.keyboard=${kb}\n'
+        printf 'isset ${pw} && set sec kldload.password=${pw:uristring} || clear sec\n'
+        printf 'isset ${pp} && set sec ${sec} kldload.passphrase=${pp:uristring} || clear _nb\n'
+        printf 'isset ${rhu} && set sec ${sec} kldload.rhel_user=${rhu:uristring} || clear _nb\n'
+        printf 'isset ${rhp} && set sec ${sec} kldload.rhel_pass=${rhp:uristring} || clear _nb\n'
+        printf 'set margs kldload.distro=${dist} kldload.encrypt=${enc} kldload.secureboot=${sb} kldload.kvm=${kvm} kldload.buildimages=${img} kldload.k8s=${k8s} kldload.k8sbootstrap=${k8s} kldload.zfsdev=${zfs} kldload.ai=${ai} kldload.template=${tpl} kldload.hostname=${host} kldload.username=${user} kldload.timezone=${tz} kldload.keyboard=${kb} ${sec}\n'
         printf 'goto install\n'
 
         # The armed path: the armed file, nothing else.

@@ -36,6 +36,7 @@ BORDER = "#283040"
 ACCENT = "#326ce5"
 BRIGHT = "#f0f4fa"
 DIM = "#5a6a85"
+SOFT_BLUE = "#8fb0ff"
 FONT = "/usr/share/fonts/rsms-inter-fonts/Inter-SemiBold.ttf"
 FONT_REG = "/usr/share/fonts/rsms-inter-fonts/Inter-Regular.ttf"
 
@@ -47,9 +48,9 @@ def main(out: str) -> None:
     sub = ImageFont.truetype(FONT_REG, 20)
     hint = ImageFont.truetype(FONT_REG, 16)
 
-    # "kldload netboot": operator, 2026-09-18, after a day of "assemble":
-    # "the assemble in the network boot screen looks dumb .. call it kldload netboot".
-    d.text((LEFT - 8, 64), "kldload netboot", font=word, fill=BRIGHT)
+    # "netboot", in soft blue: operator, 2026-09-18 -- "called netboot, no need
+    # for kldload, they get it", after "assemble" and "kldload netboot".
+    d.text((LEFT - 8, 64), "netboot", font=word, fill=SOFT_BLUE)
     d.rectangle((LEFT - 8, 144, LEFT + 56, 147), fill=ACCENT)
     d.text((LEFT - 8, 158), "any key to change the armed install", font=sub, fill=DIM)
 

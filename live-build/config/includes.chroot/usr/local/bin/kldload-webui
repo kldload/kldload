@@ -1510,17 +1510,25 @@ async def _install_secrets(websocket, msg):
     except OSError:
         await _no("The installer is not waiting for anything.")
         return
-    keys = {"password": "KLDLOAD_PASSWORD", "passphrase": "KLDLOAD_ZFS_PASSPHRASE"}
-    lines = []
+    # "rhel" is two fields: the Red Hat login registration uses once (the
+    # effective config the installed system keeps has the password redacted).
+    keys = {"password": "KLDLOAD_PASSWORD", "passphrase": "KLDLOAD_ZFS_PASSPHRASE",
+            "rhel_user": "KLDLOAD_RHEL_USERNAME", "rhel_pass": "KLDLOAD_RHEL_PASSWORD"}
+    fields = []
     for name in needs:
+        fields += ["rhel_user", "rhel_pass"] if name == "rhel" else [name]
+    human = {"password": "login password", "passphrase": "ZFS passphrase",
+             "rhel_user": "Red Hat username", "rhel_pass": "Red Hat password"}
+    lines = []
+    for name in fields:
         if name not in keys:
             continue
         val = msg.get(name)
         if not isinstance(val, str) or not val:
-            await _no(f"The {name} is empty.")
+            await _no(f"The {human[name]} is empty.")
             return
         if any(c in val for c in "\n\r\0") or len(val) > 256:
-            await _no(f"The {name} has a line break or is longer than 256 characters.")
+            await _no(f"The {human[name]} has a line break or is longer than 256 characters.")
             return
         if name == "passphrase" and len(val) < 8:
             await _no("ZFS needs a passphrase of at least 8 characters.")

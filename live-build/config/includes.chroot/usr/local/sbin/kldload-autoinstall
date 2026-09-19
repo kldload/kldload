@@ -28,6 +28,10 @@ set -Eeuo pipefail
 LOG="${KLDLOAD_AUTOINSTALL_LOG:-/var/log/installer/autoinstall.log}"
 _CMDLINE_FILE="${KLDLOAD_AUTOINSTALL_CMDLINE:-/proc/cmdline}"
 mkdir -p "$(dirname "$LOG")"
+# fd 3 keeps the ORIGINAL stdout: the test hooks print the assembled answers
+# there, because everything on stdout below is also written to the log, and the
+# answers can carry secrets typed at the netboot menu.
+exec 3>&1
 exec > >(tee -a "$LOG") 2>&1
 
 log() { printf '[%(%F %T)T] [autoinstall] %s\n' -1 "$*"; }
@@ -175,11 +179,14 @@ fi
 # boot's intent, a seed is standing configuration -- and on their own they are
 # enough to drive a whole install.
 #
-# SECURITY: /proc/cmdline is world-readable on the installed system, forever, by
-# every user. A password or a pool passphrase placed there is published, not
-# configured. Those two keys are REFUSED here rather than ignored, because
-# silently dropping a password the operator believed they had set is how you get
-# a machine with a default login and nobody aware of it.
+# SECRETS (kldload.password, .passphrase, .rhel_user, .rhel_pass) come from the
+# netboot menu's masked credentials form (operator, 2026-09-18: "asked during
+# the install menu, not after"), URI-encoded. They live on THIS live boot's
+# cmdline and in the 0600 answers below -- RAM, gone at the reboot. The
+# installed system boots its own cmdline (ZFSBootMenu), never this one. So they
+# are accepted, decoded, and NEVER logged; the effective config copied to the
+# installed system redacts them by name (answers.sh). Anything missing is asked
+# for on the screen further down.
 #
 # Values are validated against a per-key pattern, not merely quoted. The normal
 # reader (k_answers_load_env_file) parses line by line and never executes, but
@@ -188,16 +195,25 @@ fi
 # as root during a disk wipe.
 _cmdline_raw="$(cat "$_CMDLINE_FILE" 2>/dev/null || true)"
 
-# Refuse secrets LOUDLY. Checked before anything else so the message is the
-# first thing in the log rather than buried under accepted keys.
-for _secret in password passphrase zfs_passphrase pw; do
-    if [[ " $_cmdline_raw " == *" kldload.${_secret}="* ]]; then
-        log "REFUSING: kldload.${_secret}= on the kernel cmdline."
-        log "  /proc/cmdline is world-readable on the installed system, permanently."
-        log "  Put secrets in the per-MAC seed file (mode 0600) instead, or set them"
-        log "  after first boot. NOT installing."
-        exit 1
+# Secrets from the menu, decoded; written below, after the seed is in place.
+_urldecode() { printf '%b' "${1//%/\\x}"; }
+declare -A _menu_secret=()
+for _spec in password:KLDLOAD_PASSWORD passphrase:KLDLOAD_ZFS_PASSPHRASE \
+    rhel_user:KLDLOAD_RHEL_USERNAME rhel_pass:KLDLOAD_RHEL_PASSWORD; do
+    _k="${_spec%%:*}"
+    _raw="$(sed -nE "s/(^|.*[[:space:]])kldload\.${_k}=([^[:space:]]*).*/\2/p" <<<"$_cmdline_raw")"
+    [[ -n "$_raw" ]] || continue
+    _val="$(_urldecode "$_raw")"
+    if [[ "$_val" == *$'\n'* || "$_val" == *$'\r'* || ${#_val} -gt 256 ]]; then
+        log "IGNORING kldload.${_k}= from the menu: a line break or over 256 characters (asked on screen instead)"
+        continue
     fi
+    if [[ "$_k" == passphrase && ${#_val} -lt 8 ]]; then
+        log "IGNORING kldload.passphrase= from the menu: ZFS needs 8 or more characters (asked on screen instead)"
+        continue
+    fi
+    _menu_secret["${_spec#*:}"]="$_val"
+    log "  cmdline: ${_spec#*:}=(from the menu, not logged)"
 done
 
 # ── Action dispatch: install (default), deploy, rollback ─────────────────────
@@ -403,7 +419,7 @@ for _spec in \
 done
 ((_cmdline_applied == 0)) || log "Applied ${_cmdline_applied} answer(s) from the kernel cmdline"
 if [[ -n "${KLDLOAD_AUTOINSTALL_DRYRUN:-}" && -n "$ANSWERS_TMP" ]]; then
-    cat "$ANSWERS_TMP"
+    cat "$ANSWERS_TMP" >&3
     rm -f "$ANSWERS_TMP"
     exit 0
 fi
@@ -656,11 +672,26 @@ fi
 # install goes on. Nothing has touched a disk yet. (operator, 2026-09-18: "it
 # never prompted me for enc".)
 _RUN="${KLDLOAD_AUTOINSTALL_RUNDIR:-/run/kldload}"
+# The menu's secrets first: single-quoted for the loader, replacing any line the
+# seed had (the menu is this boot's intent).
+for _k in "${!_menu_secret[@]}"; do
+    awk -v k="${_k}=" 'index($0, k) != 1' "$ANSWERS_TMP" >"${ANSWERS_TMP}.new"
+    printf "%s='%s'\n" "$_k" "${_menu_secret[$_k]}" >>"${ANSWERS_TMP}.new"
+    mv -f "${ANSWERS_TMP}.new" "$ANSWERS_TMP"
+done
+unset _menu_secret
 _ans() { sed -n "s/^${1}=//p" "$ANSWERS_TMP" | tail -n 1 | sed -E "s/^([\"'])(.*)\1\$/\2/"; }
 _need=()
 [[ -n "$(_ans KLDLOAD_PASSWORD)" ]] || _need+=(password)
 if [[ "$(_ans KLDLOAD_ZFS_ENCRYPT)" == 1 && -z "$(_ans KLDLOAD_ZFS_PASSPHRASE)" ]]; then
     _need+=(passphrase)
+fi
+# RHEL registers with Red Hat during the install: a username and password, or an
+# activation key and org (bootstrap.sh). Asked for only when neither pair is here.
+if [[ "$(_ans KLDLOAD_DISTRO)" == rhel ]] &&
+    [[ -z "$(_ans KLDLOAD_RHEL_USERNAME)" || -z "$(_ans KLDLOAD_RHEL_PASSWORD)" ]] &&
+    [[ -z "$(_ans KLDLOAD_RHEL_KEY)" || -z "$(_ans KLDLOAD_RHEL_ORG)" ]]; then
+    _need+=(rhel)
 fi
 if ((${#_need[@]})); then
     install -d -m 0755 "$_RUN"
@@ -684,7 +715,7 @@ if ((${#_need[@]})); then
     _got=0
     while IFS= read -r _line; do
         case "$_line" in
-        KLDLOAD_PASSWORD=?* | KLDLOAD_ZFS_PASSPHRASE=?*)
+        KLDLOAD_PASSWORD=?* | KLDLOAD_ZFS_PASSPHRASE=?* | KLDLOAD_RHEL_USERNAME=?* | KLDLOAD_RHEL_PASSWORD=?*)
             _k="${_line%%=*}"
             awk -v k="${_k}=" 'index($0, k) != 1' "$ANSWERS_TMP" >"${ANSWERS_TMP}.new"
             printf '%s\n' "$_line" >>"${ANSWERS_TMP}.new"
@@ -694,15 +725,18 @@ if ((${#_need[@]})); then
         esac
     done <"$_RUN/install-secrets"
     rm -f "$_RUN/install-secrets" "$_RUN/install-needs"
-    if ((_got != ${#_need[@]})); then
-        log "REFUSING: asked for ${#_need[*]} secret(s) (${_need[*]}), received ${_got} — NOT installing."
+    # rhel is two lines (username and password), the others one each.
+    _want=${#_need[@]}
+    [[ " ${_need[*]} " == *" rhel "* ]] && _want=$((_want + 1))
+    if ((_got != _want)); then
+        log "REFUSING: asked for ${_need[*]} (${_want} values), received ${_got} — NOT installing."
         exit 1
     fi
     log "Received ${_need[*]} from the screen"
 fi
 
 if [[ -n "${KLDLOAD_AUTOINSTALL_STOP_BEFORE_EXEC:-}" ]]; then
-    cat "$ANSWERS_TMP"
+    cat "$ANSWERS_TMP" >&3
     exit 0
 fi
 
@@ -711,4 +745,5 @@ log "  Answers: $ANSWERS_TMP"
 log "  Log:     /var/log/installer/"
 log ""
 
+exec 3>&-
 exec /usr/sbin/kldload-install-target --config "$ANSWERS_TMP"

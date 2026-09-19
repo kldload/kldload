@@ -1550,8 +1550,14 @@ LIVEDESKTOP
     log "Window classes are unique across /usr/share/applications."
 
     mkdir -p "${ROOTFS}/etc/opt/chrome/policies/managed"
+    # PasswordManagerEnabled false: the install show asks for the login password
+    # and the ZFS passphrase on this screen (77e81639), and Chrome offered to
+    # save them (operator, 2026-09-18: "make sure the browser does not pop up and
+    # ask to remember them"). Live image only -- profiles.sh deletes this file
+    # from every installed system, so nobody's everyday browser is changed.
     cat >"${ROOTFS}/etc/opt/chrome/policies/managed/kldload-live.json" <<'LIVECHROME'
 {
+  "PasswordManagerEnabled": false,
   "RestoreOnStartup": 4,
   "RestoreOnStartupURLs": ["https://localhost:8443"],
   "HomepageLocation": "https://localhost:8443",
@@ -2203,6 +2209,13 @@ HELMCHARTS
         rm -rf /tmp/ipxe-src
         cp -a "$_ipxe_cache" /tmp/ipxe-src
         _ipxe_commit="$(git -C /tmp/ipxe-src rev-parse HEAD)"
+        # Space chooses a menu item, like Enter: the netboot options screen is a
+        # list of checkboxes, and Space is how a checkbox is ticked (operator,
+        # 2026-09-18: "should be space to x"). iPXE binds only CR/LF. Asserted
+        # after the edit, because a sed that matches nothing is silent.
+        sed -i 's/^\t\t\tcase CR:$/\t\t\tcase '"' '"':\n\t\t\tcase CR:/' /tmp/ipxe-src/src/hci/tui/menu_ui.c
+        grep -q "^[[:space:]]*case ' ':" /tmp/ipxe-src/src/hci/tui/menu_ui.c ||
+            log "  WARNING iPXE: could not bind Space in menu_ui.c (upstream changed it?) — menus take Enter only"
         # WHY env -u: iPXE's Makefile reads PROFILE as a make variable
         # (-DPROFILING=$(PROFILE)), and this script runs with PROFILE=desktop
         # in its environment. Every object then failed on "'desktop'

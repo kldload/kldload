@@ -602,6 +602,11 @@ grep -qx "KLDLOAD_PASSWORD=' p w '" "${_at}/out" || _abad+=" password-not-merged
 grep -qx "KLDLOAD_ZFS_PASSPHRASE='eight chars'" "${_at}/out" || _abad+=" passphrase-not-merged"
 grep -q '^KLDLOAD_EVIL' "${_at}/out" && _abad+=" extra-key-merged"
 [[ -z "$(ls -A "${_at}/run")" ]] || _abad+=" rundir-not-cleaned"
+# Secrets from the menu: URI-decoded exactly, and never in the log.
+_ar "kldload.distro=fedora kldload.disk=/dev/vdz kldload.encrypt=1 kldload.password=SeCrEt%20p%24w%27%23 kldload.passphrase=SeCrEtpp12" KLDLOAD_AUTOINSTALL_STOP_BEFORE_EXEC=1
+[[ "$_arc" == 0 ]] || _abad+=" menu-secrets-rc-${_arc}"
+grep -qxF "KLDLOAD_PASSWORD='SeCrEt p\$w'#'" "${_at}/out" || _abad+=" menu-password-not-decoded"
+grep -q 'SeCrEt' "${_at}/log" && _abad+=" SECRET-IN-LOG"
 rm -rf "${_at}"
 if [[ -z "${_abad}" ]]; then
     _pass "autoinstall: menu keys land, template=none clears, one seed only, secrets wait and merge only what was asked"
@@ -624,9 +629,18 @@ if env NETBOOT_ROOT="${_nt}/root" NETBOOT_MENU_TIMEOUT=10 KLDLOAD_ANSWERS_LIB="$
     for _o in o_enc o_sb o_kvm o_img o_k8s o_zfs o_ai v_host v_user v_tz v_kb go; do
         grep -q "^item ${_o} " "${_tok}" || _nbad+=" no-${_o}"
     done
-    [[ "$(sed -n '/^menu options/,/^choose /p' "${_tok}" | grep -c '^item ')" -le 14 ]] || _nbad+=" options-too-long"
+    # 15: iPXE shows LINES - 5 item rows, and the panel is 20 rows.
+    [[ "$(sed -n '/^menu options/,/^choose /p' "${_tok}" | grep -c '^item ')" -le 15 ]] || _nbad+=" options-too-long"
     grep -q '^:img_on$' "${_tok}" && sed -n '/^:img_on$/,/^goto opts$/p' "${_tok}" | grep -q '^set kvm 1$' || _nbad+=" goldens-without-kvm"
-    grep -qE 'kldload\.(password|passphrase)=' "${_tok}" && _nbad+=" secret-on-cmdline"
+    # Secrets typed in the credentials form ride the live cmdline, but ONLY as
+    # the expansion of what was typed, URI-encoded -- never a value from a file.
+    grep -qE 'kldload\.(password|passphrase|rhel_user|rhel_pass)=[^$]' "${_tok}" && _nbad+=" literal-secret-on-cmdline"
+    grep -q '^item --secret pw ' "${_tok}" || _nbad+=" no-masked-password-field"
+    # Every seed the menu can boot must be a file the server actually serves.
+    # The armed profile once pointed at the NAME of the file given to arm-install.
+    for _sf in $(sed -n 's/^set sf //p' "${_tok}" | sort -u); do
+        [[ -f "${_nt}/root/answers/${_sf}" ]] || _nbad+=" seed-not-served:${_sf}"
+    done
 else
     _nbad+=" arm-failed"
 fi

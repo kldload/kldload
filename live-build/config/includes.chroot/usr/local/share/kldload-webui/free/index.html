@@ -4635,7 +4635,7 @@ function handle(msg) {
       const e = document.getElementById('ishow-serr');
       e.className = 'ok';
       e.textContent = 'Accepted. The install continues.';
-      ['ishow-pw1', 'ishow-pw2', 'ishow-pp1', 'ishow-pp2'].forEach(function (id) {
+      ['ishow-pw1', 'ishow-pw2', 'ishow-pp1', 'ishow-pp2', 'ishow-rhu', 'ishow-rhp'].forEach(function (id) {
         document.getElementById(id).value = '';
       });
       break;
@@ -12049,6 +12049,9 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
       <label data-need="passphrase">ZFS encryption passphrase (at least 8 characters, asked at every boot)
         <input type="password" id="ishow-pp1" autocomplete="new-password">
         <input type="password" id="ishow-pp2" autocomplete="new-password" placeholder="again"></label>
+      <label data-need="rhel">Red Hat login (used once to register this machine, then discarded)
+        <input type="text" id="ishow-rhu" autocomplete="off" spellcheck="false" placeholder="username">
+        <input type="password" id="ishow-rhp" autocomplete="new-password" placeholder="password"></label>
       <div id="ishow-serr"></div>
       <button type="submit">Continue the install</button>
     </form>
@@ -12617,6 +12620,13 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     var out = { action: 'install_secrets' };
     var pairs = { password: ['ishow-pw1', 'ishow-pw2'], passphrase: ['ishow-pp1', 'ishow-pp2'] };
     for (var i = 0; i < needs.length; i++) {
+      if (needs[i] === 'rhel') {
+        var ru = document.getElementById('ishow-rhu').value, rp = document.getElementById('ishow-rhp').value;
+        if (!ru || !rp) { err.textContent = 'The Red Hat username and password are both needed.'; return; }
+        out.rhel_user = ru;
+        out.rhel_pass = rp;
+        continue;
+      }
       var ids = pairs[needs[i]];
       if (!ids) continue;
       var a = document.getElementById(ids[0]).value, b = document.getElementById(ids[1]).value;
