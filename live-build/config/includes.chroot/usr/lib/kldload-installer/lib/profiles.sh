@@ -1888,10 +1888,22 @@ DASHSTART
             # Nothing depends on these .desktop files: kldload-term execs the
             # konsole BINARY for its colourschemes, and the sysdiag launcher
             # and build monitor exec ptyxis the binary. Only the launcher goes.
-            local _dupe
+            # WARN: all of the above assumes gnome-terminal is there. RHEL 10
+            # (and its rebuilds) no longer ship it: Ptyxis IS the terminal. On
+            # fiend's first RHEL install (2026-09-19) this loop hid Ptyxis and
+            # Konsole, the dock pruner then dropped the missing
+            # org.gnome.Terminal pin, and the desktop had no visible terminal
+            # at all. So Ptyxis is a duplicate only when gnome-terminal exists;
+            # otherwise it stays, and the dock pin below falls back to it.
+            local _dupe _term_keep=""
+            if [[ ! -f "${_appdir}/org.gnome.Terminal.desktop" && -f "${_appdir}/org.gnome.Ptyxis.desktop" ]]; then
+                _term_keep=org.gnome.Ptyxis.desktop
+                k_log "no gnome-terminal on this distro: Ptyxis stays visible and is the terminal on the dock"
+            fi
             for _dupe in org.gnome.Console.desktop org.gnome.Ptyxis.desktop \
                 org.kde.konsole.desktop system-config-printer.desktop; do
                 [[ -f "${_appdir}/${_dupe}" ]] || continue
+                [[ "$_dupe" != "$_term_keep" ]] || continue
                 sed -i -e '/^NoDisplay[[:space:]]*=/d' -e '/^Hidden[[:space:]]*=/d' \
                     -e '/^\[Desktop Entry\]/a NoDisplay=true\nHidden=true' \
                     "${_appdir}/${_dupe}"
@@ -2504,6 +2516,14 @@ OSREL
                     esac
                     ;;
                 esac
+                # The terminal pin falls back to Ptyxis where gnome-terminal is
+                # not shipped (RHEL 10; see the duplicate-launcher block).
+                if [[ "$_app" == org.gnome.Terminal.desktop &&
+                    ! -f "${target}/usr/share/applications/${_app}" &&
+                    -f "${target}/usr/share/applications/org.gnome.Ptyxis.desktop" ]]; then
+                    k_log "dock: terminal pin is org.gnome.Ptyxis.desktop (no gnome-terminal on this distro)"
+                    _app=org.gnome.Ptyxis.desktop
+                fi
                 if [[ -f "${target}/usr/share/applications/${_app}" ||
                     -f "${target}/usr/local/share/applications/${_app}" ]]; then
                     _kept+="${_kept:+, }'${_app}'"
