@@ -641,11 +641,15 @@ k_profile_optional_packages() {
     # pam_systemd.so, which the kiosk's PAM stack needs to get a logind session:
     # a desktop pulls it in, a kvm install does not, and without it cage died
     # four times in eleven seconds with "XDG_RUNTIME_DIR is not set" (fiend,
-    # 3-kvm on build 17, 2026-09-15). Not claimed: EL (cage is not in its
-    # mirror) and Ubuntu (its firefox is a snap). Those keep the console screen,
-    # which is the designed fallback, not a failure.
+    # 3-kvm on build 17, 2026-09-15). EL has the same five names, cage from
+    # EPEL 10, which every EL install gets (bootstrap.sh): EL installs come off
+    # the network, so "not in the mirror" never applied. Before that, fiend's
+    # RHEL 10 first boot showed part 2 as console text ("no cage", 2026-09-19).
+    # Resolved that day on RHEL 10 (on fiend) and in centos:stream10 and
+    # rockylinux:10. Not claimed: Ubuntu (its firefox is a snap), which keeps the
+    # console screen -- the designed fallback, not a failure.
     case "$_distro" in
-    fedora) out+=(cage firefox mesa-dri-drivers dejavu-sans-mono-fonts systemd-pam) ;;
+    fedora | centos | rocky | rhel) out+=(cage firefox mesa-dri-drivers dejavu-sans-mono-fonts systemd-pam) ;;
     debian) out+=(cage firefox-esr libgl1-mesa-dri fonts-dejavu-core libpam-systemd) ;;
     *) : ;;
     esac
