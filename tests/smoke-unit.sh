@@ -531,10 +531,16 @@ else
     _fpk "k8s=0 klab=1 ai=0" debian | grep -qx libpam-systemd || _fbad+=" debian-build-no-libpam-systemd"
     _fpk "k8s=0 klab=0 ai=0" fedora | grep -qx cage || _fbad+=" plain-fedora-no-cage"
     _fpk "k8s=0 klab=0 ai=0" debian | grep -qx cage || _fbad+=" plain-debian-no-cage"
-    _fpk "k8s=1 klab=1 ai=0" rocky | grep -qx cage && _fbad+=" el-claimed-cage"
+    # EL gets them since b9ab9a01 (2026-09-19): its installs come off the network,
+    # where EPEL has cage, and every EL install gets EPEL. Before, this line
+    # asserted the opposite, and fiend's RHEL first boot showed console text.
+    for _fd in rhel centos rocky; do
+        _fpk "k8s=0 klab=0 ai=0" "$_fd" | grep -qx cage || _fbad+=" ${_fd}-no-cage"
+        _fpk "k8s=0 klab=0 ai=0" "$_fd" | grep -qx systemd-pam || _fbad+=" ${_fd}-no-systemd-pam"
+    done
     _fpk "k8s=1 klab=1 ai=0" ubuntu | grep -qxE 'cage|firefox' && _fbad+=" ubuntu-claimed-kiosk"
     if [[ -z "${_fbad}" ]]; then
-        _pass "installer: kiosk packages (cage, firefox) on every Fedora and Debian install, never claimed for EL or Ubuntu"
+        _pass "installer: kiosk packages (cage, firefox) on every Fedora, Debian and EL install, never claimed for Ubuntu"
     else
         _fail "installer kiosk packages" "${_fbad}"
     fi
