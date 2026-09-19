@@ -124,6 +124,9 @@ INSTLOGDIR="${KLDLOAD_FBSHOW_INSTLOGDIR:-/var/log/installer}"
 INSTPHASE="${KLDLOAD_FBSHOW_INSTPHASE:-/run/kldload/install-phase}"
 KLABLOGDIR="${KLDLOAD_FBSHOW_KLABLOGDIR:-/root/klab/goldens}"
 KIOSK_UNIT=kldload-firstboot-kiosk.service
+# The unit's User=. systemd exits 217/USER if it does not exist, four times,
+# and then part 2 is console text on a machine that can draw.
+KIOSK_USER=kldload-show
 KIOSK_URL="http://127.0.0.1:8099/firstboot.html"
 KIOSK_WAIT="${KLDLOAD_FBSHOW_KIOSK_WAIT:-180}"
 
@@ -143,6 +146,32 @@ _systemctl() {
     else
         systemctl "$@"
     fi
+}
+
+# _kiosk_user — 0 when the kiosk's unprivileged user exists, creating it if the
+# installer could not. profiles.sh makes it at install time; on fiend's first
+# RHEL 10 install (2026-09-19) that useradd failed inside the chroot, its error
+# was swallowed, and the kiosk died 217/USER four times while cage, Ptyxis and a
+# working GPU sat there unused. The show runs as root, before the kiosk, so it
+# is the right place for the second attempt. KLDLOAD_FBSHOW_ROOT is a test
+# prefix: never create a user against a fake root, only report.
+_kiosk_user() {
+    if [[ -n "${ROOT}" ]]; then
+        # Test prefix: read that root's passwd and never create anything.
+        grep -q "^${KIOSK_USER}:" "${ROOT}/etc/passwd" 2>/dev/null && return 0
+        _say "no ${KIOSK_USER} user — console screen only"
+        return 1
+    fi
+    getent passwd "${KIOSK_USER}" >/dev/null 2>&1 && return 0
+    local _nologin=/usr/sbin/nologin _err
+    [[ -x "$_nologin" ]] || _nologin=/sbin/nologin
+    if _err="$(useradd --system --user-group --no-create-home \
+        --home-dir /var/lib/kldload-show --shell "$_nologin" "${KIOSK_USER}" 2>&1)"; then
+        _say "created the ${KIOSK_USER} user the installer could not"
+        return 0
+    fi
+    _say "no ${KIOSK_USER} user and useradd failed (${_err:-no output}) — console screen only"
+    return 1
 }
 
 # _page_up — 0 when the kiosk's page answers on the loopback listener.
@@ -507,6 +536,7 @@ kiosk_capable() {
         _say "no ${KIOSK_UNIT} — console screen only"
         return 1
     }
+    _kiosk_user || return 1
     for _c in "${ROOT}"/dev/dri/card*; do
         [[ -e "${_c}" ]] && return 0
     done

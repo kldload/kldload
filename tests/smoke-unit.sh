@@ -454,7 +454,10 @@ else
     # can draw, falls back to the console screen when the unit gives up, and hands
     # tty1 back (a login prompt, unless a display manager takes it). systemctl is
     # a fake that records its calls.
-    mkdir -p "${_ft}/root/usr/bin" "${_ft}/root/usr/lib/systemd/system" "${_ft}/root/dev/dri" "${_ft}/root/usr/lib64/security"
+    mkdir -p "${_ft}/root/usr/bin" "${_ft}/root/usr/lib/systemd/system" "${_ft}/root/dev/dri" "${_ft}/root/usr/lib64/security" "${_ft}/root/etc"
+    # The unit's User=. Without it systemd exits 217/USER and part 2 is console
+    # text on a machine that can draw (fiend's first RHEL 10 install, 2026-09-19).
+    printf 'kldload-show:x:975:974::/var/lib/kldload-show:/usr/sbin/nologin\n' >"${_ft}/root/etc/passwd"
     touch "${_ft}/root/usr/bin/cage" "${_ft}/root/usr/bin/firefox" "${_ft}/root/dev/dri/card0" \
         "${_ft}/root/usr/lib64/security/pam_systemd.so" \
         "${_ft}/root/usr/lib/systemd/system/kldload-firstboot-kiosk.service"
@@ -479,6 +482,16 @@ else
     grep -qx 'stop kldload-firstboot-kiosk.service' "${_ft}/sysctl" || _fbad+=" kiosk-not-stopped"
     grep -qx 'start --no-block getty@tty1.service' "${_ft}/sysctl" || _fbad+=" no-login-after-kiosk"
     [[ -e "${_ft}/state/firstboot-show-done" ]] || _fbad+=" done-marker-missing"
+    # No kiosk user: systemd exits 217/USER four times and the console screen is
+    # all anyone sees -- fiend's first RHEL 10 install, 2026-09-19. Checked HERE,
+    # in the state the positive case above proves the kiosk starts in: the later
+    # negative cases run after all-ready is gone, where it never starts at all,
+    # so an assertion there passes whatever the code does.
+    mv "${_ft}/root/etc/passwd" "${_ft}/root/etc/passwd.away"
+    _frun 1 active >/dev/null
+    grep -q 'start --no-block kldload-firstboot-kiosk' "${_ft}/sysctl" && _fbad+=" kiosk-started-without-its-user"
+    mv "${_ft}/root/etc/passwd.away" "${_ft}/root/etc/passwd"
+    touch "${_ft}/state/all-ready"
     _frun 0 active >/dev/null
     grep -q 'getty@tty1' "${_ft}/sysctl" && _fbad+=" getty-started-over-display-manager"
     rm -f "${_ft}/state/all-ready"
@@ -507,6 +520,7 @@ else
     rm "${_ft}/root/usr/lib64/security/pam_systemd.so"
     _frun 1 active >/dev/null
     grep -q firstboot-kiosk "${_ft}/sysctl" && _fbad+=" kiosk-started-without-pam_systemd"
+    touch "${_ft}/root/usr/lib64/security/pam_systemd.so"
     rm -f "${_ft}/state/all-ready"
     if [[ -z "${_fbad}" ]]; then
         _pass "kldload-firstboot-show run: kiosk only where it can draw, console fallback, tty1 handed back"

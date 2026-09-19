@@ -1601,11 +1601,18 @@ k_install_system_files() {
                 k_log "WARNING: /etc/pam.d/kldload-kiosk missing on the live image — the first-boot kiosk cannot open a session"
             fi
             if ! chroot "${target}" getent passwd kldload-show >/dev/null 2>&1; then
-                local _nologin=/usr/sbin/nologin
+                local _nologin=/usr/sbin/nologin _uerr
                 [[ -x "${target}${_nologin}" ]] || _nologin=/sbin/nologin
-                chroot "${target}" useradd --system --user-group --no-create-home \
-                    --home-dir /var/lib/kldload-show --shell "${_nologin}" kldload-show ||
-                    k_log "WARNING: could not create the kldload-show user — the first-boot kiosk will fail and fall back to the console screen"
+                # The error is CAPTURED, not dropped. On fiend's first RHEL 10
+                # install (2026-09-19) this useradd failed in the chroot, the
+                # message went nowhere, and part 2 of the show was console text
+                # on a machine with cage, Ptyxis and a working GPU -- the kiosk
+                # unit died 217/USER four times. kldload-firstboot-show creates
+                # the user itself now (_kiosk_user) as the second failsafe; this
+                # log line is how the chroot failure gets diagnosed at all.
+                _uerr="$(chroot "${target}" useradd --system --user-group --no-create-home \
+                    --home-dir /var/lib/kldload-show --shell "${_nologin}" kldload-show 2>&1)" ||
+                    k_log "WARNING: could not create the kldload-show user: ${_uerr:-no output} — kldload-firstboot-show retries at first boot"
             fi
             chroot "${target}" getent passwd kldload-show >/dev/null 2>&1 &&
                 [[ -f "${target}/etc/pam.d/kldload-kiosk" ]] &&
