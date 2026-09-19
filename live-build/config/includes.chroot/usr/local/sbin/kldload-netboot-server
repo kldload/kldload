@@ -619,10 +619,10 @@ _check_answers() {
                 exit 1
             }
         done
-        if [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == 1 && -z "${KLDLOAD_ZFS_PASSPHRASE:-}" ]]; then
-            echo "REFUSED: KLDLOAD_ZFS_ENCRYPT=1 needs KLDLOAD_ZFS_PASSPHRASE"
-            exit 1
-        fi
+        # ZFS_ENCRYPT=1 with no passphrase is allowed since 9b6e7f90: the menu's
+        # credentials form or the install screen supplies it, and the installer
+        # waits for it before touching a disk. This refused, and blocked arming
+        # exactly the secret-free file the demo needs (2026-09-18).
         echo "OK ${KLDLOAD_DISTRO}/${KLDLOAD_PROFILE}"
     )" || {
         log "$answers: ${out#REFUSED: }"
