@@ -792,6 +792,8 @@ NGINX
 # ══ MONITORING ═══════════════════════════════════════════════════════════════
 setup_monitoring() {
     log "=== MONITORING setup ==="
+    # Read by _fb_prune_feature_pins: this install has a metrics plane.
+    _FB_OBS=1
 
     # Prometheus data dir
     mkdir -p /var/lib/prometheus /etc/prometheus/rules
@@ -1224,6 +1226,78 @@ _try_fetch_hub_env() {
     return 0
 }
 
+# ── _fb_prune_feature_pins — no dock icon for a feature this install lacks ─────
+# The dock pins (50-kldload-installed-favorites) are ONE list for every desktop,
+# and profiles.sh drops a pin only when its launcher file is missing. The AI,
+# Metrics, Kubernetes and k9s launchers ship on every desktop, so all four
+# stayed pinned over nothing. fiend 2026-09-19, a plain desktop (AI, KVM and
+# k8s off): Metrics opened a 502 because there was no Grafana, and "Ollama"
+# opened http://ollama:8080/ with no ollama. Operator: "if ai not selected,
+# dont show the icon.. or metrics.. or kubernetes/k8s; the xplores should
+# always be installed". A plain desktop's dock is Files, Chrome, Firefox,
+# Terminal, the three xplores and sysdiag.
+#
+# Pins follow what was ASKED FOR, not what is on disk yet. kldload-autodeploy
+# installs AI and Kubernetes after this runs, so those pins take its own --want
+# answer (the rule the installer and the first-boot show also read). Metrics
+# follows _FB_OBS, which is set where this script sets up Prometheus and
+# Grafana. A dropped launcher is also hidden from the app grid (NoDisplay=true).
+#
+# WARN: turning a feature on later (kldload-component) does not bring its icon
+# back; nothing does that yet.
+#
+# Must run BEFORE the dconf compile in arm_vm_restore. Idempotent. Always
+# returns 0. If --want cannot answer, the AI and k8s pins stay and a warning
+# says why: a dead icon is better than hiding something that is being installed.
+_fb_pin_wanted() { # _fb_pin_wanted <launcher> <want line>: 0 = keep the pin
+    case "$1" in
+    bob-chat.desktop) [[ " $2 " == *" ai=1 "* ]] ;;
+    kldload-k8s.desktop | kldload-k9s.desktop) [[ " $2 " == *" k8s=1 "* ]] ;;
+    kldload-metrics.desktop) [[ "${_FB_OBS:-0}" == 1 ]] ;;
+    *) return 0 ;;
+    esac
+}
+_fb_prune_feature_pins() {
+    local fav=/etc/dconf/db/local.d/50-kldload-installed-favorites
+    local want line app f kept="" n=0 dropped=0
+    [[ -f "$fav" ]] || return 0
+    if ! want="$(/usr/sbin/kldload-autodeploy --want 2>>"${LOG}")"; then
+        log "WARNING: kldload-autodeploy --want failed — keeping the AI and Kubernetes dock pins"
+        want="k8s=1 ai=1"
+    fi
+    line="$(sed -n 's/^favorite-apps=\[\(.*\)\]$/\1/p' "$fav" | head -n1)"
+    if [[ -z "$line" ]]; then
+        log "WARNING: no favorite-apps line in $fav — dock pins not pruned"
+        return 0
+    fi
+    while IFS= read -r app; do
+        [[ -n "$app" ]] || continue
+        n=$((n + 1))
+        if _fb_pin_wanted "$app" "$want"; then
+            kept+="${kept:+, }'${app}'"
+            continue
+        fi
+        dropped=$((dropped + 1))
+        log "  dock: no pin for ${app} (not selected for this machine: ${want}, metrics=${_FB_OBS:-0})"
+        for f in "/usr/share/applications/${app}" "/usr/local/share/applications/${app}"; do
+            [[ -f "$f" ]] || continue
+            # One NoDisplay line, in the [Desktop Entry] group (the first).
+            sed -i -e '/^NoDisplay=/d' -e '0,/^\[Desktop Entry\]$/s//[Desktop Entry]\nNoDisplay=true/' "$f"
+            grep -q '^NoDisplay=true$' "$f" ||
+                log "WARNING: could not hide ${f} from the app grid"
+        done
+    done < <(printf '%s\n' "$line" | tr ',' '\n' | tr -d " '")
+    ((dropped > 0)) || return 0
+    sed -i "s|^favorite-apps=\[.*\]\$|favorite-apps=[${kept}]|" "$fav"
+    # Outcome, not exit code: the line must now hold exactly what was kept.
+    if [[ "$(sed -n 's/^favorite-apps=\[\(.*\)\]$/\1/p' "$fav" | head -n1)" == "$kept" ]]; then
+        ok "desktop: ${dropped} of ${n} dock pins dropped for features this machine does not have"
+    else
+        log "WARNING: the dock pin rewrite did not land in $fav — unselected features stay pinned"
+    fi
+    return 0
+}
+
 # ── arm_vm_restore — VM restore-on-reboot for EVERY VM-capable role ─────────────
 # Enables libvirt-guests so the guests RUNNING at host shutdown come back on
 # boot (off ones stay off). Must run for desktop/master/storage too, not just
@@ -1468,6 +1542,7 @@ WPEOF
         # HISTORY: 2026-08-14, fiend — /etc/dconf/db/local absent after a full
         # install; app grid showed stock Debian favourites and YaST/Pardus
         # folders. `dconf update` alone fixed it.
+        _fb_prune_feature_pins
         if command -v dconf >/dev/null 2>&1 && [[ -d /etc/dconf/db/local.d ]]; then
             if dconf update >>"${LOG}" 2>&1 && [[ -f /etc/dconf/db/local ]]; then
                 ok "desktop: dconf database compiled ($(stat -c %s /etc/dconf/db/local) bytes)"
@@ -4148,6 +4223,8 @@ AIMOTD
                 "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ||
                 "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
                 log "Setting up klab observability stack on host..."
+                # Read by _fb_prune_feature_pins: keep the Metrics dock pin.
+                _FB_OBS=1
 
                 # ── Grafana (from Grafana's own repo — not in any distro archive) ──
                 # BOTH package managers. This used to be dnf-only, so on Debian
