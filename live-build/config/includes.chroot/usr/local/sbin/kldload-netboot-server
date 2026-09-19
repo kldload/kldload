@@ -132,7 +132,69 @@ MENU_TIMEOUT="${NETBOOT_MENU_TIMEOUT:-10}"
 # because the ISO happens to carry a mirror for it. One entry = no distro
 # screen; the armed distro is always offered even if it is not listed.
 NB_DISTROS="${NETBOOT_DISTROS:-fedora}"
+# The net image: the same installer without the offline package mirrors, 2 GB
+# instead of 15. The distros below never use those mirrors -- RHEL's packages
+# come from Red Hat's CDN, which nobody may mirror, and Arch has no darksite --
+# so for them the full image is 13 GB fetched for nothing (operator,
+# 2026-09-19: "make the menu pick the net image for rhel and arch"). Optional:
+# unset, every distro netboots the full image as before.
+PAYLOAD_NET="${NETBOOT_PAYLOAD_NET:-}"
+NB_NET_DISTROS="${NETBOOT_NET_DISTROS:-rhel arch}"
 DHCP_RANGE="${NETBOOT_DHCP_RANGE:-}"
+
+# _payload_commit <dir> — the build commit from <dir>/VERSION on stdout, empty
+# when the image predates the commit stamp (deploy.sh, 2026-09-19).
+_payload_commit() {
+    sed -n 's/^commit *= *//p' "$1/VERSION" 2>/dev/null | head -n1
+}
+
+# _net_payload_ok — 0 when the net image may be served in place of the full one.
+# Prints the reason on stdout when it may not. The two must be ONE build: the
+# netboot menu hands the installer its choices and secrets on the kernel
+# cmdline, and an older installer ignores the ones it predates. The -net ISO on
+# onyx on 2026-09-19 was a day older than the full one and had neither the
+# menu's credentials nor the on-screen secrets form. So: same commit, recorded
+# in both, and not a dirty tree (two dirty builds of one commit can differ).
+_net_payload_ok() {
+    local f c n
+    [[ -n "$PAYLOAD_NET" ]] || {
+        echo "NETBOOT_PAYLOAD_NET is not set"
+        return 1
+    }
+    for f in vmlinuz initrd.img squashfs.img; do
+        [[ -s "$PAYLOAD_NET/$f" ]] || {
+            echo "$PAYLOAD_NET/$f is missing"
+            return 1
+        }
+    done
+    [[ "$(head -c 4 "$PAYLOAD_NET/squashfs.img")" == "hsqs" ]] || {
+        echo "$PAYLOAD_NET/squashfs.img is not a squashfs"
+        return 1
+    }
+    c="$(_payload_commit "$PAYLOAD")"
+    n="$(_payload_commit "$PAYLOAD_NET")"
+    if [[ -z "$c" || -z "$n" || "$c" == unknown || "$n" == unknown ]]; then
+        echo "a build commit is not recorded (full: ${c:-none}, net: ${n:-none}); rebuild both"
+        return 1
+    fi
+    [[ "$c" != *-dirty ]] || {
+        echo "the images were built from a dirty tree ($c)"
+        return 1
+    }
+    [[ "$c" == "$n" ]] || {
+        echo "they are different builds (full: $c, net: $n)"
+        return 1
+    }
+    # The full image's livenet check (cmd_serve), for this initrd too.
+    if command -v lsinitrd >/dev/null 2>&1; then
+        local _ln
+        _ln="$(lsinitrd "$PAYLOAD_NET/initrd.img" 2>/dev/null | grep -c 'livenet' || true)"
+        [[ "${_ln:-0}" -gt 0 ]] || {
+            echo "$PAYLOAD_NET/initrd.img has no dracut livenet module"
+            return 1
+        }
+    fi
+}
 
 # Kernel args every entry shares — the ISO's own hard-won line (selinux=0 or
 # the live system dies with "Failed to allocate manager object", plus the USB
@@ -348,24 +410,19 @@ cmd_serve() {
     log "      next-server/bootfile, disable those there or the target gets two answers."
 
     install -d -m 0755 "$ROOT/kldload" "$ROOT/answers" "$ROOT/armed" "$ROOT/golden" "$ROOT/ipxe" "$ROOT/tmp"
-    local f _mode
-    for f in vmlinuz initrd.img squashfs.img; do
-        ln -f "$PAYLOAD/$f" "$ROOT/kldload/$f" 2>/dev/null ||
-            ln -sf "$PAYLOAD/$f" "$ROOT/kldload/$f"
-        # nginx runs UNPRIVILEGED. A payload file root can read and the worker
-        # cannot is an HTTP 403, and iPXE prints that as "Operation not
-        # permitted" with no mention of permissions -- which reads exactly like
-        # a network fault and sends you hunting NIC drivers.
-        #
-        # onyx, 2026-09-12: a payload taken off the ISO arrived with vmlinuz
-        # 0755 and initrd.img 0600, so the kernel loaded and the initrd 403'd.
-        # The installer happens to write 0644, which is why this never showed
-        # up serving a retained payload.
-        chmod a+r "$PAYLOAD/$f" 2>/dev/null || true # read-only source is fine if it is already a+r
-        _mode="$(stat -Lc%a "$ROOT/kldload/$f" 2>/dev/null || echo 000)"
-        (((8#$_mode & 8#004) != 0)) ||
-            die "$ROOT/kldload/$f is mode $_mode — the web server runs unprivileged and cannot read it; iPXE would report the 403 as 'Operation not permitted'"
-    done
+    _link_payload "$PAYLOAD" kldload
+    # The net image, for NB_NET_DISTROS. Refused rather than half-served: a
+    # stale kldload-net/ from an earlier serve is removed, so a token can never
+    # point at an image this run did not check.
+    local _why
+    rm -rf "$ROOT/kldload-net"
+    if _why="$(_net_payload_ok)"; then
+        install -d -m 0755 "$ROOT/kldload-net"
+        _link_payload "$PAYLOAD_NET" kldload-net
+        log "net      $PAYLOAD_NET ($(numfmt --to=iec "$(stat -c%s "$PAYLOAD_NET/squashfs.img")"), commit $(_payload_commit "$PAYLOAD_NET")) for: $NB_NET_DISTROS"
+    elif [[ -n "$PAYLOAD_NET" ]]; then
+        log "WARN: net image NOT served: ${_why}. ${NB_NET_DISTROS} netboot the full image."
+    fi
 
     _stage_ipxe
 
@@ -377,6 +434,30 @@ cmd_serve() {
     nginx -c "$ROOT/nginx.conf"
     trap 'nginx -c "$ROOT/nginx.conf" -s quit 2>/dev/null || true' EXIT
     exec dnsmasq --conf-file="$ROOT/dnsmasq.conf" --no-daemon
+}
+
+# _link_payload <src dir> <name> — publish <src>'s kernel, initrd and root image
+# at $ROOT/<name>/, readable by the unprivileged web server. Dies on a file the
+# web server could not read.
+_link_payload() {
+    local src="$1" name="$2" f _mode
+    for f in vmlinuz initrd.img squashfs.img; do
+        ln -f "$src/$f" "$ROOT/$name/$f" 2>/dev/null ||
+            ln -sf "$src/$f" "$ROOT/$name/$f"
+        # nginx runs UNPRIVILEGED. A payload file root can read and the worker
+        # cannot is an HTTP 403, and iPXE prints that as "Operation not
+        # permitted" with no mention of permissions -- which reads exactly like
+        # a network fault and sends you hunting NIC drivers.
+        #
+        # onyx, 2026-09-12: a payload taken off the ISO arrived with vmlinuz
+        # 0755 and initrd.img 0600, so the kernel loaded and the initrd 403'd.
+        # The installer happens to write 0644, which is why this never showed
+        # up serving a retained payload.
+        chmod a+r "$src/$f" 2>/dev/null || true # read-only source is fine if it is already a+r
+        _mode="$(stat -Lc%a "$ROOT/$name/$f" 2>/dev/null || echo 000)"
+        (((8#$_mode & 8#004) != 0)) ||
+            die "$ROOT/$name/$f is mode $_mode — the web server runs unprivileged and cannot read it; iPXE would report the 403 as 'Operation not permitted'"
+    done
 }
 
 # _stage_ipxe — put the iPXE boot images the TFTP root hands out under
@@ -908,6 +989,16 @@ _write_armed_install() {
     *) what+="${sep}not encrypted, Secure Boot off" ;;
     esac
 
+    # The net image is chosen only if serve linked it (kldload-net/ exists) and
+    # it still passes now: the payload can change between serve and arm.
+    local use_net=0 _why
+    if [[ -s "$ROOT/kldload-net/squashfs.img" ]] && _why="$(_net_payload_ok)"; then
+        use_net=1
+        log "  net image for: ${NB_NET_DISTROS} (commit $(_payload_commit "$PAYLOAD_NET"))"
+    elif [[ -n "$PAYLOAD_NET" ]]; then
+        log "  WARN: the net image is not used (${_why:-serve has not published kldload-net/}); every distro gets the full image"
+    fi
+
     local ms=$((MENU_TIMEOUT * 1000))
     {
         printf '#!ipxe\n'
@@ -1115,12 +1206,21 @@ _write_armed_install() {
         printf 'set margs kldload.distro=${dist} kldload.encrypt=${enc} kldload.secureboot=${sb} kldload.kvm=${kvm} kldload.buildimages=${img} kldload.k8s=${k8s} kldload.k8sbootstrap=${k8s} kldload.zfsdev=${zfs} kldload.ai=${ai} kldload.template=${tpl} kldload.hostname=${host} kldload.username=${user} kldload.timezone=${tz} kldload.keyboard=${kb} ${sec}\n'
         printf 'goto install\n'
 
-        # The armed path: the armed file, nothing else.
-        printf '\n:armed\nset sf %s.env\nclear margs\ngoto install\n' "$m"
+        # The armed path: the armed file, nothing else. dist is set so the
+        # image choice below sees the armed distro (margs stays cleared).
+        printf '\n:armed\nset sf %s.env\nset dist %s\nclear margs\ngoto install\n' "$m" "$distro"
 
-        printf '\n:install\n'
-        printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s kldload.seed=${base}/answers/${sf} ${margs}%s\n' "$prefix" "$netarg"
-        printf 'initrd ${base}/kldload/initrd.img\nboot\n'
+        # Which image: kldload/ (full, with the offline mirrors) unless this
+        # distro never uses them and the net image passed _net_payload_ok at
+        # serve AND at arm time. pdir, not img: img is the golden-images box.
+        printf '\n:install\nset pdir kldload\n'
+        if ((use_net)); then
+            for d in $NB_NET_DISTROS; do
+                printf 'iseq ${dist} %s && set pdir kldload-net || clear _nb\n' "$d"
+            done
+        fi
+        printf 'kernel ${base}/${pdir}/vmlinuz initrd=initrd.img root=live:${base}/${pdir}/squashfs.img %s kldload.seed=${base}/answers/${sf} ${margs}%s\n' "$prefix" "$netarg"
+        printf 'initrd ${base}/${pdir}/initrd.img\nboot\n'
         printf '\n:live\n'
         printf 'kernel ${base}/kldload/vmlinuz initrd=initrd.img root=live:${base}/kldload/squashfs.img %s%s\n' "$ISO_ARGS" "$netarg"
         printf 'initrd ${base}/kldload/initrd.img\nboot\n'
@@ -1444,6 +1544,14 @@ cmd_status() {
     # dir exits non-zero and trips set -e, so every listing is guarded on the
     # directory existing first. "no tree yet" is the normal pre-serve state.
     printf 'payload : %s\n' "$([[ -s "$PAYLOAD/squashfs.img" ]] && echo "$PAYLOAD ($(cat "$PAYLOAD/VERSION" 2>/dev/null || echo '?'))" || echo 'ABSENT — install with KLDLOAD_KEEP_NETBOOT=1')"
+    if [[ -n "$PAYLOAD_NET" ]]; then
+        local _nw
+        if _nw="$(_net_payload_ok)"; then
+            printf 'net     : %s (commit %s) for %s\n' "$PAYLOAD_NET" "$(_payload_commit "$PAYLOAD_NET")" "$NB_NET_DISTROS"
+        else
+            printf 'net     : NOT USED -- %s\n' "$_nw"
+        fi
+    fi
     local svc
     svc="$(systemctl is-active kldload-netboot.service 2>/dev/null)" || svc="inactive"
     printf 'service : %s\n' "$svc"
@@ -1468,32 +1576,9 @@ cmd_status() {
     fi
 }
 
-case "${1:-}" in
-serve) cmd_serve ;;
-arm-install)
-    shift
-    cmd_arm_install "$@"
-    ;;
-arm-deploy)
-    shift
-    cmd_arm_deploy "$@"
-    ;;
-golden)
-    shift
-    cmd_golden "$@"
-    ;;
-disarm)
-    shift
-    cmd_disarm "$@"
-    ;;
-arm-all)
-    shift
-    cmd_arm_all "$@"
-    ;;
-disarm-all) cmd_disarm_all ;;
-status) cmd_status ;;
-*)
-    cat >&2 <<'USAGE'
+# _usage — the command summary and environment, on stdout.
+_usage() {
+    cat <<'USAGE'
 usage: kldload-netboot-server <command>
 
   serve                      run the PXE server (HTTP + TFTP + proxyDHCP)
@@ -1534,6 +1619,16 @@ run by hand; a variable already set in the environment wins):
                  the matrix has verified belong here. Default "fedora". With
                  more than one, each profile opens a distro screen (default:
                  the armed distro). Read when arming.
+  NETBOOT_PAYLOAD_NET  a second payload: the net image (kldload-<v>-x86_64-net.iso,
+                 no offline mirrors, ~2 GB). Distros in NETBOOT_NET_DISTROS
+                 netboot it instead of the full ~15 GB image. Used only when
+                 its VERSION records the SAME clean build commit as
+                 NETBOOT_PAYLOAD's; otherwise serve and arm-install say why and
+                 every distro gets the full image. Stage it with
+                 kldload-netboot-run --net-iso. Unset by default.
+  NETBOOT_NET_DISTROS  distros sent to the net image. Default "rhel arch": RHEL
+                 installs from Red Hat's CDN and Arch has no offline mirror, so
+                 neither uses what the full image carries.
 
 notes:
   ipxe.efi is UNSIGNED: a target with Secure Boot enabled will refuse it.
@@ -1541,6 +1636,41 @@ notes:
   proxyDHCP hands out no addresses, but the site DHCP server must not also
   set next-server/bootfile.
 USAGE
+}
+
+case "${1:-}" in
+serve) cmd_serve ;;
+arm-install)
+    shift
+    cmd_arm_install "$@"
+    ;;
+arm-deploy)
+    shift
+    cmd_arm_deploy "$@"
+    ;;
+golden)
+    shift
+    cmd_golden "$@"
+    ;;
+disarm)
+    shift
+    cmd_disarm "$@"
+    ;;
+arm-all)
+    shift
+    cmd_arm_all "$@"
+    ;;
+disarm-all) cmd_disarm_all ;;
+status) cmd_status ;;
+-h | --help | help)
+    # Rule 9: --help answers, needs no root, exits 0. It fell through to the
+    # catch-all and exited 2 until 2026-09-19; tests/check-help-without-root.sh
+    # never saw it, because it checks only tools that re-exec with sudo.
+    _usage
+    exit 0
+    ;;
+*)
+    _usage >&2
     exit 2
     ;;
 esac

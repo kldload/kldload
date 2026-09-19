@@ -942,6 +942,18 @@ cmd_build() {
     x86_64 | amd64) _platform="linux/amd64" ;;
     aarch64 | arm64) _platform="linux/arm64" ;;
     esac
+    # The commit goes into the ISO's VERSION so two images can be proven to be
+    # one build: the netboot server serves the net image to rhel/arch only when
+    # its commit equals the full image's (2026-09-19; the -net ISO on onyx was a
+    # day older than the full one and predated the menu's credentials). -dirty
+    # when tracked files differ from HEAD, which the server refuses to match,
+    # because two dirty builds of one commit need not be the same tree.
+    local _commit
+    _commit="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null)" || _commit="unknown"
+    if [[ "$_commit" != unknown && -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+        _commit+="-dirty"
+    fi
+    log "Building from commit ${_commit}"
     # --cpu-shares: builds are batch work on a dev box that also runs the
     # operator's desktop (and games). ~512 shares ≈ cgroup CPUWeight 20, so
     # the build takes every idle core at full speed but yields instantly
@@ -965,6 +977,7 @@ cmd_build() {
         -e KLDLOAD_ZFS_GIT="${KLDLOAD_ZFS_GIT:-}" \
         -e KLDLOAD_DEBUG_ALLOW="${KLDLOAD_DEBUG_ALLOW:-}" \
         -e KLDLOAD_VERSION="${KLDLOAD_VERSION:-}" \
+        -e KLDLOAD_COMMIT="$_commit" \
         --name "$BUILDER_CONTAINER" \
         "$BUILDER_IMAGE" \
         bash /build/builder/build-iso.sh

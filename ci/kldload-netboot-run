@@ -26,9 +26,13 @@
 #
 # USAGE
 #   kldload-netboot-run --answers <mac>.env [--build] [--hosts "ip ip"] [--from PHASE] [--until PHASE]
-#                       [--ready-timeout 6h] [--no-smoke] [--iso PATH]
+#                       [--ready-timeout 6h] [--no-smoke] [--iso PATH] [--net-iso PATH]
 #   --iso PATH  stage this ISO instead of the newest full kldload-<version>-x86_64.iso
 #               (the net edition: live-build/output/kldload-<version>-x86_64-net.iso)
+#   --net-iso PATH  ALSO stage this net ISO into NETBOOT_PAYLOAD_NET, which the
+#               menu serves to rhel/arch (NETBOOT_NET_DISTROS). Refused unless its
+#               VERSION records the same clean commit as the full ISO's, because
+#               the netboot server would refuse to serve it anyway.
 #   Run it as a transient service so it outlives the terminal:
 #   sudo systemd-run --unit kldload-netboot-run --collect \
 #        /path/to/kldload-netboot-run --answers live-build/pxe/matrix/6-full-secure/f0-2f-74-cd-27-50.env --build
@@ -54,7 +58,7 @@ REPO="${KLDLOAD_REPO:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." 
 IC="$REPO/live-build/config/includes.chroot"
 PHASES=(build smoke stage arm boot watch installed ready verify)
 
-ANSWERS="" HOSTS="" FROM="" UNTIL="" DO_BUILD=0 DO_SMOKE=1 READY_TIMEOUT="" ISO_ARG=""
+ANSWERS="" HOSTS="" FROM="" UNTIL="" DO_BUILD=0 DO_SMOKE=1 READY_TIMEOUT="" ISO_ARG="" NET_ISO_ARG=""
 usage() {
     # Asked-for help is the output the caller wanted: stdout, exit 0. A usage
     # ERROR is a diagnostic: stderr, exit 2 (the code documented at the top).
@@ -78,6 +82,7 @@ while (($#)); do
     --no-smoke) DO_SMOKE=0 && shift ;;
     --ready-timeout) READY_TIMEOUT="${2:?}" && shift 2 ;;
     --iso) ISO_ARG="${2:?}" && shift 2 ;;
+    --net-iso) NET_ISO_ARG="${2:?}" && shift 2 ;;
     -h | --help) usage 0 ;;
     *) usage ;;
     esac
@@ -180,6 +185,7 @@ if [[ -r /etc/kldload/netboot.env ]]; then
     done </etc/kldload/netboot.env
 fi
 PAYLOAD="${NB[NETBOOT_PAYLOAD]:-/var/lib/kldload-netboot}"
+PAYLOAD_NET="${NB[NETBOOT_PAYLOAD_NET]:-}"
 NB_ROOT="${NB[NETBOOT_ROOT]:-/var/lib/kldload/netboot-serve}"
 NB_LOG="$NB_ROOT/nginx-access.log"
 NB_TOOL=/usr/local/sbin/kldload-netboot-server
@@ -341,13 +347,15 @@ else
     phase_skip smoke
 fi
 
-# ─── stage ───────────────────────────────────────────────────────────────────
-if should_run stage; then
-    phase_begin stage
-    [[ -n "$ISO" ]] || fail_run stage "no ISO to stage"
+# _stage_into <iso> <payload dir> — copy the ISO's kernel, initrd, VERSION and root
+# image into the payload dir and verify the copy (sizes, and the root image's
+# first and last 64 MiB). Sets the global `built` to the ISO's built_at. Ends the
+# run through fail_run on any mismatch.
+_stage_into() {
+    local iso="$1" dest="$2" mnt f _same last off
     mnt="$(mktemp -d)"
-    mount -o loop,ro "$ISO" "$mnt" || fail_run stage "could not mount $ISO"
-    install -d "$PAYLOAD"
+    mount -o loop,ro "$iso" "$mnt" || fail_run stage "could not mount $iso"
+    install -d "$dest"
     declare -A SRC=([vmlinuz]=images/pxeboot/vmlinuz [initrd.img]=images/pxeboot/initrd.img [VERSION]=VERSION [squashfs.img]=LiveOS/squashfs.img)
     # Skip the copy when the payload is already this ISO: VERSION, kernel and initrd
     # identical, root image the same size (the head/tail hash check below still
@@ -357,18 +365,18 @@ if should_run stage; then
     # instead of 2.5.
     _same=1
     for f in VERSION vmlinuz initrd.img; do
-        cmp -s "$mnt/${SRC[$f]}" "$PAYLOAD/$f" || _same=0
+        cmp -s "$mnt/${SRC[$f]}" "$dest/$f" || _same=0
     done
-    [[ "$(stat -c %s "$mnt/LiveOS/squashfs.img")" == "$(stat -c %s "$PAYLOAD/squashfs.img" 2>/dev/null)" ]] || _same=0
+    [[ "$(stat -c %s "$mnt/LiveOS/squashfs.img")" == "$(stat -c %s "$dest/squashfs.img" 2>/dev/null)" ]] || _same=0
     ((_same)) && log "payload already holds this image — not copying it again"
     for f in vmlinuz initrd.img VERSION squashfs.img; do
         ((_same)) && break
-        install -m 0644 "$mnt/${SRC[$f]}" "$PAYLOAD/.$f.new" && mv -f "$PAYLOAD/.$f.new" "$PAYLOAD/$f" ||
+        install -m 0644 "$mnt/${SRC[$f]}" "$dest/.$f.new" && mv -f "$dest/.$f.new" "$dest/$f" ||
             {
                 umount "$mnt"
                 fail_run stage "copy of $f failed"
             }
-        [[ "$(stat -c %s "$mnt/${SRC[$f]}")" == "$(stat -c %s "$PAYLOAD/$f")" ]] ||
+        [[ "$(stat -c %s "$mnt/${SRC[$f]}")" == "$(stat -c %s "$dest/$f")" ]] ||
             {
                 umount "$mnt"
                 fail_run stage "$f size mismatch after copy"
@@ -376,7 +384,7 @@ if should_run stage; then
     done
     last=$(($(stat -c %s "$mnt/LiveOS/squashfs.img") / 1048576 - 64))
     for off in 0 "$last"; do
-        [[ "$(dd if="$mnt/LiveOS/squashfs.img" bs=1M skip="$off" count=64 status=none | sha256sum)" == "$(dd if="$PAYLOAD/squashfs.img" bs=1M skip="$off" count=64 status=none | sha256sum)" ]] ||
+        [[ "$(dd if="$mnt/LiveOS/squashfs.img" bs=1M skip="$off" count=64 status=none | sha256sum)" == "$(dd if="$dest/squashfs.img" bs=1M skip="$off" count=64 status=none | sha256sum)" ]] ||
             {
                 umount "$mnt"
                 fail_run stage "root image differs from the ISO at ${off} MiB"
@@ -384,6 +392,25 @@ if should_run stage; then
     done
     built="$(grep -m1 built_at "$mnt/VERSION" | awk '{print $3}')"
     umount "$mnt" && rmdir "$mnt"
+}
+
+# ─── stage ───────────────────────────────────────────────────────────────────
+if should_run stage; then
+    phase_begin stage
+    [[ -n "$ISO" ]] || fail_run stage "no ISO to stage"
+    _stage_into "$ISO" "$PAYLOAD"
+    if [[ -n "$NET_ISO_ARG" ]]; then
+        [[ -n "$PAYLOAD_NET" ]] || fail_run stage "--net-iso needs NETBOOT_PAYLOAD_NET in /etc/kldload/netboot.env"
+        [[ -f "$NET_ISO_ARG" && "$NET_ISO_ARG" == *-net.iso ]] || fail_run stage "--net-iso $NET_ISO_ARG is not a -net.iso file"
+        full_built="$built"
+        _stage_into "$(readlink -f "$NET_ISO_ARG")" "$PAYLOAD_NET"
+        c_full="$(sed -n 's/^commit *= *//p' "$PAYLOAD/VERSION")"
+        c_net="$(sed -n 's/^commit *= *//p' "$PAYLOAD_NET/VERSION")"
+        [[ -n "$c_full" && "$c_full" != unknown && "$c_full" != *-dirty && "$c_full" == "$c_net" ]] ||
+            fail_run stage "the net ISO is not the full ISO's build (full: ${c_full:-none}, net: ${c_net:-none}) -- the server would not serve it"
+        log "net image staged: commit $c_net, built_at $built"
+        built="$full_built"
+    fi
     # Capture, then search: `lsinitrd | grep -q` is false on a match under pipefail.
     _listing="$(lsinitrd "$PAYLOAD/initrd.img" 2>/dev/null)" || fail_run stage "lsinitrd could not read the staged initrd"
     grep -q 'usr/bin/kldload-initrd-show' <<<"$_listing" || fail_run stage "staged initrd has no install show"

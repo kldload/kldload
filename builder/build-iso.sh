@@ -4003,6 +4003,7 @@ edition         = ${EDITION:-free}
 profile         = ${PROFILE:-desktop}
 arch            = ${ARCH:-x86_64}
 release         = ${RELEASE:-10}
+commit          = ${KLDLOAD_COMMIT:-unknown}
 VERSIONEOF
 cp "${ISO_STAGING}/VERSION" "${ISO_STAGING}/etc/kldload/VERSION"
 # CRITICAL: also write VERSION into the ROOTFS so the running live
