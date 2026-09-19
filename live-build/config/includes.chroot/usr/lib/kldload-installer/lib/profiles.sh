@@ -4274,6 +4274,32 @@ KLABTIMER
         done
     fi
 
+    # ── TPM2 unlock of the encrypted root: the tool and its dracut module ──
+    # kldload-tpm-seal seals the pool passphrase to TPM PCR 7 (the Secure Boot
+    # state); dracut module 91kldload-tpm-unlock tries it before 90zfs prompts.
+    # Both are INERT until someone seals: the module's check() includes it only
+    # when /etc/kldload/tpm/zfs.cred exists. dracut families only -- Debian's
+    # initramfs-tools needs its own hook. Operator, 2026-09-18: Secure Boot "is
+    # not actually enforced ... I can just turn off SB and it boots fine".
+    case "${KLDLOAD_DISTRO:-}" in
+    fedora | centos | rocky | rhel)
+        local _tf=/usr/lib/kldload-installer/target-files
+        if [[ -d "${_tf}/usr/lib/dracut/modules.d/91kldload-tpm-unlock" ]]; then
+            mkdir -p "${target}/usr/lib/dracut/modules.d" "${target}/usr/local/sbin"
+            cp -a "${_tf}/usr/lib/dracut/modules.d/91kldload-tpm-unlock" "${target}/usr/lib/dracut/modules.d/"
+            install -m 0755 "${_tf}/usr/local/sbin/kldload-tpm-seal" "${target}/usr/local/sbin/kldload-tpm-seal"
+            if [[ -s "${target}/usr/local/sbin/kldload-tpm-seal" &&
+                -s "${target}/usr/lib/dracut/modules.d/91kldload-tpm-unlock/kldload-tpm-unlock.sh" ]]; then
+                k_log "TPM unlock installed (inert until kldload-tpm-seal is run)"
+            else
+                k_log "WARNING: TPM unlock pieces did not land on the target"
+            fi
+        else
+            k_log "WARNING: ${_tf}/usr/lib/dracut/modules.d/91kldload-tpm-unlock missing from the ISO"
+        fi
+        ;;
+    esac
+
     # ── SELinux on ZFS — disabled ─────────────────────────────────────────
     # ZFS does not support xattr-based SELinux labels. All files get unlabeled_t
     # which triggers thousands of AVC denials. Permissive still floods the

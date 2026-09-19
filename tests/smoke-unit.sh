@@ -738,6 +738,74 @@ else
 fi
 rm -rf "${_xt}"
 
+# ─── TPM unlock of the encrypted root ────────────────────────────────────────
+# Secure Boot was not enforced: turn it off and fiend booted anyway (operator,
+# 2026-09-18). kldload-tpm-seal seals the pool passphrase to PCR 7 and dracut
+# hook 91kldload-tpm-unlock tries it before 90zfs prompts. The hook must unlock
+# when the TPM releases the key, fall through to the prompt with a console
+# warning when it does not, and never touch a root that is already unlocked.
+# Run the real hook with zfs, systemctl and systemd-creds stubbed as functions
+# (bash, not PATH stubs: /tmp is noexec on onyx).
+_section "TPM unlock of the encrypted root"
+_tpd="${CHROOT}/usr/lib/kldload-installer/target-files"
+_tpm_hook="${_tpd}/usr/lib/dracut/modules.d/91kldload-tpm-unlock/kldload-tpm-unlock.sh"
+_tpm_seal="${_tpd}/usr/local/sbin/kldload-tpm-seal"
+_guard "installer: dracut targets get the TPM tool and module" "${_prof}" '91kldload-tpm-unlock" "\${target}/usr/lib/dracut/modules.d/"$'
+_tt="$(mktemp -d)"
+sed -e "s|/etc/kldload/tpm/zfs.cred|${_tt}/cred|g" -e "s|/lib/dracut-zfs-lib.sh|${_tt}/lib.sh|" \
+    -e "s|/tmp/kldload-tpm.err|${_tt}/err|g" -e "s|/dev/console|${_tt}/console|" -e "s|/dev/kmsg|${_tt}/kmsg|" \
+    "${_tpm_hook}" >"${_tt}/hook.sh"
+printf 'sealed\n' >"${_tt}/cred"
+cat >"${_tt}/lib.sh" <<'TPMLIB'
+decode_root_args() { root="zfs:AUTO"; }
+info() { :; }
+warn() { :; }
+systemctl() { return 0; }
+zpool() { echo rpool/ROOT/default; }
+zfs() {
+    case "$*" in
+    "get -Ho value encryptionroot "*) echo rpool ;;
+    "get -Ho value keystatus rpool") echo "$T_KEYSTATUS" ;;
+    "load-key rpool") cat >"$T_DIR/loaded" ;;
+    esac
+}
+systemd-creds() {
+    : >"$T_DIR/creds-called"
+    [[ "$T_TPM" == ok ]] || { echo "TPM2 policy mismatch" >&2; return 1; }
+    printf 'the-passphrase'
+}
+TPMLIB
+_tbad=""
+for _case in releases refuses unlocked; do
+    rm -f "${_tt}/loaded" "${_tt}/console" "${_tt}/creds-called" "${_tt}/kmsg"
+    _ks=unavailable _tpm=ok
+    [[ "$_case" == refuses ]] && _tpm=fail
+    [[ "$_case" == unlocked ]] && _ks=available
+    _trc=0
+    T_DIR="${_tt}" T_KEYSTATUS="$_ks" T_TPM="$_tpm" bash -c '. "$1"' _ "${_tt}/hook.sh" >/dev/null 2>&1 || _trc=$?
+    ((_trc == 0)) || _tbad+=" ${_case}-rc${_trc}"
+    case "$_case" in
+    releases) [[ "$(cat "${_tt}/loaded" 2>/dev/null)" == the-passphrase && ! -e "${_tt}/console" ]] || _tbad+=" releases" ;;
+    refuses) [[ ! -s "${_tt}/loaded" ]] && grep -q "did not unlock rpool" "${_tt}/console" 2>/dev/null || _tbad+=" refuses" ;;
+    unlocked) [[ ! -e "${_tt}/creds-called" && ! -e "${_tt}/loaded" ]] || _tbad+=" unlocked" ;;
+    esac
+done
+if [[ -z "$_tbad" ]]; then
+    _pass "TPM hook: unlocks when the TPM releases, warns and falls to the prompt when not, leaves an open root alone"
+else
+    _fail "TPM hook" "wrong outcome for:${_tbad}"
+fi
+rm -rf "${_tt}"
+_trc=0
+bash "${_tpm_seal}" --help >/dev/null 2>&1 || _trc=$?
+_trc2=0
+bash "${_tpm_seal}" --bogus >/dev/null 2>&1 || _trc2=$?
+if ((_trc == 0 && _trc2 == 2)); then
+    _pass "kldload-tpm-seal: --help exits 0 without root, a bad option exits 2"
+else
+    _fail "kldload-tpm-seal usage" "--help exited ${_trc}, --bogus exited ${_trc2}"
+fi
+
 # ─── summary ─────────────────────────────────────────────────────────────────
 printf "\n  \e[1m%d passed\e[0m, %s\n" "${PASS}" \
     "$([[ ${FAILN} -gt 0 ]] && printf '\e[1;31m%d failed\e[0m' "${FAILN}" || printf '0 failed')"

@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-tpm-seal — seal the ZFS root's passphrase to this machine's TPM, bound
+# to PCR 7 (the Secure Boot state), so the machine unlocks itself only while
+# that state is unchanged.
+#
+# WHAT IT DOES, IN ORDER (seal):
+#   1. finds the boot dataset's encryption root (zpool bootfs -> encryptionroot)
+#   2. takes the passphrase (--passphrase-file, or asked twice on the terminal)
+#      and checks it against the pool with a dry-run `zfs load-key -n`
+#   3. seals it with systemd-creds, TPM2 only, PCR 7, to /etc/kldload/tpm/zfs.cred
+#      (0600, on the encrypted root), then unseals it once to prove it works
+#   4. rebuilds every initramfs so dracut module 91kldload-tpm-unlock carries
+#      the credential, and checks the newest one really contains it
+#   status: is it sealed, would the TPM release it right now, is it in the
+#           initramfs, what is the Secure Boot state
+#   remove: deletes the credential and rebuilds the initramfs without it
+#
+# WHY: Secure Boot alone is not enforced -- turn it off and the machine boots
+#   anyway (operator, fiend 2026-09-18). Sealed to PCR 7, the key comes out of
+#   the TPM only while Secure Boot is in the state it was sealed in; turn it off,
+#   change its keys, or update firmware that changes them, and the boot asks for
+#   the passphrase with a warning instead. It also removes the passphrase from
+#   every normal boot.
+#
+# INPUTS:  --passphrase-file FILE (first boot passes the installer's staged copy)
+# OUTPUTS: /etc/kldload/tpm/zfs.cred, rebuilt initramfs images
+# EXIT:    0 done · 1 failed (the message says what) · 2 usage
+#
+# NOTES:
+#   - The passphrase itself is sealed, not a derived key, so the pool keeps its
+#     passphrase: the TPM is a convenience in front of it, never instead of it.
+#   - PCR 7 changes on a firmware update that touches the Secure Boot databases
+#     (a dbx revocation update, for one). The next boot then asks once; run
+#     `kldload-tpm-seal` afterwards to seal to the new state.
+#   - Fedora/EL (dracut) only for now: Debian's initramfs-tools needs its own hook.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kldload-tpm-seal: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+CRED_DIR=/etc/kldload/tpm
+CRED="${CRED_DIR}/zfs.cred"
+NAME=kldload-zfs
+
+usage() {
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    echo
+    echo "usage: kldload-tpm-seal [seal] [--passphrase-file FILE] [--pool POOL]"
+    echo "       kldload-tpm-seal status | remove | -h|--help"
+}
+
+say() { printf 'kldload-tpm-seal: %s\n' "$*" >&2; }
+die() {
+    say "$*"
+    exit 1
+}
+
+verb=seal
+ppfile=""
+pool=""
+while (($#)); do
+    case "$1" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    seal | status | remove) verb="$1" ;;
+    --passphrase-file)
+        ppfile="${2:?--passphrase-file needs a path}"
+        shift
+        ;;
+    --pool)
+        pool="${2:?--pool needs a name}"
+        shift
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+    esac
+    shift
+done
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || die "run as root (it reads the pool and writes the initramfs)"
+
+# _encryption_root — the boot dataset's encryption root on stdout, or nothing.
+_encryption_root() {
+    local p bootfs er
+    p="${pool:-$(zpool list -H -o name | head -n 1)}"
+    bootfs="$(zpool get -Ho value bootfs "$p" 2>/dev/null)"
+    [[ -n "$bootfs" && "$bootfs" != - ]] || bootfs="$(findmnt -no SOURCE /)"
+    er="$(zfs get -Ho value encryptionroot "$bootfs" 2>/dev/null)"
+    [[ -n "$er" && "$er" != - ]] && printf '%s\n' "$er"
+    return 0
+}
+
+_sb_state() { mokutil --sb-state 2>/dev/null | head -n 1 || echo "unknown"; }
+
+# The initramfs that BOOTS is /boot/efi/EFI/BOOT/initrd.img, not /boot's: GRUB
+# loads it from the ESP, and 99-kldload-esp.install (a kernel-install hook) is
+# what copies /boot's image there. A bare `dracut -f` updates /boot and changes
+# nothing that boots -- the first draft of this tool did exactly that. So after
+# dracut, the same hook runs for the newest kernel, the one the ESP carries.
+ESP_INITRD=/boot/efi/EFI/BOOT/initrd.img
+ESP_HOOK=/etc/kernel/install.d/99-kldload-esp.install
+
+_rebuild_initramfs() {
+    local newest
+    say "rebuilding the initramfs (dracut --regenerate-all)"
+    dracut -f --regenerate-all >/dev/null 2>&1 || die "dracut failed; the initramfs may be stale -- run 'dracut -f --regenerate-all' and read its output"
+    if [[ -x "$ESP_HOOK" && -d /boot/efi/EFI/BOOT ]]; then
+        newest="$(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f\n' | sed 's/^vmlinuz-//' | sort -V | tail -n 1)"
+        [[ -n "$newest" ]] || die "no kernel in /boot to copy to the ESP"
+        "$ESP_HOOK" add "$newest" || die "$ESP_HOOK failed; the ESP still has the old initramfs"
+        say "copied the ${newest} initramfs to the ESP"
+    fi
+}
+
+# _initramfs_has <yes|no> — check the initramfs that boots does (or does not)
+# carry the credential: the ESP's when there is one, else /boot's.
+_initramfs_has() {
+    local img="$ESP_INITRD"
+    [[ -r "$img" ]] || img="/boot/initramfs-$(uname -r).img"
+    [[ -n "$img" ]] || {
+        say "no initramfs found to check"
+        return 1
+    }
+    if lsinitrd "$img" 2>/dev/null | grep -q 'etc/kldload/tpm/zfs.cred'; then
+        [[ "$1" == yes ]]
+    else
+        [[ "$1" == no ]]
+    fi
+}
+
+case "$verb" in
+status)
+    er="$(_encryption_root)"
+    echo "encryption root: ${er:-none (the root is not encrypted)}"
+    echo "secure boot:     $(_sb_state)"
+    if [[ ! -r "$CRED" ]]; then
+        echo "sealed:          no"
+        exit 0
+    fi
+    echo "sealed:          yes ($CRED)"
+    if systemd-creds decrypt --name="$NAME" "$CRED" - >/dev/null 2>&1; then
+        echo "tpm releases it: yes -- the next boot unlocks without a passphrase"
+    else
+        echo "tpm releases it: NO -- the Secure Boot state changed since sealing; the next boot asks. Run kldload-tpm-seal."
+    fi
+    if _initramfs_has yes; then echo "in initramfs:    yes"; else echo "in initramfs:    NO -- run kldload-tpm-seal"; fi
+    exit 0
+    ;;
+remove)
+    rm -f "$CRED"
+    _rebuild_initramfs
+    _initramfs_has no || die "the initramfs still carries the credential"
+    say "removed: every boot asks for the passphrase again"
+    exit 0
+    ;;
+esac
+
+# ── seal ────────────────────────────────────────────────────────────────────
+er="$(_encryption_root)"
+[[ -n "$er" ]] || die "the root dataset is not encrypted -- nothing to seal"
+[[ "$(zfs get -Ho value keyformat "$er")" == passphrase ]] ||
+    die "${er} does not use a passphrase key; only passphrase roots are supported"
+systemd-analyze has-tpm2 >/dev/null 2>&1 || die "no usable TPM2 on this machine (systemd-analyze has-tpm2)"
+command -v systemd-creds >/dev/null || die "systemd-creds is missing"
+[[ -d /usr/lib/dracut/modules.d/91kldload-tpm-unlock ]] ||
+    die "dracut module 91kldload-tpm-unlock is not installed -- the initramfs could not use the seal"
+case "$(_sb_state)" in
+*enabled*) ;;
+*) say "WARNING: Secure Boot is OFF. Sealing binds to THIS state, so turning Secure Boot on later will ask for the passphrase once (then seal again)." ;;
+esac
+
+if [[ -n "$ppfile" ]]; then
+    [[ -r "$ppfile" ]] || die "cannot read $ppfile"
+    pp="$(cat "$ppfile")"
+else
+    [[ -t 0 ]] || die "no terminal to ask for the passphrase on; pass --passphrase-file"
+    read -rsp "ZFS passphrase for ${er}: " pp
+    echo
+    read -rsp "again: " pp2
+    echo
+    [[ "$pp" == "$pp2" ]] || die "the two entries did not match"
+    unset pp2
+fi
+[[ -n "$pp" ]] || die "empty passphrase"
+
+# The dry run proves the passphrase opens the pool before anything is sealed:
+# sealing a wrong one would only fail at the next boot.
+printf '%s' "$pp" | zfs load-key -n "$er" >/dev/null 2>&1 ||
+    die "that passphrase does not open ${er}"
+
+umask 077
+install -d -m 0700 "$CRED_DIR"
+printf '%s' "$pp" | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name="$NAME" - "${CRED}.new" >/dev/null 2>&1 ||
+    die "systemd-creds could not seal to the TPM"
+got="$(systemd-creds decrypt --name="$NAME" "${CRED}.new" - 2>/dev/null)" || die "the TPM would not unseal what it just sealed"
+[[ "$got" == "$pp" ]] || die "unsealed value differs from what was sealed"
+unset got pp
+mv -f "${CRED}.new" "$CRED"
+say "sealed to TPM PCR 7 (Secure Boot state): $CRED"
+
+_rebuild_initramfs
+_initramfs_has yes || die "the rebuilt initramfs does not carry the credential -- is 91kldload-tpm-unlock intact?"
+say "done: the next boot unlocks ${er} without a passphrase while Secure Boot stays as it is now"
