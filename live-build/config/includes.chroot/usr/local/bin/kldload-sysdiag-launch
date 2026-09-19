@@ -75,7 +75,15 @@ fi
 for _t in ptyxis gnome-console kgx konsole xterm; do
     command -v "$_t" >/dev/null 2>&1 || continue
     case "$_t" in
-    ptyxis) exec ptyxis --maximize -- "$SYSDIAG" ;;
+    ptyxis)
+        # --maximize arrived after Ptyxis 47. RHEL 10 ships 47.13, which
+        # exits "Unknown option --maximize", so sysdiag never opened there
+        # (fiend, first RHEL desktop, 2026-09-19). Ask, then ask for it.
+        if ptyxis --help-all 2>/dev/null | grep -q -- '--maximize'; then
+            exec ptyxis --maximize -- "$SYSDIAG"
+        fi
+        exec ptyxis --new-window -- "$SYSDIAG"
+        ;;
     gnome-console | kgx) exec "$_t" --maximize -e "$SYSDIAG" ;;
     konsole) exec konsole -p TerminalColumns=200 -p TerminalRows=60 -p ColorScheme="$SCHEME" -e "$SYSDIAG" ;;
     xterm) exec xterm -maximized -e "$SYSDIAG" ;;
