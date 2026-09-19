@@ -92,7 +92,18 @@ _section "GNOME Desktop"
 
 test_cmd "gnome-shell" "gnome-shell"
 test_cmd "gnome-session" "gnome-session"
-test_cmd "gnome-terminal" "gnome-terminal"
+# A terminal, not gnome-terminal by name: RHEL 10 ships Ptyxis instead, and the
+# dock pins whichever is there (profiles.sh). Failing on the name reported a
+# desktop with a working terminal as broken (fiend, RHEL 10, 2026-09-19).
+_term=""
+for _t in gnome-terminal ptyxis; do
+    command -v "$_t" >/dev/null 2>&1 && _term="$_t" && break
+done
+if [[ -n "$_term" ]]; then
+    _pass "terminal: $_term"
+else
+    _fail "terminal" "neither gnome-terminal nor ptyxis is installed"
+fi
 test_cmd "nautilus (file manager)" "nautilus"
 
 if [[ "$DISTRO" == "deb" ]]; then
