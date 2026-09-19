@@ -222,6 +222,8 @@ html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background
 #ishow-sform input:focus{outline:2px solid #326ce5;border-color:#326ce5}
 #ishow-sform button{align-self:flex-start;font:inherit;font-size:1.05rem;padding:.65rem 1.4rem;
   border:0;border-radius:6px;background:#326ce5;color:#f0f4fa;cursor:pointer}
+#ishow-sform button.ishow-eye{font-size:.85rem;padding:.25rem .8rem;background:transparent;
+  border:1px solid #5a6a85;color:#d0d8e8}
 #ishow-serr{min-height:1.4rem;color:#ff9f9f;font-size:.95rem}
 #ishow-serr.ok{color:#8fe0a8}
 #ishow-brand{position:absolute;bottom:6.6rem;left:3.2rem;z-index:2;display:flex;
@@ -12045,13 +12047,16 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
     <form id="ishow-sform" autocomplete="off">
       <label data-need="password">Login password
         <input type="password" id="ishow-pw1" autocomplete="new-password">
-        <input type="password" id="ishow-pw2" autocomplete="new-password" placeholder="again"></label>
+        <input type="password" id="ishow-pw2" autocomplete="new-password" placeholder="again">
+        <button type="button" class="ishow-eye">Show</button></label>
       <label data-need="passphrase">ZFS encryption passphrase (at least 8 characters, asked at every boot)
         <input type="password" id="ishow-pp1" autocomplete="new-password">
-        <input type="password" id="ishow-pp2" autocomplete="new-password" placeholder="again"></label>
+        <input type="password" id="ishow-pp2" autocomplete="new-password" placeholder="again">
+        <button type="button" class="ishow-eye">Show</button></label>
       <label data-need="rhel">Red Hat login (used once to register this machine, then discarded)
         <input type="text" id="ishow-rhu" autocomplete="off" spellcheck="false" placeholder="username">
-        <input type="password" id="ishow-rhp" autocomplete="new-password" placeholder="password"></label>
+        <input type="password" id="ishow-rhp" autocomplete="new-password" placeholder="password">
+        <button type="button" class="ishow-eye">Show</button></label>
       <div id="ishow-serr"></div>
       <button type="submit">Continue the install</button>
     </form>
@@ -12608,6 +12613,18 @@ fetch('/api/build-info').then(r => r.json()).then(d => {
   document.getElementById('ishow-close').addEventListener('click', function () {
     try { sessionStorage.setItem(DISMISS_KEY, '1'); } catch (e) { /* private window: closes for this view only */ }
     document.getElementById('install-show').style.display = 'none';
+  });
+
+  // Show/Hide flips every secret box in its own label (both copies of a pair,
+  // so a mismatch can be seen). Operator, 2026-09-19: "maybe also a view/hide
+  // button". The Red Hat username is plain text and stays that way.
+  document.querySelectorAll('#ishow-sform .ishow-eye').forEach(function (b) {
+    var boxes = b.parentNode.querySelectorAll('input[autocomplete="new-password"]');
+    b.addEventListener('click', function () {
+      var show = b.textContent === 'Show';
+      boxes.forEach(function (i) { i.type = show ? 'text' : 'password'; });
+      b.textContent = show ? 'Hide' : 'Show';
+    });
   });
 
   // Hand the typed secrets to the installer: over the page's own socket, which
