@@ -33,7 +33,8 @@
 # it builds. When done, the snapshot appears and klab golden rhel /
 # klab build-all see it via the existing skip-if-snapshot-exists path.
 
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 log() {
     logger -t kldload-rhel-composer "$*"
@@ -50,6 +51,21 @@ DISK_GB=40
 # ── Preflight: do we need to run? ────────────────────────────────────
 if [[ ! -f "$MARKER" ]]; then
     log "marker $MARKER missing -- nothing to do, exiting clean"
+    exit 0
+fi
+
+# Only when klab was asked for. bootstrap.sh drops the marker on EVERY RHEL
+# install, so a plain RHEL desktop (klab off) ran this at first boot, failed
+# its depsolve, and booted "degraded" with a failed unit nobody asked for
+# (fiend, 2026-09-19). The rule is autodeploy's own --want, the one the
+# installer and the first-boot show read. When it cannot answer, the answer is
+# no, loudly. The marker stays, so turning klab on later still builds this.
+if ! _want="$(/usr/sbin/kldload-autodeploy --want 2>/dev/null)"; then
+    log "kldload-autodeploy --want failed -- not building the RHEL golden (marker kept)"
+    exit 0
+fi
+if [[ " ${_want} " != *" klab=1 "* ]]; then
+    log "klab was not requested (${_want}) -- no RHEL golden to build (marker kept)"
     exit 0
 fi
 
