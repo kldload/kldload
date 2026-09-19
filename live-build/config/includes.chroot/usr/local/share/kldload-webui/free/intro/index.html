@@ -9,7 +9,8 @@
 
   WHAT IT IS: one continuous raymarched shot over a slow plasma. A liquid form
   calms into a torus, the torus squares off into a solid cube, and the cube
-  carves itself into a Menger sponge one level at a time, and holds there.
+  carves itself into a Menger sponge one level at a time, holds on the close,
+  and fades to black.
   Every surface, light and backdrop is computed by the shader; nothing is
   fetched.
 
@@ -23,7 +24,7 @@
 
   TWO WAYS TO RUN IT:
     live      open it: requestAnimationFrame drives the clock.
-    ?t=SECS   render exactly one frame at that time, then set
+    ?t=SECS   render exactly one frame at that WALL-CLOCK time, then set
               window.__ready = true: stills for review, and frame-by-frame
               stepping for the video render (rendered, never screen-captured).
     ?aa=N     N x N samples per pixel (default 1 live, 2 with ?t=). The video
@@ -31,7 +32,7 @@
     ?res=0.5  render scale (live only): a kiosk may be software-rendered.
     ?nopost   debug: the shot without the post pass.
 
-  THE TIMELINE is STAGES below; LENGTH is the whole clip.
+  THE TIMELINE is STAGES below (piece-seconds); RUNTIME is the whole clip.
 -->
 <style>
   html, body { margin: 0; height: 100%; background: #05060a; overflow: hidden; }
@@ -43,10 +44,45 @@
 <script>
 "use strict";
 
-// ─── The timeline, in seconds ───────────────────────────────────────────────
-// Each boundary is a uniform, so retiming -- or syncing to the soundtrack -- is
-// a change here and nothing in the shader.
-const LENGTH = 140;
+// ─── The timeline, in piece-seconds ─────────────────────────────────────────
+// Every time below is in piece-seconds; pieceTime() converts wall-clock to them,
+// so the whole piece -- morphs, tumble, plasma, captions, fades -- plays faster or
+// slower as one. The first cut ran at 1; the operator asked for double, then
+// "still to slow", then "the whole thing in 30s" (2026-09-18) -- so the knob is
+// now the RUNTIME, and the rates follow from it. Each STAGES boundary is a
+// uniform, so retiming -- or syncing to the soundtrack -- is a change here and
+// nothing in the shader.
+const RUNTIME = 30;            // wall-clock seconds, fade to black included
+const CLOSE_HOLD = 12;         // the close runs from 18 s to the end
+const FADE_END = 5;            // a long fade to black (operator: "another 2-3 seconds of fade out")
+// KEYFRAMES, wall -> piece (operator, 2026-09-18: "the blob and the ring should
+// be over in 6 seconds .. then the kube takes until 18s and then 7sec end, 25s";
+// then "another 2-3 seconds of fade out", then "go the full 30 sec": the close
+// holds from 18 s, the 5 s fade to black starts at 25 s).
+// Piece times are the STAGES below: 62 = the torus starts squaring off, 118 =
+// the sponge is complete, 124 = where it coasts to under the date.
+const KEYS = [[0, 0], [6, 62], [18, 118], [30, 125.5]];
+// Monotone cubic (Fritsch-Carlson) through KEYS: speed is continuous across
+// every keyframe, it never runs backwards, and the last tangent is 0 so the
+// sponge eases to a standstill on the final frame.
+function pieceTime(wall) {
+  const n = KEYS.length, w = Math.min(KEYS[n - 1][0], Math.max(0, wall));
+  const d = [], m = [];
+  for (let i = 0; i < n - 1; i++) d.push((KEYS[i + 1][1] - KEYS[i][1]) / (KEYS[i + 1][0] - KEYS[i][0]));
+  m.push(d[0]);
+  for (let i = 1; i < n - 1; i++) {
+    // weighted harmonic mean of the neighbouring slopes, weights from the
+    // interval widths (Fritsch-Carlson / Fritsch-Butland for uneven spacing)
+    const h0 = KEYS[i][0] - KEYS[i - 1][0], h1 = KEYS[i + 1][0] - KEYS[i][0];
+    const w1 = 2 * h1 + h0, w2 = h1 + 2 * h0;
+    m.push(d[i - 1] * d[i] <= 0 ? 0 : (w1 + w2) / (w1 / d[i - 1] + w2 / d[i]));
+  }
+  m.push(0);
+  let i = 0; while (i < n - 2 && w > KEYS[i + 1][0]) i++;
+  const [x0, y0] = KEYS[i], [x1, y1] = KEYS[i + 1], h = x1 - x0, u = (w - x0) / h;
+  const h00 = 2*u*u*u - 3*u*u + 1, h10 = u*u*u - 2*u*u + u, h01 = -2*u*u*u + 3*u*u, h11 = u*u*u - u*u;
+  return h00 * y0 + h10 * h * m[i] + h01 * y1 + h11 * h * m[i + 1];
+}
 const STAGES = {
   formToTorus: [26, 50],   // the liquid form holds, then becomes a torus
   torusToCube: [62, 80],   // the torus squares off into a solid cube
@@ -56,58 +92,43 @@ const STAGES = {
 };
 
 // ─── The tribute ────────────────────────────────────────────────────────────
-// Parties, one at a time, over the shot. Name, city, founding year as listed by
-// Wikipedia's "Demoparty" article (read 2026-09-18) -- where a party has moved,
-// the city is where that list places it. No logos, no end years: a tribute to
-// the gatherings, not a claim about them.
+// Parties, one at a time, over the shot: name and founding year as listed by
+// Wikipedia's "Demoparty" article (read 2026-09-18). No logos, no end years.
 const PARTIES = [
-  ["THE PARTY", "AARS", 1991],
-  ["ASSEMBLY", "HELSINKI", 1992],
-  ["THE GATHERING", "HAMAR", 1992],
-  ["MEKKA & SYMPOSIUM", "FALLINGBOSTEL", 1996],
-  ["EVOKE", "COLOGNE", 1997],
-  ["SILLY VENTURE", "GDA\u0143SK", 2000],
-  ["SOLSKOGEN", "FLATEBY", 2002],
-  ["BREAKPOINT", "BINGEN", 2003],
-  ["FUNCTION", "BUDAPEST", 2003],
-  ["OUTLINE", "OMMEN", 2004],
-  ["REVISION", "SAARBR\u00DCCKEN", 2011],
-  ["NORDLICHT", "BREMEN", 2012],
-  ["DEADLINE", "BERLIN", 2014],
-  ["LOVEBYTE", "ONLINE", 2021],
+  ["THE PARTY", 1991], ["ASSEMBLY", 1992], ["THE GATHERING", 1992],
+  ["MEKKA & SYMPOSIUM", 1996], ["EVOKE", 1997], ["SILLY VENTURE", 2000],
+  ["SOLSKOGEN", 2002], ["BREAKPOINT", 2003], ["FUNCTION", 2003],
+  ["OUTLINE", 2004], ["REVISION", 2011], ["NORDLICHT", 2012],
+  ["DEADLINE", 2014], ["LOVEBYTE", 2021],
 ];
-const TRIBUTE = { start: 6, each: 4.2 };   // first party at 6 s, one every 4.2 s
+// All of them, a row at a time, one row per transformation (operator,
+// 2026-09-18: "all of the names and years .. 4-5 at a time", then "condense
+// that into 4-5 and then show those during transformation"). ROWS rows split as
+// evenly as they go (14 -> 4, 4, 3, 3), each held the same WALL-clock time
+// across everything before the close, so none is rushed by the fast opening:
+// blob to ring, ring to cube, the cube opening, the sponge completing.
+const TRIBUTE = { start: 0.6, fade: 0.8, rows: 4 };
 
-// Greetings, sent the way a production sends them: from the group. EDIT THIS
-// LIST -- greets are personal, the groups you knew. The starter set is classic
-// C64/Amiga/PC-era groups; Future Crew, The Judges, 1001 Crew, The Black Lotus,
-// Farbrausch and Conspiracy are named in Wikipedia's "Demoscene" article, the
-// rest are from the scene's history and want the operator's eye.
-const GREETS = { from: "NORTH STAR", start: 67, each: 4.5, perCard: 3, groups: [
-  "FUTURE CREW", "FAIRLIGHT", "RAZOR 1911",
-  "TRSI", "KEFRENS", "SANITY",
-  "SPACEBALLS", "COMPLEX", "THE BLACK LOTUS",
-  "SCOOPEX", "PHENOMENA", "SILENTS",
-  "TRITON", "ORANGE", "HAUJOBB",
-  "MELON DEZIGN", "ANARCHY", "BOOZE DESIGN",
-  "OXYRON", "CENSOR DESIGN", "THE JUDGES",
-  "1001 CREW", "FARBRAUSCH", "CONSPIRACY",
-] };
-// The close, over the finished sponge. National inventories of intangible
-// cultural heritage that list the demoscene, per the Art of Coding initiative
-// and Aalto University (read 2026-09-18).
-const CLOSE = { at: 121, title: "A TRIBUTE TO THE DEMOSCENE",
-  sub: "LIVING HERITAGE  \u00B7  FINLAND 2020  \u00B7  GERMANY 2021  \u00B7  POLAND 2021  \u00B7  " +
-       "NETHERLANDS 2023  \u00B7  SWITZERLAND 2023  \u00B7  SWEDEN 2025  \u00B7  FRANCE 2025" };
+// The close, over the finished sponge: the year, and the next party. Deadline
+// 2026, 2-4 October, ORWOhaus Berlin (demoparty.berlin, read 2026-09-18). The
+// operator's call: not "a tribute", not the heritage list -- the scene and the
+// date (2026-09-18).
+const CLOSE = { title: "DEMOSCENE 2026",
+  sub: "DEADLINE  \u00B7  2\u20134 OCTOBER  \u00B7  BERLIN" };
 
 // ─── GL plumbing ────────────────────────────────────────────────────────────
 const Q = new URLSearchParams(location.search);
 const FIXED_T = Q.has("t") ? parseFloat(Q.get("t")) : null;
+// ?render&fps=N: step every frame at exactly i/N seconds and POST each one to the
+// page's own origin (/frame?i=), which is tools/intro/render.py -- the video is
+// rendered frame by frame, so it is identical however slowly a frame draws.
+const RENDER = Q.has("render"), FPS = parseFloat(Q.get("fps") || "60");
 const NOPOST = Q.has("nopost");
 const RES = Math.min(1, Math.max(0.25, parseFloat(Q.get("res") || "1")));
-const AA = Math.min(4, Math.max(1, parseInt(Q.get("aa") || (FIXED_T !== null ? "2" : "1"), 10)));
+const AA = Math.min(4, Math.max(1, parseInt(Q.get("aa") || (STILL ? "2" : "1"), 10)));
 const cv = document.getElementById("c");
-const gl = cv.getContext("webgl2", { antialias: false, preserveDrawingBuffer: FIXED_T !== null });
+const STILL = FIXED_T !== null || RENDER;   // one exact frame at a time, at 1:1 pixels
+const gl = cv.getContext("webgl2", { antialias: false, preserveDrawingBuffer: STILL });
 if (!gl) { document.body.textContent = "WebGL2 is not available"; throw new Error("no webgl2"); }
 
 const VS = `#version 300 es
@@ -137,10 +158,14 @@ gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 
 
 let fbo = null, fboTex = null, fw = 0, fh = 0;
 function resize() {
-  const dpr = FIXED_T !== null ? 1 : Math.min(2, window.devicePixelRatio || 1);
+  const dpr = STILL ? 1 : Math.min(2, window.devicePixelRatio || 1);
   // innerWidth, not clientWidth: a frame drawn before layout read 0 and rendered
   // the whole shot into a 2x2 buffer stretched to the screen (stills, 2026-09-18).
-  const w = Math.max(2, Math.floor(innerWidth * dpr * RES)), h = Math.max(2, Math.floor(innerHeight * dpr * RES));
+  // A render names its exact frame size (?w=&h=): headless Chrome's viewport is
+  // the window minus about 121 px of browser UI, so --window-size=640,360 drew
+  // 640x239 frames that ffmpeg then refused (odd height, 2026-09-18).
+  const w = RENDER && Q.has("w") ? parseInt(Q.get("w"), 10) : Math.max(2, Math.floor(innerWidth * dpr * RES));
+  const h = RENDER && Q.has("h") ? parseInt(Q.get("h"), 10) : Math.max(2, Math.floor(innerHeight * dpr * RES));
   if (w === fw && h === fh) return;
   cv.width = w; cv.height = h; fw = w; fh = h;
   if (fbo) { gl.deleteFramebuffer(fbo); gl.deleteTexture(fboTex); }
@@ -187,54 +212,60 @@ function card(key, draw) {
   return tx;
 }
 const FONT = '"Inter", "Helvetica Neue", "DejaVu Sans", sans-serif';
-function partyCard(i) {
-  const [name, city, year] = PARTIES[i];
-  return card("p" + i, (c, w, h) => {
-    c.font = `300 ${Math.round(h * .036)}px ${FONT}`; track(c, name, w / 2, h * .83, h * .012);
-    c.globalAlpha = .78;
-    c.font = `300 ${Math.round(h * .017)}px ${FONT}`; track(c, city + "   " + year, w / 2, h * .875, h * .006);
-  });
+function partyRows() {
+  const n = TRIBUTE.rows, rows = [];
+  for (let r = 0, at = 0; r < n; r++) {           // even split: 14 -> 4, 4, 3, 3
+    const take = Math.ceil((PARTIES.length - at) / (n - r));
+    rows.push(PARTIES.slice(at, at + take)); at += take;
+  }
+  return rows;
 }
-function greetHeadCard() {
-  return card("gh", (c, w, h) => {
-    c.globalAlpha = .6;
-    c.font = `300 ${Math.round(h * .017)}px ${FONT}`; track(c, "SENDS GREETINGS TO", w / 2, h * .875, h * .008);
-    c.globalAlpha = 1;
-    c.font = `300 ${Math.round(h * .036)}px ${FONT}`; track(c, GREETS.from, w / 2, h * .83, h * .016);
-  });
+// One type size for EVERY row -- the largest at which the longest name of all
+// fits a column -- because sizing per row made the row holding MEKKA &
+// SYMPOSIUM visibly smaller than the rest (stills, 2026-09-18).
+let rowPx = 0;
+function rowLayout(c, w, h) {
+  const cols = Math.max(...partyRows().map(r => r.length)), colW = w * .8 / cols;
+  if (!rowPx) {
+    rowPx = Math.round(h * .03);
+    const width = (nm, px) => { c.font = `300 ${px}px ${FONT}`; let t = 0;
+      for (const ch of nm) t += c.measureText(ch).width + px * .28; return t; };
+    const longest = Math.max(...PARTIES.map(([nm]) => width(nm, rowPx)));
+    rowPx = Math.max(8, Math.floor(rowPx * Math.min(1, colW * .92 / longest)));
+  }
+  return { colW, px: rowPx };
 }
-function greetCard(i) {
-  const names = GREETS.groups.slice(i * GREETS.perCard, (i + 1) * GREETS.perCard);
-  return card("g" + i, (c, w, h) => {
-    c.font = `300 ${Math.round(h * .026)}px ${FONT}`;
-    track(c, names.join("     \u00B7     "), w / 2, h * .85, h * .01);
+function rowCard(r) {
+  const row = partyRows()[r];
+  return card("row" + r, (c, w, h) => {
+    const { colW, px } = rowLayout(c, w, h), x0 = w / 2 - colW * (row.length - 1) / 2;
+    row.forEach(([name, year], k) => {
+      const x = x0 + k * colW;
+      c.globalAlpha = 1;
+      c.font = `300 ${px}px ${FONT}`; track(c, name, x, h * .84, px * .28);
+      c.globalAlpha = .7;
+      c.font = `300 ${Math.round(px * .72)}px ${FONT}`; track(c, String(year), x, h * .84 + px * 1.5, px * .3);
+    });
   });
 }
 function closeCard() {
   return card("close", (c, w, h) => {
     c.font = `200 ${Math.round(h * .05)}px ${FONT}`; track(c, CLOSE.title, w / 2, h * .82, h * .02);
-    c.globalAlpha = .5;
-    c.font = `300 ${Math.round(h * .0145)}px ${FONT}`; track(c, CLOSE.sub, w / 2, h * .875, h * .004);
+    c.globalAlpha = .75;
+    c.font = `300 ${Math.round(h * .022)}px ${FONT}`; track(c, CLOSE.sub, w / 2, h * .885, h * .01);
   });
 }
 // Which card is up at time t, and how visible: [texture, alpha] or null.
 function cardAt(t) {
   const ease = x => x * x * (3 - 2 * x);
-  if (t >= CLOSE.at) return [closeCard(), ease(Math.min(1, (t - CLOSE.at) / 3))];
-  // a run of cards: [start, seconds each, count, card(i)]
-  const runs = [
-    [TRIBUTE.start, TRIBUTE.each, PARTIES.length, partyCard],
-    [GREETS.start, GREETS.each, 1 + Math.ceil(GREETS.groups.length / GREETS.perCard),
-      i => i === 0 ? greetHeadCard() : greetCard(i - 1)],
-  ];
-  for (const [start, each, count, make] of runs) {
-    const k = (t - start) / each, i = Math.floor(k);
-    if (k < 0 || i >= count) continue;
-    const f = (k - i) * each;                         // seconds into this card
-    const a = Math.min(1, f / 1.2, (each - f) / 1.2);
-    return a > 0 ? [make(i), ease(Math.max(0, a))] : null;
-  }
-  return null;
+  if (wallNow >= RUNTIME - CLOSE_HOLD) return [closeCard(), ease(Math.min(1, (wallNow - (RUNTIME - CLOSE_HOLD)) / 0.8))];
+  const rows = partyRows().length;
+  const each = (RUNTIME - CLOSE_HOLD - TRIBUTE.start) / rows;
+  const k = (wallNow - TRIBUTE.start) / each, i = Math.floor(k);
+  if (k < 0 || i >= rows) return null;
+  const f = (k - i) * each;                           // wall seconds into this row
+  const a = Math.min(1, f / TRIBUTE.fade, (each - f) / TRIBUTE.fade);
+  return a > 0 ? [rowCard(i), ease(a)] : null;
 }
 
 // ─── The shot ───────────────────────────────────────────────────────────────
@@ -366,9 +397,12 @@ const SHOT = program(S_SHOT), POST = program(S_POST);
 const blankTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, blankTex);
 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
 
-function frame(t) {
+let wallNow = 0;   // cardAt() times the close on the wall clock
+function frame(wall) {
   resize();
-  t = Math.max(0, t);   // past LENGTH the finished sponge keeps turning
+  // piece-seconds from here on; past RUNTIME the frame is black (see FADE_END)
+  wallNow = Math.max(0, wall);
+  const t = pieceTime(wall);
   gl.bindFramebuffer(gl.FRAMEBUFFER, NOPOST ? null : fbo); gl.viewport(0, 0, fw, fh);
   gl.useProgram(SHOT.p); const u = SHOT.u;
   gl.uniform2f(u.uRes, fw, fh); gl.uniform1f(u.uT, t); gl.uniform1i(u.uAA, AA);
@@ -386,13 +420,27 @@ function frame(t) {
   const cd = cardAt(t);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, cd ? cd[0] : blankTex); gl.uniform1i(POST.u.uCard, 1);
   gl.uniform1f(POST.u.uCardA, cd ? cd[1] : 0);
-  const x = Math.min(1, t / 4);
-  gl.uniform1f(POST.u.uFade, x * x * (3 - 2 * x));   // a slow fade up; no fade out
+  // A quick fade up from black, and a fade out to black over the last FADE_END
+  // wall seconds -- picture and type together -- after which it stays black.
+  const ease = x => { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); };
+  gl.uniform1f(POST.u.uFade, ease(wallNow / 0.7) * (1 - ease((wallNow - (RUNTIME - FADE_END)) / FADE_END)));
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
-window.__length = LENGTH;
-if (FIXED_T !== null) {
+window.__length = RUNTIME;   // wall-clock seconds, for the video render
+if (RENDER) {
+  addEventListener("load", async () => {
+    const n = Math.round(RUNTIME * FPS);
+    for (let i = 0; i <= n; i++) {
+      frame(i / FPS); gl.finish();
+      const png = await new Promise(r => cv.toBlob(r, "image/png"));
+      const res = await fetch("/frame?i=" + i, { method: "POST", body: png });
+      if (!res.ok) { document.title = "error at frame " + i; return; }
+    }
+    await fetch("/done?frames=" + (n + 1), { method: "POST" });
+    document.title = "done";
+  });
+} else if (FIXED_T !== null) {
   // After layout, so the frame is drawn at the size the screenshot captures.
   addEventListener("load", () => requestAnimationFrame(() => {
     frame(FIXED_T); gl.finish();
