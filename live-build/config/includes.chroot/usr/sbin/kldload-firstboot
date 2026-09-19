@@ -1890,11 +1890,43 @@ _fb_nvidia_ko_present() {
     return 1
 }
 
+# ── _fb_state_group — the kldload group owns the state database ─────────────
+# The installer creates the group and sets /var/lib/kldload to root:kldload
+# 2775 and state.db to 0664, so tools that are not root (kldload-db from
+# vmxplore) can write the fleet record. On fiend's first RHEL 10 install
+# (2026-09-19) the installer's groupadd failed silently in the chroot: no
+# group, root:root 0755, and non-root deregistration failing again as it did
+# on 2026-08-31. This is the second failsafe, on the real system. Idempotent.
+# Returns 0; a step that fails is logged by name.
+_fb_state_group() {
+    local _u="${KLDLOAD_USERNAME:-admin}" _p
+    getent group kldload >/dev/null 2>&1 ||
+        { groupadd -r kldload && log "state db: created group kldload (the installer had not)"; } ||
+        {
+            log "WARNING: groupadd kldload failed -- state.db stays root-only"
+            return 0
+        }
+    if [[ -d /var/lib/kldload ]]; then
+        chgrp -R kldload /var/lib/kldload && chmod 2775 /var/lib/kldload ||
+            log "WARNING: could not give /var/lib/kldload to group kldload"
+        [[ ! -f /var/lib/kldload/state.db ]] || chmod 0664 /var/lib/kldload/state.db ||
+            log "WARNING: could not make state.db group-writable"
+    fi
+    if id "$_u" >/dev/null 2>&1 && [[ " $(id -nG "$_u") " != *" kldload "* ]]; then
+        usermod -aG kldload "$_u" && log "state db: added $_u to group kldload" ||
+            log "WARNING: could not add $_u to group kldload"
+    fi
+    _p="$(stat -c '%a %U:%G' /var/lib/kldload 2>/dev/null)" || _p="absent"
+    log "state db: /var/lib/kldload is ${_p}"
+    return 0
+}
+
 main() {
     local _edition
     _edition="$(cat /etc/kldload/edition 2>/dev/null || echo free)"
 
     log "kldload-firstboot start — role=${ROLE} hostname=${HOSTNAME} edition=${_edition}"
+    _fb_state_group
 
     # ── Persistent journal directory ──────────────────────────────────────────
     # The installer creates /var/log/journal/ but the per-machine-id sub-dir

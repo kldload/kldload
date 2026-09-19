@@ -1523,18 +1523,32 @@ k_install_system_files() {
         # exporters only read, and several run as neither root nor a kldload
         # member -- 2770 would have broken every one of them to fix a writer.
         # setgid on the directory so files created later inherit the group.
-        chroot "${target}" sh -c 'getent group kldload >/dev/null 2>&1 || groupadd -r kldload' 2>/dev/null || true
-        # Swallowed: a target without /var/lib/kldload yet, or a chroot where
-        # the group step above did not take. Permissions are re-derived by
-        # kldload-db on its next root run, so losing this is not fatal.
-        chroot "${target}" sh -c 'chgrp -R kldload /var/lib/kldload 2>/dev/null; chmod 2775 /var/lib/kldload 2>/dev/null; [ -f /var/lib/kldload/state.db ] && chmod 0664 /var/lib/kldload/state.db' 2>/dev/null || true
-        # The operator account is the one driving vmxplore, kvm-* and the webui.
-        if [[ -n "${KLDLOAD_USERNAME:-}" ]]; then
-            # Swallowed: an install with no operator account, or a distro
-            # whose usermod lives elsewhere. The group still exists and root
-            # still writes; only the convenience is lost.
-            chroot "${target}" sh -c "usermod -aG kldload '${KLDLOAD_USERNAME}'" 2>/dev/null || true
-            k_log "state.db writable by group kldload (${KLDLOAD_USERNAME} added)"
+        #
+        # HISTORY: every step here used to be `2>/dev/null || true`, and the
+        # log line below said "state.db writable by group kldload" regardless.
+        # fiend's first RHEL 10 install (2026-09-19) had NO kldload group at
+        # all -- /var/lib/kldload root:root 0755, state.db 0644 -- and the only
+        # sign was the first-boot smoke test. Why groupadd failed in that
+        # chroot is unknown, because the error went nowhere. Now it is logged,
+        # the outcome is checked, and kldload-firstboot re-does all of it on
+        # the real system (_fb_state_group), which is the second failsafe.
+        local _gerr
+        _gerr="$(chroot "${target}" sh -c 'getent group kldload >/dev/null 2>&1 || groupadd -r kldload' 2>&1)" ||
+            k_log "WARNING: groupadd kldload failed in the target: ${_gerr:-no output} -- kldload-firstboot retries"
+        if chroot "${target}" getent group kldload >/dev/null 2>&1; then
+            # A target without /var/lib/kldload yet is fine; firstboot re-applies.
+            _gerr="$(chroot "${target}" sh -c 'chgrp -R kldload /var/lib/kldload && chmod 2775 /var/lib/kldload && { [ ! -f /var/lib/kldload/state.db ] || chmod 0664 /var/lib/kldload/state.db; }' 2>&1)" ||
+                k_log "WARNING: /var/lib/kldload permissions not set: ${_gerr:-no output} -- kldload-firstboot retries"
+            # The operator account is the one driving vmxplore, kvm-* and the webui.
+            if [[ -n "${KLDLOAD_USERNAME:-}" ]]; then
+                if _gerr="$(chroot "${target}" usermod -aG kldload "${KLDLOAD_USERNAME}" 2>&1)"; then
+                    k_log "state.db writable by group kldload (${KLDLOAD_USERNAME} added)"
+                else
+                    k_log "WARNING: could not add ${KLDLOAD_USERNAME} to kldload: ${_gerr:-no output} -- kldload-firstboot retries"
+                fi
+            fi
+        else
+            k_log "WARNING: no kldload group in the target -- state.db stays root-only until kldload-firstboot creates it"
         fi
         # Enable nginx at boot.
         ln -sf "/usr/lib/systemd/system/nginx.service" \
