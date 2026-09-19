@@ -806,6 +806,40 @@ else
     _fail "kldload-tpm-seal usage" "--help exited ${_trc}, --bogus exited ${_trc2}"
 fi
 
+# ─── rollback keeps every ESP grub.cfg in step; kbe activate follows it ──────
+# fiend 2026-09-18 (F44, Secure Boot on): `dnf rollback` rewrote \EFI\BOOT\grub.cfg
+# and left \EFI\fedora\grub.cfg naming the old environment, and `kbe activate` only
+# set bootfs, which the Secure Boot direct entry never reads. Run the real
+# _mirror_grub_cfg against a fake ESP: the vendor copy must follow, a non-kldload
+# stub must be left alone, and no .new file may be left behind.
+_section "rollback: ESP grub.cfg copies and kbe activate"
+_rb="${CHROOT}/usr/sbin/kldload-rollback"
+_be="${CHROOT}/usr/lib/kldload-installer/backend/bootenv.sh"
+_mt="$(mktemp -d)"
+mkdir -p "${_mt}/EFI/BOOT" "${_mt}/EFI/fedora" "${_mt}/EFI/other"
+printf '# kldload - generated\nroot=ZFS=rpool/ROOT/NEW\n' >"${_mt}/EFI/BOOT/grub.cfg"
+printf '# kldload - generated\nroot=ZFS=rpool/ROOT/OLD\n' >"${_mt}/EFI/fedora/grub.cfg"
+printf 'configfile $prefix/grub.cfg\n' >"${_mt}/EFI/other/grub.cfg"
+_mrc=0
+bash -c 'set -Eeuo pipefail; log() { :; }; die() { echo "DIE $*" >&2; exit 1; }
+    ESP_GRUB_CFG="$2/EFI/BOOT/grub.cfg"
+    source <(sed -n "/^_mirror_grub_cfg() {/,/^}/p" "$1" | sed "s|/boot/efi/EFI|$2/EFI|")
+    _mirror_grub_cfg' _ "${_rb}" "${_mt}" >/dev/null 2>&1 || _mrc=$?
+_mbad=""
+((_mrc == 0)) || _mbad+=" rc=${_mrc}"
+cmp -s "${_mt}/EFI/BOOT/grub.cfg" "${_mt}/EFI/fedora/grub.cfg" || _mbad+=" vendor-copy-not-mirrored"
+grep -q '^configfile' "${_mt}/EFI/other/grub.cfg" || _mbad+=" non-kldload-stub-overwritten"
+[[ -z "$(find "${_mt}" -name '*.new')" ]] || _mbad+=" temp-file-left"
+if [[ -z "${_mbad}" ]]; then
+    _pass "rollback: every kldload grub.cfg on the ESP follows the rewrite; foreign stubs untouched"
+else
+    _fail "rollback grub.cfg mirror" "${_mbad}"
+fi
+rm -rf "${_mt}"
+_guard "rollback: _sync_esp mirrors the rewritten grub.cfg" "${_rb}" '^    _mirror_grub_cfg$'
+_guard "rollback: an 'activate' verb exists" "${_rb}" '^activate\)$'
+_guard "kbe activate delegates to kldload-rollback activate" "${_be}" 'kldload-rollback activate "\$dataset"'
+
 # ─── summary ─────────────────────────────────────────────────────────────────
 printf "\n  \e[1m%d passed\e[0m, %s\n" "${PASS}" \
     "$([[ ${FAILN} -gt 0 ]] && printf '\e[1;31m%d failed\e[0m' "${FAILN}" || printf '0 failed')"

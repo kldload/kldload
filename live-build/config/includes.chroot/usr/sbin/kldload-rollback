@@ -325,6 +325,30 @@ _boot_mode() {
     echo direct
 }
 
+# _mirror_grub_cfg — make every kldload grub.cfg on the ESP match ESP_GRUB_CFG.
+#
+# The installer writes the SAME grub.cfg to \EFI\BOOT and to the vendor
+# directory (\EFI\fedora, \EFI\centos, ...), because a vendor-signed GRUB
+# looks in its own directory and the removable-path GRUB may look in either.
+# Rewriting only one of them left them disagreeing -- fiend 2026-09-18, F44,
+# Secure Boot on: `dnf rollback` pointed \EFI\BOOT\grub.cfg at the new
+# environment while \EFI\fedora\grub.cfg still named the old one, and whichever
+# GRUB read decided whether the rollback happened. Only files the installer
+# generated are touched (first line "# kldload"); a vendor stub that chains to
+# another config is not ours to overwrite.
+# Returns: 0, or dies naming the copy that would not take.
+_mirror_grub_cfg() {
+    local c
+    for c in /boot/efi/EFI/*/grub.cfg; do
+        [[ -f "$c" && "$c" != "$ESP_GRUB_CFG" ]] || continue
+        head -n 1 "$c" | grep -q '^# kldload' || continue
+        cp -f "$ESP_GRUB_CFG" "${c}.new" || die "could not stage a copy of grub.cfg at ${c}.new"
+        mv -f "${c}.new" "$c" || die "could not install grub.cfg at $c"
+        cmp -s "$ESP_GRUB_CFG" "$c" || die "$c does not match $ESP_GRUB_CFG after the copy"
+        log "mirrored grub.cfg to $c"
+    done
+}
+
 # _sync_esp <new-be> — make the ESP boot the given environment.
 # Args:    dataset name of the freshly cloned boot environment.
 # Returns: 0 on success; dies on failure AFTER restoring what it touched.
@@ -440,6 +464,7 @@ rebuild a host-only initrd (dracut -f --hostonly) to shrink it."
     grep -q "root=ZFS=${newbe}" "$tmpcfg" ||
         die "grub.cfg rewrite did not take — refusing to install it"
     mv -f "$tmpcfg" "$ESP_GRUB_CFG" || die "could not install the rewritten grub.cfg"
+    _mirror_grub_cfg
 
     sync
     log "ESP updated: grub.cfg root=ZFS=$newbe, kernel $(basename "$kern")"
@@ -757,6 +782,40 @@ what exists; 'rollback to <snap>' takes any of them."
     _reboot_now
 }
 
+# cmd_activate <dataset> — boot an EXISTING environment next, on either path.
+#
+# `kbe activate` only set the pool's bootfs, which ZFSBootMenu follows and the
+# Secure Boot direct entry never reads: on fiend 2026-09-18 (F44, Secure Boot
+# on) grub.cfg carried root=ZFS=rpool/ROOT/fiend and activating anything else
+# changed nothing at the next boot, with no error. This is the same staging a
+# rollback does -- bootfs, then the ESP kernel, initrd and grub.cfg on the
+# direct path -- for an environment that already exists, so `cancel` undoes
+# it the same way. It never reboots.
+cmd_activate() {
+    local ds="${1:-}"
+    [[ -n "$ds" ]] || die "usage: rollback activate <boot environment>  (see: kbe list)"
+    ds="${ds%%@*}"
+    zfs list -H -o name "$ds" >/dev/null 2>&1 || die "no such dataset: $ds"
+    [[ "$(zfs get -H -o value mountpoint "$ds" 2>/dev/null)" == "/" ]] ||
+        die "$ds is not a boot environment (its mountpoint is not /)"
+    [[ "$ds" == "$BE_PARENT"/* ]] || die "$ds is not under $BE_PARENT"
+
+    log "activate: bootfs=$ds on pool $POOL"
+    zpool set "bootfs=${ds}" "$POOL" || die "could not set bootfs=$ds"
+    [[ "$(zpool get -H -o value bootfs "$POOL")" == "$ds" ]] ||
+        die "bootfs did not change to $ds"
+
+    local mode
+    mode="$(_boot_mode)"
+    if [[ "$mode" == direct ]]; then
+        _sync_esp "$ds"
+        say "Next boot: $ds (direct kernel path: grub.cfg and the ESP kernel updated)"
+    else
+        say "Next boot: $ds (ZFSBootMenu follows bootfs)"
+    fi
+    say "Undo before rebooting:  kldload-rollback cancel"
+}
+
 cmd_cancel() {
     local running staged="$BE"
     running="$(_running_be)"
@@ -813,6 +872,7 @@ cmd_cancel() {
             cp -f "$ESP_BAK_DIR/initrd.img" "$ESP_DIR/initrd.img"
         cp -f "$ESP_BAK_DIR/grub.cfg" "$ESP_GRUB_CFG" ||
             die "could not restore grub.cfg from backup"
+        _mirror_grub_cfg
         sync
         # CONSUMED. A backup that outlives the cancel that used it is the bug
         # in the HISTORY note above; removing it here is what `mv` used to do
@@ -904,6 +964,11 @@ rollback — return the system to a previous boot environment
   rollback to <snapshot>    Roll back to a specific snapshot, then REBOOT into
                             it. `list` names the candidates.
   rollback cancel           Un-stage a rollback that has not booted yet
+  rollback activate <env>   Boot an EXISTING environment next (rpool/ROOT/...).
+                            Sets bootfs, and on a Secure Boot install also
+                            rewrites grub.cfg and copies that environment's
+                            kernel to the ESP. Never reboots; `cancel` undoes
+                            it. `kbe activate` uses this.
   rollback migrate-pkgdb    Move the package database into the boot
                             environment. For pools old enough to have it on
                             its own dataset. One reboot.
@@ -1073,6 +1138,10 @@ to)
     cmd_to "${1:-}"
     ;;
 cancel) cmd_cancel ;;
+activate)
+    shift
+    cmd_activate "${1:-}"
+    ;;
 migrate-pkgdb) cmd_migrate_pkgdb ;;
 status) cmd_status ;;
 help | -h | --help) cmd_help ;;

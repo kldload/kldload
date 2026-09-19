@@ -376,6 +376,19 @@ bootenv_activate() {
         log "      (kbe list), or create one first with: kbe create <name>"
     fi
 
+    # WHY delegate: bootfs alone is what ZFSBootMenu follows, but a Secure Boot
+    # install boots GRUB's direct entry with root=ZFS=<dataset> written into
+    # grub.cfg and never reads bootfs -- so this used to report success and
+    # boot the same environment again (fiend, 2026-09-18). kldload-rollback
+    # already knows both boot paths and keeps the ESP in step; reuse it.
+    if [[ -x /usr/sbin/kldload-rollback ]]; then
+        log "Activating boot environment: $dataset"
+        /usr/sbin/kldload-rollback activate "$dataset" ||
+            die "bootenv_activate: kldload-rollback could not activate $dataset"
+        return 0
+    fi
+    log "WARNING: kldload-rollback is missing; setting bootfs only. On a Secure Boot"
+    log "         install (GRUB direct entry) the next boot will NOT follow it."
     log "Activating boot environment: $dataset"
     run zpool set "bootfs=${dataset}" rpool
 
