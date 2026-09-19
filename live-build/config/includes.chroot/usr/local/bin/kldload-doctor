@@ -549,7 +549,25 @@ def _prom_query(q, timeout=4):
     except Exception:
         return None
 
+def _installed(unit: str, *binaries: str) -> bool:
+    """Is this feature ON THIS MACHINE at all?
+
+    A check that fails for software the install never asked for is noise that
+    trains people to ignore the report: fiend's clean RHEL desktop (2026-09-19,
+    KVM/AI/k8s all off) failed prometheus, grafana and ollama, none of which it
+    had ever been given. Asked by unit file and binary, not by running state --
+    installed-but-stopped is a real failure and still reported.
+    """
+    if any(shutil.which(b) for b in binaries):
+        return True
+    rc, out, _ = _run(["systemctl", "list-unit-files", "--no-legend", unit])
+    return rc == 0 and unit.split(".")[0] in out
+
+
 def check_prometheus_running():
+    if not _installed("prometheus.service", "prometheus"):
+        return _result("observability", "prometheus", "skip", "",
+                       "prometheus is not installed on this machine")
     rc, out, _ = _run(["systemctl", "is-active", "prometheus"])
     if rc == 0 and "active" in out:
         return _result("observability", "prometheus", "ok",
@@ -724,6 +742,9 @@ def check_grafana_dashboards():
                    f"{n} dashboards provisioned cleanly")
 
 def check_grafana_running():
+    if not _installed("grafana-server.service", "grafana-server", "grafana"):
+        return _result("observability", "grafana", "skip", "",
+                       "grafana is not installed on this machine")
     rc, out, _ = _run(["systemctl", "is-active", "grafana-server"])
     if rc == 0 and "active" in out:
         return _result("observability", "grafana", "ok",
@@ -794,6 +815,9 @@ def check_cluster_firewall():
 
 def check_ollama():
     import urllib.request
+    if not _installed("ollama.service", "ollama"):
+        return _result("bob", "ollama", "skip", "",
+                       "the AI stack was not installed on this machine")
     try:
         with urllib.request.urlopen("http://localhost:11434/api/ps", timeout=3) as r:
             data = json.loads(r.read().decode())
@@ -938,6 +962,14 @@ def check_darksite_charts():
     being broken (fiend, 2026-08-16).
     """
     d = "/root/darksite/helm-charts"
+    # No darksite at all: a net-image install, or EL, which installs from its
+    # vendor and never carries one. Missing charts inside a darksite is still a
+    # failure -- that is the 2026-08-16 defect above -- but a machine that was
+    # never meant to have one is not broken (fiend's RHEL net install,
+    # 2026-09-19).
+    if not os.path.isdir("/root/darksite"):
+        return _result("k8s-stack", "darksite charts", "skip", "",
+                       "this install carries no darksite (net image or EL)")
     if not os.path.isdir(d):
         return _result("k8s-stack", "darksite charts", "fail",
                        "helm charts staged for offline deploy",
