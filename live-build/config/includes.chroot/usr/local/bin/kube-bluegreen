@@ -177,13 +177,25 @@ _cutover() {
 
 _usage() {
     cat <<'HELPTEXT'
-kube-bluegreen — drive the demo's blue/green cutover
+kube-bluegreen — blue/green at two levels: one workload, or two whole clusters
 
-USAGE
+USAGE — the workload (two deployment tracks behind one Service)
     kube-bluegreen status              show which track is live and both tracks' health
     kube-bluegreen preview <track>     send real traffic to the idle track, privately
     kube-bluegreen cutover <track>     health-gate, smoke-test, then move the public VIP
     kube-bluegreen rollback            cut back to the previously-live track
+
+USAGE — the cluster (two whole clusters, for a stack change)
+    kube-bluegreen cluster status              which cluster is live, health of both
+    kube-bluegreen cluster deploy <track> ...  build that track (extra args go to kube-cluster)
+    kube-bluegreen cluster promote <track>     point /root/.kube/config at it; refuses unless Ready
+    kube-bluegreen cluster destroy <track>     tear it down; refuses if it is the active track
+
+    A CNI cannot be blue/greened — one datapath per cluster — so a Cilium or
+    Kubernetes version change is made reversible by running two clusters and
+    moving the workload. Each track keeps its own MetalLB pool, so the idle
+    one is reachable before promotion; service addresses therefore differ
+    between tracks.
 
 ARGUMENTS
     <track>    blue | green
@@ -193,6 +205,11 @@ ENVIRONMENT
     NS         namespace                  (default: demo)
     CHART      chart path                 (default: /usr/local/share/kldload/demo/charts/javaapi-fullstack)
     KUBECONFIG cluster credentials        (default: /root/.kube/config)
+
+ENVIRONMENT — the cluster tier
+    KLDLOAD_BG_BLUE_VIP / KLDLOAD_BG_GREEN_VIP    API server VIP per track
+    KLDLOAD_BG_BLUE_POOL / KLDLOAD_BG_GREEN_POOL  MetalLB range per track
+                                                  (each track needs its own)
 
 EXAMPLES
     kube-bluegreen status
@@ -206,10 +223,227 @@ EXIT STATUS
 HELPTEXT
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# CLUSTER TIER -- two whole clusters, not two deployments
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Everything above this line moves a Service selector between two deployment
+# tracks. Everything below moves between two CLUSTERS.
+#
+# Why the cluster is the right granularity for a stack change: you cannot
+# blue/green a CNI. There is one datapath per cluster, Cilium's eBPF programs
+# attach to the same hooks and own the same CRDs, and upstream's answer to a
+# version change is a rolling in-place upgrade. So the way to make a Cilium
+# 1.16 -> 1.20 jump reversible is not two Ciliums, it is two clusters and a
+# workload that moves -- which on this substrate costs seconds per node,
+# because every node is a ZFS clone of a golden.
+#
+# Nothing in kube-cluster or kube-init changed to allow this: CLUSTER_NAME,
+# KUBE_VIP_ADDRESS, METALLB_POOL and METALLB_POOL_NAME were already variables.
+# Two clusters need distinct values, a kubeconfig each, and a record of which
+# is live.
+#
+# Pool mode is SPLIT (operator, 2026-09-20): each track keeps its own MetalLB
+# range, so the idle track is reachable and testable before promotion. Service
+# addresses therefore differ between tracks -- a client pinned to blue's IP is
+# not moved by a promote. Handover, where green takes blue's range at promote
+# so the public address survives, is the truer blue/green and is NOT built:
+# there is a window where neither track owns the range and that needs a real
+# cluster to test.
+#
+# The helpers here are _cl_ prefixed because the workload tier above already
+# owns _active, _other and friends, and a collision would silently give one
+# tier the other's answer.
+_CL_STATE_DIR=/var/lib/kldload
+_CL_TRACK_FILE="${_CL_STATE_DIR}/cluster-track"
+_CL_KUBE_DIR=/root/.kube
+_CL_TRACKS=(blue green)
+
+# _cl_valid_track <name> — refuse anything that is not a known track. The names
+# reach CLUSTER_NAME, which reaches `virsh destroy` and a ZFS dataset regex, so
+# this is a safety check and not a nicety (a VM once got created named --help).
+_cl_valid_track() {
+    local t
+    for t in "${_CL_TRACKS[@]}"; do [[ "$1" == "$t" ]] && return 0; done
+    return 1
+}
+
+_cl_name() { printf 'kldload-%s' "$1"; }
+_cl_kubeconfig() { printf '%s/config-%s' "$_CL_KUBE_DIR" "$1"; }
+
+# _cl_active — the live track, or empty when nothing has been promoted yet.
+_cl_active() { [[ -r "$_CL_TRACK_FILE" ]] && tr -d '[:space:]' <"$_CL_TRACK_FILE" || true; }
+
+# _cl_exists <track> — does this track have any VMs defined?
+_cl_exists() {
+    virsh list --all --name 2>/dev/null | grep -q "^$(_cl_name "$1")-" || return 1
+}
+
+# _cl_ready <track> — does its API answer, and are all nodes Ready?
+#
+# Outcome, not exit code: `kubectl get nodes` succeeding says the API is up,
+# which is not the same as the cluster being usable. Count NotReady explicitly.
+_cl_ready() {
+    local kc
+    kc="$(_cl_kubeconfig "$1")"
+    [[ -r "$kc" ]] || return 1
+    local out
+    out="$(timeout 30 kubectl --kubeconfig "$kc" get nodes --no-headers 2>/dev/null || true)"
+    [[ -n "$out" ]] || return 1
+    local total notready
+    total="$(printf '%s\n' "$out" | grep -c . || true)"
+    notready="$(printf '%s\n' "$out" | awk '$2 != "Ready" {n++} END {print n+0}')"
+    ((total > 0 && notready == 0))
+}
+
+# ── status ──────────────────────────────────────────────────────────────────
+_cl_status_cmd() {
+    local act
+    act="$(_cl_active)"
+    printf '\n  %-8s %-10s %-9s %-7s %s\n' TRACK EXISTS READY ACTIVE KUBECONFIG
+    local t
+    for t in "${_CL_TRACKS[@]}"; do
+        local ex=no rd=no ac=' '
+        _cl_exists "$t" && ex=yes
+        _cl_ready "$t" && rd=yes
+        [[ "$act" == "$t" ]] && ac='<<<'
+        printf '  %-8s %-10s %-9s %-7s %s\n' "$t" "$ex" "$rd" "$ac" "$(_cl_kubeconfig "$t")"
+    done
+    echo
+    [[ -n "$act" ]] || _say "no track is active yet — promote one to point /root/.kube/config at it"
+}
+
+# ── deploy ──────────────────────────────────────────────────────────────────
+#
+# Builds a cluster under this track's name. Every value that must differ
+# between tracks is passed here; kube-cluster and kube-init already read all of
+# them, so nothing in those tools changes.
+_cl_deploy() {
+    local track="$1"
+    shift
+    _cl_valid_track "$track" || _die "unknown track '${track}' (expected: ${_CL_TRACKS[*]})"
+    _cl_exists "$track" && _die "${track} already has VMs — destroy it first, or deploy the other track"
+
+    local act
+    act="$(_cl_active)"
+    [[ "$act" == "$track" ]] && _die "${track} is recorded as ACTIVE but has no VMs — state is inconsistent, fix ${_CL_TRACK_FILE} first"
+
+    # Addresses. Defaults are derived so a demo works with no configuration,
+    # and every one is overridable because a real LAN is not a demo.
+    local vip pool
+    case "$track" in
+    blue)
+        vip="${KLDLOAD_BG_BLUE_VIP:-}"
+        pool="${KLDLOAD_BG_BLUE_POOL:-}"
+        ;;
+    green)
+        vip="${KLDLOAD_BG_GREEN_VIP:-}"
+        pool="${KLDLOAD_BG_GREEN_POOL:-}"
+        ;;
+    esac
+
+    _say "deploying ${track} as $(_cl_name "$track")"
+    [[ -n "$vip" ]] && _say "  API VIP:      ${vip}"
+    [[ -n "$pool" ]] && _say "  MetalLB pool: ${pool}"
+
+    # kube-cluster does the work. It is the shipped verb and it owns cluster
+    # lifecycle; re-implementing any of it here is how a harness ends up
+    # reproducing a bug that was fixed in the real tool.
+    CLUSTER_NAME="$(_cl_name "$track")" \
+    KUBE_VIP_ADDRESS="$vip" \
+    METALLB_POOL="$pool" \
+    METALLB_POOL_NAME="kldload-${track}-pool" \
+        kube-cluster bootstrap "$@" || _die "kube-cluster bootstrap failed for ${track}"
+
+    # kube-cluster writes /root/.kube/config for whichever cluster it just
+    # built. Move it to this track's file so the next deploy cannot overwrite
+    # the other track's credentials.
+    if [[ -r "${_CL_KUBE_DIR}/config" && ! -L "${_CL_KUBE_DIR}/config" ]]; then
+        install -m 0600 "${_CL_KUBE_DIR}/config" "$(_cl_kubeconfig "$track")"
+        _say "kubeconfig saved: $(_cl_kubeconfig "$track")"
+    fi
+
+    _cl_ready "$track" && _say "${track} is Ready" || _say "WARNING: ${track} deployed but not all nodes are Ready yet"
+}
+
+# ── promote ─────────────────────────────────────────────────────────────────
+_cl_promote() {
+    local track="$1"
+    _cl_valid_track "$track" || _die "unknown track '${track}'"
+    _cl_exists "$track" || _die "${track} has no VMs — deploy it first"
+
+    # Gate on health, not on existence. Promoting a cluster whose nodes are not
+    # Ready is how a cutover becomes an outage.
+    _cl_ready "$track" || _die "${track} is not Ready — refusing to promote. Check: kubectl --kubeconfig $(_cl_kubeconfig "$track") get nodes"
+
+    local prev
+    prev="$(_cl_active)"
+    mkdir -p "$_CL_STATE_DIR" "$_CL_KUBE_DIR"
+    ln -sfn "$(_cl_kubeconfig "$track")" "${_CL_KUBE_DIR}/config"
+    printf '%s\n' "$track" >"$_CL_TRACK_FILE"
+
+    # Outcome, not exit code: the symlink must resolve AND the API it points at
+    # must answer, or the operator has a kubeconfig that lies.
+    timeout 30 kubectl get nodes >/dev/null 2>&1 ||
+        _die "promoted ${track} but the default kubeconfig does not reach it — check ${_CL_KUBE_DIR}/config"
+
+    _say "active track: ${prev:-none} -> ${track}"
+    _say "/root/.kube/config now points at $(_cl_kubeconfig "$track")"
+    [[ -n "$prev" && "$prev" != "$track" ]] &&
+        _say "${prev} is still running and untouched — destroy it when you are happy: kube-bluegreen cluster destroy ${prev}"
+    # TODO(handover mode): release the previous track's IPAddressPool and give
+    # its range to this one, so the public address survives the cutover. Not
+    # implemented: there is a window where neither track owns the range, and
+    # that needs testing on a real cluster before it is offered.
+}
+
+# ── destroy ─────────────────────────────────────────────────────────────────
+_cl_destroy() {
+    local track="$1"
+    _cl_valid_track "$track" || _die "unknown track '${track}'"
+    # Never destroy what is serving. The whole point of the idle track is that
+    # it is the thing you are allowed to break.
+    [[ "$(_cl_active)" == "$track" ]] &&
+        _die "${track} is the ACTIVE track — promote the other one first"
+    _cl_exists "$track" || {
+        _say "${track} has no VMs; nothing to destroy"
+        return 0
+    }
+
+    _say "destroying ${track} ($(_cl_name "$track"))"
+    CLUSTER_NAME="$(_cl_name "$track")" kube-cluster destroy ||
+        _die "kube-cluster destroy failed for ${track}"
+    rm -f "$(_cl_kubeconfig "$track")"
+    # By exact name, never a pattern: a destroy driven by a wildcard once took
+    # six unrelated clones.
+    _cl_exists "$track" && _die "${track} still has VMs after destroy — look before re-running"
+    _say "${track} destroyed"
+}
+
 case "${1:-status}" in
 status) _status ;;
 preview) _preview "${2:-}" ;;
 cutover) _cutover "${2:-}" ;;
+cluster)
+    # The cluster tier. Its own verbs, so `kube-bluegreen status` keeps
+    # meaning the workload and nobody has to guess which tier they are in.
+    case "${2:-status}" in
+    status) _cl_status_cmd ;;
+    deploy)
+        [[ -n "${3:-}" ]] || _die "usage: kube-bluegreen cluster deploy <blue|green> [kube-cluster options]"
+        _cl_deploy "${@:3}"
+        ;;
+    promote)
+        [[ -n "${3:-}" ]] || _die "usage: kube-bluegreen cluster promote <blue|green>"
+        _cl_promote "$3"
+        ;;
+    destroy)
+        [[ -n "${3:-}" ]] || _die "usage: kube-bluegreen cluster destroy <blue|green>"
+        _cl_destroy "$3"
+        ;;
+    *) _die "unknown cluster verb '${2}' (status|deploy|promote|destroy)" ;;
+    esac
+    ;;
 rollback)
     _live="$(_active)"
     [[ -n "$_live" ]] || _die "release $RELEASE not found in namespace $NS"
