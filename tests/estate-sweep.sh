@@ -42,6 +42,10 @@ SERVER=/usr/local/sbin/kldload-netboot-server
 NGINX_LOG=/var/lib/kldload/netboot-serve/nginx-access.log
 INSTALL_WAIT="${INSTALL_WAIT:-3000}" # 50 min: the full image is 15 GB over 1G
 FETCH_WAIT="${FETCH_WAIT:-900}"      # 15 min from PXE to the answers fetch
+# 40 min: an edition with BUILD_IMAGES=1 builds five cloud-image goldens on its
+# first boot, and measuring it before that finishes reports a machine that does
+# not exist yet.
+CONVERGE_WAIT="${CONVERGE_WAIT:-2400}"
 
 # The default order is deliberate: kvm first, because it is the only one that
 # builds goldens and therefore the only one that exercises the estate at all.
@@ -64,6 +68,17 @@ EOF
     exit "${1:-1}"
 }
 case "${1:-}" in -h | --help | help) usage 0 ;; esac
+
+# --adopt-first: the first edition is ALREADY installing — armed and PXE-booted
+# by hand, or by a run that was interrupted mid-edition. Arming and rebooting
+# are skipped for it and it is picked up at "wait for it to come back", so an
+# install in flight is adopted rather than restarted, and its report and bundle
+# come out of exactly the same code as every other edition's.
+ADOPT_FIRST=0
+if [[ "${1:-}" == --adopt-first ]]; then
+    ADOPT_FIRST=1
+    shift
+fi
 
 EDITIONS=("$@")
 ((${#EDITIONS[@]})) || EDITIONS=("${DEFAULT_EDITIONS[@]}")
@@ -162,24 +177,38 @@ for ed in "${EDITIONS[@]}"; do
     want_distro="$(sudo -n grep -hE '^KLDLOAD_DISTRO=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
     say "=== ${ed} (${want_distro}/${want_profile})"
 
+    # 0. Is this edition already installing? Decided BEFORE the scan below,
+    #    because a machine that is mid-install answers nothing and the scan
+    #    would abandon the edition before reaching the adopt path.
+    _adopt=0
+    if ((ADOPT_FIRST == 1)); then
+        ADOPT_FIRST=0
+        _adopt=1
+        say "${ed}: adopting an install already in flight — not scanning, not arming, not rebooting"
+        # It was armed by whoever started it; disarm so a later reboot cannot
+        # loop back into the installer. Already disarmed is the wanted state.
+        sudo -n "$SERVER" disarm "$MAC" >>"$LOG" 2>&1 || true
+    fi
+
     # 1. where is the bench machine now? Any profile will do — it is about to
     #    be reinstalled; all that is needed is a way to reboot it.
     cur=""
     for p in "$want_profile" desktop server core kvm storage ai master; do
+        ((_adopt == 1)) && break
         # find_bench returns 1 when that profile is not on the subnet, which
         # is expected for all but one of the profiles tried here.
         cur="$(find_bench "$p" || true)"
         [[ -n "$cur" ]] && break
     done
-    if [[ -z "$cur" ]]; then
+    if [[ -z "$cur" && "$_adopt" == 0 ]]; then
         say "${ed}: cannot find the bench machine on ${SUBNET}.0/24 — is it powered on?"
         printf '| %s | %s/%s | machine not found | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
         RC=1
         continue
     fi
-    say "${ed}: bench machine at ${cur}"
+    ((_adopt == 0)) && say "${ed}: bench machine at ${cur}"
 
-    # 2. arm, then send it to PXE
+    # 2. arm, then send it to PXE — unless this one is already under way.
     # Byte offset, not a line number. The first version took `wc -l` and then
     # read from `tail -n +$_mark`, which re-reads the LAST EXISTING line -- and
     # that line was already an /answers/ GET from the previous edition. So the
@@ -187,35 +216,37 @@ for ed in "${EDITIONS[@]}"; do
     # PXE-booted, and fiend got a 404 for its armed menu and fell back to local
     # boot (23:09:38, 2026-09-19). An offset in bytes cannot re-read anything.
     _mark="$(stat -c %s "$NGINX_LOG" 2>/dev/null || echo 0)"
-    sudo -n "$SERVER" arm-install "$MAC" "$ANS" --netdev "$NETDEV" >>"$LOG" 2>&1 || {
-        say "${ed}: arm FAILED"
-        printf '| %s | %s/%s | arm failed | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
-        RC=1
-        continue
-    }
-    kick_pxe "$cur" || say "${ed}: could not set BootNext — power-cycle and pick network boot"
+    if ((_adopt == 0)); then
+        sudo -n "$SERVER" arm-install "$MAC" "$ANS" --netdev "$NETDEV" >>"$LOG" 2>&1 || {
+            say "${ed}: arm FAILED"
+            printf '| %s | %s/%s | arm failed | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
+            RC=1
+            continue
+        }
+        kick_pxe "$cur" || say "${ed}: could not set BootNext — power-cycle and pick network boot"
 
-    # 3. wait for the answers fetch, then disarm
-    fetched=0 t=0
-    while ((t < FETCH_WAIT)); do
-        if sudo -n tail -c "+$((_mark + 1))" "$NGINX_LOG" 2>/dev/null | grep -q "GET /answers/"; then
-            fetched=1
-            break
+        # 3. wait for the answers fetch, then disarm
+        fetched=0 t=0
+        while ((t < FETCH_WAIT)); do
+            if sudo -n tail -c "+$((_mark + 1))" "$NGINX_LOG" 2>/dev/null | grep -q "GET /answers/"; then
+                fetched=1
+                break
+            fi
+            sleep 15
+            t=$((t + 15))
+        done
+        # Disarming a MAC that is already disarmed is the wanted end state, and
+        # the server says so rather than failing; either way it must not stop the
+        # sweep, because leaving a machine armed loops it back into the installer.
+        sudo -n "$SERVER" disarm "$MAC" >>"$LOG" 2>&1 || true
+        if ((fetched == 0)); then
+            say "${ed}: the installer never fetched its answers (${FETCH_WAIT}s) — disarmed"
+            printf '| %s | %s/%s | never PXE-booted | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
+            RC=1
+            continue
         fi
-        sleep 15
-        t=$((t + 15))
-    done
-    # Disarming a MAC that is already disarmed is the wanted end state, and
-    # the server says so rather than failing; either way it must not stop the
-    # sweep, because leaving a machine armed loops it back into the installer.
-    sudo -n "$SERVER" disarm "$MAC" >>"$LOG" 2>&1 || true
-    if ((fetched == 0)); then
-        say "${ed}: the installer never fetched its answers (${FETCH_WAIT}s) — disarmed"
-        printf '| %s | %s/%s | never PXE-booted | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
-        RC=1
-        continue
+        say "${ed}: answers fetched after ${t}s; installing"
     fi
-    say "${ed}: answers fetched after ${t}s; installing"
 
     # 4. wait for it to come back AS THE PROFILE THAT WAS ASKED FOR
     ip="" t=0
@@ -239,6 +270,28 @@ for ed in "${EDITIONS[@]}"; do
         continue
     fi
     say "${ed}: up at ${ip} after ${t}s"
+
+    # 4b. Let first boot FINISH before measuring the machine.
+    #
+    # An edition with BUILD_IMAGES=1 spends twenty minutes after its first
+    # login building goldens. Reporting the moment ssh answers files "0
+    # goldens" for every one of them and calls it a defect — the same false
+    # verdict the feature ledger guards against with its build-in-flight check.
+    # Bounded, and what it waited for is recorded.
+    conv=0
+    while ((conv < CONVERGE_WAIT)); do
+        if ssh_bench "$ip" 'test -e /var/lib/kldload/firstboot-done' &&
+            ! ssh_bench "$ip" 'systemctl is-active --quiet kldload-autodeploy'; then
+            break
+        fi
+        sleep 60
+        conv=$((conv + 60))
+    done
+    if ((conv >= CONVERGE_WAIT)); then
+        say "${ed}: first boot had NOT finished after ${conv}s — reporting anyway; treat golden counts with suspicion"
+    else
+        say "${ed}: first boot settled after ${conv}s"
+    fi
 
     # 5. the manifest
     scp_to "$ip" "${REPO}/tests/profile-report.sh" "${REPO}/tests/collect-bundle.sh" /tmp/ || true
