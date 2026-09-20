@@ -164,6 +164,14 @@ run_suite "Core Tests (ZFS, SSH, Network)" "$SCRIPT_DIR/smoke-core.sh"
 # on adding to it: every feature gets a check here in the change that ships it.
 run_suite "Feature Ledger (apps, rollback, estate, goldens, audio, mesh)" "$SCRIPT_DIR/smoke-features.sh"
 
+# The estate suite runs everywhere too, for the same reason: the machines that
+# BUILD goldens are not the only ones that end up with VMs, and a host with
+# none reports DID NOT RUN rather than a pass. Where the feature ledger asks
+# "is this VM in the inventory", this one asks "does Ansible reach it, does a
+# play run, is it up in Prometheus, has it handshaken" -- the questions a
+# listing cannot answer (operator, 2026-09-19).
+run_suite "Estate (ansible reach, playbook, monitoring, mesh)" "$SCRIPT_DIR/smoke-estate.sh"
+
 # Server tests for server, kvm, desktop, ai profiles
 case "$PROFILE" in
 server | kvm | desktop | ai | zfslab)

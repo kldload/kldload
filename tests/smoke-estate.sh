@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# =============================================================================
+# smoke-estate.sh — the VMs are not just LISTED, they are reachable and watched
+# =============================================================================
+#
+# WHAT IT DOES, IN ORDER
+#   1. Ansible reach   — `ansible all -m ping` against the dynamic inventory,
+#                        counting hosts that answered against hosts offered.
+#   2. Playbook run    — actually runs system-info.yml and reads its own
+#                        reached-vs-inventory line back.
+#   3. First-boot proof— the report kldload-ansible-firstboot.service leaves in
+#                        /root, checked for a SHORTFALL rather than existence.
+#   4. Monitoring      — every running VM has a Prometheus file_sd target, and
+#                        Prometheus says that target is up (the API, not the file).
+#   5. Mesh            — every running VM is a WireGuard peer with a handshake.
+#
+# WHY IT EXISTS: the feature ledger already checks that a running VM appears in
+# the Ansible inventory and that a golden carries its @golden snapshot. Neither
+# is the operator's actual question, which is "can I run a playbook against the
+# fleet, and does it show up in monitoring". An inventory entry proves a name
+# was written to a file; it says nothing about SSH, the mesh, the key, the
+# lease being stale or the scrape failing. Those are exactly the things that
+# break, and every one of them leaves the inventory looking perfect.
+#
+# This is the "a count is not a result" rule applied to the estate: every check
+# here compares what answered against what was ASKED, and names the shortfall.
+#
+# SCOPE: a host with no running VMs has no estate to check. That is reported as
+# DID NOT RUN, never as a pass — a gate that cannot run is not a gate.
+#
+# EXIT: 0 no failures (warnings allowed) · 1 at least one _fail.
+# =============================================================================
+set -Eeuo pipefail
+trap 'echo "smoke-estate.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-test.sh
+source "${SCRIPT_DIR}/lib-test.sh"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# _didnotrun — a check that could not run says so in its own voice. It counts
+# as a warning so the suite's exit status stays honest, but the wording is what
+# stops it being read as a pass three months later.
+_didnotrun() { _warn "$1" "DID NOT RUN — $2"; }
+
+PLAYBOOK=/usr/local/share/kldload-ansible/playbooks/system-info.yml
+REPORT=/root/kldload-ansible-report.txt
+TARGETS_DIR=/etc/prometheus/targets
+
+# vms_running — names of the domains libvirt currently has up.
+vms_running() { virsh list --name 2>/dev/null | grep . || true; }
+
+# inv_hosts — hostnames the dynamic inventory offers right now.
+inv_hosts() {
+    local _inv
+    _inv="$(kldload-inventory --list 2>/dev/null)" || return 0
+    [[ -n "$_inv" ]] || return 0
+    printf '%s' "$_inv" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+for h in sorted(d.get("_meta",{}).get("hostvars",{})): print(h)' 2>/dev/null
+}
+
+_vm_count="$(vms_running | grep -c . || true)"
+
+# ─── 1. Ansible actually reaches the fleet ──────────────────────────────────
+#
+# `ansible all -m ping` is the cheapest end-to-end proof there is: it resolves
+# the dynamic inventory, opens SSH over the mesh with the key the install
+# generated, and runs a module on the other end. If any link in that chain is
+# broken it fails here rather than in the middle of a real play.
+_section "Ansible reach"
+
+if ((_vm_count == 0)); then
+    _didnotrun "ansible reach" "no VMs are running on this host"
+elif ! have ansible || ! have kldload-inventory; then
+    _didnotrun "ansible reach" "ansible or kldload-inventory is not installed"
+else
+    _inv_n="$(inv_hosts | grep -c . || true)"
+    if ((_inv_n == 0)); then
+        _fail "ansible reach" "${_vm_count} VM(s) running and the inventory is EMPTY"
+    else
+        # -o gives one line per host; a host that answers prints SUCCESS.
+        _ping_out="$(timeout 180 ansible all -i /usr/local/bin/kldload-inventory \
+            -m ping -o 2>/dev/null || true)"
+        _ok="$(printf '%s\n' "$_ping_out" | grep -c 'SUCCESS' || true)"
+        _bad="$(printf '%s\n' "$_ping_out" | grep -cE 'UNREACHABLE|FAILED' || true)"
+        if ((_ok == _inv_n)); then
+            _pass "ansible ping: all ${_ok} inventory host(s) answered"
+        elif ((_ok == 0)); then
+            _fail "ansible reach" "0 of ${_inv_n} host(s) answered — $(printf '%s' "$_ping_out" | head -n 1 | cut -c1-120)"
+        else
+            # The shortfall by NAME. "4 of 6" sends someone hunting; the two
+            # names that did not answer are the actual bug report.
+            _quiet="$(comm -23 <(inv_hosts | sort) \
+                <(printf '%s\n' "$_ping_out" | awk '/SUCCESS/{print $1}' | sort) | tr '\n' ' ')"
+            _fail "ansible reach" "${_ok} of ${_inv_n} answered (${_bad} unreachable/failed); silent:${_quiet:- none}"
+        fi
+    fi
+fi
+
+# ─── 2. A real playbook, not just a ping ────────────────────────────────────
+#
+# ping proves the transport. A play proves fact gathering, the become path and
+# the inventory's host vars — the things a real playbook needs and a ping does
+# not touch. system-info.yml is read-only and already counts what it reached,
+# so the assertion here is its own last line, not a guess about exit status.
+_section "Playbook run"
+
+if ((_vm_count == 0)); then
+    _didnotrun "playbook run" "no VMs are running on this host"
+elif [[ ! -r "$PLAYBOOK" ]]; then
+    _fail "playbook run" "${PLAYBOOK} is not installed — the fleet has no shipped play"
+elif ! have ansible-playbook; then
+    _didnotrun "playbook run" "ansible-playbook is not installed"
+else
+    _pb_out="$(timeout 300 ansible-playbook -i /usr/local/bin/kldload-inventory \
+        "$PLAYBOOK" 2>&1 || true)"
+    # failed=N appears once per host in the recap; any non-zero is a real failure.
+    _pb_failed="$(printf '%s\n' "$_pb_out" | grep -oE 'failed=[0-9]+' | awk -F= '{s+=$2} END{print s+0}')"
+    _pb_unreach="$(printf '%s\n' "$_pb_out" | grep -oE 'unreachable=[0-9]+' | awk -F= '{s+=$2} END{print s+0}')"
+    _pb_hosts="$(printf '%s\n' "$_pb_out" | grep -cE '^[a-zA-Z0-9_.-]+ +: +ok=' || true)"
+    if ((_pb_hosts == 0)); then
+        _fail "playbook run" "the play reached NO hosts — $(printf '%s' "$_pb_out" | tail -n 1 | cut -c1-120)"
+    elif ((_pb_failed == 0 && _pb_unreach == 0)); then
+        _pass "playbook: system-info.yml ran clean on ${_pb_hosts} host(s)"
+    else
+        _fail "playbook run" "${_pb_hosts} host(s): failed=${_pb_failed} unreachable=${_pb_unreach}"
+    fi
+fi
+
+# ─── 3. The first-boot report, read rather than counted ─────────────────────
+#
+# kldload-ansible-firstboot.service runs the same play on a fresh install and
+# leaves its output here. Checking the file EXISTS is the trap: it exists just
+# as happily when the play reached one host out of six. The play prints its own
+# reached-vs-inventory line for exactly this reason.
+_section "First-boot Ansible report"
+
+if [[ ! -f "$REPORT" ]]; then
+    if ((_vm_count == 0)); then
+        _didnotrun "first-boot ansible report" "no report and no VMs — nothing ran yet"
+    else
+        _warn "first-boot ansible report" "${REPORT} is absent although ${_vm_count} VM(s) are running"
+    fi
+else
+    _rep_line="$(grep -iE 'reached|inventory' "$REPORT" 2>/dev/null | tail -n 1 || true)"
+    # Compare the two NUMBERS, never pattern-match the sentence. The first
+    # version of this check looked for "reached 0" and "0 of", and so read
+    # "reached 1 of 2 hosts" -- a play that missed half the fleet -- as a pass.
+    # Caught by the stub harness before it ever ran on a machine, 2026-09-19.
+    _rep_pair="$(grep -oE '[0-9]+ of [0-9]+' <<<"$_rep_line" | tail -n 1 || true)"
+    if [[ -z "$_rep_line" ]]; then
+        _warn "first-boot ansible report" "present but says nothing about what it reached"
+    elif [[ -n "$_rep_pair" ]]; then
+        _rep_got="${_rep_pair%% of *}"
+        _rep_want="${_rep_pair##* }"
+        if ((_rep_want > 0 && _rep_got == _rep_want)); then
+            _pass "first-boot ansible report: reached ${_rep_pair} host(s)"
+        else
+            _fail "first-boot ansible report" "reached only ${_rep_pair} host(s) at first boot"
+        fi
+    elif grep -qiE 'shortfall|reached 0' <<<"$_rep_line"; then
+        _fail "first-boot ansible report" "$(printf '%s' "$_rep_line" | cut -c1-140)"
+    else
+        _warn "first-boot ansible report" "no reached/inventory counts to compare: $(printf '%s' "$_rep_line" | cut -c1-80)"
+    fi
+fi
+
+# ─── 4. Monitoring: the file AND the scrape ─────────────────────────────────
+#
+# Two different failures wear the same face. klab-prom-targets can write a
+# perfect file_sd entry for a VM that Prometheus then fails to scrape (node
+# exporter absent, firewall, stale lease), and Prometheus can be happily
+# scraping a host that no longer exists. So this checks the file for coverage
+# and the API for truth, and says which of the two is wrong.
+_section "Monitoring"
+
+if ((_vm_count == 0)); then
+    _didnotrun "monitoring" "no VMs are running on this host"
+elif [[ ! -d "$TARGETS_DIR" ]]; then
+    _didnotrun "monitoring" "${TARGETS_DIR} does not exist — Prometheus is not configured here"
+else
+    _untargeted=""
+    while read -r _vm; do
+        [[ -n "$_vm" ]] || continue
+        grep -rqs "\"vm\"[[:space:]]*:[[:space:]]*\"${_vm}\"" "$TARGETS_DIR" || _untargeted+=" ${_vm}"
+    done < <(vms_running)
+    if [[ -z "$_untargeted" ]]; then
+        _pass "file_sd: all ${_vm_count} running VM(s) have a Prometheus target"
+    else
+        _fail "monitoring targets" "running but absent from ${TARGETS_DIR}:${_untargeted}"
+    fi
+
+    # The scrape itself. Prometheus is local; a machine where it is not
+    # listening has a monitoring problem of its own, which is a warning here
+    # rather than a failure of the estate.
+    _api="$(timeout 20 curl -sf 'http://127.0.0.1:9090/api/v1/query?query=up' 2>/dev/null || true)"
+    if [[ -z "$_api" ]]; then
+        _warn "monitoring scrape" "Prometheus did not answer on 127.0.0.1:9090"
+    else
+        _down="$(printf '%s' "$_api" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+for r in d.get("data",{}).get("result",[]):
+    m=r.get("metric",{})
+    if m.get("vm") and r.get("value",["",""])[1]=="0":
+        print(m["vm"])' 2>/dev/null | sort -u | tr '\n' ' ')"
+        if [[ -z "${_down// /}" ]]; then
+            _pass "scrape: every VM target Prometheus knows about is up"
+        else
+            _fail "monitoring scrape" "targeted but DOWN in Prometheus:${_down}"
+        fi
+    fi
+fi
+
+# ─── 5. Mesh: attached, and recently ────────────────────────────────────────
+#
+# A peer entry with no handshake is a key that was minted and never used —
+# which is what a half-finished enrol looks like, and it is invisible unless
+# the handshake age is what gets checked rather than the peer count.
+_section "Mesh attachment"
+
+if ((_vm_count == 0)); then
+    _didnotrun "mesh attachment" "no VMs are running on this host"
+elif ! have wg; then
+    _didnotrun "mesh attachment" "wg is not installed"
+else
+    _if="$(wg show interfaces 2>/dev/null | tr ' ' '\n' | head -n 1 || true)"
+    if [[ -z "$_if" ]]; then
+        _didnotrun "mesh attachment" "no WireGuard interface is up on this host"
+    else
+        _peers="$(wg show "$_if" peers 2>/dev/null | grep -c . || true)"
+        _now="$(date +%s)"
+        # 15 minutes: the mesh keepalive is well under that, so anything older
+        # is a peer that is not actually talking.
+        _live="$(wg show "$_if" latest-handshakes 2>/dev/null |
+            awk -v n="$_now" '$2>0 && (n-$2)<900' | grep -c . || true)"
+        if ((_peers == 0)); then
+            _warn "mesh attachment" "${_if} is up with no peers — nothing has enrolled"
+        elif ((_live == _peers)); then
+            _pass "mesh: all ${_peers} peer(s) on ${_if} handshook within 15 min"
+        elif ((_live == 0)); then
+            _fail "mesh attachment" "${_peers} peer(s) on ${_if} and NOT ONE has handshaken"
+        else
+            _warn "mesh attachment" "${_live} of ${_peers} peer(s) on ${_if} handshook recently"
+        fi
+    fi
+fi
+
+printf '\n  estate: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
+((FAIL == 0))
