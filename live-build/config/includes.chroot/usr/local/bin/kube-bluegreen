@@ -209,7 +209,16 @@ ENVIRONMENT
 ENVIRONMENT — the cluster tier
     KLDLOAD_BG_BLUE_VIP / KLDLOAD_BG_GREEN_VIP    API server VIP per track
     KLDLOAD_BG_BLUE_POOL / KLDLOAD_BG_GREEN_POOL  MetalLB range per track
-                                                  (each track needs its own)
+
+    Both tracks share one virbr0, so neither the VIP nor the MetalLB range may
+    overlap. Blue defaults to kube-cluster's own addresses (VIP .240, pool
+    .200-.220 auto-detected), so a blue track is an ordinary cluster. Green
+    moves out of the way: VIP .241, pool .221-.239, on whatever subnet virbr0
+    is actually on. Override either only if that slice is already spoken for.
+
+    Both tracks clone the SAME golden image (k8s-golden). Deploying green does
+    not rebuild it and does not build klab's five per-distro goldens — those
+    belong to klab, not to a cluster cutover. Green costs a clone per node.
 
 EXAMPLES
     kube-bluegreen status
@@ -318,6 +327,36 @@ _cl_status_cmd() {
 # Builds a cluster under this track's name. Every value that must differ
 # between tracks is passed here; kube-cluster and kube-init already read all of
 # them, so nothing in those tools changes.
+# _cl_subnet — the first three octets of the libvirt bridge green will live on.
+#
+# Green's addresses have to be disjoint from blue's, and blue's are DERIVED:
+# kube-init auto-detects ${subnet}.200-220 from the control plane's own address.
+# Hardcoding 192.168.122 for green would put the two tracks on different
+# subnets the moment someone's virbr0 is not the libvirt default — green would
+# advertise a range no client on that LAN can reach, and it would look like a
+# MetalLB bug rather than a wrong constant.
+#
+# virbr0 by name because that is the bridge kube-cluster itself arpings against
+# when it reserves the VIP; if that assumption is ever wrong it is wrong in both
+# tools at once, which is the failure I can actually find. Falls back to the
+# libvirt default only when the bridge has no address to read.
+# stdout: three octets, no trailing dot (e.g. "192.168.122").
+_cl_subnet() {
+    local _a
+    # The swallow covers exactly one case: virbr0 is absent, where ip(1) writes
+    # "Device does not exist" and exits 1. That is this function's FALLBACK
+    # path, not an error — but under `set -e` + pipefail it is still a failed
+    # pipeline, so without the `|| true` it aborts the caller mid-deploy and
+    # fires the ERR trap into the operator's console first. Verified by
+    # stubbing ip(1) to exit 1: the trap fired twice before this line existed.
+    _a="$(ip -4 -o addr show virbr0 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}' || true)"
+    if [[ "$_a" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\.[0-9]{1,3}$ ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    else
+        printf '192.168.122'
+    fi
+}
+
 _cl_deploy() {
     local track="$1"
     shift
@@ -328,8 +367,18 @@ _cl_deploy() {
     act="$(_cl_active)"
     [[ "$act" == "$track" ]] && _die "${track} is recorded as ACTIVE but has no VMs — state is inconsistent, fix ${_CL_TRACK_FILE} first"
 
-    # Addresses. Defaults are derived so a demo works with no configuration,
-    # and every one is overridable because a real LAN is not a demo.
+    # Addresses. Two clusters share one virbr0, so they cannot share one API
+    # VIP or one MetalLB range — and neither collision is loud. The VIP is
+    # (kube-cluster arpings it and dies), but the MetalLB range is not: both
+    # clusters would answer ARP for the same LoadBalancer address and the
+    # winner would be whichever replied last.
+    #
+    # BLUE therefore keeps kube-cluster's own defaults — empty, meaning VIP
+    # .240 and the auto-detected ${subnet}.200-220 — so a blue track behaves
+    # exactly like any ordinary cluster and nothing about the normal path
+    # changes. GREEN is the one that moves out of the way, into a slice that
+    # is disjoint from both of blue's. Green is the disposable track; making
+    # it carry the deviation keeps the surprise on the side that expects one.
     local vip pool
     case "$track" in
     blue)
@@ -337,8 +386,10 @@ _cl_deploy() {
         pool="${KLDLOAD_BG_BLUE_POOL:-}"
         ;;
     green)
-        vip="${KLDLOAD_BG_GREEN_VIP:-}"
-        pool="${KLDLOAD_BG_GREEN_POOL:-}"
+        local _net
+        _net="$(_cl_subnet)"
+        vip="${KLDLOAD_BG_GREEN_VIP:-${_net}.241}"
+        pool="${KLDLOAD_BG_GREEN_POOL:-${_net}.221-${_net}.239}"
         ;;
     esac
 
@@ -411,7 +462,14 @@ _cl_destroy() {
     }
 
     _say "destroying ${track} ($(_cl_name "$track"))"
-    CLUSTER_NAME="$(_cl_name "$track")" kube-cluster destroy ||
+    # KUBE_CLUSTER_YES=1 because the guard above is the real safety and it is a
+    # stronger one than a prompt: kube-cluster asks "are you sure" about a name
+    # it cannot reason about, while this refuses outright to touch the track
+    # that is serving. Without it kube-cluster exits 2 from any non-interactive
+    # caller — the webui button, ssh -c, the sweep — and reports it as
+    # "destroy failed", which is a lie about what happened. The golden is kept
+    # either way: only DESTROY_ALL=1 removes it, and green clones from it.
+    CLUSTER_NAME="$(_cl_name "$track")" KUBE_CLUSTER_YES=1 kube-cluster destroy ||
         _die "kube-cluster destroy failed for ${track}"
     rm -f "$(_cl_kubeconfig "$track")"
     # By exact name, never a pattern: a destroy driven by a wildcard once took

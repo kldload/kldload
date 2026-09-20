@@ -2187,7 +2187,17 @@ cmd_bootstrap() {
     # + --upload-certs + kube-vip static pod). Empty KUBE_VIP_ADDRESS (HA_READY=0)
     # falls through to the legacy single-CP path unchanged. Interface is left for
     # kube-init to auto-detect inside the VM (its default-route iface, not the host's).
-    _ssh_cmd "$cp_ip" "KUBE_VIP_ADDRESS='${KUBE_VIP_ADDRESS}' kube-init" ||
+    #
+    # METALLB_POOL / METALLB_POOL_NAME cross the same wire, and they have to.
+    # kube-init reads them INSIDE the guest, so a caller that exports them in
+    # the host's environment is talking to nobody: kube-init sees them empty and
+    # auto-detects ${subnet}.200-220 from the node's own address. For one
+    # cluster that is invisible. For two on the same virbr0 — kube-bluegreen's
+    # whole reason to exist — both clusters advertise the SAME LoadBalancer
+    # range and fight over it by ARP. Caught by reading who consumes the
+    # variable rather than who sets it (2026-09-20, before green ever ran).
+    # Empty stays empty, so the single-cluster auto-detect path is unchanged.
+    _ssh_cmd "$cp_ip" "KUBE_VIP_ADDRESS='${KUBE_VIP_ADDRESS}' METALLB_POOL='${METALLB_POOL:-}' METALLB_POOL_NAME='${METALLB_POOL_NAME:-}' kube-init" ||
         warn "kube-init had errors — some components may still be pulling images"
 
     # Step 5: Join workers. The join token is a short-lived bootstrap credential
