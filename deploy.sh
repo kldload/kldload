@@ -842,13 +842,27 @@ cmd_build() {
             bash "$ROOT/build/darksite/resolve-k8s-stack.sh" ||
                 die "could not resolve the Kubernetes stack — refusing to build an ISO that would quietly ship the previous one"
         fi
+        # WHICH images, not HOW MANY. Counting tarballs against the lock's
+        # image count says "29 cached, 29 wanted, nothing to do" when the 29 on
+        # disk are the PREVIOUS stack's — which is exactly what happened on the
+        # first fresh-resolve build: a lock claiming Cilium 1.20.2 over a mirror
+        # still holding 1.16.5, the skew the lock exists to prevent, put back by
+        # the one line that checks it (2026-09-20).
+        #
+        # The tarball name is the image reference with / : @ flattened to _,
+        # which is how pull-k8s-images.sh writes it — so the check asks for the
+        # file each locked image would produce.
         _want="$(grep -c '^IMAGE=' "$k8s_images_list")"
-        _have="$(find "$k8s_images_dir" -name '*.tar' 2>/dev/null | wc -l)"
+        _have=0
+        while IFS= read -r _img; do
+            [[ -n "$_img" ]] || continue
+            [[ -s "${k8s_images_dir}/$(printf '%s' "$_img" | tr '/:@' '___').tar" ]] && _have=$((_have + 1))
+        done < <(sed -n 's/^IMAGE=//p' "$k8s_images_list")
         if [[ "$_have" -lt "$_want" ]]; then
             log "Pre-pulling Kubernetes container images for offline deploy (${_have}/${_want} cached)..."
             bash "$ROOT/build/darksite/pull-k8s-images.sh" "$k8s_images_dir"
         else
-            log "K8s images cached: $(du -sh "$k8s_images_dir" | cut -f1) ($(ls "$k8s_images_dir"/*.tar 2>/dev/null | wc -l) images)"
+            log "K8s images cached: $(du -sh "$k8s_images_dir" | cut -f1) (${_have}/${_want} from the lock)"
         fi
     fi
 
