@@ -3919,6 +3919,46 @@ if [[ -n "${KLDLOAD_BUILD_PROCESSORS:-}" ]]; then
     SQFS_PROC=(-processors "$KLDLOAD_BUILD_PROCESSORS")
     log "squashfs limited to ${KLDLOAD_BUILD_PROCESSORS} of $(nproc) processors"
 fi
+
+# ─── Build provenance, written BEFORE the rootfs is sealed ──────────────────
+# VERSION has to exist inside $ROOTFS by the time mksquashfs runs, because that
+# is the only copy the booted live system — and therefore the installer — can
+# read. It used to be written with the ISO-staging files ~150 lines below,
+# which is AFTER this point: the copy there is even commented CRITICAL, and it
+# landed in a directory nothing looks at again. Consequence, verified by
+# mounting build 45's squashfs (2026-09-20): /etc/kldload/VERSION was absent
+# from the live rootfs, so the installer's provenance copy found nothing, took
+# its `else` branch, and every installed machine recorded no build id — while
+# the ISO's own top-level VERSION looked perfectly correct, which is why this
+# survived a check that only ever read the ISO.
+#
+# The staging copies below now come FROM this file, so the three locations
+# (rootfs, ISO root, ISO /etc/kldload) cannot drift from each other.
+_iso_label="kldload ${VERSION} x86_64"
+_iso_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# The stack lock's digest, recorded beside the commit: the darksite resolves
+# its Kubernetes stack fresh every build, so the tree is dirty by construction
+# and the commit alone no longer says what an ISO contains — two ISOs from one
+# commit can carry different Cilium versions.
+_k8s_lock_sha="$(sha256sum "$K8S_LOCK" 2>/dev/null | cut -c1-16 || echo none)"
+mkdir -p "${ROOTFS}/etc/kldload"
+cat >"${ROOTFS}/etc/kldload/VERSION" <<VERSIONEOF
+kldload_version = ${VERSION}
+iso_name        = ${ISO_NAME}
+built_at        = ${_iso_built_at}
+edition         = ${EDITION:-free}
+profile         = ${PROFILE:-desktop}
+arch            = ${ARCH:-x86_64}
+release         = ${RELEASE:-10}
+commit          = ${KLDLOAD_COMMIT:-unknown}
+k8s_stack_lock  = ${_k8s_lock_sha:-none}
+VERSIONEOF
+# Outcome, not exit code: if this is not in the rootfs the installed machine
+# has no provenance, which is the whole defect this block exists to prevent.
+[[ -s "${ROOTFS}/etc/kldload/VERSION" ]] ||
+    die "FATAL: VERSION was not written into the rootfs — the install would record no build id"
+log "Provenance: commit ${KLDLOAD_COMMIT:-unknown}, k8s lock ${_k8s_lock_sha}"
+
 mksquashfs "$ROOTFS" "${SQUASHFS_DIR}/squashfs.img" \
     -comp xz "${SQFS_BCJ[@]}" "${SQFS_PROC[@]}" -b 1M -noappend 2>&1 | tail -5
 
@@ -4042,8 +4082,10 @@ mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grub.cfg" 
 #   /VERSION        — top-level, trivially `cat`-able
 #   /etc/kldload/VERSION — lives inside the eventual rootfs path too
 # The installer prefers .disk/info but falls back to /VERSION.
-_iso_label="kldload ${VERSION} x86_64"
-_iso_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# _iso_label, _iso_built_at and _k8s_lock_sha are set before mksquashfs now
+# (see "Build provenance" above) — they must be, because the rootfs copy of
+# VERSION is written there. Recomputing _iso_built_at here would give the ISO
+# a different timestamp from the rootfs it contains.
 # The stack lock's digest, recorded beside the commit.
 #
 # WHY: the darksite resolves its Kubernetes stack fresh on every build and
@@ -4052,27 +4094,19 @@ _iso_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # carry different Cilium versions. Commit plus this digest does say it, and
 # KLDLOAD_K8S_LOCK_REUSE=1 with the matching lock reproduces the build exactly
 # (2026-09-20).
-_k8s_lock_sha="$(sha256sum "$K8S_LOCK" 2>/dev/null | cut -c1-16 || echo none)"
 mkdir -p "${ISO_STAGING}/.disk" "${ISO_STAGING}/etc/kldload"
 printf '%s\n' "${_iso_label}" >"${ISO_STAGING}/.disk/info"
-cat >"${ISO_STAGING}/VERSION" <<VERSIONEOF
-kldload_version = ${VERSION}
-iso_name        = ${ISO_NAME}
-built_at        = ${_iso_built_at}
-edition         = ${EDITION:-free}
-profile         = ${PROFILE:-desktop}
-arch            = ${ARCH:-x86_64}
-release         = ${RELEASE:-10}
-commit          = ${KLDLOAD_COMMIT:-unknown}
-k8s_stack_lock  = ${_k8s_lock_sha:-none}
-VERSIONEOF
+# Both ISO copies come from the rootfs file written before mksquashfs, rather
+# than from a second heredoc. Two generators drift: the one below used to be
+# the only one that worked, and the rootfs was silently left without a VERSION
+# for as long as nobody mounted the squashfs to look.
+cp "${ROOTFS}/etc/kldload/VERSION" "${ISO_STAGING}/VERSION"
 cp "${ISO_STAGING}/VERSION" "${ISO_STAGING}/etc/kldload/VERSION"
-# CRITICAL: also write VERSION into the ROOTFS so the running live
-# system (kldload-install-target reads /etc/kldload/VERSION) can pick
-# it up. Without this, files under ISO_STAGING only exist on the
-# ISO medium, not inside the squashfs'd rootfs that boots.
-mkdir -p "${ROOTFS}/etc/kldload"
-cp "${ISO_STAGING}/VERSION" "${ROOTFS}/etc/kldload/VERSION"
+# All three must be byte-identical, and an ISO whose media disagrees with the
+# rootfs it carries is worse than one with no VERSION at all — it lies.
+cmp -s "${ROOTFS}/etc/kldload/VERSION" "${ISO_STAGING}/VERSION" &&
+    cmp -s "${ROOTFS}/etc/kldload/VERSION" "${ISO_STAGING}/etc/kldload/VERSION" ||
+    die "FATAL: the three VERSION copies differ — the ISO would misreport its own build"
 
 # ── The NFO ─────────────────────────────────────────────────────────────────
 # Every release gets one: an 80-column plain-text file that says what this build
