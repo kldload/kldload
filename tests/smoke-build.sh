@@ -2885,6 +2885,25 @@ else
     fi
 fi
 
+# The KVM package list lives in two places since 2026-09-19 — profiles.sh (the
+# installer, ISO-side) and the kvm component (the installed machine, used by
+# `kldload-component install kvm`). Nothing but this gate keeps the copy honest.
+_section "kvm package list"
+
+_kv_script="$ROOT/tests/check-kvm-component-pkgs.sh"
+if [[ ! -r "$_kv_script" ]]; then
+    _didnotrun "kvm package list" "tests/check-kvm-component-pkgs.sh is missing"
+else
+    _kv_out="$(cd "$ROOT" && bash "$_kv_script" 2>&1)" && _kv_rc=0 || _kv_rc=$?
+    if [[ "$_kv_rc" -eq 0 ]]; then
+        _pass "kvm package list: installer and component agree on all three families"
+    elif [[ "$_kv_rc" -eq 2 ]]; then
+        _didnotrun "kvm package list" "$(printf '%s' "$_kv_out" | tail -n 1)"
+    else
+        _fail "kvm package list" "$(printf '%s' "$_kv_out" | grep -E 'only|drifted' | head -n 3 | tr '\n' ' ')"
+    fi
+fi
+
 _section "systemd drop-ins"
 
 _di_src="$ROOT/live-build/config/includes.chroot/usr/lib/systemd/system"

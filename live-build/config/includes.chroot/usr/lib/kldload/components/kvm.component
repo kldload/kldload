@@ -11,7 +11,7 @@
 # operation. Removing the components that OWN those VMs is what deletes them.
 # ─────────────────────────────────────────────────────────────────────────────
 COMPONENT_SUMMARY="KVM/libvirt host: run VMs on this machine"
-COMPONENT_MINUTES=2
+COMPONENT_MINUTES=5
 COMPONENT_REQUIRES=""
 
 component_status() {
@@ -28,11 +28,82 @@ component_status() {
     fi
 }
 
-component_install() {
-    command -v virsh >/dev/null 2>&1 || {
-        echo "FATAL: virsh not present — the profile did not ship libvirt" >&2
+# _kvm_pkgs — the virt stack for THIS family, space separated, on stdout.
+#
+# This list is a COPY of the KVM branch of k_profile_optional_packages in the
+# installer's profiles.sh, because that file lives on the ISO and never reaches
+# an installed machine. tests/check-kvm-component-pkgs.sh fails if the two ever
+# drift, which is the only thing keeping a copy honest.
+_kvm_pkgs() {
+    # KLDLOAD_DISTRO_ID overrides the detected family. It exists so the drift
+    # gate (tests/check-kvm-component-pkgs.sh) can ask this function for every
+    # family from one machine, instead of scraping the list out of the file.
+    local id="${KLDLOAD_DISTRO_ID:-}"
+    [[ -n "$id" || ! -r /etc/os-release ]] || id="$(. /etc/os-release && echo "${ID:-}")"
+    case "$id" in
+    debian | ubuntu)
+        echo "qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst" \
+            "bridge-utils ovmf dnsmasq-base sshpass qemu-utils cloud-image-utils" \
+            "genisoimage jq ksmtuned"
+        ;;
+    arch)
+        echo "qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq sshpass cdrtools jq"
+        ;;
+    *)
+        echo "qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu" \
+            "libvirt-daemon-driver-storage libvirt-daemon-config-network" \
+            "libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq sshpass" \
+            "xorriso jq ksmtuned"
+        ;;
+    esac
+}
+
+# _kvm_install_pkgs — put the virt stack on a machine that never got it.
+#
+# WHY THIS EXISTS: KVM is an installer checkbox, so every desktop, server and
+# core install that left it unticked has vmxplore, kfire and the klab/k8s/zfslab
+# components on disk with no hypervisor under any of them -- and this component,
+# whose whole job is "turn KVM on", used to answer that with
+# "FATAL: virsh not present" and stop. There was no way to reach a hypervisor
+# short of reinstalling the machine (fiend .120, desktop/debian, 2026-09-19).
+#
+# Returns: 0 when virsh is present afterwards, 1 otherwise (loudly -- an
+# air-gapped machine with no darksite mirror genuinely cannot do this, and
+# saying so is the correct failure).
+_kvm_install_pkgs() {
+    local pkgs
+    read -r -a pkgs <<<"$(_kvm_pkgs)"
+    ((${#pkgs[@]})) || {
+        echo "FATAL: no package list for this distribution — install libvirt by hand" >&2
         return 1
     }
+    echo "installing the virt stack (${#pkgs[@]} packages) — the profile did not ship it"
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${pkgs[@]}"
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y "${pkgs[@]}"
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --needed --noconfirm "${pkgs[@]}"
+    else
+        echo "FATAL: no supported package manager here" >&2
+        return 1
+    fi
+}
+
+component_install() {
+    # Outcome, not exit code, on both sides of this: the transaction's status
+    # says nothing useful, and `virsh` on PATH is the thing the rest of this
+    # function actually needs.
+    if ! command -v virsh >/dev/null 2>&1; then
+        _kvm_install_pkgs || echo "WARNING: the package transaction failed — checking anyway" >&2
+        hash -r
+        command -v virsh >/dev/null 2>&1 || {
+            echo "FATAL: virsh still not present — no repo reachable? (apt/dnf output above)" >&2
+            return 1
+        }
+        echo "virt stack installed: $(virsh --version 2>/dev/null || echo 'version unknown')"
+    fi
     # MODULAR sockets first. libvirtd.socket is the MONOLITHIC daemon's socket and
     # CONFLICTS with virtqemud.socket, so enabling it on a modular host (Fedora 44,
     # current EL) leaves virsh unable to reach /var/run/libvirt/virtqemud-sock --
@@ -64,7 +135,129 @@ component_install() {
         virsh net-autostart default || true # already autostarted: harmless
         virsh net-start default 2>/dev/null || true
     fi
+    _kvm_storage
+    _kvm_snapshots
+    _kvm_group
     virsh version
+}
+
+# _kvm_storage — the ZFS layout and the container store a KVM install gets.
+#
+# A machine that ticked the KVM box at install time gets all of this from
+# profiles.sh; one that did not was reaching `component install kvm`, ending up
+# with a working libvirt and NO rpool/vms, so every VM it ever created landed on
+# the root dataset with 128K records and no separate snapshot policy. The tool
+# worked and the storage was wrong, which is the worse of the two failures.
+#
+# Idempotent: every step is "create if absent". Returns 0 always -- storage that
+# cannot be created is reported per item and does not stop libvirt being usable.
+_kvm_storage() {
+    local root="${KLDLOAD_VM_ROOT:-rpool/vms}"
+    if zfs list -H -o name "$root" >/dev/null 2>&1; then
+        echo "storage: $root already exists"
+    elif zfs create -o canmount=off -o mountpoint=none \
+        -o compression=lz4 -o recordsize=64K "$root" 2>/dev/null; then
+        # 64K because a zvol-backed guest's writes arrive in that shape; the
+        # pool default of 128K doubles read-modify-write on every guest write.
+        echo "storage: created $root (lz4, 64K records)"
+    else
+        echo "WARNING: could not create $root — VMs will land on the root dataset" >&2
+    fi
+    zfs list -H -o name "$root/isos" >/dev/null 2>&1 ||
+        zfs create -o mountpoint=/var/lib/libvirt/isos -o compression=zstd \
+            -o atime=off "$root/isos" 2>/dev/null ||
+        echo "WARNING: could not create $root/isos — ISOs will sit on the root dataset" >&2
+    mkdir -p /var/lib/libvirt/images
+    # The container store shares the pool: podman on ZFS needs its own dataset
+    # and a storage.conf naming it, or it silently falls back to vfs and copies
+    # every layer. Only written when podman is actually here.
+    if command -v podman >/dev/null 2>&1 && [[ ! -f /etc/containers/storage.conf ]]; then
+        zfs create -p -o mountpoint=/var/lib/containers/storage/zfs \
+            rpool/var/lib/containers/storage/zfs 2>/dev/null || true # exists: fine
+        mkdir -p /etc/containers
+        cat >/etc/containers/storage.conf <<'STORAGE'
+# Written by `kldload-component install kvm`. podman on ZFS: without the zfs
+# driver and a dataset of its own it falls back to vfs, which copies every
+# layer instead of cloning it.
+[storage]
+driver = "zfs"
+runroot = "/run/containers/storage"
+graphroot = "/var/lib/containers/storage"
+[storage.options.zfs]
+fsname = "rpool/var/lib/containers/storage/zfs"
+STORAGE
+        echo "storage: podman pointed at the ZFS driver"
+    fi
+}
+
+# _kvm_snapshots — hourly VM snapshots, the same pair profiles.sh drops in.
+#
+# WHY: rollback of a guest is the reason the VMs live on ZFS at all. Without the
+# timer nothing has ever snapshotted them, and that is only discovered the day
+# someone needs a snapshot (the "why is this empty" shape, core rules 2c).
+_kvm_snapshots() {
+    [[ -x /usr/local/sbin/kldload-vm-snapshot ]] || {
+        echo "note: kldload-vm-snapshot not installed — no VM snapshot timer"
+        return 0
+    }
+    local root="${KLDLOAD_VM_ROOT:-rpool/vms}"
+    cat >/etc/systemd/system/kvm-snapshot.service <<SNAPSVC
+[Unit]
+Description=ZFS snapshot all VM datasets
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kldload-vm-snapshot --root ${root} --keep 48
+SNAPSVC
+    cat >/etc/systemd/system/kvm-snapshot.timer <<'SNAPTMR'
+[Unit]
+Description=Hourly ZFS snapshots for VM datasets
+[Timer]
+OnCalendar=hourly
+Persistent=true
+[Install]
+WantedBy=timers.target
+SNAPTMR
+    systemctl daemon-reload
+    systemctl enable --now kvm-snapshot.timer >/dev/null 2>&1 ||
+        echo "WARNING: kvm-snapshot.timer did not enable — VM snapshots will not be taken" >&2
+    # Outcome, not exit code (core rules 2c: installed is not enabled).
+    systemctl is-enabled kvm-snapshot.timer >/dev/null 2>&1 &&
+        echo "snapshots: kvm-snapshot.timer enabled (hourly, keep 48)"
+    # sanoid keeps its own policy for the VM tree; append only once.
+    if [[ -f /etc/sanoid/sanoid.conf ]] && ! grep -q "^\[${root//\//\\/}\]" /etc/sanoid/sanoid.conf; then
+        cat >>/etc/sanoid/sanoid.conf <<SANOID
+
+[${root}]
+use_template = kvm
+recursive = yes
+
+[template_kvm]
+frequently = 0
+hourly     = 6
+daily      = 3
+weekly     = 1
+monthly    = 0
+yearly     = 0
+autosnap   = yes
+autoprune  = yes
+SANOID
+        echo "snapshots: sanoid policy added for ${root}"
+    fi
+}
+
+# _kvm_group — the operator must be in the libvirt group or every GUI verb
+# prompts. The group only exists once the packages are in, which is why this
+# runs here and not at the top.
+_kvm_group() {
+    local u="${KLDLOAD_USERNAME:-}"
+    [[ -n "$u" ]] || u="$(getent passwd 1000 | cut -d: -f1)"
+    [[ -n "$u" ]] || return 0
+    local g
+    for g in libvirt kvm; do
+        getent group "$g" >/dev/null 2>&1 || continue
+        id -nG "$u" | tr ' ' '\n' | grep -qx "$g" && continue
+        usermod -aG "$g" "$u" && echo "added ${u} to ${g} (takes effect at next login)"
+    done
 }
 
 component_remove() {
