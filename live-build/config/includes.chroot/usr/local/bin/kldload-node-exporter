@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# =============================================================================
+# kldload-node-exporter — run whichever node_exporter this machine actually has
+# =============================================================================
+#
+# WHAT IT DOES
+#   Finds the node_exporter binary this distribution ships and execs it with
+#   the arguments it was given. Nothing else.
+#
+# WHY IT EXISTS
+#   kldload ships a drop-in (node_exporter.service.d/textfile.conf) that resets
+#   ExecStart so the exporter runs with the collectors its dashboards need —
+#   the textfile directory, per-process metrics, and the vmstat fields the
+#   Memory Pressure dashboards read. That drop-in pointed at
+#   /usr/local/bin/node_exporter, and NOTHING SHIPS THAT BINARY: the ISO build
+#   downloads helm, process-exporter and the rest, and a comment claims it
+#   fetches node_exporter "below", but no line ever did.
+#
+#   On Debian that was invisible — there is no node_exporter.service, so the
+#   drop-in applied to nothing and the distro's prometheus-node-exporter ran
+#   normally. On Fedora the RPM provides node_exporter.service as an ALIAS of
+#   prometheus-node-exporter.service, so the drop-in landed on the working unit
+#   and broke it: status=203/EXEC, five restarts, "Start request repeated too
+#   quickly", and a machine with no host metrics at all while its Metrics view
+#   looked fine (fiend, 11-storage, fedora, 2026-09-20).
+#
+#   The flags are upstream node_exporter flags and the distro package IS
+#   upstream node_exporter, so the right fix is to run the binary that exists
+#   rather than to insist on a path that does not.
+#
+# ORDER: kldload's own build first (if a build ever ships one), then the
+# package paths used by Debian/Ubuntu and Fedora/EL.
+#
+# EXIT: execs the exporter, so this process becomes it · 1 if none is installed,
+#       loudly, because a silent exit would leave the unit "active" and the
+#       machine unmonitored.
+# =============================================================================
+set -Eeuo pipefail
+
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
+
+for _b in /usr/local/bin/node_exporter \
+    /usr/bin/prometheus-node-exporter \
+    /usr/bin/node_exporter \
+    /usr/sbin/prometheus-node-exporter; do
+    [[ -x "$_b" ]] || continue
+    exec "$_b" "$@"
+done
+
+echo "kldload-node-exporter: no node_exporter binary found — looked in /usr/local/bin and the Debian and Fedora package paths" >&2
+exit 1
