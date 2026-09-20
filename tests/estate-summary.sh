@@ -56,9 +56,14 @@ for run in "$RESULTS"/*/; do
         fi
         [[ -n "$rep" && -f "$rep" ]] || continue
 
+        # A truncated report has no verdict line; the label below says so.
         verdict="$(grep -oE '\*\*(PASS|FAIL)[^*]*\*\*' "$rep" 2>/dev/null | head -1 | tr -d '*' || true)"
         [[ -n "$verdict" ]] || verdict="(none)"
-        read -r p f w < <(sed -n 's/^PASS \([0-9]*\)   FAIL \([0-9]*\)   WARN \([0-9]*\)$/\1 \2 \3/p' "$rep" | head -1)
+        p="" f="" w=""
+        # Guarded for the same reason the sweep's copy is: a core install ships
+        # no smoke suite, so its report has no tally and read returns 1 — which
+        # under set -e would end this listing partway through, silently.
+        read -r p f w < <(sed -n 's/^PASS \([0-9]*\)   FAIL \([0-9]*\)   WARN \([0-9]*\)$/\1 \2 \3/p' "$rep" | head -1) || true
 
         lc="—"
         if [[ -f "${ed}estate-lifecycle.txt" ]]; then

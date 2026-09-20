@@ -316,11 +316,11 @@ for ed in "${EDITIONS[@]}"; do
         verdict="TRUNCATED ($(wc -l <"${OUT}/report.md") lines)"
         RC=1
     fi
+    sp="" sf="" sw=""
     # `|| true`: a core install ships no smoke suite, so its report carries no
     # tally line and read returns 1 — which under set -e killed the whole sweep
     # after nine successful editions, with the last one never run (08:07:54,
     # 2026-09-20). An absent tally is a legitimate state, not a failure.
-    sp="" sf="" sw=""
     read -r sp sf sw < <(sed -n 's/^PASS \([0-9]*\)   FAIL \([0-9]*\)   WARN \([0-9]*\)$/\1 \2 \3/p' "${OUT}/report.md" | head -1) || true
     sp="${sp:-n/a}" sf="${sf:-n/a}" sw="${sw:-n/a}"
 
@@ -342,7 +342,9 @@ for ed in "${EDITIONS[@]}"; do
         SSH_T=1800 ssh_bench "$ip" 'sudo -n bash /usr/local/share/kldload/tests/estate-lifecycle.sh' \
             >"${OUT}/estate-lifecycle.txt" 2>&1 ||
             true # its verdict is in the file; a failed lifecycle is a result, not a reason to stop
+        # grep -c exits 1 when there are no failures, which is the GOOD case.
         _lc="$(grep -cE '✗ FAIL' "${OUT}/estate-lifecycle.txt" 2>/dev/null || true)"
+        # ...and likewise none of the other kind on a run that died early.
         _lp="$(grep -cE '✓ PASS' "${OUT}/estate-lifecycle.txt" 2>/dev/null || true)"
         # The script prints a summary line last. Without it the run did not
         # finish, and counting only its passes would report a killed test as a

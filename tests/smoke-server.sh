@@ -293,6 +293,8 @@ _section "AI (Open WebUI)"
 # Ollama backs the chat models Open WebUI serves.
 if command -v ollama >/dev/null 2>&1; then
     _pass "Ollama CLI"
+    # An ollama that is not up yet answers nothing; the empty case is handled
+    # explicitly below as a warning rather than a failure.
     _tags="$(curl -sf --max-time 3 http://localhost:11434/api/tags 2>/dev/null || true)"
     if [[ -n "$_tags" ]]; then
         _pass "Ollama API responds"
@@ -309,11 +311,16 @@ print(len(d.get("models",[])))' 2>/dev/null || echo 0)"
         if [[ "${_models:-0}" == 0 ]]; then
             _warn "Ollama model" "no model pulled — the chat box has nothing to answer with (expected unless KLDLOAD_AI_PULL_MODEL=1)"
         else
-            _first="$(printf '%s' "$_tags" | python3 -c 'import json,sys
-d=json.load(sys.stdin); print(d["models"][0]["name"])' 2>/dev/null || true)"
+            # Malformed JSON here means no name to test with, handled as an
+            # empty _first by the generate call below.
+            # Malformed JSON leaves _first empty, which the generate call treats
+            # as "no model to test" rather than erroring.
+            _first="$(printf '%s' "$_tags" | python3 -c 'import json,sys; print(json.load(sys.stdin)["models"][0]["name"])' 2>/dev/null || true)"
             # 120s: a first generation loads the weights from disk.
-            _gen="$(curl -sf --max-time 120 http://localhost:11434/api/generate \
-                -d "{\"model\":\"${_first}\",\"prompt\":\"Reply with the single word: ok\",\"stream\":false}" 2>/dev/null || true)"
+            _payload="$(printf '{"model":"%s","prompt":"Reply with the single word: ok","stream":false}' "$_first")"
+            # A model that cannot answer returns nothing or an error body, and
+            # both are judged by the grep below rather than by curl's status.
+            _gen="$(curl -sf --max-time 120 http://localhost:11434/api/generate -d "$_payload" 2>/dev/null || true)"
             if printf '%s' "$_gen" | grep -q '"response"'; then
                 _pass "Ollama generates: ${_models} model(s), ${_first} answered a prompt"
             else
