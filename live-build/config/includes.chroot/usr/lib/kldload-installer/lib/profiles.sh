@@ -2073,7 +2073,13 @@ DASHSTART
         # `kldload-netboot-server` unable to start its own dnsmasq later.
         case "${KLDLOAD_DISTRO:-debian}" in
         debian | ubuntu)
-            for _inert in dnsmasq.service openipmi.service; do
+            # prometheus-node-exporter is Debian's own, and it binds :9100 —
+            # the same port kldload's node_exporter.service uses. Both shipped
+            # enabled, so kldload's lost the race and logged "listen tcp :9100:
+            # bind: address already in use" forever while the Debian one served
+            # metrics nothing was scraping (fiend, deb-11-storage, 2026-09-20).
+            # kldload's is the one wired into the file_sd targets, so it wins.
+            for _inert in dnsmasq.service openipmi.service prometheus-node-exporter.service; do
                 chroot "${target}" systemctl is-enabled "$_inert" >/dev/null 2>&1 || continue
                 if chroot "${target}" systemctl disable "$_inert" >/dev/null 2>&1; then
                     k_log "disabled ${_inert} (shipped for later, not for boot)"
@@ -2081,6 +2087,19 @@ DASHSTART
                     k_log "WARNING: could not disable ${_inert} — it will fail at every boot and degrade the system"
                 fi
             done
+            # prometheus itself: enabled by the package, and its config is
+            # written by kldload only when metrics were asked for. On a profile
+            # that did not ask, the unit restart-looped every 32 seconds on
+            # "open /etc/prometheus/prometheus.yml: no such file or directory"
+            # and left the machine degraded from first boot. Enable it where
+            # there is something for it to read, and not otherwise.
+            if [[ ! -f "${target}/etc/prometheus/prometheus.yml" ]]; then
+                if chroot "${target}" systemctl is-enabled prometheus.service >/dev/null 2>&1; then
+                    chroot "${target}" systemctl disable prometheus.service >/dev/null 2>&1 &&
+                        k_log "disabled prometheus.service (no prometheus.yml on this profile)" ||
+                        k_log "WARNING: prometheus.service is enabled with no config — it will fail at every boot"
+                fi
+            fi
             ;;
         *) : ;; # RPM/Arch do not enable a unit just because it was installed
         esac
