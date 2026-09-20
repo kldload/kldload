@@ -255,19 +255,36 @@ print(sum(1 for v in d.get("vms",[]) if v.get("ip_addr")))' 2>/dev/null || echo 
     # still handed Ansible 7 targets. test-cloud (.40) and klab-golden-ubuntu
     # (.60) held no lease, so nothing ever touched them.
     local -A _dom_ip=()
+    # Expiry per domain, so a stale lease cannot overwrite a live one.
+    local -A _dom_exp=()
     while read -r net; do
         [[ -z "$net" ]] && continue
-        while read -r _ _ mac _ ip name _; do
+        while read -r _lease_d _lease_t mac _ ip name _; do
             [[ -z "${ip:-}" ]] && continue
             ip="${ip%%/*}"
-            # A lease with no hostname is still a real lease -- a raw kvm-clone
-            # announces nothing, because it carries the golden's identity. The
-            # host does not need the guest to identify itself: libvirt assigned
-            # the MAC and knows which domain owns it.
+            # libvirt's MAC -> domain map WINS over the name the guest
+            # announced. A klab clone carries the golden's cloud-init identity,
+            # so several guests announce the same name, and an expiring lease
+            # from a previous boot announces it too -- whichever line came last
+            # simply overwrote the right answer.
+            #
+            # HISTORY: fiend, deb-3-kvm and 4-k8s, 2026-09-20. klab-blue-ubuntu
+            # was cloned at 192.168.122.105 and the inventory handed Ansible
+            # 192.168.122.96, so the play could not reach it on either distro.
+            # An inventory pointing at an address DHCP has since given to
+            # somebody else is the hazard this file's own comments warn about.
+            local _owner="${_mac_owner[${mac,,}]:-}"
+            [[ -n "$_owner" ]] && name="$_owner"
             if [[ -z "${name:-}" || "$name" == "-" ]]; then
-                name="${_mac_owner[${mac,,}]:-}"
-                [[ -z "$name" ]] && continue
+                continue
             fi
+            # Two leases for one domain: keep the one that expires LATEST. The
+            # expiry sorts correctly as text (YYYY-MM-DD HH:MM:SS).
+            local _exp="${_lease_d} ${_lease_t}"
+            if [[ -n "${_dom_exp[$name]:-}" && "${_dom_exp[$name]}" > "$_exp" ]]; then
+                continue
+            fi
+            _dom_exp["$name"]="$_exp"
             _dom_ip["$name"]="$ip"
             seen=$((seen + 1))
         done < <(virsh net-dhcp-leases "$net" 2>/dev/null | tail -n +3)

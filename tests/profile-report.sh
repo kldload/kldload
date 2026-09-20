@@ -131,7 +131,12 @@ check_feature() { # check_feature <label> <manifest key> <probe cmd...>
 : >/tmp/.pr_missing.$$
 check_feature "KVM / libvirt" KLDLOAD_ENABLE_KVM command -v virsh
 check_feature "Kubernetes" KLDLOAD_ENABLE_K8S command -v kubectl
-check_feature "K8s bootstrap" KLDLOAD_K8S_BOOTSTRAP test -d /etc/kubernetes
+# NOT `test -d /etc/kubernetes` on the host: kldload builds the cluster INSIDE
+# VMs, so the host never has that directory and the probe reported "absent" on
+# a machine running six healthy cluster nodes (4-k8s, 2026-09-20). Ask the
+# cluster: kubeconfig on the host, and the API answering.
+check_feature "K8s bootstrap" KLDLOAD_K8S_BOOTSTRAP \
+    bash -c 'test -r /root/.kube/config && timeout 20 kubectl --kubeconfig /root/.kube/config get nodes >/dev/null 2>&1'
 check_feature "AI (ollama)" KLDLOAD_ENABLE_AI command -v ollama
 check_feature "WireGuard" KLDLOAD_WIREGUARD command -v wg
 check_feature "eBPF tools" KLDLOAD_ENABLE_EBPF command -v bpftrace
