@@ -361,7 +361,10 @@ An armed machine shows a summary of what it was armed with and counts down
 Left alone, it installs exactly the armed answers file. Any key opens the
 manual override: pick a profile (core, server, desktop, kvm, k8s, storage, ai
 -- each the armed file with that profile's settings), a distro (from
-`NETBOOT_DISTROS`, default `fedora`; list only the ones you have verified),
+`NETBOOT_DISTROS`, default `fedora`; list only the ones you have verified --
+Fedora, RHEL and Debian are what the matrix proves, and Arch is NOT: an
+encrypted Arch install panics at boot, and a rolling release cannot be
+version-locked the way the rest of the substrate is),
 then tick options -- ZFS encryption, Secure Boot, KVM, golden images,
 Kubernetes, the ZFS lab, AI -- and change the hostname, user, time zone or
 keyboard. Golden images, Kubernetes and the ZFS lab need KVM, so ticking one
