@@ -4044,6 +4044,15 @@ mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grub.cfg" 
 # The installer prefers .disk/info but falls back to /VERSION.
 _iso_label="kldload ${VERSION} x86_64"
 _iso_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# The stack lock's digest, recorded beside the commit.
+#
+# WHY: the darksite resolves its Kubernetes stack fresh on every build and
+# writes k8s-stack.lock, so the tree is dirty by construction and the commit
+# alone no longer says what an ISO contains — two ISOs from one commit can
+# carry different Cilium versions. Commit plus this digest does say it, and
+# KLDLOAD_K8S_LOCK_REUSE=1 with the matching lock reproduces the build exactly
+# (2026-09-20).
+_k8s_lock_sha="$(sha256sum "$K8S_LOCK" 2>/dev/null | cut -c1-16 || echo none)"
 mkdir -p "${ISO_STAGING}/.disk" "${ISO_STAGING}/etc/kldload"
 printf '%s\n' "${_iso_label}" >"${ISO_STAGING}/.disk/info"
 cat >"${ISO_STAGING}/VERSION" <<VERSIONEOF
@@ -4055,6 +4064,7 @@ profile         = ${PROFILE:-desktop}
 arch            = ${ARCH:-x86_64}
 release         = ${RELEASE:-10}
 commit          = ${KLDLOAD_COMMIT:-unknown}
+k8s_stack_lock  = ${_k8s_lock_sha:-none}
 VERSIONEOF
 cp "${ISO_STAGING}/VERSION" "${ISO_STAGING}/etc/kldload/VERSION"
 # CRITICAL: also write VERSION into the ROOTFS so the running live
