@@ -293,8 +293,33 @@ _section "AI (Open WebUI)"
 # Ollama backs the chat models Open WebUI serves.
 if command -v ollama >/dev/null 2>&1; then
     _pass "Ollama CLI"
-    if curl -sf --max-time 3 http://localhost:11434/api/tags >/dev/null 2>&1; then
+    _tags="$(curl -sf --max-time 3 http://localhost:11434/api/tags 2>/dev/null || true)"
+    if [[ -n "$_tags" ]]; then
         _pass "Ollama API responds"
+        # Answering /api/tags with an empty model list is a chat box that
+        # cannot chat. Count the models, and where there is one, make it
+        # actually generate: "the API responds" and "the model works" are
+        # different claims, and only the second is what a user needs
+        # (2026-09-20). No model is the NORMAL state on an install that did
+        # not pull one -- said plainly rather than passed over in silence.
+        _models="$(printf '%s' "$_tags" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+print(len(d.get("models",[])))' 2>/dev/null || echo 0)"
+        if [[ "${_models:-0}" == 0 ]]; then
+            _warn "Ollama model" "no model pulled — the chat box has nothing to answer with (expected unless KLDLOAD_AI_PULL_MODEL=1)"
+        else
+            _first="$(printf '%s' "$_tags" | python3 -c 'import json,sys
+d=json.load(sys.stdin); print(d["models"][0]["name"])' 2>/dev/null || true)"
+            # 120s: a first generation loads the weights from disk.
+            _gen="$(curl -sf --max-time 120 http://localhost:11434/api/generate \
+                -d "{\"model\":\"${_first}\",\"prompt\":\"Reply with the single word: ok\",\"stream\":false}" 2>/dev/null || true)"
+            if printf '%s' "$_gen" | grep -q '"response"'; then
+                _pass "Ollama generates: ${_models} model(s), ${_first} answered a prompt"
+            else
+                _fail "Ollama generate" "${_models} model(s) installed and ${_first} did not answer a prompt"
+            fi
+        fi
     else
         _warn "Ollama API responds" "ollama service may not be running yet"
     fi
