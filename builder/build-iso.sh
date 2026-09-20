@@ -92,6 +92,21 @@ fi
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}${_iso_suffix}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
+# _gh_tag <owner/repo> — the newest release tag, or empty.
+#
+# The build already resolved helm, firecracker, k9s, eza and mediamtx this way
+# while eight OTHER downloads carried literal versions, so the darksite
+# rebuilt itself faithfully from 2024 for those: zfs_exporter 2.3.8, loki
+# 3.3.2, ebpf_exporter 2.5.1 and friends. One helper, asked by all of them
+# (2026-09-20).
+#
+# Empty means "could not ask" — every caller treats that as fatal for its own
+# download rather than quietly substituting a version nobody chose.
+_gh_tag() {
+    curl -sL --max-time 20 "https://api.github.com/repos/${1}/releases/latest" 2>/dev/null |
+        grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4
+}
+
 log() { printf '[%s] [build-iso] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die() {
     printf '[%s] [build-iso] ERROR: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
@@ -1116,7 +1131,10 @@ if [[ "$EDITION" != "core" ]]; then
     # helper and DIES if helm can't be fetched after 3 tries (just like
     # node_exporter/process-exporter below).
     log "Installing helm (live host) from get.helm.sh..."
-    HELM_VERSION="${HELM_VERSION:-v3.16.2}"
+    # Asked, not pinned — the same question this file already asks for the
+    # darksite copy of helm a thousand lines below.
+    HELM_VERSION="${HELM_VERSION:-$(_gh_tag helm/helm)}"
+    [[ -n "$HELM_VERSION" ]] || die "FATAL: could not resolve the current helm release"
     if _fetch_with_retry \
         "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH_DEB}.tar.gz" \
         /tmp/helm.tar.gz "helm"; then
@@ -1135,7 +1153,11 @@ if [[ "$EDITION" != "core" ]]; then
     # rogue qemu-kvm, the stuck zfs send, the misbehaving kubelet, etc.
     # Static Go binary from ncabatoff/process-exporter releases.
     log "Installing process-exporter from GitHub..."
-    PROCESS_EXPORTER_VERSION="${PROCESS_EXPORTER_VERSION:-0.8.7}"
+    # Resolved, not pinned. The v prefix is stripped because this project's
+    # asset names carry the bare version.
+    PROCESS_EXPORTER_VERSION="${PROCESS_EXPORTER_VERSION:-$(_gh_tag ncabatoff/process-exporter)}"
+    PROCESS_EXPORTER_VERSION="${PROCESS_EXPORTER_VERSION#v}"
+    [[ -n "$PROCESS_EXPORTER_VERSION" ]] || die "FATAL: could not resolve the current process-exporter release"
     case "$ARCH" in
     x86_64) _pe_arch="amd64" ;;
     aarch64) _pe_arch="arm64" ;;
@@ -1160,7 +1182,10 @@ if [[ "$EDITION" != "core" ]]; then
     # test VM is CPU-starved or disk-thrashed without SSH'ing into each one.
     # Static Go binary from inovex/prometheus-libvirt-exporter releases.
     log "Installing libvirt-exporter from GitHub..."
-    LIBVIRT_EXPORTER_VERSION="${LIBVIRT_EXPORTER_VERSION:-2.3.1}"
+    # Resolved, not pinned (bare version in the asset name, as above).
+    LIBVIRT_EXPORTER_VERSION="${LIBVIRT_EXPORTER_VERSION:-$(_gh_tag inovex/prometheus-libvirt-exporter)}"
+    LIBVIRT_EXPORTER_VERSION="${LIBVIRT_EXPORTER_VERSION#v}"
+    [[ -n "$LIBVIRT_EXPORTER_VERSION" ]] || die "FATAL: could not resolve the current prometheus-libvirt-exporter release"
     case "$ARCH" in
     x86_64) _lvexp_arch="amd64" ;;
     aarch64) _lvexp_arch="arm64" ;;
@@ -1983,6 +2008,15 @@ if [[ "$EDITION" != "core" ]]; then
     # "lh build failed — F5 will fall back to journalctl". Six fatal compiler
     # lines per build, invisible under the audit tab's warning noise.
 
+    # Resolved, not pinned (see _gh_tag).
+    _LOKI_V="$(_gh_tag grafana/loki)"
+    [[ -n "$_LOKI_V" ]] || die "FATAL: could not resolve the current loki release"
+    # Resolved, not pinned (see _gh_tag).
+    _SMART_V="$(_gh_tag prometheus-community/smartctl_exporter)"
+    [[ -n "$_SMART_V" ]] || die "FATAL: could not resolve the current smartctl_exporter release"
+    # Resolved, not pinned (see _gh_tag).
+    _ZFSEXP_V="$(_gh_tag pdf/zfs_exporter)"
+    [[ -n "$_ZFSEXP_V" ]] || die "FATAL: could not resolve the current zfs_exporter release"
     # ── Observability stack — zfs_exporter, smartctl_exporter, loki, promtail ─
     # These are Go binaries downloaded from GitHub releases and installed to
     # /usr/local/bin in the rootfs. Systemd units + configs come in via
@@ -1995,7 +2029,7 @@ if [[ "$EDITION" != "core" ]]; then
     _obs_ok=1
     # zfs_exporter
     if curl -fsSL -o "${_obs_tmp}/zfs_exporter.tgz" \
-        "https://github.com/pdf/zfs_exporter/releases/download/v2.3.8/zfs_exporter-2.3.8.linux-amd64.tar.gz" \
+        "https://github.com/pdf/zfs_exporter/releases/download/${_ZFSEXP_V}/zfs_exporter-${_ZFSEXP_V#v}.linux-amd64.tar.gz" \
         >>"$LOG_FILE" 2>&1; then
         tar xzf "${_obs_tmp}/zfs_exporter.tgz" -C "${_obs_tmp}" >>"$LOG_FILE" 2>&1
         install -m 0755 "${_obs_tmp}"/zfs_exporter-*/zfs_exporter "${ROOTFS}/usr/local/bin/zfs_exporter"
@@ -2005,7 +2039,7 @@ if [[ "$EDITION" != "core" ]]; then
     fi
     # smartctl_exporter
     if curl -fsSL -o "${_obs_tmp}/smartctl_exporter.tgz" \
-        "https://github.com/prometheus-community/smartctl_exporter/releases/download/v0.14.0/smartctl_exporter-0.14.0.linux-amd64.tar.gz" \
+        "https://github.com/prometheus-community/smartctl_exporter/releases/download/${_SMART_V}/smartctl_exporter-${_SMART_V#v}.linux-amd64.tar.gz" \
         >>"$LOG_FILE" 2>&1; then
         tar xzf "${_obs_tmp}/smartctl_exporter.tgz" -C "${_obs_tmp}" >>"$LOG_FILE" 2>&1
         install -m 0755 "${_obs_tmp}"/smartctl_exporter-*/smartctl_exporter "${ROOTFS}/usr/local/bin/smartctl_exporter"
@@ -2015,7 +2049,7 @@ if [[ "$EDITION" != "core" ]]; then
     fi
     # loki (single binary, zip archive)
     if curl -fsSL -o "${_obs_tmp}/loki.zip" \
-        "https://github.com/grafana/loki/releases/download/v3.3.2/loki-linux-amd64.zip" \
+        "https://github.com/grafana/loki/releases/download/${_LOKI_V}/loki-linux-amd64.zip" \
         >>"$LOG_FILE" 2>&1; then
         (cd "${_obs_tmp}" && unzip -o loki.zip >>"$LOG_FILE" 2>&1)
         install -m 0755 "${_obs_tmp}/loki-linux-amd64" "${ROOTFS}/usr/local/bin/loki"
@@ -2025,7 +2059,7 @@ if [[ "$EDITION" != "core" ]]; then
     fi
     # promtail (same release)
     if curl -fsSL -o "${_obs_tmp}/promtail.zip" \
-        "https://github.com/grafana/loki/releases/download/v3.3.2/promtail-linux-amd64.zip" \
+        "https://github.com/grafana/loki/releases/download/${_LOKI_V}/promtail-linux-amd64.zip" \
         >>"$LOG_FILE" 2>&1; then
         (cd "${_obs_tmp}" && unzip -o promtail.zip >>"$LOG_FILE" 2>&1)
         install -m 0755 "${_obs_tmp}/promtail-linux-amd64" "${ROOTFS}/usr/local/bin/promtail"
@@ -2357,11 +2391,14 @@ if [[ "$EDITION" != "core" ]]; then
         die "FATAL: kldload-install-kiosk is missing from includes.chroot/usr/local/sbin"
     log "Install kiosk: unit + fallback + generator installed; unit left un-enabled for the generator"
 
+    # Resolved, not pinned (see _gh_tag).
+    _EBPFEXP_V="$(_gh_tag cloudflare/ebpf_exporter)"
+    [[ -n "$_EBPFEXP_V" ]] || die "FATAL: could not resolve the current ebpf_exporter release"
     # ebpf_exporter (Cloudflare) — per-device block I/O latency histograms.
     # BPF programs + yaml configs ship via includes.chroot/etc/ebpf_exporter.
     _ebpf_tmp="$(mktemp -d)"
     if curl -fsSL -o "${_ebpf_tmp}/ebpf.tgz" \
-        "https://github.com/cloudflare/ebpf_exporter/releases/download/v2.5.1/ebpf_exporter_with_examples.x86_64.tar.gz" \
+        "https://github.com/cloudflare/ebpf_exporter/releases/download/${_EBPFEXP_V}/ebpf_exporter_with_examples.x86_64.tar.gz" \
         >>"$LOG_FILE" 2>&1; then
         tar xzf "${_ebpf_tmp}/ebpf.tgz" -C "${_ebpf_tmp}" --strip-components=1 >>"$LOG_FILE" 2>&1
         install -m 0755 "${_ebpf_tmp}/ebpf_exporter" "${ROOTFS}/usr/local/bin/ebpf_exporter"
