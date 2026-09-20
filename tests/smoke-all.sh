@@ -39,7 +39,15 @@ esac
 
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the SYMLINK CHAIN, not the invocation path. kldload-test is
+# /usr/local/sbin/kldload-test -> /usr/local/bin/kldload-test ->
+# /usr/local/share/kldload/tests/smoke-all.sh, and sudo's secure_path puts sbin
+# first, so BASH_SOURCE[0] was /usr/local/sbin/kldload-test and every sibling
+# suite was looked for in /usr/local/sbin. On fiend, debian/server, 2026-09-19:
+# all three suites SKIPPED, 0 passes, and the run still printed "ALL TESTS
+# PASSED — this system is verified and ready for production use".
+_SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$_SELF")" && pwd)"
 REPORT="/tmp/kldload-smoke-report-$(date -u +%Y%m%d-%H%M%S).txt"
 # _count_results — how many result lines of one kind a suite emitted.
 #
@@ -113,10 +121,17 @@ tee_report() {
 } | tee_report
 
 # ── Run test suites based on profile ─────────────────────────────────────────
+# SUITES_MISSING — suites this run could not find. A missing suite is not a
+# skip: skipping is what this script does on purpose for a profile that has no
+# desktop, while a suite whose FILE is absent means the run tested nothing it
+# thought it was testing. Counted here and made fatal in the final report.
+SUITES_MISSING=0
+
 run_suite() {
     local name="$1" script="$2"
     if [[ ! -f "$script" ]]; then
-        echo -e "  ${Y}SKIP${N}  $name — script not found: $script" | tee_report
+        echo -e "  ${R}MISSING${N}  $name — script not found: $script" | tee_report
+        SUITES_MISSING=$((SUITES_MISSING + 1))
         return
     fi
 
@@ -292,7 +307,25 @@ fi
     echo -e "  ${Y}WARN: $TOTAL_WARN${N}"
     echo ""
 
-    if [[ $TOTAL_FAIL -eq 0 ]]; then
+    if [[ $SUITES_MISSING -gt 0 ]]; then
+        # A gate that cannot run is not a gate. This branch exists because the
+        # old one printed "verified and ready for production use" over a run
+        # where every suite file was missing and nothing had been checked.
+        echo -e "  ${R}INCONCLUSIVE — $SUITES_MISSING suite(s) could not be found${N}"
+        echo ""
+        if [[ $TOTAL_PASS -eq 0 ]]; then
+            echo "  This run tested NOTHING it believed it was testing. Do not read"
+            echo "  the counts above as a verdict; fix the install and re-run."
+        else
+            echo "  The counts above cover only the suites that were found. The"
+            echo "  missing ones are named above and were NOT run."
+        fi
+    elif [[ $TOTAL_PASS -eq 0 ]]; then
+        echo -e "  ${R}INCONCLUSIVE — 0 checks passed${N}"
+        echo ""
+        echo "  No suite produced a single result. That is a broken run, not a"
+        echo "  clean machine."
+    elif [[ $TOTAL_FAIL -eq 0 ]]; then
         echo -e "  ${G}ALL TESTS PASSED${N}"
         echo ""
         echo "  This system is verified and ready for production use."
@@ -310,6 +343,11 @@ echo -e "${C}══════════════════════�
 # Exit status is a boolean, not a count: `exit $TOTAL_FAIL` is taken mod 256 by
 # the shell, so a run with exactly 256 failures would have reported success.
 if ((TOTAL_FAIL > 0)); then
+    exit 1
+fi
+# An inconclusive run must not exit 0 either, or the driver that greps for a
+# clean status records "verified" for a machine nothing ran against.
+if ((SUITES_MISSING > 0 || TOTAL_PASS == 0)); then
     exit 1
 fi
 exit 0
