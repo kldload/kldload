@@ -358,4 +358,43 @@ if have wg; then
     ((_wg_any == 0)) && _warn "WireGuard" "no interfaces up"
 fi
 
+# ─── Build provenance ───────────────────────────────────────────────────────
+# Can this machine say what built it?
+#
+# Since the darksite started resolving its Kubernetes stack fresh, the commit
+# alone does not answer that: two ISOs from one commit can carry different
+# Cilium versions. The answer is commit + stack-lock digest, and BOTH have to
+# survive the install -- build-iso writes them into the live rootfs, and a
+# target is debootstrapped fresh and inherits nothing from it.
+#
+# HISTORY: fiend, debian/kvm, 2026-09-20. The ISO carried both and the
+# installed machine had neither: /etc/kldload/VERSION absent, /root/darksite
+# holding only helm-charts, and the rsync that fills it excluding '*.lock'.
+# kube-init would not have known which Cilium the image shipped. Both were
+# verified in the ISO and never on a machine, which is why this check exists.
+_section "Build provenance"
+
+if [[ -r /etc/kldload/VERSION ]]; then
+    if grep -qE '^commit +=' /etc/kldload/VERSION; then
+        _pass "VERSION records the build: $(sed -n 's/^commit *= *//p' /etc/kldload/VERSION)"
+    else
+        _fail "build provenance" "/etc/kldload/VERSION exists with no commit line"
+    fi
+    if grep -qE '^k8s_stack_lock +=' /etc/kldload/VERSION; then
+        _pass "VERSION records the stack lock digest"
+    else
+        _warn "build provenance" "VERSION has no k8s_stack_lock — built before that existed, or it was dropped"
+    fi
+else
+    _fail "build provenance" "/etc/kldload/VERSION is absent — this machine cannot say what built it"
+fi
+
+if [[ -r /root/darksite/k8s-stack.lock ]]; then
+    _pass "k8s stack lock on disk: $(sed -n 's/^K8S_VERSION=//p' /root/darksite/k8s-stack.lock), $(grep -c '^IMAGE=' /root/darksite/k8s-stack.lock) images"
+elif [[ -d /root/darksite ]]; then
+    _fail "k8s stack lock" "/root/darksite exists without k8s-stack.lock — kube-init cannot tell which Cilium this image carries"
+else
+    _warn "k8s stack lock" "no darksite on this machine (a net-image install?)"
+fi
+
 summary

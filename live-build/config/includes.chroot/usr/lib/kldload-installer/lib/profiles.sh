@@ -3162,6 +3162,38 @@ WPEOF
             k_log "WARN: no helm charts in the live darksite — k8s deploy will need a network"
         fi
 
+        # The k8s stack lock: WHICH Kubernetes, Cilium, MetalLB, Argo and CSI
+        # this image was built with.
+        #
+        # kube-init on the target reads it to learn which Cilium to install,
+        # and it is half of the answer to "what is this machine running" (the
+        # other half is the commit in VERSION below). It sits one level ABOVE
+        # helm-charts, so the rsync of that directory never saw it — and that
+        # rsync excludes '*.lock' anyway, for helm's own Chart.lock files, so
+        # putting it there would not have worked either. Verified absent on a
+        # freshly installed machine before this existed (fiend, debian/kvm,
+        # 2026-09-20): the ISO had it, the install did not.
+        if [[ -f /root/darksite/k8s-stack.lock ]]; then
+            install -m 0644 /root/darksite/k8s-stack.lock "${darksite_tgt}/k8s-stack.lock"
+            k_log "k8s stack lock installed: $(sed -n 's/^K8S_VERSION=//p' "${darksite_tgt}/k8s-stack.lock"), $(grep -c '^IMAGE=' "${darksite_tgt}/k8s-stack.lock") images"
+        else
+            k_log "WARN: no k8s-stack.lock in the live darksite — kube-init will not know which Cilium this image carries"
+        fi
+
+        # VERSION: the build this machine came from.
+        #
+        # build-iso writes it into the LIVE rootfs so the installer can read
+        # it, but a target is debootstrapped fresh and inherits nothing, so
+        # every installed machine has been unable to say what built it. With
+        # the stack now resolved per build, commit + lock digest is the only
+        # answer there is.
+        if [[ -f /etc/kldload/VERSION ]]; then
+            install -D -m 0644 /etc/kldload/VERSION "${target}/etc/kldload/VERSION"
+            k_log "build provenance installed: $(sed -n 's/^commit *= *//p' /etc/kldload/VERSION)"
+        else
+            k_log "WARN: /etc/kldload/VERSION absent in the live environment — the target cannot record its build"
+        fi
+
         # Copy support scripts if present
         for f in kldload-syscheck.sh audit.sh; do
             [[ -f "/root/darksite/${f}" ]] && cp "/root/darksite/${f}" "${darksite_tgt}/${f}" && chmod +x "${darksite_tgt}/${f}"
