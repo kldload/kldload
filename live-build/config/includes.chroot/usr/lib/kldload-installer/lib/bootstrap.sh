@@ -481,7 +481,20 @@ KLDLOAD_ENABLE_AI=${KLDLOAD_ENABLE_AI:-0}
 KLDLOAD_AI_PULL_MODEL=${KLDLOAD_AI_PULL_MODEL:-0}
 KLDLOAD_BOB_MODEL=${KLDLOAD_BOB_MODEL:-recommended}
 KLDLOAD_BOB_DARKSITE=${KLDLOAD_BOB_DARKSITE:-0}
-KLDLOAD_ENABLE_KVM=${KLDLOAD_ENABLE_KVM:-0}
+# KVM is ON by default on every profile but core.
+#
+# It was a checkbox, defaulting off, and that shipped vmxplore, kfire and the
+# VM half of the web console onto a desktop with no hypervisor under any of
+# them: the icon was on the dock, the tool started, and $(virsh) was not even
+# installed (fiend .120, debian/desktop, 2026-09-19). The whole stack measures
+# 118 MB on Debian -- 58 packages, two minutes -- which is not a price worth a
+# question, and the lab components (klab, k8s, zfslab) all require it anyway.
+# core stays bare on purpose: it is ZFS on root and nothing else.
+if [[ "${KLDLOAD_PROFILE:-server}" == "core" ]]; then
+    KLDLOAD_ENABLE_KVM=${KLDLOAD_ENABLE_KVM:-0}
+else
+    KLDLOAD_ENABLE_KVM=${KLDLOAD_ENABLE_KVM:-1}
+fi
 KLDLOAD_BUILD_IMAGES=${KLDLOAD_BUILD_IMAGES:-0}
 KLDLOAD_ENABLE_K8S=${KLDLOAD_ENABLE_K8S:-0}
 KLDLOAD_K8S_BOOTSTRAP=${KLDLOAD_K8S_BOOTSTRAP:-0}

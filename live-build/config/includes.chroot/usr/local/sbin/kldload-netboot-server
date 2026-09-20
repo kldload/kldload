@@ -1069,6 +1069,13 @@ _write_armed_install() {
             for k in enc:KLDLOAD_ZFS_ENCRYPT sb:KLDLOAD_ENABLE_SECURE_BOOT kvm:KLDLOAD_ENABLE_KVM \
                 img:KLDLOAD_BUILD_IMAGES k8s:KLDLOAD_K8S_BOOTSTRAP zfs:KLDLOAD_KLAB_ZFS_DEV ai:KLDLOAD_ENABLE_AI; do
                 v="$(_answer_val "$f" "${k#*:}")"
+                # An UNSET key takes the installer's default, not 0. Only KVM
+                # has a non-zero one (every profile but core, 2026-09-19) --
+                # printing kvm=0 here while the install enables it would make
+                # this menu lie about what the operator is about to get.
+                if [[ -z "$v" && "${k%%:*}" == kvm && "$p" != core ]]; then
+                    v=1
+                fi
                 [[ "$v" == 1 ]] || v=0
                 printf 'set %s %s\n' "${k%%:*}" "$v"
             done
