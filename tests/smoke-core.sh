@@ -122,7 +122,13 @@ _section "SSH"
 test_service_active "sshd running" "sshd"
 test_service_enabled "sshd enabled" "sshd"
 test_file "SSH host key exists" "/etc/ssh/ssh_host_ed25519_key.pub"
-test_succeeds "SSH port open" "ss -tlnp | grep -q :22"
+# NOT `ss -tlnp | grep -q :22`: grep -q exits on its first match, ss takes
+# SIGPIPE, and under pipefail that is rc=141 — a FAILURE reported on a
+# machine whose port 22 is open. The window widens with the number of
+# listeners, so it showed up first on a storage box serving NFS, SMB and
+# iSCSI (fedora/storage, 2026-09-20), over an ssh session that was itself
+# proof the port was open. Capture first, then search.
+test_succeeds "SSH port open" '[[ "$(ss -tlnH 2>/dev/null)" == *":22 "* ]]'
 
 # ── Networking ───────────────────────────────────────────────────────────────
 _section "Networking"
@@ -130,7 +136,7 @@ _section "Networking"
 # no `grep -q`: -q exits at first match and SIGPIPEs `ip` → exit 141 under
 # pipefail, failing the test on a box that plainly has an IP (e7b1b4f class)
 test_succeeds "Has an IP address" "ip -4 addr show | grep 'inet ' >/dev/null"
-test_succeeds "Default route exists" "ip route show default | grep -q 'default'"
+test_succeeds "Default route exists" '[[ -n "$(ip route show default 2>/dev/null)" ]]'
 test_succeeds "DNS resolves" "getent hosts github.com"
 
 if [[ "$DISTRO" == "deb" ]]; then

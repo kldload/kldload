@@ -30,7 +30,9 @@ test_succeeds "EFI mounted" "mountpoint -q /boot/efi"
 # ── SSH & Network ────────────────────────────────────────────────────────────
 _section "SSH & Network"
 test_service_active "sshd" "sshd"
-test_succeeds "Has IP" "ip -4 addr show | grep -q 'inet '"
+# Captured, not piped: `| grep -q` under pipefail is rc=141 when grep
+# exits first (see the SSH check in smoke-core.sh).
+test_succeeds "Has IP" '[[ "$(ip -4 addr show 2>/dev/null)" == *"inet "* ]]'
 
 # ── Secure Boot ──────────────────────────────────────────────────────────────
 _section "Secure Boot"
