@@ -180,7 +180,13 @@ for ed in "${EDITIONS[@]}"; do
     say "${ed}: bench machine at ${cur}"
 
     # 2. arm, then send it to PXE
-    _mark="$(wc -l <"$NGINX_LOG" 2>/dev/null || echo 0)"
+    # Byte offset, not a line number. The first version took `wc -l` and then
+    # read from `tail -n +$_mark`, which re-reads the LAST EXISTING line -- and
+    # that line was already an /answers/ GET from the previous edition. So the
+    # fetch "completed" in 0 s, the sweep disarmed before the machine had even
+    # PXE-booted, and fiend got a 404 for its armed menu and fell back to local
+    # boot (23:09:38, 2026-09-19). An offset in bytes cannot re-read anything.
+    _mark="$(stat -c %s "$NGINX_LOG" 2>/dev/null || echo 0)"
     sudo -n "$SERVER" arm-install "$MAC" "$ANS" --netdev "$NETDEV" >>"$LOG" 2>&1 || {
         say "${ed}: arm FAILED"
         printf '| %s | %s/%s | arm failed | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
@@ -192,7 +198,7 @@ for ed in "${EDITIONS[@]}"; do
     # 3. wait for the answers fetch, then disarm
     fetched=0 t=0
     while ((t < FETCH_WAIT)); do
-        if sudo -n tail -n +"$_mark" "$NGINX_LOG" 2>/dev/null | grep -q "GET /answers/"; then
+        if sudo -n tail -c "+$((_mark + 1))" "$NGINX_LOG" 2>/dev/null | grep -q "GET /answers/"; then
             fetched=1
             break
         fi
