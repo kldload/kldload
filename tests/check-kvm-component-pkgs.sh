@@ -111,4 +111,41 @@ compare "debian" debian
 compare "arch" arch
 compare "fedora/rpm" fedora
 
+# ── k_kvm_wanted's truth table ──────────────────────────────────────────────
+#
+# One answer decides the package list, the ZFS layout, the units AND the
+# manifest. When it lived in four places plus a default inside a function, the
+# manifest recorded KVM=1 while the package phase used 0, and a storage install
+# came up with no libvirt while its own manifest said it had been asked for
+# (fiend, deb-11-storage, 2026-09-20). Executed, not read.
+want() { # want <profile> <explicit 0/1 or empty> <expected yes|no>
+    local got
+    # env with an ARRAY: `${2:+KLDLOAD_ENABLE_KVM="$2"}` as a command prefix is
+    # not an assignment after word splitting — bash tried to RUN it and the
+    # gate exited 127 (2026-09-20).
+    local -a e=(KLDLOAD_LOG_DIR="${SCRATCH}/log" KLDLOAD_STATE_DIR="${SCRATCH}/state"
+        KLDLOAD_PROFILE="$1")
+    [[ -n "$2" ]] && e+=(KLDLOAD_ENABLE_KVM="$2")
+    got="$(
+        env "${e[@]}" bash -c \
+            'source "'"$ROOT"'/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/common.sh" >/dev/null 2>&1
+             k_kvm_wanted && echo yes || echo no'
+    )"
+    if [[ "$got" != "$3" ]]; then
+        echo "check-kvm-component-pkgs: k_kvm_wanted ${1}/${2:-unset} = ${got}, expected ${3}" >&2
+        rc=1
+    fi
+}
+want kvm "" yes
+want kvm 0 yes # the profile IS the statement; a stray 0 must not disarm it
+want kvm 1 yes
+want core "" no # core is ZFS on root and nothing else
+want core 0 no
+want core 1 yes # asked for explicitly: give it
+want storage "" yes
+want storage 0 no
+want desktop "" yes
+want desktop 0 no
+((rc != 0)) || echo "check-kvm-component-pkgs: k_kvm_wanted agrees with its truth table (10 cases)"
+
 exit "$rc"

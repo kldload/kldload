@@ -219,3 +219,33 @@ k_in_chroot() {
         PATH=/usr/sbin:/usr/bin:/sbin:/bin \
         "$@"
 }
+
+# k_kvm_wanted — does THIS install want the hypervisor? Exit 0 for yes.
+#
+# ONE answer, for the package list, the ZFS layout, the units and the manifest.
+# It used to be a bare ${KLDLOAD_ENABLE_KVM:-0} repeated at four gates, plus a
+# default set inside k_write_manifest() -- which is a function, so the default
+# only existed while the manifest was being written. The result: the manifest
+# recorded KVM=1 and the package phase ran with 0, and a storage install came
+# up with no libvirt at all while its own manifest said it had been asked for
+# (fiend, deb-11-storage, 2026-09-20). A default that lives in one function is
+# not a default.
+#
+# Precedence, strongest first:
+#   1. PROFILE=kvm always wants it. The profile IS the statement, and an
+#      answers file that says kvm=0 on a hypervisor profile is a typo — the
+#      old gate read `profile == kvm || ENABLE_KVM == 1` for that reason, and
+#      shipping a KVM host with no libvirt because of one stray key would be a
+#      worse outcome than ignoring the key.
+#   2. An explicit 0 or 1 from the answers file.
+#   3. Otherwise: every profile but core, because vmxplore and kfire ship
+#      everywhere and 118 MB is not worth a question.
+k_kvm_wanted() {
+    [[ "${KLDLOAD_PROFILE:-server}" == "kvm" ]] && return 0
+    case "${KLDLOAD_ENABLE_KVM:-}" in
+    1) return 0 ;;
+    0) return 1 ;;
+    esac
+    [[ "${KLDLOAD_PROFILE:-server}" == "core" ]] && return 1
+    return 0
+}

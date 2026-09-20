@@ -709,7 +709,7 @@ k_profile_optional_packages() {
     #   Debian/Ubuntu: split packages (libvirt-daemon-system, virtinst, ovmf)
     #   RPM (CentOS/Rocky/RHEL/Fedora): further split — individual driver packages
     #     must be listed explicitly because the meta-packages don't exist
-    if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
+    if k_kvm_wanted; then
         # kfire (Firecracker stamping) and vmxplore both build a NoCloud seed
         # with mkisofs and read their own JSON with jq. xorriso ships mkisofs
         # on the RPM families, genisoimage on Debian/Ubuntu (already below),
@@ -3324,7 +3324,7 @@ STORAGENFT
     fi
 
     # ── KVM Host profile: ZFS datasets, ARC tuning, sysctl, replication ────────
-    if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
+    if k_kvm_wanted; then
         k_log "Configuring KVM host with ZFS-optimized storage"
 
         # VM zvol parent — canmount=off, VMs are zvols accessed via /dev/zvol/rpool/vms/
@@ -3645,7 +3645,7 @@ REPL
 
     fi
     # ── back to the KVM host specifics ───────────────────────────────────────
-    if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
+    if k_kvm_wanted; then
         # Hourly VM snapshot timer
         mkdir -p "${target}/etc/systemd/system"
         cat >"${target}/etc/systemd/system/kvm-snapshot.service" <<'SNAPSVC'
