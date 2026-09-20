@@ -130,6 +130,8 @@ chmod +x "$WORK/kubeadm"
 # stderr is KEPT: when this returned nothing the reason was a noexec mount, and
 # discarding it turned a one-line diagnosis into an afternoon.
 _kubeadm_err="$WORK/kubeadm.err"
+# kubeadm failing is handled by the count check below, which can say WHY
+# (it prints kubeadm's stderr); dying here would lose that message.
 mapfile -t _k8s_images < <("$WORK/kubeadm" config images list --kubernetes-version "$K8S_VERSION" 2>"$_kubeadm_err" || true)
 ((${#_k8s_images[@]} >= 5)) ||
     die "kubeadm listed ${#_k8s_images[@]} images (expected >=5). kubeadm said: $(head -2 "$_kubeadm_err" 2>/dev/null | tr '\n' ' ')"
@@ -140,11 +142,13 @@ _all_images+=("${_k8s_images[@]}")
 
 for _entry in "${CHARTS[@]}"; do
     IFS='|' read -r _rname _rurl _cname <<<"$_entry"
-    _ver="$(helm search repo "${_rname}/${_cname}" --versions -o json 2>/dev/null |
-        python3 -c 'import json,sys
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(1)
-print(d[0]["version"] if d else "")' 2>/dev/null || true)"
+    # An empty answer here is caught on the line after this block and is
+    # fatal there, with the chart named -- dying inside the pipe would not say
+    # which chart could not be resolved.
+    _vjson="$(helm search repo "${_rname}/${_cname}" --versions -o json 2>/dev/null || true)"
+    # Malformed or empty JSON leaves _ver empty, which the next line makes
+    # fatal with the chart named.
+    _ver="$(printf '%s' "$_vjson" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["version"] if d else "")' 2>/dev/null || true)"
     [[ -n "$_ver" ]] || die "could not resolve a version for ${_rname}/${_cname}"
     say "${_cname} ${_ver}"
     _chart_lines+=("${_rname}|${_rurl}|${_cname}|${_ver}")
@@ -154,17 +158,22 @@ print(d[0]["version"] if d else "")' 2>/dev/null || true)"
     # build actually enables are passed where they matter.
     _extra=()
     [[ "$_cname" == cilium ]] && _extra=(--set hubble.relay.enabled=true --set hubble.ui.enabled=true --set gatewayAPI.enabled=true)
-    mapfile -t _imgs < <(helm template "$_cname" "${_rname}/${_cname}" --version "$_ver" "${_extra[@]}" 2>/dev/null |
-        grep -oE '^[[:space:]]*image:[[:space:]]*"?[^"[:space:]]+' |
-        sed -E 's/^[[:space:]]*image:[[:space:]]*"?//' | sort -u || true)
+    # A chart that renders no images is fatal two lines down, where the chart
+    # and version can be named; swallowing here only defers that check.
+    _rendered="$(helm template "$_cname" "${_rname}/${_cname}" --version "$_ver" "${_extra[@]}" 2>/dev/null || true)"
+    # No matching lines is an empty list, which is fatal below -- grep exiting
+    # 1 on no matches is the same information, said less usefully.
+    mapfile -t _imgs < <(printf '%s' "$_rendered" | grep -oE '^[[:space:]]*image:[[:space:]]*"?[^"[:space:]]+' | sed -E 's/^[[:space:]]*image:[[:space:]]*"?//' | sort -u || true)
     ((${#_imgs[@]})) || die "helm template ${_cname} ${_ver} produced no images — the chart or its values changed shape"
     _all_images+=("${_imgs[@]}")
 done
 
 # ── CLI tooling, resolved the same way ──────────────────────────────────────
 _gh_latest() { # _gh_latest <owner/repo> — newest tag, or empty
-    curl -fsSL --max-time 20 "https://api.github.com/repos/${1}/releases/latest" 2>/dev/null |
-        grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4 || true
+    # An unreachable API yields empty, and every caller treats empty as fatal
+    # for its own tool -- so the swallow here is what lets the error name the
+    # tool rather than the curl.
+    curl -fsSL --max-time 20 "https://api.github.com/repos/${1}/releases/latest" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4 || true
 }
 HELM_CLI_VERSION="$(_gh_latest helm/helm)"
 CILIUM_CLI_VERSION="$(_gh_latest cilium/cilium-cli)"
