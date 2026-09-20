@@ -196,19 +196,23 @@ if [[ -n "${_failed// /}" ]]; then
 fi
 
 # ─── 5. Estate ──────────────────────────────────────────────────────────────
+# `grep -c X || echo 0` prints TWO lines when there are no matches — grep's own
+# "0" and then the echo — which shifted every printf argument after it and put
+# stray zeroes through the middle of this table (3-kvm, 2026-09-20). It is the
+# same shape the engineering rules already record. _count says it once.
 echo "## Estate"
 echo
 echo '```'
 if have virsh; then
     printf '%-18s %s\n' \
-        "VMs defined" "$(S virsh list --all --name | grep -c . || echo 0)" \
-        "VMs running" "$(S virsh list --name | grep -c . || echo 0)" \
-        "goldens sealed" "$(S zfs list -H -t snapshot -o name -r rpool/vms 2>/dev/null | grep -c '@golden' || echo 0)" \
+        "VMs defined" "$(S virsh list --all --name | _count .)" \
+        "VMs running" "$(S virsh list --name | _count .)" \
+        "goldens sealed" "$(S zfs list -H -t snapshot -o name -r rpool/vms 2>/dev/null | _count '@golden')" \
         "inventory hosts" "$(kldload-inventory --list 2>/dev/null | python3 -c 'import json,sys
 try: print(len(json.load(sys.stdin).get("_meta",{}).get("hostvars",{})))
 except Exception: print("?")' || echo '?')" \
-        "prom targets" "$(S bash -c 'cat /etc/prometheus/targets/*.json 2>/dev/null' | grep -oc '"vm"' || echo 0)" \
-        "wg peers" "$(S wg show all peers 2>/dev/null | grep -c . || echo 0)"
+        "prom targets" "$(S bash -c 'cat /etc/prometheus/targets/*.json 2>/dev/null' | grep -o '"vm"' | _count .)" \
+        "wg peers" "$(S wg show all peers 2>/dev/null | _count .)"
 else
     echo "no hypervisor on this machine (virsh absent)"
 fi

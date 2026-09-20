@@ -91,10 +91,19 @@ LOG="${RESULTS}/sweep.log"
 
 say() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
+# ssh_bench <ip> <command...> — run a command on the bench machine.
+#
+# SSH_T sets the timeout for one call. The default of 120s is right for the
+# probes this script makes constantly (what profile are you, are you up), and
+# WRONG for the two calls that run a test suite: profile-report.sh takes as
+# long as the smoke suite does, and at 120s it was killed mid-write, leaving a
+# report that stopped after the "## Smoke suite" heading with no verdict at all
+# (3-kvm, 2026-09-20). A truncated report is worse than none, because the
+# summary row still says the edition ran.
 ssh_bench() { # ssh_bench <ip> <command...>
     local ip="$1"
     shift
-    SSHPASS="$BENCH_PASS" timeout 120 sshpass -e ssh \
+    SSHPASS="$BENCH_PASS" timeout "${SSH_T:-120}" sshpass -e ssh \
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=error \
         -o ConnectTimeout=6 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
         "${BENCH_USER}@${ip}" "$@" 2>/dev/null
@@ -156,8 +165,8 @@ command -v sshpass >/dev/null || {
     echo
     echo "Image: \`$(sudo -n "$SERVER" status 2>/dev/null | sed -n 's/.*commit *= *//p' | head -1 || echo unknown)\`"
     echo
-    echo '| edition | distro/profile | install | verdict | pass | fail | warn | report |'
-    echo '|---|---|---|---|---|---|---|---|'
+    echo '| edition | distro/profile | install | verdict | pass | fail | warn | lifecycle | report |'
+    echo '|---|---|---|---|---|---|---|---|---|'
 } >"$SUMMARY"
 
 say "sweep ${RUN_ID}: ${#EDITIONS[@]} edition(s) — ${EDITIONS[*]}"
@@ -170,7 +179,7 @@ for ed in "${EDITIONS[@]}"; do
     mkdir -p "$OUT"
     if [[ ! -r "$ANS" ]]; then
         say "${ed}: SKIP — no answers file at ${ANS}"
-        printf '| %s | — | no answers file | SKIP | | | | |\n' "$ed" >>"$SUMMARY"
+        printf '| %s | — | no answers file | SKIP | | | |  |\n' "$ed" >>"$SUMMARY"
         continue
     fi
     want_profile="$(sudo -n grep -hE '^KLDLOAD_PROFILE=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
@@ -202,7 +211,7 @@ for ed in "${EDITIONS[@]}"; do
     done
     if [[ -z "$cur" && "$_adopt" == 0 ]]; then
         say "${ed}: cannot find the bench machine on ${SUBNET}.0/24 — is it powered on?"
-        printf '| %s | %s/%s | machine not found | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
+        printf '| %s | %s/%s | machine not found | FAIL | | | |  |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
         RC=1
         continue
     fi
@@ -219,7 +228,7 @@ for ed in "${EDITIONS[@]}"; do
     if ((_adopt == 0)); then
         sudo -n "$SERVER" arm-install "$MAC" "$ANS" --netdev "$NETDEV" >>"$LOG" 2>&1 || {
             say "${ed}: arm FAILED"
-            printf '| %s | %s/%s | arm failed | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
+            printf '| %s | %s/%s | arm failed | FAIL | | | |  |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
             RC=1
             continue
         }
@@ -241,7 +250,7 @@ for ed in "${EDITIONS[@]}"; do
         sudo -n "$SERVER" disarm "$MAC" >>"$LOG" 2>&1 || true
         if ((fetched == 0)); then
             say "${ed}: the installer never fetched its answers (${FETCH_WAIT}s) — disarmed"
-            printf '| %s | %s/%s | never PXE-booted | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
+            printf '| %s | %s/%s | never PXE-booted | FAIL | | | |  |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
             RC=1
             continue
         fi
@@ -265,7 +274,7 @@ for ed in "${EDITIONS[@]}"; do
     done
     if [[ -z "$ip" ]]; then
         say "${ed}: did not come back as ${want_profile} within ${INSTALL_WAIT}s"
-        printf '| %s | %s/%s | did not boot | FAIL | | | | |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
+        printf '| %s | %s/%s | did not boot | FAIL | | | |  |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
         RC=1
         continue
     fi
@@ -298,13 +307,47 @@ for ed in "${EDITIONS[@]}"; do
     # profile-report exits 1 when the machine has defects — which is a result
     # to be filed, not a reason to abandon the sweep. The report is judged by
     # its VERDICT line below.
-    ssh_bench "$ip" 'bash /tmp/profile-report.sh' >"${OUT}/report.md" 2>"${OUT}/report.stderr" || true
+    SSH_T=2400 ssh_bench "$ip" 'bash /tmp/profile-report.sh' >"${OUT}/report.md" 2>"${OUT}/report.stderr" || true
     verdict="$(grep -oE '\*\*(PASS|FAIL)[^*]*\*\*' "${OUT}/report.md" | head -1 | tr -d '*' || echo '?')"
+    # No verdict line means the report did not finish — killed by a timeout, or
+    # it died. Say TRUNCATED rather than leaving an empty cell that reads like
+    # a pass at a glance.
+    if [[ -z "$verdict" ]]; then
+        verdict="TRUNCATED ($(wc -l <"${OUT}/report.md") lines)"
+        RC=1
+    fi
     read -r sp sf sw < <(sed -n 's/^PASS \([0-9]*\)   FAIL \([0-9]*\)   WARN \([0-9]*\)$/\1 \2 \3/p' "${OUT}/report.md" | head -1)
     sp="${sp:-}" sf="${sf:-}" sw="${sw:-}"
 
+    # 5b. The ACTIVE estate test, where there is a hypervisor to run it on.
+    #
+    # profile-report covers the static picture (are the VMs in the inventory,
+    # are they up in Prometheus). This is the half that only a real create and
+    # delete can answer: does a new machine JOIN all four registries, and does
+    # deleting it make it LEAVE them. It ships in the image, so the shipped
+    # copy is what runs -- a harness that re-implements the thing it tests has
+    # blamed a healthy machine before.
+    if ssh_bench "$ip" 'command -v virsh >/dev/null 2>&1'; then
+        say "${ed}: estate lifecycle (clone -> join -> delete -> unjoin)"
+        ssh_bench "$ip" 'sudo -n bash /usr/local/share/kldload/tests/estate-lifecycle.sh' \
+            >"${OUT}/estate-lifecycle.txt" 2>&1 ||
+            true # its verdict is in the file; a failed lifecycle is a result, not a reason to stop
+        _lc="$(grep -cE '✗ FAIL' "${OUT}/estate-lifecycle.txt" 2>/dev/null || true)"
+        _lp="$(grep -cE '✓ PASS' "${OUT}/estate-lifecycle.txt" 2>/dev/null || true)"
+        say "${ed}: lifecycle ${_lp} passed, ${_lc} failed"
+        if [[ "${_lc:-0}" != 0 ]]; then
+            RC=1
+            # Surface it in the summary row rather than only in a side file.
+            _lifecycle="lifecycle ${_lp}/${_lc}"
+        else
+            _lifecycle="lifecycle ok (${_lp})"
+        fi
+    else
+        _lifecycle="no hypervisor"
+    fi
+
     # 6. the bundle
-    b="$(ssh_bench "$ip" 'bash /tmp/collect-bundle.sh' | tail -1 || true)"
+    b="$(SSH_T=900 ssh_bench "$ip" 'bash /tmp/collect-bundle.sh' | tail -1 || true)"
     if [[ -n "$b" ]]; then
         # stat, not du: on ZFS du reports allocated blocks, and a file written
         # seconds ago has not been flushed, so it reported a 165 MB bundle as
@@ -316,8 +359,9 @@ for ed in "${EDITIONS[@]}"; do
     fi
 
     # 7. the row
-    printf '| %s | %s/%s | ok | %s | %s | %s | %s | [report](%s/report.md) |\n' \
-        "$ed" "$want_distro" "$want_profile" "${verdict:-?}" "$sp" "$sf" "$sw" "$ed" >>"$SUMMARY"
+    printf '| %s | %s/%s | ok | %s | %s | %s | %s | %s | [report](%s/report.md) |\n' \
+        "$ed" "$want_distro" "$want_profile" "${verdict:-?}" "$sp" "$sf" "$sw" \
+        "${_lifecycle:-not run}" "$ed" >>"$SUMMARY"
     say "${ed}: ${verdict:-no verdict}"
     [[ "$verdict" == PASS* ]] || RC=1
 done
