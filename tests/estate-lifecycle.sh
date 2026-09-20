@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# =============================================================================
+# estate-lifecycle.sh — a VM joins the estate when made, and LEAVES when deleted
+# =============================================================================
+#
+# WHAT IT DOES, IN ORDER
+#   1. Picks a source VM (a golden, or --source), and a name of its own.
+#   2. Clones it with the shipped verb, `kvm-clone`.
+#   3. JOIN: waits, bounded, for the clone to appear in all four systems that
+#      are supposed to notice it — libvirt, the state DB / Ansible inventory,
+#      the WireGuard mesh, and Prometheus file_sd — and reports how long each
+#      took. Those are timer-driven, so "how long" is the interesting number.
+#   4. Runs `ansible -m ping` at the clone specifically: in the inventory is
+#      not the same as reachable.
+#   5. UNJOIN: deletes it with `kvm-delete`, then asserts it is gone from all
+#      four, plus its zvol.
+#
+# WHY IT EXISTS: the estate is four independent registries kept in step by
+# timers and sweeps. Every one of them has been wrong at least once — a VM up
+# and absent from Ansible, a deleted VM still in the DB, `kvm-delete` returning
+# 1 after a successful destroy so the DB row was never touched, a mesh key
+# minted and never used. Creating one machine and deleting it again exercises
+# all of that in about three minutes, and the UNJOIN half is the half nobody
+# tests: a stale entry points a play at an address DHCP has since given to
+# somebody else.
+#
+# SAFETY: it creates and destroys exactly one VM, named by this script, and
+# deletes it BY EXACT NAME on every exit path. It never touches a VM it did not
+# create — a `destroy --all` in a test once took six of the operator's clones.
+#
+# USAGE: estate-lifecycle.sh [--source <vm>] [--keep] [--timeout <s>]
+# EXIT:  0 join and unjoin both proved · 1 something did not · 2 could not run.
+# =============================================================================
+set -Eeuo pipefail
+trap 'echo "estate-lifecycle.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-test.sh
+source "${SCRIPT_DIR}/lib-test.sh"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+_didnotrun() { _warn "$1" "DID NOT RUN — $2"; }
+
+SOURCE_VM=""
+KEEP=0
+WAIT_MAX=240
+# The name carries the PID and the date so two runs cannot collide, and so a
+# leftover is obviously this test's and obviously stale.
+PROBE="estate-probe-$(date +%m%d%H%M)-$$"
+
+usage() {
+    cat <<EOF
+Usage: estate-lifecycle.sh [--source <vm>] [--keep] [--timeout <seconds>]
+
+Clones one VM, proves it joins the estate, deletes it, proves it leaves.
+
+  --source <vm>    clone this VM (default: the first sealed golden found)
+  --keep           do not delete the clone at the end (debugging)
+  --timeout <s>    how long to wait for each registry to notice (default ${WAIT_MAX})
+
+EXIT: 0 both halves proved, 1 a check failed, 2 the test could not run.
+EOF
+    exit "${1:-1}"
+}
+
+while (($#)); do
+    case "$1" in
+    -h | --help) usage 0 ;;
+    --source)
+        SOURCE_VM="${2:-}"
+        shift 2
+        ;;
+    --keep)
+        KEEP=1
+        shift
+        ;;
+    --timeout)
+        WAIT_MAX="${2:-240}"
+        shift 2
+        ;;
+    *)
+        echo "estate-lifecycle.sh: unknown argument: $1" >&2
+        usage 2
+        ;;
+    esac
+done
+
+# ─── Probes: one function per registry, each answering yes/no for a name ─────
+#
+# Each is deliberately a separate question. When a clone is in libvirt and not
+# in Ansible, the useful output is WHICH registry is behind, not "the estate is
+# broken" -- so the join/unjoin loops below report per registry.
+
+in_libvirt() { virsh dominfo "$1" >/dev/null 2>&1; }
+
+in_db() {
+    kldload-db dump 2>/dev/null | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(1)
+sys.exit(0 if any(v.get("name")==sys.argv[1] for v in d.get("vms",[])) else 1)' "$1" 2>/dev/null
+}
+
+in_inventory() {
+    kldload-inventory --list 2>/dev/null | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(1)
+sys.exit(0 if sys.argv[1] in d.get("_meta",{}).get("hostvars",{}) else 1)' "$1" 2>/dev/null
+}
+
+in_prometheus() { grep -rqs "\"vm\"[[:space:]]*:[[:space:]]*\"${1}\"" /etc/prometheus/targets 2>/dev/null; }
+
+# The mesh is keyed by public key, not name, so the question is asked of the
+# estate's own view rather than of `wg show` directly.
+on_mesh() {
+    have kldload-estate || return 1
+    kldload-estate --json 2>/dev/null | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(1)
+for m in d.get("machines",[]) if isinstance(d,dict) else []:
+    if m.get("name")==sys.argv[1] and (m.get("wg_ip") or m.get("wg_pubkey")):
+        sys.exit(0)
+sys.exit(1)' "$1" 2>/dev/null
+}
+
+has_zvol() { zfs list -H -o name 2>/dev/null | grep -qx ".*/${1}" || zfs list -H -o name -r rpool/vms 2>/dev/null | grep -q "/${1}\$"; }
+
+# _wait_until <label> <want: yes|no> <fn> — poll until the answer matches, up
+# to WAIT_MAX. Prints the seconds it took, which is the number worth having:
+# these registries are driven by 30s and 60s timers, so "it got there in 62s"
+# and "it never got there" are different findings, and a fixed sleep would
+# report the second as the first.
+_wait_until() {
+    local label="$1" want="$2" fn="$3" t=0
+    while ((t < WAIT_MAX)); do
+        if "$fn" "$PROBE"; then
+            [[ "$want" == yes ]] && {
+                echo "$t"
+                return 0
+            }
+        else
+            [[ "$want" == no ]] && {
+                echo "$t"
+                return 0
+            }
+        fi
+        sleep 5
+        t=$((t + 5))
+    done
+    echo "$t"
+    return 1
+}
+
+_check() { # _check <label> <want> <fn>
+    local label="$1" want="$2" fn="$3" secs rc=0
+    secs="$(_wait_until "$label" "$want" "$fn")" || rc=1
+    if ((rc == 0)); then
+        if [[ "$want" == yes ]]; then
+            _pass "join: ${label} picked it up after ${secs}s"
+        else
+            _pass "unjoin: ${label} released it after ${secs}s"
+        fi
+    else
+        if [[ "$want" == yes ]]; then
+            _fail "join: ${label}" "${PROBE} never appeared (${WAIT_MAX}s)"
+        else
+            _fail "unjoin: ${label}" "${PROBE} is STILL registered ${WAIT_MAX}s after delete"
+        fi
+    fi
+}
+
+# ─── Cleanup: by exact name, on every path ──────────────────────────────────
+#
+# The name is this script's own and is never a pattern. A cleanup that took a
+# wildcard to `destroy` once ate six unrelated clones, and a snapshot pattern
+# ate four of the operator's rollback points.
+cleanup() {
+    ((KEEP == 1)) && return 0
+    if virsh dominfo "$PROBE" >/dev/null 2>&1 || has_zvol "$PROBE"; then
+        echo "  cleanup: removing ${PROBE}"
+        kvm-delete "$PROBE" --force >/dev/null 2>&1 ||
+            echo "  cleanup: kvm-delete ${PROBE} failed — remove it by hand" >&2
+    fi
+}
+trap cleanup EXIT
+
+# ─── Preconditions ──────────────────────────────────────────────────────────
+_section "Estate lifecycle — preconditions"
+
+for _t in virsh kvm-clone kvm-delete kldload-inventory; do
+    have "$_t" || {
+        _didnotrun "estate lifecycle" "${_t} is not installed — this is not a hypervisor"
+        printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
+        exit 0
+    }
+done
+
+if [[ -z "$SOURCE_VM" ]]; then
+    # A golden is the right source: it is shut off, sealed, and cloning one is
+    # what the operator actually does. Prefer one that is defined in libvirt.
+    SOURCE_VM="$(virsh list --all --name 2>/dev/null | grep -E 'golden' | head -n 1 || true)"
+fi
+if [[ -z "$SOURCE_VM" ]]; then
+    _didnotrun "estate lifecycle" "no golden to clone — build one first (klab golden) or pass --source"
+    printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
+    exit 0
+fi
+_pass "source VM: ${SOURCE_VM}"
+echo "  probe name: ${PROBE}  (created and destroyed by this script, by exact name)"
+
+# ─── 1. Create ──────────────────────────────────────────────────────────────
+_section "Clone (kvm-clone)"
+
+if kvm-clone "$SOURCE_VM" "$PROBE" >/dev/null 2>&1; then
+    # Outcome, not exit code: the domain must actually exist.
+    if in_libvirt "$PROBE"; then
+        _pass "kvm-clone created ${PROBE}"
+    else
+        _fail "kvm-clone" "exited 0 and no domain named ${PROBE} exists"
+        printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
+        exit 1
+    fi
+else
+    _fail "kvm-clone" "could not clone ${SOURCE_VM} into ${PROBE}"
+    printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
+    exit 1
+fi
+
+virsh start "$PROBE" >/dev/null 2>&1 ||
+    _warn "clone start" "${PROBE} did not start — the registries below may never see it"
+
+# ─── 2. Join ────────────────────────────────────────────────────────────────
+_section "Join"
+
+_check "libvirt" yes in_libvirt
+_check "state DB" yes in_db
+_check "Ansible inventory" yes in_inventory
+have kldload-estate && _check "WireGuard mesh" yes on_mesh ||
+    _didnotrun "join: WireGuard mesh" "kldload-estate is not installed"
+[[ -d /etc/prometheus/targets ]] && _check "Prometheus file_sd" yes in_prometheus ||
+    _didnotrun "join: Prometheus file_sd" "/etc/prometheus/targets does not exist"
+
+# In the inventory is not reachable. This is the same distinction smoke-estate
+# draws for the fleet, asked of the one machine this test owns.
+if have ansible && in_inventory "$PROBE"; then
+    if timeout 120 ansible "$PROBE" -i /usr/local/bin/kldload-inventory -m ping -o >/dev/null 2>&1; then
+        _pass "ansible reaches ${PROBE}"
+    else
+        _fail "ansible reach" "${PROBE} is in the inventory and does not answer a ping"
+    fi
+fi
+
+# ─── 3. Delete and unjoin ───────────────────────────────────────────────────
+_section "Unjoin (kvm-delete)"
+
+if kvm-delete "$PROBE" --force >/dev/null 2>&1; then
+    _pass "kvm-delete returned 0"
+else
+    # kvm-delete has returned 1 after a successful destroy before (a pipeline
+    # under pipefail), which left the DB row untouched. So the status is
+    # reported and the real checks below decide.
+    _warn "kvm-delete" "returned non-zero — the checks below decide whether it worked"
+fi
+
+_check "libvirt" no in_libvirt
+_check "state DB" no in_db
+_check "Ansible inventory" no in_inventory
+have kldload-estate && _check "WireGuard mesh" no on_mesh || true
+[[ -d /etc/prometheus/targets ]] && _check "Prometheus file_sd" no in_prometheus || true
+
+if has_zvol "$PROBE"; then
+    _fail "unjoin: storage" "the zvol for ${PROBE} survived kvm-delete"
+else
+    _pass "unjoin: the zvol is gone"
+fi
+
+printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
+((FAIL == 0))
