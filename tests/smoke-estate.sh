@@ -39,12 +39,24 @@ source "${SCRIPT_DIR}/lib-test.sh"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# _count <extended regex> — how many lines of stdin match, 0 when none.
+#
+# grep exits 1 on zero matches, and zero is a RESULT here, not a failure: "no
+# host answered" and "no VM is running" are exactly what this suite is trying
+# to find out. Named once so the twelve call sites below do not each need their
+# own swallow, which is how a file ends up with a dozen unexplained `|| true`.
+_count() { grep -cE "$1" || true; }
+
 # _didnotrun — a check that could not run says so in its own voice. It counts
 # as a warning so the suite's exit status stays honest, but the wording is what
 # stops it being read as a pass three months later.
 _didnotrun() { _warn "$1" "DID NOT RUN — $2"; }
 
 PLAYBOOK=/usr/local/share/kldload-ansible/playbooks/system-info.yml
+# The dynamic inventory script itself is what -i takes; ansible runs it and
+# reads the JSON, which is how a VM that got its lease a minute ago is already
+# targetable without anyone editing a hosts file.
+INV=/usr/local/bin/kldload-inventory
 REPORT=/root/kldload-ansible-report.txt
 TARGETS_DIR=/etc/prometheus/targets
 
@@ -62,7 +74,7 @@ except Exception: sys.exit()
 for h in sorted(d.get("_meta",{}).get("hostvars",{})): print(h)' 2>/dev/null
 }
 
-_vm_count="$(vms_running | grep -c . || true)"
+_vm_count="$(vms_running | _count .)"
 
 # ─── 1. Ansible actually reaches the fleet ──────────────────────────────────
 #
@@ -77,15 +89,17 @@ if ((_vm_count == 0)); then
 elif ! have ansible || ! have kldload-inventory; then
     _didnotrun "ansible reach" "ansible or kldload-inventory is not installed"
 else
-    _inv_n="$(inv_hosts | grep -c . || true)"
+    _inv_n="$(inv_hosts | _count .)"
     if ((_inv_n == 0)); then
         _fail "ansible reach" "${_vm_count} VM(s) running and the inventory is EMPTY"
     else
         # -o gives one line per host; a host that answers prints SUCCESS.
-        _ping_out="$(timeout 180 ansible all -i /usr/local/bin/kldload-inventory \
-            -m ping -o 2>/dev/null || true)"
-        _ok="$(printf '%s\n' "$_ping_out" | grep -c 'SUCCESS' || true)"
-        _bad="$(printf '%s\n' "$_ping_out" | grep -cE 'UNREACHABLE|FAILED' || true)"
+        # ansible exits non-zero when ANY host is unreachable, which is the
+        # case this check exists to measure — so the status is discarded and
+        # the output is what gets judged, host by host, below.
+        _ping_out="$(timeout 180 ansible all -i "$INV" -m ping -o 2>/dev/null || true)"
+        _ok="$(printf '%s\n' "$_ping_out" | _count 'SUCCESS')"
+        _bad="$(printf '%s\n' "$_ping_out" | _count 'UNREACHABLE|FAILED')"
         if ((_ok == _inv_n)); then
             _pass "ansible ping: all ${_ok} inventory host(s) answered"
         elif ((_ok == 0)); then
@@ -115,12 +129,13 @@ elif [[ ! -r "$PLAYBOOK" ]]; then
 elif ! have ansible-playbook; then
     _didnotrun "playbook run" "ansible-playbook is not installed"
 else
-    _pb_out="$(timeout 300 ansible-playbook -i /usr/local/bin/kldload-inventory \
-        "$PLAYBOOK" 2>&1 || true)"
+    # Same as the ping above: a play that fails on one host of six exits
+    # non-zero, and "one of six" is the finding. The recap is parsed instead.
+    _pb_out="$(timeout 300 ansible-playbook -i "$INV" "$PLAYBOOK" 2>&1 || true)"
     # failed=N appears once per host in the recap; any non-zero is a real failure.
     _pb_failed="$(printf '%s\n' "$_pb_out" | grep -oE 'failed=[0-9]+' | awk -F= '{s+=$2} END{print s+0}')"
     _pb_unreach="$(printf '%s\n' "$_pb_out" | grep -oE 'unreachable=[0-9]+' | awk -F= '{s+=$2} END{print s+0}')"
-    _pb_hosts="$(printf '%s\n' "$_pb_out" | grep -cE '^[a-zA-Z0-9_.-]+ +: +ok=' || true)"
+    _pb_hosts="$(printf '%s\n' "$_pb_out" | _count '^[a-zA-Z0-9_.-]+ +: +ok=')"
     if ((_pb_hosts == 0)); then
         _fail "playbook run" "the play reached NO hosts — $(printf '%s' "$_pb_out" | tail -n 1 | cut -c1-120)"
     elif ((_pb_failed == 0 && _pb_unreach == 0)); then
@@ -145,6 +160,8 @@ if [[ ! -f "$REPORT" ]]; then
         _warn "first-boot ansible report" "${REPORT} is absent although ${_vm_count} VM(s) are running"
     fi
 else
+    # An empty result is handled explicitly below ("says nothing about what it
+    # reached"), so grep finding nothing is not an error here.
     _rep_line="$(grep -iE 'reached|inventory' "$REPORT" 2>/dev/null | tail -n 1 || true)"
     # Compare the two NUMBERS, never pattern-match the sentence. The first
     # version of this check looked for "reached 0" and "0 of", and so read
@@ -227,16 +244,18 @@ if ((_vm_count == 0)); then
 elif ! have wg; then
     _didnotrun "mesh attachment" "wg is not installed"
 else
+    # No interface at all is a legitimate state (no mesh on this host) and is
+    # reported as DID NOT RUN two lines down.
     _if="$(wg show interfaces 2>/dev/null | tr ' ' '\n' | head -n 1 || true)"
     if [[ -z "$_if" ]]; then
         _didnotrun "mesh attachment" "no WireGuard interface is up on this host"
     else
-        _peers="$(wg show "$_if" peers 2>/dev/null | grep -c . || true)"
+        _peers="$(wg show "$_if" peers 2>/dev/null | _count .)"
         _now="$(date +%s)"
         # 15 minutes: the mesh keepalive is well under that, so anything older
         # is a peer that is not actually talking.
         _live="$(wg show "$_if" latest-handshakes 2>/dev/null |
-            awk -v n="$_now" '$2>0 && (n-$2)<900' | grep -c . || true)"
+            awk -v n="$_now" '$2>0 && (n-$2)<900' | _count .)"
         if ((_peers == 0)); then
             _warn "mesh attachment" "${_if} is up with no peers — nothing has enrolled"
         elif ((_live == _peers)); then

@@ -2944,7 +2944,13 @@ SALT
             _web_units+=("$_wu")
         done
         if ((${#_web_units[@]})); then
+            # Swallowed on purpose, both of them: a unit already enabled and
+            # a unit already running each return non-zero here, and first boot
+            # can run twice (the operator re-runs it to heal a machine). The
+            # status is worthless either way -- the per-unit is-active check
+            # below is what decides, and it names the one that is down.
             systemctl enable "${_web_units[@]}" 2>/dev/null || true
+            # Already running is the same non-answer as already enabled.
             systemctl start "${_web_units[@]}" 2>/dev/null || true
             # Outcome, not exit code, and per unit: the name that did not come
             # up is the bug report; "one of three" is a scavenger hunt.

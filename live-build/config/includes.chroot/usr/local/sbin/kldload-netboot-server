@@ -188,6 +188,9 @@ _net_payload_ok() {
     # The full image's livenet check (cmd_serve), for this initrd too.
     if command -v lsinitrd >/dev/null 2>&1; then
         local _ln
+        # grep -c exits 1 when the initrd carries no livenet module, and that
+        # is the thing being measured -- a net image without it cannot fetch a
+        # root over http, which the caller reports two lines down.
         _ln="$(lsinitrd "$PAYLOAD_NET/initrd.img" 2>/dev/null | grep -c 'livenet' || true)"
         [[ "${_ln:-0}" -gt 0 ]] || {
             echo "$PAYLOAD_NET/initrd.img has no dracut livenet module"

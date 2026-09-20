@@ -264,8 +264,8 @@ fi
 _check "libvirt" no in_libvirt
 _check "state DB" no in_db
 _check "Ansible inventory" no in_inventory
-have kldload-estate && _check "WireGuard mesh" no on_mesh || true
-[[ -d /etc/prometheus/targets ]] && _check "Prometheus file_sd" no in_prometheus || true
+if have kldload-estate; then _check "WireGuard mesh" no on_mesh; fi
+if [[ -d /etc/prometheus/targets ]]; then _check "Prometheus file_sd" no in_prometheus; fi
 
 if has_zvol "$PROBE"; then
     _fail "unjoin: storage" "the zvol for ${PROBE} survived kvm-delete"

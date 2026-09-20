@@ -108,6 +108,8 @@ find_bench() {
     for ip in $(seq 100 200); do
         ip="${SUBNET}.${ip}"
         timeout 1 ping -c1 -W1 "$ip" >/dev/null 2>&1 || continue
+        # Most addresses on this subnet are not the bench machine, and an
+        # address that does not answer ssh is the normal case, not an error.
         got="$(ssh_bench "$ip" 'sudo -n grep -hE "^KLDLOAD_PROFILE=" /etc/kldload/install-manifest.env 2>/dev/null | cut -d= -f2 | tr -d "\""' || true)"
         [[ "$got" == "$want" ]] || continue
         printf '%s\n' "$ip"
@@ -164,6 +166,8 @@ for ed in "${EDITIONS[@]}"; do
     #    be reinstalled; all that is needed is a way to reboot it.
     cur=""
     for p in "$want_profile" desktop server core kvm storage ai master; do
+        # find_bench returns 1 when that profile is not on the subnet, which
+        # is expected for all but one of the profiles tried here.
         cur="$(find_bench "$p" || true)"
         [[ -n "$cur" ]] && break
     done
@@ -195,6 +199,9 @@ for ed in "${EDITIONS[@]}"; do
         sleep 15
         t=$((t + 15))
     done
+    # Disarming a MAC that is already disarmed is the wanted end state, and
+    # the server says so rather than failing; either way it must not stop the
+    # sweep, because leaving a machine armed loops it back into the installer.
     sudo -n "$SERVER" disarm "$MAC" >>"$LOG" 2>&1 || true
     if ((fetched == 0)); then
         say "${ed}: the installer never fetched its answers (${FETCH_WAIT}s) — disarmed"
@@ -209,6 +216,8 @@ for ed in "${EDITIONS[@]}"; do
     while ((t < INSTALL_WAIT)); do
         sleep 30
         t=$((t + 30))
+        # Still installing: not found yet is the expected answer here for
+        # twenty-odd minutes.
         ip="$(find_bench "$want_profile" || true)"
         [[ -n "$ip" ]] || continue
         # Freshly installed, not the machine that was there before: uptime has
@@ -227,6 +236,9 @@ for ed in "${EDITIONS[@]}"; do
 
     # 5. the manifest
     scp_to "$ip" "${REPO}/tests/profile-report.sh" "${REPO}/tests/collect-bundle.sh" /tmp/ || true
+    # profile-report exits 1 when the machine has defects — which is a result
+    # to be filed, not a reason to abandon the sweep. The report is judged by
+    # its VERDICT line below.
     ssh_bench "$ip" 'bash /tmp/profile-report.sh' >"${OUT}/report.md" 2>"${OUT}/report.stderr" || true
     verdict="$(grep -oE '\*\*(PASS|FAIL)[^*]*\*\*' "${OUT}/report.md" | head -1 | tr -d '*' || echo '?')"
     read -r sp sf sw < <(sed -n 's/^PASS \([0-9]*\)   FAIL \([0-9]*\)   WARN \([0-9]*\)$/\1 \2 \3/p' "${OUT}/report.md" | head -1)
@@ -235,8 +247,11 @@ for ed in "${EDITIONS[@]}"; do
     # 6. the bundle
     b="$(ssh_bench "$ip" 'bash /tmp/collect-bundle.sh' | tail -1 || true)"
     if [[ -n "$b" ]]; then
+        # stat, not du: on ZFS du reports allocated blocks, and a file written
+        # seconds ago has not been flushed, so it reported a 165 MB bundle as
+        # "1.0K" (onyx, 2026-09-19).
         scp_from "$ip" "$b" "${OUT}/bundle.tar.gz" &&
-            say "${ed}: bundle $(du -h "${OUT}/bundle.tar.gz" | cut -f1)"
+            say "${ed}: bundle $(stat -c %s "${OUT}/bundle.tar.gz" 2>/dev/null || echo 0) bytes"
     else
         say "${ed}: no bundle collected"
     fi

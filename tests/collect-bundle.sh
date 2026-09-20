@@ -24,8 +24,10 @@
 #
 # EXIT: 0 and the bundle path on stdout · 1 nothing could be collected.
 # =============================================================================
-set -Euo pipefail
+set -Eeuo pipefail
 trap 'echo "collect-bundle.sh: line $LINENO: $BASH_COMMAND" >&2' ERR
+# Every probe below is wrapped (S, cap, _count, or an explicit fallback), so
+# -e reports a BUG in this script rather than a machine that answered "no".
 
 case "${1:-}" in
 -h | --help | help)
@@ -79,10 +81,32 @@ cap units-all systemctl list-units --all --no-pager
 cap units-enabled systemctl list-unit-files --no-pager
 
 # ── logs ────────────────────────────────────────────────────────────────────
-cap journal-boot journalctl -b --no-pager
+# The journal for this boot, newest last, capped at 200k lines: a fresh
+# install produces a few thousand, and a machine that has been up for weeks
+# produces a bundle nobody can open.
+cap journal-boot journalctl -b --no-pager -n 200000
 cap journal-errors journalctl -p err -b --no-pager
-[[ -d /var/log/kldload ]] && cp -a /var/log/kldload "${OUT}/kldload-logs" 2>/dev/null
-[[ -d /var/log/installer ]] && cp -a /var/log/installer "${OUT}/installer-logs" 2>/dev/null
+# Copy the log trees, but CAP each file. On a long-lived machine
+# networks.log was 68 MB and zfs-dbgmsg.log 45 MB, which is a 165 MB bundle
+# per install for two files nobody reads past the end of (onyx, 2026-09-19).
+# The tail is the part that explains the last boot.
+copy_logs() { # copy_logs <src dir> <dest name>
+    local src="$1" dst="${OUT}/$2" f
+    [[ -d "$src" ]] || return 0
+    mkdir -p "$dst"
+    while IFS= read -r f; do
+        if [[ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -gt 20971520 ]]; then
+            {
+                echo "### TRUNCATED by collect-bundle.sh: last 20 MB of $f"
+                tail -c 20971520 "$f"
+            } >"${dst}/$(basename "$f")"
+        else
+            cp -a "$f" "${dst}/" 2>/dev/null || true # a log rotated mid-copy is not worth failing over
+        fi
+    done < <(find "$src" -maxdepth 1 -type f)
+}
+copy_logs /var/log/kldload kldload-logs
+copy_logs /var/log/installer installer-logs
 
 # ── storage, boot, network ──────────────────────────────────────────────────
 cap zpool-status zpool status -v
@@ -109,7 +133,10 @@ cp /tmp/kldload-smoke-report-*.txt "${OUT}/" 2>/dev/null || true
 
 # Outcome, not exit code: the tar must exist and be non-trivial, or this
 # reported success having collected nothing.
-tar -C "$(dirname "$OUT")" -czf "$TAR" "$(basename "$OUT")" 2>/dev/null
+# tar's own status is discarded deliberately: it exits 1 for "file changed as
+# we read it", which happens constantly when the journal is being written into
+# the staging dir. Whether the bundle is usable is decided by the file itself.
+tar -C "$(dirname "$OUT")" -czf "$TAR" "$(basename "$OUT")" 2>/dev/null || true
 if [[ ! -s "$TAR" ]]; then
     echo "collect-bundle.sh: produced no bundle" >&2
     exit 1
