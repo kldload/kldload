@@ -1,0 +1,25 @@
+{{- /*
+One PVC against the `zfs` StorageClass. What makes this worth demonstrating on
+kldload rather than anywhere else: the volume IS a ZFS dataset on the node, so
+after the pod starts you can find it with `zfs list -r rpool/k8s-volumes`,
+snapshot it with `zfs snapshot`, and roll it back — the storage primitives are
+the filesystem's, not an abstraction over it.
+
+volumeBindingMode on that StorageClass is WaitForFirstConsumer, so the PVC
+stays Pending until a pod is scheduled. That is correct behaviour, not a
+fault: the dataset has to be created on the node the pod lands on.
+*/ -}}
+{{- if .Values.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-data
+  labels:
+{{ include "pod-inspector.labels" . | indent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.persistence.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

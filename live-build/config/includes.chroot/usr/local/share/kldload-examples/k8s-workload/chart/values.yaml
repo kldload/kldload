@@ -1,0 +1,69 @@
+# pod-inspector — every knob, and every kldload layer it can switch on.
+#
+# The defaults install on ANY cluster with nothing configured. Each block
+# below turns on one more part of the kldload stack, and each is something a
+# viewer can enable on camera and then SEE working. Nothing here is magic:
+# every toggle maps to one template in templates/, which you can read.
+
+replicaCount: 3
+
+image:
+  # nginx is NOT one of the images baked into the kldload darksite. On a
+  # machine with a network this just pulls. For an air-gapped cluster, add
+  # "nginx:1.27-alpine" to build/darksite/k8s-images.txt and rebuild the ISO.
+  repository: nginx
+  tag: "1.27-alpine"
+  pullPolicy: IfNotPresent
+
+# The headline the page shows. Change it, helm upgrade, refresh the browser.
+message: "Deployed by kldload at first boot"
+
+resources:
+  requests: { cpu: 10m, memory: 16Mi }
+  limits: { cpu: 200m, memory: 64Mi }
+
+spreadAcrossNodes: true
+
+# ── Layer 1: the Service ────────────────────────────────────────────────
+# ClusterIP works everywhere. LoadBalancer asks MetalLB for an address on
+# your LAN — which is the interesting one, because the resulting IP shows up
+# in Cilium's eBPF load-balancer map (see observe/).
+service:
+  type: ClusterIP          # ClusterIP | NodePort | LoadBalancer
+  port: 80
+  # Pin the address instead of taking whatever MetalLB hands out. Leave empty
+  # to let the pool decide.
+  loadBalancerIP: ""
+  annotations: {}
+    # metallb.universe.tf/address-pool: default
+
+# ── Layer 2: storage on ZFS ─────────────────────────────────────────────
+# A PVC against the `zfs` StorageClass becomes a ZFS dataset on the node, so
+# `zfs list` shows it and `zfs snapshot` works on it. OFF by default because
+# the CSI driver is installed from the internet — on an air-gapped cluster a
+# PVC stays Pending until that is staged offline.
+persistence:
+  enabled: false
+  storageClass: zfs        # zfs | zfs-db (8k recordsize, for databases)
+  size: 1Gi
+  mountPath: /data
+
+# ── Layer 3: Cilium network policy, enforced in eBPF ────────────────────
+# Default-deny plus an explicit L7 allow: GET on / only. A POST to the same
+# port is dropped by the eBPF datapath, not by the app — which is the point,
+# and is visible in `hubble observe --verdict DROPPED`.
+networkPolicy:
+  enabled: false
+  allowedMethod: GET
+  allowedPath: "/"
+
+# ── Layer 4: Tetragon, watching this workload specifically ──────────────
+# A TracingPolicy scoped to these pods by label. Observes execs inside the
+# container; flip action to Sigkill and it ENFORCES instead of reporting.
+tracing:
+  enabled: false
+  binaries:
+    - "/bin/sh"
+    - "/usr/bin/curl"
+    - "/usr/bin/wget"
+  action: Post             # Post = observe · Sigkill = block the exec

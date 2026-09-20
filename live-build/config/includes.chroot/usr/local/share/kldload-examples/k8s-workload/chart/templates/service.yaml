@@ -1,0 +1,28 @@
+{{- /*
+The Service. With type: LoadBalancer, MetalLB assigns an address from its pool
+and Cilium programs that address into its eBPF load-balancer map — so the same
+IP you type in a browser can be found with `cilium bpf lb list` on any node.
+That round trip, YAML -> LAN IP -> eBPF map entry, is the whole point of
+turning this on in a class.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+{{ include "pod-inspector.labels" . | indent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+{{ toYaml . | indent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- if and (eq .Values.service.type "LoadBalancer") .Values.service.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.service.loadBalancerIP | quote }}
+  {{- end }}
+  selector:
+{{ include "pod-inspector.selector" . | indent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

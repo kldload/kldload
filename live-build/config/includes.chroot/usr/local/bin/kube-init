@@ -480,14 +480,54 @@ install_zfs_csi() {
 
     log "Installing OpenEBS ZFS LocalPV CSI driver..."
 
-    helm repo add openebs-zfslocalpv https://openebs.github.io/zfs-localpv 2>/dev/null || true
-    helm repo update >/dev/null 2>&1
+    # Staged chart first, exactly like Cilium above. The chart carries the CSI
+    # driver, the VolumeSnapshot CRDs and a snapshot-controller, so an
+    # air-gapped cluster gets the whole storage story or none of it.
+    local _zfs_chart="openebs-zfslocalpv/zfs-localpv"
+    if [[ -f /root/darksite/helm-charts/zfs-localpv.tgz ]]; then
+        _zfs_chart="/root/darksite/helm-charts/zfs-localpv.tgz"
+        log "Using cached zfs-localpv chart from darksite"
+    else
+        helm repo add openebs-zfslocalpv https://openebs.github.io/zfs-localpv 2>/dev/null || true
+        helm repo update >/dev/null 2>&1
+    fi
 
-    helm install zfs-localpv openebs-zfslocalpv/zfs-localpv \
+    helm install zfs-localpv "$_zfs_chart" \
         --namespace openebs --create-namespace \
         --set zfsNode.encrKeysDir=/etc/openebs \
-        --wait --timeout 120s \
-        2>&1
+        --wait --timeout 300s \
+        2>&1 || log "WARNING: zfs-localpv install returned non-zero — the check below decides"
+
+    # Outcome, not exit code: is the CSI driver REGISTERED?
+    #
+    # Everything below this point writes StorageClasses that name
+    # zfs.csi.openebs.io as their provisioner, and one of them is marked the
+    # cluster default. Applying that against a driver that is not there gives
+    # every future PVC a provisioner that does not exist: Pending forever, no
+    # event naming the cause, and the operator left to work out why a
+    # StatefulSet never starts. That is the silent-success shape this codebase
+    # keeps paying for, so the default class is only claimed when the driver
+    # that backs it is actually registered (2026-09-20).
+    local _csi_ok=0 _t=0
+    while ((_t < 120)); do
+        if kubectl get csidrivers.storage.k8s.io zfs.csi.openebs.io >/dev/null 2>&1; then
+            _csi_ok=1
+            break
+        fi
+        sleep 5
+        _t=$((_t + 5))
+    done
+    if ((_csi_ok == 0)); then
+        log "FATAL: the ZFS CSI driver did not register within ${_t}s."
+        log "       NOT applying the zfs StorageClasses: a default class whose"
+        log "       provisioner is missing makes every PVC hang with no reason given."
+        log "       Check it with:  helm -n openebs status zfs-localpv"
+        log "                       kubectl -n openebs get pods"
+        log "       Once the driver is up, re-run this installer; applying the"
+        log "       classes a second time is idempotent."
+        return 1
+    fi
+    log "ZFS CSI driver registered after ${_t}s"
 
     # Detect the ZFS pool
     local pool

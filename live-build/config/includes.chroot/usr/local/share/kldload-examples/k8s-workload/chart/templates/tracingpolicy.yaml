@@ -1,0 +1,38 @@
+{{- /*
+Tetragon, scoped to THIS workload by pod label rather than to a whole
+namespace — which is what makes it usable as a per-app policy you ship with
+your chart instead of a cluster-wide rule somebody else owns.
+
+It fires on exec of the listed binaries inside these pods. An nginx container
+should never run a shell, so `kubectl exec ... -- sh` is an event with the
+pod, the binary, the arguments and the ancestry attached.
+
+action: Post observes. Change it to Sigkill and the same policy ENFORCES —
+the exec dies in the kernel. That one-word switch, observe to enforce with no
+sidecar and no restart, is the demo worth filming.
+*/ -}}
+{{- if .Values.tracing.enabled }}
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ .Release.Name }}-exec
+  labels:
+{{ include "pod-inspector.labels" . | indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "pod-inspector.selector" . | indent 6 }}
+  kprobes:
+    - call: "security_bprm_check"
+      syscall: false
+      args:
+        - { index: 0, type: "linux_binprm" }
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Postfix"
+              values:
+{{ toYaml .Values.tracing.binaries | indent 16 }}
+          matchActions:
+            - action: {{ .Values.tracing.action }}
+{{- end }}

@@ -1,0 +1,49 @@
+{{- /*
+The page itself. Kept in a ConfigMap rather than baked into an image so the
+whole workload is text you can read in a code review — which is the point of
+the example. __POD__ and __NODE__ are substituted at container start from the
+downward API (see deployment.yaml), because nginx does not template.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-page
+  labels:
+{{ include "pod-inspector.labels" . | indent 4 }}
+data:
+  index.html: |
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>pod-inspector</title>
+      <style>
+        :root { color-scheme: dark; }
+        body { margin:0; min-height:100vh; display:grid; place-items:center;
+               background:#0d1117; color:#e6edf3;
+               font:16px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .card { border:1px solid #30363d; border-radius:10px; padding:2.5rem 3rem;
+                background:#161b22; box-shadow:0 12px 40px rgba(0,0,0,.45); }
+        h1 { margin:0 0 1.5rem; font-size:1.35rem; color:#c9a04a; font-weight:600; }
+        dl { display:grid; grid-template-columns:auto 1fr; gap:.6rem 1.5rem; margin:0; }
+        dt { color:#8b949e; }
+        dd { margin:0; font-weight:600; }
+        .pod { color:#7ee787; }
+        footer { margin-top:1.8rem; padding-top:1rem; border-top:1px solid #30363d;
+                 color:#8b949e; font-size:.82rem; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>{{ .Values.message }}</h1>
+        <dl>
+          <dt>pod</dt>  <dd class="pod">__POD__</dd>
+          <dt>node</dt> <dd>__NODE__</dd>
+          <dt>chart</dt><dd>{{ .Chart.Name }}-{{ .Chart.Version }}</dd>
+          <dt>release</dt><dd>{{ .Release.Name }}</dd>
+        </dl>
+        <footer>Refresh to hit another replica — {{ .Values.replicaCount }} are running.</footer>
+      </div>
+    </body>
+    </html>

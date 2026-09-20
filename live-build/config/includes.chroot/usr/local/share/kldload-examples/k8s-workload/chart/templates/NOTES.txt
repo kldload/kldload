@@ -1,0 +1,18 @@
+pod-inspector is installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+{{ .Values.replicaCount }} replica(s), image {{ .Values.image.repository }}:{{ .Values.image.tag }}.
+
+See it:
+{{- if eq .Values.service.type "ClusterIP" }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Release.Name }} 8080:{{ .Values.service.port }}
+  then open http://localhost:8080 — refresh to hit a different pod.
+{{- else if eq .Values.service.type "LoadBalancer" }}
+  kubectl -n {{ .Release.Namespace }} get svc {{ .Release.Name }} -w
+  open http://<EXTERNAL-IP> once MetalLB assigns one.
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} get svc {{ .Release.Name }} -o jsonpath='{.spec.ports[0].nodePort}{"\n"}'
+  open http://<any-node-ip>:<that-port>
+{{- end }}
+
+Change what it says, and watch the pods roll:
+  helm upgrade {{ .Release.Name }} <chart> --set message="my workload, my cluster"

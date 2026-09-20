@@ -1,0 +1,36 @@
+{{- /*
+Default-deny plus one explicit L7 allow, enforced by Cilium in eBPF.
+
+Why L7 and not just a port: a plain port rule cannot tell GET / from POST /.
+This one can, because Cilium parses HTTP in the datapath. With it applied,
+`curl http://<svc>/` succeeds and `curl -X POST http://<svc>/` is dropped
+BEFORE nginx ever sees it — and `hubble observe --verdict DROPPED` names the
+rule that did it.
+
+Egress is left open deliberately: locking it down is the first exercise worth
+giving a class, and doing it here would rob them of it.
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+{{ include "pod-inspector.labels" . | indent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+{{ include "pod-inspector.selector" . | indent 6 }}
+  ingress:
+    - fromEntities:
+        - cluster
+        - world
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+          rules:
+            http:
+              - method: {{ .Values.networkPolicy.allowedMethod | quote }}
+                path: {{ .Values.networkPolicy.allowedPath | quote }}
+{{- end }}

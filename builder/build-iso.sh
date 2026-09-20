@@ -2098,6 +2098,7 @@ if [[ "$EDITION" != "core" ]]; then
 cilium|https://helm.cilium.io/|tetragon
 argo|https://argoproj.github.io/argo-helm|argo-cd
 metallb|https://metallb.github.io/metallb|metallb
+openebs-zfslocalpv|https://openebs.github.io/zfs-localpv|zfs-localpv
 HELMREPOS
         "$_helm_bin" repo update >>"$LOG_FILE" 2>&1 || true
 
@@ -2123,6 +2124,7 @@ HELMREPOS
         done <<'HELMCHARTS'
 cilium|https://helm.cilium.io/|tetragon|1.7.0
 cilium|https://helm.cilium.io/|cilium|1.16.5
+openebs-zfslocalpv|https://openebs.github.io/zfs-localpv|zfs-localpv|2.11.1
 argo|https://argoproj.github.io/argo-helm|argo-cd|10.3.3
 metallb|https://metallb.github.io/metallb|metallb|0.14.9
 HELMCHARTS

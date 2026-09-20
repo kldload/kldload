@@ -69,3 +69,31 @@ ecr-public.aws.com/docker/library/redis:8.6.4-alpine
 
 # ── HA control-plane VIP (must match KUBE_VIP_VERSION in kube-cluster) ────
 ghcr.io/kube-vip/kube-vip:v0.8.9
+
+# ── OpenEBS ZFS LocalPV — the CSI driver behind the `zfs` StorageClass ──────
+#
+# WHY THESE ARE HERE: kube-init applies a default StorageClass whose
+# provisioner is zfs.csi.openebs.io, and installed the driver with
+# `helm repo add` + `helm install` straight off the internet. On an air-gapped
+# cluster — which is the whole point of the darksite — that install could not
+# run, the StorageClass was applied anyway, and every PVC bound to a
+# provisioner that did not exist and sat Pending with nothing naming the cause
+# (found 2026-09-20 while writing a class exercise that used a PVC).
+#
+# The chart is staged alongside cilium/tetragon/metallb/argo-cd in
+# build-iso.sh, pinned to the SAME version as these images. Re-derive this
+# list after a version bump with:
+#
+#   helm template zfs-localpv openebs-zfslocalpv/zfs-localpv --version <v> \
+#     | grep -oE 'image: *"?[^"]+' | sed 's/image: *"*//' | sort -u
+#
+# The chart carries its own snapshot-controller and the VolumeSnapshot CRDs,
+# which is why a VolumeSnapshotClass is worth applying at all: without them
+# `kubectl apply` of that class matches no kind and the snapshot story — PVC
+# to ZFS dataset to `zfs snapshot` — does not work.
+docker.io/openebs/zfs-driver:2.11.1
+registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
+registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
+registry.k8s.io/sig-storage/csi-resizer:v1.13.2
+registry.k8s.io/sig-storage/csi-snapshotter:v8.2.0
+registry.k8s.io/sig-storage/snapshot-controller:v8.2.0
