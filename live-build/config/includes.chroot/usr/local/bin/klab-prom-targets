@@ -44,12 +44,52 @@ EMPTY='[]'
 # Each gets labelled with site + distro (klab) or cluster (kspawn).
 declare -A DHCP=()
 if command -v virsh >/dev/null 2>&1; then
-    while read -r _expire _mac _proto _ip _hostname _clientid; do
+    # MAC -> domain, straight from libvirt.
+    #
+    # WHY: a lease whose guest announced no hostname is still a real lease. A
+    # klab clone carries the golden's cloud-init identity and announces either
+    # nothing or the golden's name, so the hostname column is "-" for most of
+    # them. The old loop indexed by hostname alone -- its comment said "AND by
+    # MAC", but no line ever did it -- so every such lease was dropped and the
+    # target file was written EMPTY.
+    #
+    # HISTORY: fiend, deb-3-kvm, 2026-09-20. Five klab-blue VMs running, four
+    # of them in the Ansible inventory with addresses, and klab-blue.json was
+    # "[]" -- a Metrics view with nothing behind it, which is the fourth time
+    # this shape has shipped. kldload-networks already solved it exactly this
+    # way (see its pass-1 loop); this is that fix, not a new invention.
+    declare -A _mac_owner=()
+    _dom=""
+    _m=""
+    while read -r _dom; do
+        [[ -z "$_dom" ]] && continue
+        while read -r _m; do
+            [[ -n "$_m" ]] && _mac_owner["${_m,,}"]="$_dom"
+        done < <(virsh domiflist "$_dom" 2>/dev/null | awk 'NR>2 && NF {print $5}')
+    done < <(virsh list --all --name 2>/dev/null)
+
+    # SIX columns, but the first is "Expiry Time" and it is TWO tokens -- a
+    # date and a time. Reading it into one variable shifted every field by
+    # one, so $_ip held the literal string "ipv4" and the map was keyed by
+    # "192.168.122.101/24". Nothing errored; the lookup below simply never
+    # matched a domain name, and klab-blue.json has been "[]" on every machine
+    # that ever ran this. kldload-networks reads the same output as
+    # `read -r _ _ mac _ ip name _`, which is the layout that is actually true.
+    while read -r _date _time _mac _proto _ip _hostname _clientid; do
         [[ -z "$_ip" || "$_ip" == "IP" ]] && continue
+        : "${_date:-} ${_time:-} ${_clientid:-}" # columns read only to position the rest
         _hostname="${_hostname%%.}"
         _ip="${_ip%/*}"
-        # Index by hostname AND by MAC so we can cross-reference virsh list.
-        [[ -n "$_hostname" && "$_hostname" != "-" ]] && DHCP["$_hostname"]="$_ip"
+        # No hostname, or one that is not a domain we know: ask libvirt which
+        # domain owns the MAC it handed the lease to.
+        if [[ -z "$_hostname" || "$_hostname" == "-" ]]; then
+            _hostname="${_mac_owner[${_mac,,}]:-}"
+        fi
+        [[ -n "$_hostname" ]] && DHCP["$_hostname"]="$_ip"
+        # Index by the owning domain as well, so a guest that announces a name
+        # of its own (the golden's) still reaches the right target entry.
+        _owner="${_mac_owner[${_mac,,}]:-}"
+        [[ -n "$_owner" ]] && DHCP["$_owner"]="$_ip"
     done < <(virsh -q net-dhcp-leases default 2>/dev/null || true)
 fi
 

@@ -138,7 +138,12 @@ check_feature "eBPF tools" KLDLOAD_ENABLE_EBPF command -v bpftrace
 check_feature "Metrics (devops)" KLDLOAD_ENABLE_DEVOPS test -d /etc/prometheus
 check_feature "Web console" KLDLOAD_ENABLE_WEBUI test -x /usr/local/bin/kldload-webui
 check_feature "ZFS dev lab" KLDLOAD_KLAB_ZFS_DEV command -v klab
-check_feature "Build images" KLDLOAD_BUILD_IMAGES test -d /rpool/vms
+# NOT `test -d /rpool/vms`: that dataset is created with mountpoint=none, so
+# the directory never exists and the probe reported "absent" on a machine that
+# had five sealed goldens (deb-3-kvm, 2026-09-20). Ask ZFS, and ask about the
+# thing that matters — a golden is only built once it carries its @golden snap.
+check_feature "Build images" KLDLOAD_BUILD_IMAGES \
+    bash -c 'zfs list -H -t snapshot -o name -r rpool/vms 2>/dev/null | grep -q "@golden"'
 echo
 if [[ -s /tmp/.pr_missing.$$ ]]; then
     while read -r _m; do note_fail "requested but ABSENT: ${_m}"; done </tmp/.pr_missing.$$
