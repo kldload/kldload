@@ -91,7 +91,34 @@ _app_triad() { # _app_triad <label> <binary> <desktop> <icon-basename>
         _fail "${label}" "missing on the installed system:${missing}"
     fi
 }
-_app_triad "Timer" /usr/local/bin/timer com.kldload.Timer.desktop com.kldload.Timer.svg
+# The Timer is a GTK4 app, and since 2026-09-20 the installer ships it only
+# where there is a desktop to run it in (profiles.sh: `_skip_tools+=" timer"`
+# for every other profile). So the assertion has to follow the install rule,
+# and it is checked in BOTH directions: present where it belongs, and ABSENT
+# where it does not. A Timer that turns up on a headless profile means the skip
+# stopped working, which is a defect worth failing on rather than passing over.
+#
+# HISTORY: b1668 on fiend (kvm profile) reported "Timer — missing on the
+# installed system: binary" as the single FAIL out of 190 tests, because the
+# skip landed and this check was not updated with it in the same change.
+_kld_profile="$(cat /etc/kldload/profile 2>/dev/null || true)"
+case "$_kld_profile" in
+desktop | vdi | rdp | arcade) _timer_expected=1 ;;
+# No profile file — an older image, or a live session. Fall back to asking
+# whether this machine has a graphical target at all, which is the same
+# question one level less precisely.
+"") [[ "$(systemctl get-default 2>/dev/null)" == graphical.target ]] &&
+    _timer_expected=1 || _timer_expected=0 ;;
+*) _timer_expected=0 ;;
+esac
+
+if ((_timer_expected)); then
+    _app_triad "Timer" /usr/local/bin/timer com.kldload.Timer.desktop com.kldload.Timer.svg
+elif [[ -x /usr/local/bin/timer ]]; then
+    _fail "Timer" "present on the ${_kld_profile} profile, which skips it — the skip in profiles.sh is not landing"
+else
+    _pass "Timer: correctly absent on the ${_kld_profile:-headless} profile"
+fi
 
 # A GTK4 app whose PyGObject was never packaged starts, fails to import, and
 # dies with no window — indistinguishable from "the icon does nothing".
