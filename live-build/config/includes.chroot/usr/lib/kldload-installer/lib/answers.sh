@@ -78,7 +78,13 @@ k_save_effective_config() {
             *_PUBKEY | *_KEY_FILE | *_CERT_FILE)
                 printf '%s=%q\n' "${name}" "${!name:-}"
                 ;;
-            *PASS | *PASSWORD | *PASSPHRASE | *PSK | *SECRET | *TOKEN | *_KEY | *PRIVATE_KEY | *PRESHARED_KEY)
+            # *RHEL_USERNAME too: a Red Hat login is half of a credential, and
+            # this file is copied to the installed system's
+            # /root/kldload-install-logs and gets read on camera (operator,
+            # 2026-09-19, filming a RHEL install). NOT a bare *_USERNAME: that
+            # also caught KLDLOAD_USERNAME, the local admin account, which is not
+            # a secret and which kldload-autodeploy reads back out of this file.
+            *PASS | *PASSWORD | *PASSPHRASE | *PSK | *SECRET | *TOKEN | *_KEY | *PRIVATE_KEY | *PRESHARED_KEY | *RHEL_USERNAME)
                 printf '%s=%q\n' "${name}" "__REDACTED__"
                 ;;
             *)

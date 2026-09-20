@@ -1212,7 +1212,11 @@ ROCKYREPO
         local rhel_auth=""
         if [[ -n "${rhel_user}" && -n "${rhel_pass}" ]]; then
             rhel_auth="userpass"
-            k_log_to "$log" "RHEL auth: username/password (user=${rhel_user})"
+            # The login is NOT logged: bootstrap.log is copied to the installed
+            # system and gets read on camera. Its length distinguishes "empty or
+            # truncated" from "wrong account" without writing the account down,
+            # exactly as the activation-key branch below already does.
+            k_log_to "$log" "RHEL auth: username/password (user=<redacted, ${#rhel_user} chars>)"
         elif [[ -n "${rhel_key}" && -n "${rhel_org}" ]]; then
             rhel_auth="activation"
             # The key is REDACTED, and the org id is not.
