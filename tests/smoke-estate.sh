@@ -199,15 +199,31 @@ if ((_vm_count == 0)); then
 elif [[ ! -d "$TARGETS_DIR" ]]; then
     _didnotrun "monitoring" "${TARGETS_DIR} does not exist — Prometheus is not configured here"
 else
-    _untargeted=""
+    # Split by whether anything is SUPPOSED to generate a target for the name.
+    # klab-prom-targets covers klab-blue-*, klab-green-* and kspawn-*; a k8s
+    # node (kldload-cp, kldload-w-N) or a hand-made clone matches none of them,
+    # so failing on those reported a defect against every machine with a
+    # cluster on it. Missing where it is generated is a FAILURE; missing where
+    # nothing generates one is a WARNING that names the gap, because "these VMs
+    # are running and nothing scrapes them" is still worth knowing.
+    _untargeted="" _uncovered=""
     while read -r _vm; do
         [[ -n "$_vm" ]] || continue
-        grep -rqs "\"vm\"[[:space:]]*:[[:space:]]*\"${_vm}\"" "$TARGETS_DIR" || _untargeted+=" ${_vm}"
+        grep -rqs "\"vm\"[[:space:]]*:[[:space:]]*\"${_vm}\"" "$TARGETS_DIR" && continue
+        case "$_vm" in
+        klab-blue-* | klab-green-* | kspawn-*) _untargeted+=" ${_vm}" ;;
+        *) _uncovered+=" ${_vm}" ;;
+        esac
     done < <(vms_running)
-    if [[ -z "$_untargeted" ]]; then
+    if [[ -z "$_untargeted" && -z "$_uncovered" ]]; then
         _pass "file_sd: all ${_vm_count} running VM(s) have a Prometheus target"
+    elif [[ -z "$_untargeted" ]]; then
+        _pass "file_sd: every VM a generator covers has a target"
+        _warn "monitoring coverage" "running, and no generator covers the name:${_uncovered}"
     else
-        _fail "monitoring targets" "running but absent from ${TARGETS_DIR}:${_untargeted}"
+        _fail "monitoring targets" "klab/kspawn VMs running and absent from ${TARGETS_DIR}:${_untargeted}"
+        [[ -n "$_uncovered" ]] &&
+            _warn "monitoring coverage" "also running, and no generator covers the name:${_uncovered}"
     fi
 
     # The scrape itself. Prometheus is local; a machine where it is not

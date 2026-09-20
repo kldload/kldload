@@ -150,8 +150,16 @@ _wait_until() {
     return 1
 }
 
-_check() { # _check <label> <want> <fn>
+# _check <label> <want> <fn> [max-seconds]
+#
+# The fourth argument matters: these registries run on very different clocks.
+# file_sd regenerates every 30s and the inventory every 60s, but the enrol
+# sweep is OnUnitActiveSec=10min — so a 240s wait reported "never appeared" for
+# a mesh that was simply not due yet, and called a healthy machine broken
+# (deb-4-k8s, 2026-09-20). Each check now waits as long as its own timer needs.
+_check() {
     local label="$1" want="$2" fn="$3" secs rc=0
+    local WAIT_MAX="${4:-$WAIT_MAX}"
     secs="$(_wait_until "$label" "$want" "$fn")" || rc=1
     if ((rc == 0)); then
         if [[ "$want" == yes ]]; then
@@ -234,10 +242,21 @@ _section "Join"
 _check "libvirt" yes in_libvirt
 _check "state DB" yes in_db
 _check "Ansible inventory" yes in_inventory
-have kldload-estate && _check "WireGuard mesh" yes on_mesh ||
+# 900s: the enrol sweep fires every 10 minutes.
+have kldload-estate && _check "WireGuard mesh" yes on_mesh 900 ||
     _didnotrun "join: WireGuard mesh" "kldload-estate is not installed"
-[[ -d /etc/prometheus/targets ]] && _check "Prometheus file_sd" yes in_prometheus ||
+# klab-prom-targets generates entries for klab-blue-*, klab-green-* and
+# kspawn-* and nothing else, so a probe named anything else is not supposed to
+# appear and asserting that it does is a test bug, not a finding. The REAL gap
+# — that a VM you create by hand is invisible to monitoring — is reported once,
+# as a warning, rather than as a failure on every run.
+if [[ ! -d /etc/prometheus/targets ]]; then
     _didnotrun "join: Prometheus file_sd" "/etc/prometheus/targets does not exist"
+elif [[ "$PROBE" == klab-blue-* || "$PROBE" == klab-green-* || "$PROBE" == kspawn-* ]]; then
+    _check "Prometheus file_sd" yes in_prometheus
+else
+    _warn "join: Prometheus file_sd" "nothing generates a target for a VM named '${PROBE}' — only klab-blue-*, klab-green-* and kspawn-* are covered, so a hand-made clone is not scraped"
+fi
 
 # In the inventory is not reachable. This is the same distinction smoke-estate
 # draws for the fleet, asked of the one machine this test owns.
@@ -264,8 +283,10 @@ fi
 _check "libvirt" no in_libvirt
 _check "state DB" no in_db
 _check "Ansible inventory" no in_inventory
-if have kldload-estate; then _check "WireGuard mesh" no on_mesh; fi
-if [[ -d /etc/prometheus/targets ]]; then _check "Prometheus file_sd" no in_prometheus; fi
+if have kldload-estate; then _check "WireGuard mesh" no on_mesh 900; fi
+if [[ -d /etc/prometheus/targets ]] && [[ "$PROBE" == klab-* || "$PROBE" == kspawn-* ]]; then
+    _check "Prometheus file_sd" no in_prometheus
+fi
 
 if has_zvol "$PROBE"; then
     _fail "unjoin: storage" "the zvol for ${PROBE} survived kvm-delete"

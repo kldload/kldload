@@ -329,16 +329,32 @@ for ed in "${EDITIONS[@]}"; do
     # blamed a healthy machine before.
     if ssh_bench "$ip" 'command -v virsh >/dev/null 2>&1'; then
         say "${ed}: estate lifecycle (clone -> join -> delete -> unjoin)"
-        ssh_bench "$ip" 'sudo -n bash /usr/local/share/kldload/tests/estate-lifecycle.sh' \
+        # 1800s, not the 120s default: this test creates a VM and then waits,
+        # bounded, for four registries to notice it and four to release it.
+        # At 120s it was killed after the third check and the file stopped
+        # mid-run (deb-4-k8s, 2026-09-20) — the same truncation the report
+        # call had, one call site later.
+        SSH_T=1800 ssh_bench "$ip" 'sudo -n bash /usr/local/share/kldload/tests/estate-lifecycle.sh' \
             >"${OUT}/estate-lifecycle.txt" 2>&1 ||
             true # its verdict is in the file; a failed lifecycle is a result, not a reason to stop
         _lc="$(grep -cE '✗ FAIL' "${OUT}/estate-lifecycle.txt" 2>/dev/null || true)"
         _lp="$(grep -cE '✓ PASS' "${OUT}/estate-lifecycle.txt" 2>/dev/null || true)"
+        # The script prints a summary line last. Without it the run did not
+        # finish, and counting only its passes would report a killed test as a
+        # clean one.
+        if ! grep -q 'estate lifecycle:' "${OUT}/estate-lifecycle.txt" 2>/dev/null; then
+            say "${ed}: lifecycle did NOT finish — recorded as truncated"
+            _lifecycle="lifecycle TRUNCATED (${_lp} before it stopped)"
+            RC=1
+            _lc=truncated
+        fi
         say "${ed}: lifecycle ${_lp} passed, ${_lc} failed"
-        if [[ "${_lc:-0}" != 0 ]]; then
+        if [[ "$_lc" == truncated ]]; then
+            : # already recorded above
+        elif [[ "${_lc:-0}" != 0 ]]; then
             RC=1
             # Surface it in the summary row rather than only in a side file.
-            _lifecycle="lifecycle ${_lp}/${_lc}"
+            _lifecycle="lifecycle ${_lp} passed / ${_lc} failed"
         else
             _lifecycle="lifecycle ok (${_lp})"
         fi
