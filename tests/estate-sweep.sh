@@ -316,8 +316,13 @@ for ed in "${EDITIONS[@]}"; do
         verdict="TRUNCATED ($(wc -l <"${OUT}/report.md") lines)"
         RC=1
     fi
-    read -r sp sf sw < <(sed -n 's/^PASS \([0-9]*\)   FAIL \([0-9]*\)   WARN \([0-9]*\)$/\1 \2 \3/p' "${OUT}/report.md" | head -1)
-    sp="${sp:-}" sf="${sf:-}" sw="${sw:-}"
+    # `|| true`: a core install ships no smoke suite, so its report carries no
+    # tally line and read returns 1 — which under set -e killed the whole sweep
+    # after nine successful editions, with the last one never run (08:07:54,
+    # 2026-09-20). An absent tally is a legitimate state, not a failure.
+    sp="" sf="" sw=""
+    read -r sp sf sw < <(sed -n 's/^PASS \([0-9]*\)   FAIL \([0-9]*\)   WARN \([0-9]*\)$/\1 \2 \3/p' "${OUT}/report.md" | head -1) || true
+    sp="${sp:-n/a}" sf="${sf:-n/a}" sw="${sw:-n/a}"
 
     # 5b. The ACTIVE estate test, where there is a hypervisor to run it on.
     #
