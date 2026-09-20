@@ -26,7 +26,7 @@ component.
 Environment:
   POD_CIDR            Default 10.244.0.0/16.
   SVC_CIDR            Default 10.96.0.0/12.
-  CILIUM_VERSION      Default 1.16.5.
+  CILIUM_VERSION      Default: whatever this ISO locked at build time.
   METALLB_VERSION     Default 0.14.9.
   METALLB_POOL        address range for MetalLB, e.g. 192.168.122.240-250.
                       EMPTY by default, which means MetalLB is not configured
@@ -52,7 +52,14 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 SVC_CIDR="${SVC_CIDR:-10.96.0.0/12}"
-CILIUM_VERSION="${CILIUM_VERSION:-1.16.5}"
+# The version this ISO was BUILT with, from the lock it carries. A literal
+# here is how the installer came to ask for 1.16.5 while the mirror held
+# whatever the build resolved — the two must be one answer (2026-09-20).
+_k8s_lock=/root/darksite/k8s-stack.lock
+CILIUM_VERSION="${CILIUM_VERSION:-$(sed -n 's/^CHART=//p' "$_k8s_lock" 2>/dev/null | awk -F'|' '$3=="cilium"{print $4; exit}')}"
+# Empty means the lock is missing: say so rather than silently installing
+# whatever the chart repo offers today, which on an air-gapped box is nothing.
+[[ -n "$CILIUM_VERSION" ]] || CILIUM_VERSION=unknown
 METALLB_VERSION="${METALLB_VERSION:-0.14.9}"
 METALLB_POOL="${METALLB_POOL:-}" # auto-detect from node subnet if empty
 # The pool's NAME, not its range. Anything that asks MetalLB for an address BY

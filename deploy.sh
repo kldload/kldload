@@ -106,6 +106,15 @@ USB_BURN_ON_DEPLOY="${USB_BURN_ON_DEPLOY:-no}" # Auto-burn after full build (yes
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+# _lock_chart_version <chart> — the version resolve-k8s-stack.sh locked, or
+# empty. Everything that used to hardcode 1.16.5 asks this instead; a literal
+# version anywhere in the build is the bug the lock was written to end.
+_lock_chart_version() {
+    local _lock="$ROOT/build/darksite/k8s-stack.lock"
+    [[ -s "$_lock" ]] || return 0
+    sed -n 's/^CHART=//p' "$_lock" | awk -F'|' -v c="$1" '$3 == c { print $4; exit }'
+}
+
 log() { printf '[%s] [deploy] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die() {
     log "ERROR: $*"
@@ -795,7 +804,9 @@ cmd_build() {
     # Pre-pulls all images needed by kubeadm, Cilium, MetalLB, etc.
     # so kube-cluster bootstrap works without internet.
     local k8s_images_dir="$ROOT/live-build/config/includes.chroot/root/darksite/k8s-images"
-    local k8s_images_list="$ROOT/build/darksite/k8s-images.txt"
+    # The LOCK, not the old hand-maintained list: k8s-images.txt is gone and
+    # the image set is derived by resolve-k8s-stack.sh (2026-09-20).
+    local k8s_images_list="$ROOT/build/darksite/k8s-stack.lock"
     if [[ -f "$k8s_images_list" ]] && [[ "$EDITION" != "core" && "$PAYLOAD" != "net" && "$K8S_IMAGES" == "yes" ]]; then
         # Always run the puller. It skips images it already has, one at a
         # time, so this is cheap on a warm cache and — unlike the old
@@ -815,7 +826,23 @@ cmd_build() {
         # HISTORY: onyx 2026-08-29 — ship exited 1 right after "Note: Arch
         # installs require internet", no error printed, no ISO, no burn.
         mkdir -p "$k8s_images_dir"
-        _want="$(grep -cvE '^\s*(#|$)' "$k8s_images_list")"
+        # Resolve the stack FRESH, here, before anything counts or pulls.
+        #
+        # This runs on the host because the image pull does, and both must read
+        # the same lock — resolving inside the container at chart-staging time
+        # would be long after these tarballs were fetched, so the mirror and the
+        # charts could disagree, which is the failure the lock exists to stop.
+        #
+        # KLDLOAD_K8S_LOCK_REUSE=1 keeps the committed lock instead, which is
+        # how a release build is reproduced exactly.
+        if [[ "${KLDLOAD_K8S_LOCK_REUSE:-0}" == "1" ]]; then
+            log "k8s stack: reusing the committed lock on purpose (KLDLOAD_K8S_LOCK_REUSE=1)"
+        else
+            log "Resolving the Kubernetes stack fresh..."
+            bash "$ROOT/build/darksite/resolve-k8s-stack.sh" ||
+                die "could not resolve the Kubernetes stack — refusing to build an ISO that would quietly ship the previous one"
+        fi
+        _want="$(grep -c '^IMAGE=' "$k8s_images_list")"
         _have="$(find "$k8s_images_dir" -name '*.tar' 2>/dev/null | wc -l)"
         if [[ "$_have" -lt "$_want" ]]; then
             log "Pre-pulling Kubernetes container images for offline deploy (${_have}/${_want} cached)..."
@@ -849,10 +876,10 @@ cmd_build() {
             if command -v helm >/dev/null 2>&1; then
                 helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
                 helm repo update >/dev/null 2>&1 || true
-                helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "$helm_cache" 2>/dev/null &&
+                helm pull cilium/cilium --version "${CILIUM_VERSION:-$(_lock_chart_version cilium)}" -d "$helm_cache" 2>/dev/null &&
                     mv "$helm_cache"/cilium-*.tgz "$helm_cache/cilium.tgz" 2>/dev/null || true
             elif command -v curl >/dev/null 2>&1; then
-                curl -fsSL "https://helm.cilium.io/cilium-${CILIUM_VERSION:-1.16.5}.tgz" \
+                curl -fsSL "https://helm.cilium.io/cilium-${CILIUM_VERSION:-$(_lock_chart_version cilium)}.tgz" \
                     -o "$helm_cache/cilium.tgz" 2>/dev/null || log "WARNING: Could not cache Cilium chart"
             fi
             [[ -f "$helm_cache/cilium.tgz" ]] && log "Cilium chart cached: $(du -h "$helm_cache/cilium.tgz" | cut -f1)"
@@ -2317,12 +2344,18 @@ build-k8s-darksite)
     # Normally this runs as part of `build`, but can be triggered
     # independently to pre-cache images before a full build.
     log "Building Kubernetes + Cilium offline darksite..."
+    # Resolve first here too: this subcommand exists to pre-cache before a full
+    # build, and caching the previous stack would defeat it.
+    if [[ "${KLDLOAD_K8S_LOCK_REUSE:-0}" != "1" ]]; then
+        bash "$ROOT/build/darksite/resolve-k8s-stack.sh" ||
+            die "could not resolve the Kubernetes stack"
+    fi
     bash "$ROOT/build/darksite/pull-k8s-images.sh" "$ROOT/live-build/config/includes.chroot/root/darksite/k8s-images"
     mkdir -p "$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts"
     if command -v helm >/dev/null 2>&1; then
         helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
         helm repo update >/dev/null 2>&1 || true
-        helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "/tmp/cilium-chart" 2>/dev/null
+        helm pull cilium/cilium --version "${CILIUM_VERSION:-$(_lock_chart_version cilium)}" -d "/tmp/cilium-chart" 2>/dev/null
         mv /tmp/cilium-chart/cilium-*.tgz "$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts/cilium.tgz" 2>/dev/null || true
         rm -rf /tmp/cilium-chart
     fi
@@ -2442,7 +2475,7 @@ Environment (override via env vars or kldload.env):
   KVM_VMS         Number of KVM test VMs (default: 1)
   USB_DEVICE      USB block device for burn (default: /dev/sda)
   PROXMOX_HOST    Proxmox host IP (default: 10.100.10.225)
-  CILIUM_VERSION  Cilium Helm chart version (default: 1.16.5)
+  CILIUM_VERSION  Cilium Helm chart version (default: whatever k8s-stack.lock resolved)
 
 Examples:
   ./deploy.sh build                          # Build with defaults

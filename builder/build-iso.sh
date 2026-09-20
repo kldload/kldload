@@ -2075,6 +2075,25 @@ if [[ "$EDITION" != "core" ]]; then
     # This directory is also the operator's drop-in point: any *.tgz placed in
     # /root/darksite/helm-charts/workloads is installed at first boot, which is
     # how you run your own charts on a machine that has never had a network.
+    # The stack was resolved on the HOST before the image mirror was pulled
+    # (deploy.sh), so this only READS the lock. Resolving again here would let
+    # the charts and the already-baked images disagree, which is precisely what
+    # the lock exists to prevent.
+    K8S_LOCK="/build/build/darksite/k8s-stack.lock"
+    [[ -s "$K8S_LOCK" ]] || die "k8s-stack.lock is missing — the host build must resolve it before build-iso runs"
+    log "k8s stack from lock: $(sed -n 's/^K8S_VERSION=//p' "$K8S_LOCK"), $(grep -c '^CHART=' "$K8S_LOCK") charts, $(grep -c '^IMAGE=' "$K8S_LOCK") images"
+
+    # SHIP the lock. kube-init on the installed machine reads it to learn which
+    # Cilium this ISO carries, and it is the record that lets a node say what it
+    # was built from — which is what makes "replicate this node anywhere" mean
+    # reproduce rather than merely copy.
+    mkdir -p "${ROOTFS}/root/darksite"
+    install -m 0644 "$K8S_LOCK" "${ROOTFS}/root/darksite/k8s-stack.lock"
+    # Written is not wired: prove it landed, because every consumer of it on the
+    # target degrades quietly when it is absent.
+    [[ -s "${ROOTFS}/root/darksite/k8s-stack.lock" ]] ||
+        die "k8s-stack.lock did not reach the image — kube-init would not know which Cilium to install"
+
     mkdir -p "${ROOTFS}/root/darksite/helm-charts/workloads"
     _helm_tmp="$(mktemp -d)"
     _helm_bin=""
@@ -2091,15 +2110,14 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -n "$_helm_bin" ]]; then
         export HELM_CACHE_HOME="${_helm_tmp}/cache" HELM_CONFIG_HOME="${_helm_tmp}/config" \
             HELM_DATA_HOME="${_helm_tmp}/data"
-        while IFS='|' read -r _rname _rurl _cname; do
+        # Repos and versions both come from the LOCK now — see
+        # build/darksite/resolve-k8s-stack.sh. There are no chart versions in
+        # this file any more, deliberately: a literal here is how the darksite
+        # came to rebuild itself faithfully from 2024 every time.
+        while IFS='|' read -r _rname _rurl _cname _cver; do
             [[ -n "$_rname" ]] || continue
             "$_helm_bin" repo add "$_rname" "$_rurl" >>"$LOG_FILE" 2>&1 || true
-        done <<'HELMREPOS'
-cilium|https://helm.cilium.io/|tetragon
-argo|https://argoproj.github.io/argo-helm|argo-cd
-metallb|https://metallb.github.io/metallb|metallb
-openebs-zfslocalpv|https://openebs.github.io/zfs-localpv|zfs-localpv
-HELMREPOS
+        done < <(sed -n 's/^CHART=//p' "$K8S_LOCK" | sort -u -t'|' -k1,1)
         "$_helm_bin" repo update >>"$LOG_FILE" 2>&1 || true
 
         while IFS='|' read -r _rname _rurl _cname _cver; do
@@ -2121,13 +2139,7 @@ HELMREPOS
             fi
             log "  WARNING helm chart download failed: ${_cname} — install will fall back to the online repo"
             _chart_fail=$((_chart_fail + 1))
-        done <<'HELMCHARTS'
-cilium|https://helm.cilium.io/|tetragon|1.7.0
-cilium|https://helm.cilium.io/|cilium|1.16.5
-openebs-zfslocalpv|https://openebs.github.io/zfs-localpv|zfs-localpv|2.11.1
-argo|https://argoproj.github.io/argo-helm|argo-cd|10.3.3
-metallb|https://metallb.github.io/metallb|metallb|0.14.9
-HELMCHARTS
+        done < <(sed -n 's/^CHART=//p' "$K8S_LOCK")
         unset HELM_CACHE_HOME HELM_CONFIG_HOME HELM_DATA_HOME
     else
         log "  WARNING helm binary unavailable at build time — no charts staged"
