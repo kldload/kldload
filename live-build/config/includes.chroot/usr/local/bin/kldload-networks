@@ -186,7 +186,13 @@ _refresh_wgx_inventory() {
             # swallow: an interface with no peers prints nothing and exits
             # non-zero under pipefail; that is an empty mesh, not an error.
             wg show "$_if" endpoints 2>/dev/null | awk '{print $2}' | cut -d: -f1 || true
-        done | grep -vE '^\(none\)$|^$' | sort -u
+            # A host whose meshes have no peers yet produces nothing here, and
+            # grep exits 1 on no matches, which under pipefail fails the whole
+            # pipeline and trips the ERR trap. That is how a healthy machine
+            # logged "FAIL at line 171: sort -u" during every sync (fiend,
+            # deb-3-kvm, 2026-09-20). An empty mesh is a boot-order state, and
+            # the caller already treats "no peers" as "change nothing".
+        done | grep -vE '^\(none\)$|^$' | sort -u || true
     )
 
     # An empty sweep must not blank a working inventory. No peers means no
