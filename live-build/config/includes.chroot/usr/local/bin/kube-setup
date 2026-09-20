@@ -441,18 +441,31 @@ main() {
     kubeadm config images pull 2>/dev/null && log "  kubeadm images pulled" ||
         log "WARNING: kubeadm image pull failed"
 
-    # Cilium + Hubble (eBPF CNI + observability)
-    local CILIUM_VER="${CILIUM_CLI_VERSION:-0.19.2}"
-    for img in \
-        "quay.io/cilium/cilium:v1.16.5" \
-        "quay.io/cilium/operator-generic:v1.16.5" \
-        "quay.io/cilium/hubble-relay:v1.16.5" \
-        "quay.io/cilium/hubble-ui:v0.13.1" \
-        "quay.io/cilium/hubble-ui-backend:v0.13.1" \
-        "quay.io/cilium/cilium-envoy:v1.30.8-1733837904-eaae5aca0fb988583e5617170a65ac5aa51c0aa8"; do
-        crictl pull "$img" 2>/dev/null && log "  pulled: ${img##*/}" ||
-            log "  WARN: failed to pull ${img##*/}"
-    done
+    # Cilium + Hubble, from the lock this ISO was built with.
+    #
+    # These were six hardcoded tags (cilium v1.16.5, hubble-ui v0.13.1, an
+    # envoy build hash). Once the darksite started resolving its stack fresh,
+    # a literal here asks for an image the mirror does not contain and pulls it
+    # over the internet — on a node whose entire premise is that it does not
+    # need one. The lock is the single answer; anything not in it is not in the
+    # mirror either (2026-09-20).
+    local _lock=/root/darksite/k8s-stack.lock
+    if [[ -s "$_lock" ]]; then
+        local _n=0 _got=0
+        while IFS= read -r img; do
+            [[ -n "$img" ]] || continue
+            _n=$((_n + 1))
+            if crictl pull "$img" 2>/dev/null; then
+                _got=$((_got + 1))
+            else
+                log "  WARN: failed to pull ${img##*/}"
+            fi
+        done < <(sed -n 's/^IMAGE=//p' "$_lock" | grep -E 'cilium|hubble|tetragon')
+        # A count against what it was given, not just a cheerful total.
+        log "  cilium/hubble images: ${_got}/${_n} pulled"
+    else
+        log "WARNING: ${_lock} is absent — cannot tell which Cilium images this build expects"
+    fi
 
     # MetalLB
     for img in \
