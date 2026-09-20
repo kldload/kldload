@@ -93,11 +93,22 @@ done
 
 in_libvirt() { virsh dominfo "$1" >/dev/null 2>&1; }
 
+# A LIVE row, not any row. `kldload-db vm-delete` is a SOFT delete by design --
+# it sets status='deleted' and stamps deleted_at so the history survives while
+# the dynamic inventory drops the host. Asking merely whether the name appears
+# reported "STILL registered 240s after delete" for a database behaving exactly
+# as intended (deb-4-k8s, 2026-09-20).
 in_db() {
     kldload-db dump 2>/dev/null | python3 -c 'import json,sys
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(1)
-sys.exit(0 if any(v.get("name")==sys.argv[1] for v in d.get("vms",[])) else 1)' "$1" 2>/dev/null
+for v in d.get("vms",[]):
+    if v.get("name")!=sys.argv[1]:
+        continue
+    if v.get("status")=="deleted" or v.get("deleted_at"):
+        continue          # soft-deleted: released, not registered
+    sys.exit(0)
+sys.exit(1)' "$1" 2>/dev/null
 }
 
 in_inventory() {
@@ -295,4 +306,8 @@ else
 fi
 
 printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
-((FAIL == 0))
+# Explicit, so lib-test's ERR trap does not fire on this script's own verdict.
+if ((FAIL == 0)); then
+    exit 0
+fi
+exit 1

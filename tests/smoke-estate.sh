@@ -285,4 +285,8 @@ else
 fi
 
 printf '\n  estate: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
-((FAIL == 0))
+# Explicit, so lib-test's ERR trap does not fire on this suite's own verdict.
+if ((FAIL == 0)); then
+    exit 0
+fi
+exit 1
