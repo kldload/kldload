@@ -2049,6 +2049,42 @@ DASHSTART
             ;;
         esac
 
+        # ── Debian ships services ENABLED and RUNNING ────────────────────
+        #
+        # dpkg starts a daemon the moment its package lands, unless a
+        # policy-rc.d says otherwise. RPM does the opposite, so a package
+        # carried "inert until somebody enables the unit" is inert on half
+        # the matrix and live on the other half -- and the comment above the
+        # dnsmasq/nginx/ipxe line says "inert unless the unit is enabled",
+        # which was simply untrue here.
+        #
+        # What that cost, fiend debian/server 2026-09-19:
+        #   dnsmasq  — bound nothing, because systemd-resolved already holds
+        #              127.0.0.53:53. "failed to create listening socket for
+        #              port 53: Address already in use", unit failed, system
+        #              degraded from the first boot.
+        #   openipmi — an LSB init script that exits non-zero on a machine
+        #              with no BMC, which is most machines. Also failed, also
+        #              degraded.
+        #
+        # Neither is wanted at boot: dnsmasq is carried for the netboot server
+        # to enable when the operator runs one, and OpenIPMI for ipmitool on
+        # hardware that has a BMC. Disabled, not masked -- masking would make
+        # `kldload-netboot-server` unable to start its own dnsmasq later.
+        case "${KLDLOAD_DISTRO:-debian}" in
+        debian | ubuntu)
+            for _inert in dnsmasq.service openipmi.service; do
+                chroot "${target}" systemctl is-enabled "$_inert" >/dev/null 2>&1 || continue
+                if chroot "${target}" systemctl disable "$_inert" >/dev/null 2>&1; then
+                    k_log "disabled ${_inert} (shipped for later, not for boot)"
+                else
+                    k_log "WARNING: could not disable ${_inert} — it will fail at every boot and degrade the system"
+                fi
+            done
+            ;;
+        *) : ;; # RPM/Arch do not enable a unit just because it was installed
+        esac
+
     fi # end non-core block
 
     # ── Build markers ──────────────────────────────────────────────────────

@@ -2926,9 +2926,35 @@ SALT
         # The Kubernetes tile's web view embeds /k9s (ttyd-k9s); enabling
         # kldload-webui alone left that pane 502 on a fresh install (.147,
         # 2026-06-03), so the tile looked like "just a terminal". Enable the trio.
-        systemctl enable kldload-webui kldload-proxy ttyd-k9s 2>/dev/null || true
-        systemctl start kldload-webui kldload-proxy ttyd-k9s 2>/dev/null ||
-            log "WARNING: one of kldload-webui, kldload-proxy, ttyd-k9s did not start — the web console may be unreachable"
+        # kldload-proxy is MASKED on any host where nginx fronts the console,
+        # which is every current install -- so enabling and starting it as part
+        # of the trio always failed, and the warning below fired on machines
+        # whose web console was perfectly healthy (fiend, debian/server,
+        # 2026-09-19: webui active, ttyd-k9s active, nginx serving 8443, and a
+        # WARNING in the log saying it might be unreachable). A warning that
+        # cries wolf on every install is worse than none, because it is the
+        # reason nobody reads the next one.
+        #
+        # So: act on the units this host actually wants, and check each one by
+        # name rather than asking systemctl about three at once and getting a
+        # single status back.
+        _web_units=()
+        for _wu in kldload-webui kldload-proxy ttyd-k9s; do
+            [[ "$(systemctl is-enabled "$_wu" 2>/dev/null)" == masked ]] && continue
+            _web_units+=("$_wu")
+        done
+        if ((${#_web_units[@]})); then
+            systemctl enable "${_web_units[@]}" 2>/dev/null || true
+            systemctl start "${_web_units[@]}" 2>/dev/null || true
+            # Outcome, not exit code, and per unit: the name that did not come
+            # up is the bug report; "one of three" is a scavenger hunt.
+            _web_dead=""
+            for _wu in "${_web_units[@]}"; do
+                systemctl is-active --quiet "$_wu" || _web_dead+=" ${_wu}"
+            done
+            [[ -n "$_web_dead" ]] &&
+                log "WARNING: web console unit(s) not running:${_web_dead} — the console may be unreachable"
+        fi
 
         # Enable the hourly TLS-cert drift-check timer. The cert is generated
         # for the first time via ttyd-k9s.service's ExecStartPre, now ordered
