@@ -2150,6 +2150,17 @@ DASHSTART
         # zexplore binary, and the app tile opened a terminal to "zexplore: command not
         # found" (.116 2026-07-26). Any future non-k tool needs adding here too.
         _skip_tools="kldload-install-target kldload-overview"
+        # A GUI-only tool on a headless profile is a launcher onto nothing.
+        # The Timer is a GTK4 app; on fedora/storage its binary landed, its
+        # PyGObject/Gtk4 stack did not (there is no desktop to pull it in), and
+        # the smoke suite correctly reported "gi/Gtk4 will not import — the
+        # launcher opens nothing" (2026-09-20). Shipping it there is the same
+        # mistake as the guarded import in the engineering rules: the tool is
+        # present, it cannot run, and nothing says so until someone clicks it.
+        case "${_profile}" in
+        desktop | vdi | rdp | arcade) : ;;
+        *) _skip_tools+=" timer" ;;
+        esac
         shopt -s nullglob
         # wgx is explicit like zxplore: the WG networks console breaks the k*
         # naming convention, so the globs would silently drop it. vmxplore and

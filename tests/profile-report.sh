@@ -195,6 +195,14 @@ echo '```'
 echo
 if [[ -n "${_failed// /}" ]]; then
     for _u in $_failed; do
+        # kldload-smoke-firstboot runs the smoke suite at first boot, so it
+        # fails exactly when the suite found failures. Counting it as its own
+        # defect double-counts the same news and sends the reader hunting for a
+        # second problem that does not exist (fedora/storage, 2026-09-20).
+        if [[ "$_u" == kldload-smoke-firstboot.service ]]; then
+            note_warn "kldload-smoke-firstboot failed — it runs the smoke suite, so this reflects the suite failures below, not a separate fault"
+            continue
+        fi
         note_fail "failed unit: ${_u} — $(S systemctl show -p Result --value "$_u" || echo '?')"
     done
     echo

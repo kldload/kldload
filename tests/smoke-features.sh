@@ -95,7 +95,11 @@ _app_triad "Timer" /usr/local/bin/timer com.kldload.Timer.desktop com.kldload.Ti
 
 # A GTK4 app whose PyGObject was never packaged starts, fails to import, and
 # dies with no window — indistinguishable from "the icon does nothing".
-if [[ -x /usr/local/bin/timer ]]; then
+# Only where there is a desktop to run it in. A headless profile has no Gtk4
+# stack by design, so asking whether it imports there tests the profile's
+# definition, not a defect — and the installer no longer ships the binary to
+# those profiles anyway (2026-09-20).
+if [[ -x /usr/local/bin/timer ]] && [[ "$(systemctl get-default 2>/dev/null)" == graphical.target ]]; then
     if python3 -c 'import gi; gi.require_version("Gtk","4.0"); from gi.repository import Gtk' 2>/dev/null; then
         _pass "Timer: PyGObject + Gtk4 import on this machine"
     else
