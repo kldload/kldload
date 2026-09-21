@@ -297,9 +297,16 @@ _cl_ready() {
     kc="$(_cl_kubeconfig "$1")"
     [[ -r "$kc" ]] || return 1
     local out
+    # `|| true`: kubectl failing IS the answer here — an unreachable or
+    # half-started cluster is precisely what this function reports, through the
+    # emptiness guard below. Without the swallow `set -e` kills the caller
+    # instead of letting it hear "not ready".
     out="$(timeout 30 kubectl --kubeconfig "$kc" get nodes --no-headers 2>/dev/null || true)"
     [[ -n "$out" ]] || return 1
     local total notready
+    # `|| true`: grep -c exits 1 when it counts zero, and zero is a legitimate
+    # count, not an error — the arithmetic test at the end of the function is
+    # what judges it.
     total="$(printf '%s\n' "$out" | grep -c . || true)"
     notready="$(printf '%s\n' "$out" | awk '$2 != "Ready" {n++} END {print n+0}')"
     ((total > 0 && notready == 0))
