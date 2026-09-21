@@ -22,11 +22,14 @@ Takes no arguments. Needs root. Handles dnf (CentOS, RHEL, Rocky, Fedora) and
 apt (Debian, Ubuntu) from /etc/os-release.
 
 Environment:
-  K8S_VERSION          package repo stream. Default v1.32.
+  K8S_VERSION          package repo stream, e.g. v1.37. No default: taken
+                       from the caller, then /root/darksite/k8s-stack.lock,
+                       then dl.k8s.io's current release. Unresolvable is a
+                       fatal error, never a guess.
   HELM_VERSION         Default v3.17.0.
   CILIUM_CLI_VERSION   Default 0.19.2.
 
-Set K8S_VERSION to the minor stream (v1.32), not a patch release -- it selects
+Set K8S_VERSION to the MINOR stream (v1.37), not a patch release -- it selects
 the pkgs.k8s.io repo, not a package pin.
 
 See also: kube-init, kube-join, kube-load-images, kube-status.
@@ -41,20 +44,36 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 #
 # Order: the caller (kube-cluster hands it over from the host's stack lock,
 # because this script runs in a GUEST and the lock is on the hypervisor), then
-# a lock if one happens to be readable here, then the fallback.
+# a lock if one is readable here, then upstream's current release. No literal
+# at any rung.
 #
-# The fallback used to be the only rule, and it is how an ISO whose lock said
-# v1.37.0 stocked a v1.32 mirror and installed v1.32.13 kubelets: three copies
-# of one fact — here, build-darksite.sh, and the lock — with two of them
-# stale, agreeing with each other loudly enough that nobody noticed the third
-# (fiend 2026-09-20). The other two are derived now; this is the last copy and
-# it exists only for a kube-setup run by hand on a machine with no lock.
+# A literal here is how an ISO whose lock said v1.37.0 installed v1.32.13
+# kubelets. The same constant existed in FOUR places — this file,
+# build-darksite.sh, build-darksite-fedora.sh and the -e passed into the
+# darksite container by deploy.sh — and two of them agreed with each other
+# loudly enough that the derived answer looked like the odd one out
+# (fiend 2026-09-20).
 _k8s_lock=/root/darksite/k8s-stack.lock
 if [[ -z "${K8S_VERSION:-}" && -r "$_k8s_lock" ]]; then
     K8S_VERSION="$(sed -n 's/^K8S_VERSION=//p' "$_k8s_lock" |
         sed -n 's/^\(v[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)" || K8S_VERSION=""
 fi
-K8S_VERSION="${K8S_VERSION:-v1.32}"
+# No literal. Third rung: ask upstream what is current, the same question
+# resolve-k8s-stack.sh asks at build time — so a kube-setup run by hand on a
+# networked machine with no lock still gets the CURRENT release rather than
+# whatever someone typed into this file once.
+#
+# There is no fourth rung. A hardcoded default is how this project shipped an
+# ISO whose lock said v1.37.0 onto nodes running v1.32.13: the literal was in
+# four places, two of them agreed with each other, and the derived answer was
+# the odd one out. A version nobody can resolve is a reason to stop, not a
+# reason to guess.
+if [[ -z "${K8S_VERSION:-}" ]]; then
+    K8S_VERSION="$(curl -fsSL --max-time 15 https://dl.k8s.io/release/stable.txt 2>/dev/null |
+        sed -n 's/^\(v[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)" || K8S_VERSION=""
+    [[ -n "$K8S_VERSION" ]] && log "Kubernetes ${K8S_VERSION} (current upstream release; no lock on this machine)"
+fi
+[[ -n "${K8S_VERSION:-}" ]] || die "cannot determine a Kubernetes version: no caller value, no ${_k8s_lock}, and dl.k8s.io is unreachable. Set K8S_VERSION=vX.Y."
 CILIUM_CLI_VERSION="${CILIUM_CLI_VERSION:-0.19.2}"
 HELM_VERSION="${HELM_VERSION:-v3.17.0}"
 

@@ -289,7 +289,7 @@ cmd_build_fedora_darksite() {
         -v "$darksite_dir:/output:z" \
         -e ARCH="${_fed_arch}" \
         -e RELEASE="${fed_release}" \
-        -e K8S_MINOR="${K8S_MINOR:-v1.32}" \
+        -e K8S_MINOR="${K8S_MINOR:-$(_k8s_minor_from_lock)}" \
         --name "kldload-darksite-fedora-$$" \
         "registry.fedoraproject.org/fedora:${fed_release}" \
         bash /darksite-build/build-darksite-fedora.sh
@@ -351,6 +351,29 @@ cmd_build_fedora_darksite() {
 # --skip-unavailable. Debian and Ubuntu had the identical check and identical
 # three-week-old caches — Debian's from 07-23 — so any package added to those
 # sets since had never been mirrored either.
+# _k8s_minor_from_lock — the Kubernetes MINOR stream the mirrors stock.
+#
+# The lock is the single answer (resolve-k8s-stack.sh fills it from upstream's
+# stable.txt every build); this turns its v1.37.0 into the v1.37 that
+# pkgs.k8s.io keys its repos on.
+#
+# This was the literal v1.32, passed as -e into the darksite container — which
+# is how it beat the derivation added inside build-darksite-fedora.sh on the
+# same day: an env var that is already set wins over the script's own lookup,
+# so the fix could not fire. FOUR copies of this fact existed, and this one
+# was the last found because it is the only one that is not in a file with
+# "darksite" or "kube" in its name.
+#
+# Empty output is deliberate: the two mirror builders refuse to run without a
+# version rather than falling back, because a mirror stocked at a version
+# nothing else agrees on is silent until an air-gapped install finds nothing.
+_k8s_minor_from_lock() {
+    local lock="$ROOT/build/darksite/k8s-stack.lock"
+    [[ -r "$lock" ]] || return 0
+    sed -n 's/^K8S_VERSION=//p' "$lock" |
+        sed -n 's/^\(v[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1
+}
+
 _pkgset_hash() {
     local dir="${1:?}"
     shift
@@ -697,8 +720,15 @@ cmd_build() {
             local _fed_hash
             # The builder is hashed for the same reason as Debian's: it decides what
             # ends up in the pool, so an edit there must invalidate the cache.
+            # The k8s minor is part of the key. Without it the mirror keeps
+            # whatever kubeadm it stocked first: on 2026-09-20 the lock moved
+            # to v1.37 and the Fedora pool still held only kubeadm-1.32.13,
+            # because nothing about the PACKAGE SET had changed — only the
+            # version those packages are fetched at. A cache keyed on the
+            # question but not the answer.
             _fed_hash="$(_pkgset_hash "$ROOT/build/darksite-fedora/config/package-sets" \
-                "$ROOT/build/darksite-fedora/build-darksite-fedora.sh")"
+                "$ROOT/build/darksite-fedora/build-darksite-fedora.sh" \
+                <(printf 'k8s=%s\n' "${K8S_MINOR:-$(_k8s_minor_from_lock)}"))"
             if [[ ! -f "$fedora_darksite/rpm/repodata/repomd.xml" ]]; then
                 cmd_build_fedora_darksite
                 printf '%s\n' "$_fed_hash" >"$_fed_stamp"
