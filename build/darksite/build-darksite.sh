@@ -41,7 +41,30 @@ mkdir -p "${REPO_DIR}"
 # consulted. gpgcheck=0: this is a download-only mirror build (dnf download
 # does not verify signatures either way); target-side install policy owns
 # verification. All six repomd.xml URLs probed 200 on 2026-07-23.
-K8S_MINOR="${K8S_MINOR:-v1.32}"
+# The Kubernetes MINOR stream this mirror carries.
+#
+# Derived from k8s-stack.lock, which resolve-k8s-stack.sh fills from upstream's
+# own stable.txt on every build — so "current" is decided once, at build time,
+# and everything downstream follows that one answer.
+#
+# It was the literal v1.32, and so was kube-setup's default, and so the two
+# agreed with each other while the lock said v1.37.0. That made the lock's
+# K8S_VERSION decorative for packages: an ISO advertising v1.37 stocked a
+# v1.32 mirror and installed v1.32.13 kubelets (fiend 2026-09-20). Three
+# copies of one fact, two of them stale.
+#
+# The lock is the single answer; an override still wins for a deliberate pin.
+_k8s_lock="$(dirname "$0")/../darksite/k8s-stack.lock"
+[[ -r "$_k8s_lock" ]] || _k8s_lock="$(dirname "$0")/k8s-stack.lock"
+if [[ -z "${K8S_MINOR:-}" && -r "$_k8s_lock" ]]; then
+    K8S_MINOR="$(sed -n 's/^K8S_VERSION=//p' "$_k8s_lock" |
+        sed -n 's/^\(v[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)" || K8S_MINOR=""
+fi
+[[ -n "${K8S_MINOR:-}" ]] || {
+    echo "FATAL: no K8S_VERSION in ${_k8s_lock} and K8S_MINOR unset — refusing to" >&2
+    echo "       stock a mirror at a version nothing else agrees on." >&2
+    exit 1
+}
 REPO_DEFS="$(mktemp -d)"
 trap 'rm -rf "$REPO_DEFS"' EXIT
 cat >"${REPO_DEFS}/el-darksite.repo" <<EOF

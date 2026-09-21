@@ -117,8 +117,17 @@
         - kube-load-images
       failed_when: false
 
+    # k8s_minor comes from the HOST's k8s-stack.lock, passed in by
+    # kube-cluster with -e. The guest has no copy of that lock — it lives on
+    # the hypervisor — which is why this is handed over rather than read here.
+    #
+    # Empty means the caller had no lock to read, and kube-setup then keeps
+    # its own default. That is the case that shipped v1.32 nodes from an image
+    # whose lock said v1.37 (fiend 2026-09-20).
     - name: Run kube-setup (installs kubeadm, kubelet, containerd, helm, cilium-cli)
       shell: /usr/local/bin/kube-setup
+      environment:
+        K8S_VERSION: "{{ k8s_minor | default('') }}"
       args:
         creates: /usr/bin/kubeadm
       async: "{{ kube_setup_timeout }}"

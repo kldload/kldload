@@ -37,6 +37,23 @@ esac
 
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
+# The Kubernetes MINOR stream whose pkgs.k8s.io repo this installs from.
+#
+# Order: the caller (kube-cluster hands it over from the host's stack lock,
+# because this script runs in a GUEST and the lock is on the hypervisor), then
+# a lock if one happens to be readable here, then the fallback.
+#
+# The fallback used to be the only rule, and it is how an ISO whose lock said
+# v1.37.0 stocked a v1.32 mirror and installed v1.32.13 kubelets: three copies
+# of one fact — here, build-darksite.sh, and the lock — with two of them
+# stale, agreeing with each other loudly enough that nobody noticed the third
+# (fiend 2026-09-20). The other two are derived now; this is the last copy and
+# it exists only for a kube-setup run by hand on a machine with no lock.
+_k8s_lock=/root/darksite/k8s-stack.lock
+if [[ -z "${K8S_VERSION:-}" && -r "$_k8s_lock" ]]; then
+    K8S_VERSION="$(sed -n 's/^K8S_VERSION=//p' "$_k8s_lock" |
+        sed -n 's/^\(v[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)" || K8S_VERSION=""
+fi
 K8S_VERSION="${K8S_VERSION:-v1.32}"
 CILIUM_CLI_VERSION="${CILIUM_CLI_VERSION:-0.19.2}"
 HELM_VERSION="${HELM_VERSION:-v3.17.0}"

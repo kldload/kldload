@@ -1248,8 +1248,28 @@ NETCFG
     # runcmd used to do — disable firewall, harden sshd, copy kube-* tools,
     # run kube-setup, write the ready marker. It is idempotent and distro-aware
     # (Ansible's os_family detection handles CentOS/Debian/Ubuntu branches).
+    # The Kubernetes MINOR stream the golden installs, from this host's lock.
+    #
+    # kube-setup selects a pkgs.k8s.io repo, which is keyed on the minor
+    # (v1.32), not the patch — so the lock's v1.37.0 becomes v1.37 here. Its
+    # own default is a hardcoded v1.32, and that literal is why fiend ran
+    # v1.32.13 kubelets out of an image whose lock pinned v1.37.0: the Cilium
+    # half of the lock reached the cluster and the Kubernetes half never did
+    # (2026-09-20). Same boundary as CILIUM_VERSION — the lock is on the
+    # hypervisor and kube-setup runs in the guest, so it is handed over.
+    local _k8s_minor=""
+    if [[ -r /root/darksite/k8s-stack.lock ]]; then
+        _k8s_minor="$(sed -n 's/^K8S_VERSION=//p' /root/darksite/k8s-stack.lock |
+            sed -n 's/^\(v[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)" || _k8s_minor=""
+    fi
+    if [[ -n "$_k8s_minor" ]]; then
+        log "Kubernetes ${_k8s_minor} stream (from this host's stack lock)"
+    else
+        warn "no K8S_VERSION in the stack lock — the golden will take kube-setup's default"
+    fi
     log "Running Ansible provision-golden against ${golden_ip}..."
-    run_ansible_against_vm "$golden_ip" provision-golden.yml ||
+    run_ansible_against_vm "$golden_ip" provision-golden.yml \
+        -e "k8s_minor=${_k8s_minor}" ||
         die "ansible provision-golden failed"
     log "  provision-golden complete — kubeadm, helm, cilium-cli installed"
 
