@@ -1405,6 +1405,33 @@ LVG
 [Service]
 TimeoutStopSec=180
 LVGT
+
+        # Guests must not be resumed before the virtual network their interfaces
+        # live on exists. Upstream's After= lists only the virt*d SOCKETS and
+        # network.target; with the modular daemons virtnetworkd is a separate,
+        # socket-activated service that nothing orders this unit against.
+        #
+        # HISTORY: fiend, 2026-09-21, found while checking whether a k8s estate
+        # survives a reboot. libvirt-guests started 06:44:52, virtnetworkd
+        # 06:45:16 -- 24s later. The two guests resumed inside that window,
+        # kldload-cp and kldload-w-1, both failed with "Cannot get interface MTU
+        # on 'virbr0': No such device"; the unit exited 1 and a 6-node cluster
+        # came back as 4 with a CONTROL PLANE missing. Nothing reported it: the
+        # cluster was still quorate at 2 of 3, so it looked fine. START_DELAY=15
+        # is the only reason guests 3-6 survived, which is luck, not design.
+        cat >/etc/systemd/system/libvirt-guests.service.d/15-kldload-network-first.conf <<'LVGN'
+# kldload: resume guests only once the virtual network exists.
+[Unit]
+After=virtnetworkd.service
+Wants=virtnetworkd.service
+
+[Service]
+# Second failsafe: ordering alone still races if virtnetworkd is slow to
+# publish the bridge. Wait for the DEVICE, bounded at 60s. It exits 0 even on
+# timeout on purpose -- failing here would resume NOTHING, which is strictly
+# worse than the partial resume this fixes.
+ExecStartPre=/bin/bash -c 'for _ in $(seq 1 60); do ip -br link show virbr0 >/dev/null 2>&1 && exit 0; sleep 1; done; echo "kldload: virbr0 absent after 60s - guests on the default network will not resume" >&2; exit 0'
+LVGN
         # || true: VM-restore is an enhancement; a trimmed libvirt without the
         # libvirt-guests unit must not abort firstboot.
         systemctl enable --now libvirt-guests 2>/dev/null || true
