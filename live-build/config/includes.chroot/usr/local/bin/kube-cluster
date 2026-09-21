@@ -2420,9 +2420,17 @@ cmd_bootstrap() {
     mkdir -p /root/.kube
     if scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY" \
         "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null; then
-        sed -i "s|https://.*:6443|https://${cp_ip}:6443|" /root/.kube/config
+        # The VIP, not a node's DHCP address. admin.conf already names the VIP;
+        # rewriting it to ${cp_ip} pins the operator's kubectl to ONE node's
+        # lease, and a lease can be reassigned. On fiend, 2026-09-21, the CP's
+        # lease moved from .25 to .26 during a `kube-bluegreen cluster deploy
+        # green`, kldload-green-cp took .25, and the default kubectl silently
+        # started answering from the OTHER CLUSTER. Not a dead address — a live
+        # one belonging to something else, which is the worse failure.
+        # The VIP is reserved out of DHCP and cannot be inherited.
+        sed -i "s|https://.*:6443|https://${KUBE_VIP_ADDRESS:-$cp_ip}:6443|" /root/.kube/config
         chmod 600 /root/.kube/config
-        log "  kubeconfig → /root/.kube/config (early publish, cp=${cp_ip})"
+        log "  kubeconfig → /root/.kube/config (early publish, server=${KUBE_VIP_ADDRESS:-$cp_ip})"
     else
         warn "  early kubeconfig publish failed — retrying at end of bootstrap"
     fi
@@ -2678,9 +2686,13 @@ KBYAML
     if [[ $_kc_ok -eq 1 ]]; then
         # Point kubeconfig at the CP's WireGuard IP (encrypted) if mesh is up
         if ip link show wg-k8s >/dev/null 2>&1; then
+            # The mesh address is preferred because the traffic is encrypted.
             sed -i "s|https://.*:6443|https://10.251.0.1:6443|" /root/.kube/config
         else
-            sed -i "s|https://.*:6443|https://${cp_ip}:6443|" /root/.kube/config
+            # VIP before a node's DHCP address — see the note at the early
+            # publish above. Both 10.251.0.1 and the VIP are outside the DHCP
+            # range and cannot be handed to another machine; ${cp_ip} can.
+            sed -i "s|https://.*:6443|https://${KUBE_VIP_ADDRESS:-$cp_ip}:6443|" /root/.kube/config
         fi
         chmod 600 /root/.kube/config
         export KUBECONFIG=/root/.kube/config

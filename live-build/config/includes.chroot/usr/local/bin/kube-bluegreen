@@ -278,6 +278,12 @@ _cl_valid_track() {
 }
 
 _cl_name() { printf 'kldload-%s' "$1"; }
+# _cl_other <track> — the track that is not this one. Deliberately NOT the
+# workload tier's _other(): the comment above says why the cluster tier keeps
+# its own _cl_ helpers, and borrowing across the two is how one tier silently
+# answers for the other.
+# shellcheck disable=SC2015 # both branches echo; there is no failure case
+_cl_other() { [[ "$1" == "blue" ]] && echo green || echo blue; }
 _cl_kubeconfig() { printf '%s/config-%s' "$_CL_KUBE_DIR" "$1"; }
 
 # _cl_active — the live track, or empty when nothing has been promoted yet.
@@ -476,9 +482,71 @@ _cl_destroy() {
     # caller — the webui button, ssh -c, the sweep — and reports it as
     # "destroy failed", which is a lie about what happened. The golden is kept
     # either way: only DESTROY_ALL=1 removes it, and green clones from it.
+    # kube-cluster destroy tears down HOST-WIDE state as well as the VMs: the
+    # hypervisor's WireGuard identity (wg-mgmt/wg-k8s .conf/.key/.pub plus the
+    # interfaces), /root/.kube/config, and the /etc/hosts block. That is right
+    # when it is destroying THE cluster. It is wrong here, where one track is
+    # going away and another cluster may still be running on this host — that
+    # state belongs to the survivor, not to the track being removed.
+    #
+    # HISTORY: fiend, 2026-09-21, the first time this verb was ever run. A
+    # `cluster destroy green` against a host that also had a live six-node
+    # cluster left that cluster Ready and: /root/.kube/config deleted, so
+    # `kubectl get nodes` fell back to localhost:8080 and was refused; and
+    # /etc/wireguard stripped to wg0.* with wg-mgmt and wg-k8s at 0 peers,
+    # taking the hypervisor off its own mesh while .node-id still claimed
+    # membership — the exact state cmd_bootstrap's comment warns makes
+    # `kube-network init` a silent no-op.
+    #
+    # So: snapshot what is host-wide, delegate, and put it back if anything
+    # else is still here. Restored by CONTENT, and the mesh is brought back up
+    # rather than just having its files returned.
+    local _snap _restore=0
+    _snap="$(mktemp -d)"
+    local _hostwide=(
+        /root/.kube/config
+        /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-mgmt.key /etc/wireguard/wg-mgmt.pub
+        /etc/wireguard/wg-k8s.conf /etc/wireguard/wg-k8s.key /etc/wireguard/wg-k8s.pub
+    )
+    local _f
+    for _f in "${_hostwide[@]}"; do
+        [[ -e "$_f" ]] && cp -a "$_f" "${_snap}/$(basename "$_f")"
+    done
+
     CLUSTER_NAME="$(_cl_name "$track")" KUBE_CLUSTER_YES=1 kube-cluster destroy ||
         _die "kube-cluster destroy failed for ${track}"
     rm -f "$(_cl_kubeconfig "$track")"
+
+    # Is anything still here? The other track, or an ordinary kube-cluster
+    # cluster that was never a track at all — which is the common case, since
+    # a normal `kube-cluster bootstrap` names its VMs kldload-cp/kldload-w-N
+    # and is not adoptable as blue.
+    if virsh list --all --name 2>/dev/null |
+        grep -qE "^kldload-(cp|cp-[0-9]+|w-[0-9]+)$|^$(_cl_name "$(_cl_other "$track")")-"; then
+        _restore=1
+    fi
+
+    if ((_restore)); then
+        for _f in "${_hostwide[@]}"; do
+            [[ -e "${_snap}/$(basename "$_f")" ]] || continue
+            [[ -e "$_f" ]] && continue # destroy left it alone; do not clobber
+            install -D -m 0600 "${_snap}/$(basename "$_f")" "$_f"
+            _say "restored ${_f} — it belongs to a cluster ${track} did not own"
+        done
+        # Files alone do not make an interface. wg-quick is what kube-network
+        # itself uses, so use the same verb rather than a second mechanism.
+        if [[ -e /etc/wireguard/wg-mgmt.conf ]] && ! ip link show wg-mgmt >/dev/null 2>&1; then
+            wg-quick up wg-mgmt >/dev/null 2>&1 &&
+                _say "wg-mgmt brought back up" ||
+                _say "WARNING: wg-mgmt.conf restored but the interface did not come up — run: wg-quick up wg-mgmt"
+        fi
+        if [[ -e /etc/wireguard/wg-k8s.conf ]] && ! ip link show wg-k8s >/dev/null 2>&1; then
+            wg-quick up wg-k8s >/dev/null 2>&1 &&
+                _say "wg-k8s brought back up" ||
+                _say "WARNING: wg-k8s.conf restored but the interface did not come up — run: wg-quick up wg-k8s"
+        fi
+    fi
+    rm -rf "$_snap"
     # By exact name, never a pattern: a destroy driven by a wildcard once took
     # six unrelated clones.
     _cl_exists "$track" && _die "${track} still has VMs after destroy — look before re-running"
