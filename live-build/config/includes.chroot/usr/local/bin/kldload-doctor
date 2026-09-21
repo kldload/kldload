@@ -875,6 +875,31 @@ def check_install_artifacts():
     dropped on the target. Silent cp failures in profiles.sh were the
     common root cause across 1.0.4 regressions: autodeploy binary
     missing, ansible playbook dir missing, ttyd-k9s unit missing."""
+    # The CORE profile does not get these, by design. k_install_system_files
+    # takes an early return for core — documented there as "ZFS on root + boot
+    # environments + stock distro" — so autodeploy, the terminal drawer, the
+    # ansible library and kube-cluster are all deliberately absent. Demanding
+    # them anyway failed a correct core install at HIGH severity for being
+    # minimal, which is the thing core is for.
+    #
+    # HISTORY: fiend, 2026-09-21, deb-1-core. Third profile-blind check found
+    # in this file in one session; the other two demanded a Kubernetes
+    # cluster's scrape jobs on machines with no cluster.
+    try:
+        with open("/etc/kldload/profile") as _pf:
+            _profile = _pf.read().strip()
+    except OSError:
+        _profile = "unknown"
+
+    # core ships NONE of them, so there is nothing here to verify. Measured on
+    # deb-1-core (fiend, 2026-09-21): /usr/local/bin is EMPTY — not even
+    # kldload-doctor, which this check listed as "doctor tool (self)" on the
+    # assumption it is everywhere. It is not.
+    if _profile == "core":
+        return _result("installer", "artifacts", "skip",
+                       "install-time artifacts present",
+                       "core profile ships no kldload tools by design")
+
     want = {
         "/usr/sbin/kldload-autodeploy":                        "autodeploy orchestrator binary",
         "/usr/lib/systemd/system/kldload-autodeploy.service":  "autodeploy systemd unit",
