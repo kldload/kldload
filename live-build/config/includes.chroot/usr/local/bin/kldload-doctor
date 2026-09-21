@@ -723,6 +723,16 @@ def check_tetragon_scrape():
                    f"{len(r)} series, Σ events = {int(total)}")
 
 def check_hubble_scrape():
+    # Same guard the tetragon check twenty lines up already has: if the job is
+    # not being scraped at all there is nothing to judge, and "no data" is the
+    # expected answer rather than a defect. Without it, every machine with no
+    # cluster — ai, storage, core, server, desktop — failed this at medium
+    # severity and was told to reapply a Kubernetes firewall it does not have.
+    # fiend, 2026-09-21: found by running the patched doctor on deb-1-core and
+    # seeing "fail": 1 still left after gating the prometheus-scrape check.
+    if not _prom_query('up{job="hubble-metrics"}'):
+        return _result("observability", "hubble scrape", "skip", "",
+                       "hubble not scraped — no cluster, or still converging")
     r = _prom_query("hubble_flows_processed_total")
     if r is None:
         return _result("observability", "hubble scrape", "skip", "", "prometheus unreachable")
