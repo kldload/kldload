@@ -56,10 +56,28 @@ SVC_CIDR="${SVC_CIDR:-10.96.0.0/12}"
 # here is how the installer came to ask for 1.16.5 while the mirror held
 # whatever the build resolved — the two must be one answer (2026-09-20).
 _k8s_lock=/root/darksite/k8s-stack.lock
-CILIUM_VERSION="${CILIUM_VERSION:-$(sed -n 's/^CHART=//p' "$_k8s_lock" 2>/dev/null | awk -F'|' '$3=="cilium"{print $4; exit}')}"
-# Empty means the lock is missing: say so rather than silently installing
-# whatever the chart repo offers today, which on an air-gapped box is nothing.
-[[ -n "$CILIUM_VERSION" ]] || CILIUM_VERSION=unknown
+# Read the lock in its OWN statement, guarded, never inside a ${VAR:-$(...)}.
+#
+# It used to be exactly that, and it killed this script on every control plane
+# it ran on. The lock lives on the HYPERVISOR; a cluster VM has never had a
+# copy. `sed` on a missing file exits 2, the 2>/dev/null hides the message,
+# pipefail carries the 2 out of the pipeline, and under `set -e` a failing
+# command substitution in an assignment aborts the script — at line 59, before
+# a single line of output. kube-cluster then reported "kube-init had errors"
+# with nothing to show, and left a control plane whose kubelet crash-looped on
+# a config kubeadm had never written (fiend, 2026-09-20).
+#
+# Now: only read it if it is there, and let the caller override. kube-cluster
+# passes CILIUM_VERSION in from the host's own lock, which is the copy that
+# actually exists.
+if [[ -z "${CILIUM_VERSION:-}" && -r "$_k8s_lock" ]]; then
+    CILIUM_VERSION="$(sed -n 's/^CHART=//p' "$_k8s_lock" |
+        awk -F'|' '$3=="cilium"{print $4; exit}')" || CILIUM_VERSION=""
+fi
+# Empty means neither the caller nor a lock said: say so rather than silently
+# installing whatever the chart repo offers today, which on an air-gapped box
+# is nothing.
+CILIUM_VERSION="${CILIUM_VERSION:-unknown}"
 METALLB_VERSION="${METALLB_VERSION:-0.14.9}"
 METALLB_POOL="${METALLB_POOL:-}" # auto-detect from node subnet if empty
 # The pool's NAME, not its range. Anything that asks MetalLB for an address BY

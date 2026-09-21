@@ -2197,8 +2197,22 @@ cmd_bootstrap() {
     # range and fight over it by ARP. Caught by reading who consumes the
     # variable rather than who sets it (2026-09-20, before green ever ran).
     # Empty stays empty, so the single-cluster auto-detect path is unchanged.
-    _ssh_cmd "$cp_ip" "KUBE_VIP_ADDRESS='${KUBE_VIP_ADDRESS}' METALLB_POOL='${METALLB_POOL:-}' METALLB_POOL_NAME='${METALLB_POOL_NAME:-}' kube-init" ||
-        warn "kube-init had errors — some components may still be pulling images"
+    # CILIUM_VERSION crosses the wire for the same reason the other two do: the
+    # k8s-stack.lock is on THIS host and has never existed inside a cluster VM.
+    # kube-init reading it there was a guaranteed miss, and a fatal one.
+    local _cil=""
+    if [[ -r /root/darksite/k8s-stack.lock ]]; then
+        _cil="$(sed -n 's/^CHART=//p' /root/darksite/k8s-stack.lock |
+            awk -F'|' '$3=="cilium"{print $4; exit}')" || _cil=""
+    fi
+    [[ -n "$_cil" ]] && log "Cilium ${_cil} (from this host's stack lock)" ||
+        warn "no Cilium version in the stack lock — kube-init will say 'unknown'"
+    # The output is KEPT. This used to be discarded, so a kube-init that died
+    # before printing anything produced exactly one line — "had errors" — and
+    # no way to find out which. The log is named in the warning.
+    _ssh_cmd "$cp_ip" "KUBE_VIP_ADDRESS='${KUBE_VIP_ADDRESS}' METALLB_POOL='${METALLB_POOL:-}' METALLB_POOL_NAME='${METALLB_POOL_NAME:-}' CILIUM_VERSION='${_cil}' kube-init" \
+        >/var/log/kldload/kube-init-${CLUSTER_NAME}.log 2>&1 ||
+        warn "kube-init had errors — see /var/log/kldload/kube-init-${CLUSTER_NAME}.log"
 
     # Step 5: Join workers. The join token is a short-lived bootstrap credential
     # that lets workers authenticate to the API server.
