@@ -473,6 +473,7 @@ k_profile_packages() {
         samba \
         ${_nodeexp} \
         nftables chrony \
+        podman \
         salt-minion wireguard-tools"
         ;;
 
