@@ -1051,7 +1051,19 @@ cmd_build() {
         log "WARNING: KLDLOAD_ALLOW_NO_COMMIT=1 — building anyway, VERSION will say 'unknown'"
         _commit="unknown"
     fi
-    if [[ "$_commit" != unknown && -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+    # The k8s stack lock is EXCLUDED from this test. The resolver rewrites that
+    # tracked file seconds earlier in this same build (the resolve step above), so
+    # including it meant the build dirtied its own tree before stamping and could
+    # never record a clean commit. Every image since the stamp landed has said
+    # "-dirty", and the netboot server refuses to pair a dirty full image with a
+    # net one, so the net payload read "NOT USED" with nobody having asked for
+    # that. The lock is not lost from the record: VERSION carries
+    # k8s_stack_lock = <digest> beside the commit (e57d0d58) precisely so the
+    # resolved stack is provable on its own terms.
+    # HISTORY: onyx 2026-09-21. Committed the lock so build 48 would stamp clean;
+    # it stamped 4e2ffa0cf4d8-dirty anyway, because the resolver had already
+    # rewritten it. The commit is not what was dirty — the build was.
+    if [[ "$_commit" != unknown && -n "$(git -C "$ROOT" status --porcelain --untracked-files=no -- . ':!build/darksite/k8s-stack.lock' 2>/dev/null)" ]]; then
         _commit+="-dirty"
     fi
     log "Building from commit ${_commit}"
