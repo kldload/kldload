@@ -335,14 +335,16 @@ _allocate_ha_vip() {
     # has already carved their network up keeps their layout.
     _reserve_metallb_pool() {
         local net="${1:?subnet prefix}" lo="${2:?pool start octet}"
-        local cur_end
+        local cur_start cur_end xml
         # `|| true`: virsh failing here is the case the guard below handles, and
         # without it `set -e` plus pipefail kills the script ON THE ASSIGNMENT, so
         # the guard never runs and the caller gets no warning. Third time this
         # shape appeared today (kube-init, deploy.sh, here) — the one bash footgun
         # this codebase keeps reloading.
-        cur_end="$(virsh net-dumpxml default 2>/dev/null | sed -n "s/.*<range start='[0-9.]*' end='${net}\.\([0-9]*\)'.*/\1/p" | head -1)" || true
-        [[ -n "$cur_end" ]] || {
+        xml="$(virsh net-dumpxml default 2>/dev/null)" || true
+        cur_start="$(sed -n "s/.*<range start='\([0-9.]*\)' end='${net}\.[0-9]*'.*/\1/p" <<<"$xml" | head -1)"
+        cur_end="$(sed -n "s/.*<range start='[0-9.]*' end='${net}\.\([0-9]*\)'.*/\1/p" <<<"$xml" | head -1)"
+        [[ -n "$cur_start" && -n "$cur_end" ]] || {
             warn "could not read the default network's DHCP range — MetalLB pool NOT reserved"
             return 0
         }
@@ -351,11 +353,44 @@ _allocate_ha_vip() {
             return 0
         }
         local new_end=$((lo - 1))
-        if virsh net-update default modify ip-dhcp-range \
-            "<range start='${net}.2' end='${net}.${new_end}'/>" --live --config >/dev/null 2>&1; then
-            log "DHCP narrowed to ${net}.2-${net}.${new_end} so MetalLB owns ${net}.${lo} upward"
+        local old_range="<range start='${cur_start}' end='${net}.${cur_end}'/>"
+        local new_range="<range start='${cur_start}' end='${net}.${new_end}'/>"
+        local _err
+
+        # DELETE then ADD, because libvirt does not implement modify here:
+        #   error: Operation not supported: dhcp ranges cannot be modified,
+        #          only added or deleted
+        # The first version of this used `modify` and could therefore never
+        # work. It failed on every bootstrap, with stderr sent to /dev/null, so
+        # all anyone saw was the generic warning below and the range stayed at
+        # .254 (fiend, 2026-09-21, the first time it was run on real hardware).
+        if ! _err="$(virsh net-update default delete ip-dhcp-range "$old_range" --live --config 2>&1)"; then
+            warn "could not remove the existing DHCP range — MetalLB pool NOT reserved: ${_err}"
+            return 0
+        fi
+
+        # From here the network has NO dhcp range. An add that fails leaves the
+        # bridge unable to lease ANY address, which is far worse than the
+        # collision this function exists to prevent, so the failure path puts
+        # the original back and says so.
+        if ! _err="$(virsh net-update default add-last ip-dhcp-range "$new_range" --live --config 2>&1)"; then
+            if virsh net-update default add-last ip-dhcp-range "$old_range" --live --config >/dev/null 2>&1; then
+                warn "could not add the narrowed DHCP range (${_err}) — original range restored, MetalLB pool NOT reserved"
+            else
+                warn "the default network now has NO DHCP range (${_err}) — restore it with:"
+                warn "  virsh net-update default add-last ip-dhcp-range \"${old_range}\" --live --config"
+            fi
+            return 0
+        fi
+
+        # Outcome, not exit code: read the range back out of the network.
+        local now_end
+        now_end="$(virsh net-dumpxml default 2>/dev/null |
+            sed -n "s/.*<range start='[0-9.]*' end='${net}\.\([0-9]*\)'.*/\1/p" | head -1)" || true
+        if [[ "$now_end" == "$new_end" ]]; then
+            log "DHCP narrowed to ${cur_start}-${net}.${new_end} so MetalLB owns ${net}.${lo} upward"
         else
-            warn "could not narrow the DHCP range — a node may be leased an address MetalLB will advertise"
+            warn "DHCP range reads ${net}.${now_end:-unknown} after narrowing to ${net}.${new_end} — MetalLB pool may NOT be reserved"
         fi
     }
     _reserve_metallb_pool "$(printf '%s' "${KUBE_VIP_ADDRESS}" | cut -d. -f1-3)" 200
