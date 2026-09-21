@@ -173,15 +173,39 @@ say "sweep ${RUN_ID}: ${#EDITIONS[@]} edition(s) — ${EDITIONS[*]}"
 say "results: ${RESULTS}"
 
 RC=0
+_ran=0
+_skipped=0
 for ed in "${EDITIONS[@]}"; do
     ANS="${REPO}/live-build/pxe/matrix/${ed}/$(tr ':' '-' <<<"$MAC").env"
     OUT="${RESULTS}/${ed}"
     mkdir -p "$OUT"
+    # ABSENT and UNREADABLE are different problems and the message has to say
+    # which. Run as a non-root user the answers files are root-owned and mode
+    # 0640, so every edition "had no answers file" and the sweep skipped all of
+    # them (onyx, 2026-09-21, launched under systemd as the operator).
     if [[ ! -r "$ANS" ]]; then
-        say "${ed}: SKIP — no answers file at ${ANS}"
-        printf '| %s | — | no answers file | SKIP | | | |  |\n' "$ed" >>"$SUMMARY"
+        # Three distinct causes, and "absent" is the one that is almost never
+        # true. A 0700 parent means even stat fails, so -e reports the file
+        # missing when it is sitting right there.
+        _ansdir="$(dirname "$ANS")"
+        if [[ -e "$ANS" ]]; then
+            _why="unreadable — it is root-owned; run the sweep as root"
+        elif [[ ! -d "$_ansdir" ]]; then
+            _why="absent — there is no ${_ansdir}; is that an edition name?"
+        elif [[ ! -r "$_ansdir" || ! -x "$_ansdir" ]]; then
+            _why="not visible — ${_ansdir} is not readable by $(id -un); run the sweep as root"
+        else
+            _why="absent"
+        fi
+        say "${ed}: SKIP — answers file ${_why}: ${ANS}"
+        printf '| %s | — | answers %s | SKIP | | | |  |\n' "$ed" "$_why" >>"$SUMMARY"
+        _skipped=$((_skipped + 1))
+        # A skipped edition is NOT a pass. Without this the sweep exits 0
+        # having installed nothing.
+        RC=1
         continue
     fi
+    _ran=$((_ran + 1))
     want_profile="$(sudo -n grep -hE '^KLDLOAD_PROFILE=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
     want_distro="$(sudo -n grep -hE '^KLDLOAD_DISTRO=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
     say "=== ${ed} (${want_distro}/${want_profile})"
@@ -389,5 +413,13 @@ for ed in "${EDITIONS[@]}"; do
     [[ "$verdict" == PASS* ]] || RC=1
 done
 
-say "sweep finished — ${SUMMARY}"
+# Count what ran against what was GIVEN. A sweep that skipped every edition
+# used to print "sweep finished" and exit 0 -- success, with nothing installed
+# and nothing tested. Zero editions run is "could not start" (exit 2), which is
+# what the header has always promised.
+say "sweep finished — ${_ran} of ${#EDITIONS[@]} edition(s) ran, ${_skipped} skipped — ${SUMMARY}"
+if ((_ran == 0)); then
+    say "NOTHING RAN — every edition was skipped; this is not a pass"
+    exit 2
+fi
 exit "$RC"
