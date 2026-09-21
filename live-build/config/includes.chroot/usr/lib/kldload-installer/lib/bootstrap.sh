@@ -3667,6 +3667,38 @@ _k_bootstrap_apt() {
     k_write_hostname
     k_enable_locale
     k_in_chroot "${target}" locale-gen "${KLDLOAD_LOCALE:-en_US.UTF-8}"
+
+    # The timezone. Every OTHER bootstrap family already did this — dnf,
+    # pacman, apk and freebsd each carry their own copy of the symlink — and
+    # apt carried none, so every Debian and Ubuntu install silently ignored
+    # KLDLOAD_TIMEZONE and ran on UTC.
+    #
+    # It is not cosmetic. The machine's logs are stamped in LOCAL time
+    # (kldload-autodeploy uses printf '%(%F %T)T'), so a Debian box in an
+    # estate timestamps everything 7 hours away from its Fedora neighbours,
+    # and correlating two machines' logs by eye silently compares different
+    # moments. This repo already has a scar about reading logs by printed
+    # time rather than by position.
+    #
+    # /etc/timezone as well as the symlink: Debian's own tooling reads it, and
+    # dpkg-reconfigure tzdata will happily undo a symlink that disagrees with
+    # it. apk is the only other family that bothered.
+    #
+    # HISTORY: fiend, 2026-09-21. deb-11-storage came up with
+    # /etc/localtime -> Etc/UTC and no /etc/timezone at all, while 3-kvm
+    # (Fedora, same answers file, same America/Vancouver) was correct.
+    if [[ -n "${KLDLOAD_TIMEZONE:-}" ]]; then
+        if [[ -e "${target}/usr/share/zoneinfo/${KLDLOAD_TIMEZONE}" ]]; then
+            ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE}" "${target}/etc/localtime"
+            printf '%s\n' "${KLDLOAD_TIMEZONE}" >"${target}/etc/timezone"
+            k_log "timezone: ${KLDLOAD_TIMEZONE}"
+        else
+            # Loud, not silent: a typo'd zone would otherwise leave the machine
+            # on UTC with nothing to show for it, which is this bug again.
+            k_log "WARNING: timezone '${KLDLOAD_TIMEZONE}' not found in the target's zoneinfo — leaving UTC"
+        fi
+    fi
+
     k_create_users
     k_install_system_files
 
