@@ -989,8 +989,38 @@ cmd_build() {
     # day older than the full one and predated the menu's credentials). -dirty
     # when tracked files differ from HEAD, which the server refuses to match,
     # because two dirty builds of one commit need not be the same tree.
-    local _commit
-    _commit="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null)" || _commit="unknown"
+    # A commit that cannot be read is FATAL, not a log line.
+    #
+    # It used to fall back to the string "unknown" and carry on, and that is
+    # not a hypothetical: run under `systemd-run` as root against a repo owned
+    # by the operator, git refuses with "detected dubious ownership", the
+    # rev-parse fails, and the build cheerfully stamps commit=unknown into the
+    # ISO's VERSION. Twice in a row on 2026-09-20, with nothing stopping it —
+    # the same morning that was spent fixing VERSION from the other end so an
+    # installed machine could say what built it. A VERSION that says "unknown"
+    # is the defect wearing the fix's clothes.
+    #
+    # The git error itself is printed, because "unknown" told nobody WHY, and
+    # the answer that time was one config line away. KLDLOAD_ALLOW_NO_COMMIT=1
+    # is the deliberate escape hatch for building outside a checkout at all;
+    # it has to be said out loud rather than arrived at by accident.
+    local _commit _giterr
+    if ! _commit="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null)"; then
+        # `|| true`: this command is EXPECTED to fail — that is why we are in
+        # this branch — and we want its message, not its status. Without it,
+        # `set -e` plus pipefail kills the script on the failing assignment
+        # before the diagnosis is printed, which is exactly the shape of the
+        # kube-init bug fixed earlier the same day. Writing it twice in one
+        # evening is the argument for the comment.
+        _giterr="$(git -C "$ROOT" rev-parse HEAD 2>&1 | head -1)" || true
+        log "WARNING: cannot read HEAD — this ISO could not say what built it."
+        log "WARNING:   git: ${_giterr}"
+        if [[ "${KLDLOAD_ALLOW_NO_COMMIT:-0}" != 1 ]]; then
+            die "refusing to build an ISO with no provenance (KLDLOAD_ALLOW_NO_COMMIT=1 to override)"
+        fi
+        log "WARNING: KLDLOAD_ALLOW_NO_COMMIT=1 — building anyway, VERSION will say 'unknown'"
+        _commit="unknown"
+    fi
     if [[ "$_commit" != unknown && -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
         _commit+="-dirty"
     fi
