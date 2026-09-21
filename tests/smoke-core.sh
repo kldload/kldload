@@ -45,7 +45,17 @@ test_output_contains "ZFS module loaded" "lsmod" "zfs"
 test_output_contains "Pool rpool exists" "zpool list" "rpool"
 test_output_contains "Pool rpool is ONLINE" "zpool list -H -o health rpool" "ONLINE"
 test_output_contains "Pool has zero errors" "zpool status rpool" "No known data errors"
-test_succeeds "Pool scrub runs" "zpool scrub rpool"
+# A scrub ALREADY RUNNING is a healthy pool, not a failure. `zpool scrub` exits
+# 1 with "cannot scrub rpool: currently scrubbing" in that case, so the bare
+# command failed this check on exactly the machines that were busy verifying
+# themselves — and passed on idle ones, which is why it looked flaky.
+#
+# HISTORY: fiend, 2026-09-21. 4-k8s failed "Pool scrub runs" while deb-4-k8s
+# passed the same check minutes earlier on the same build. Two back-to-back
+# scrubs reproduce it every time; ZFS names the reason itself.
+# shellcheck disable=SC2016 # $_o is expanded by test_succeeds' eval, not here
+test_succeeds "Pool scrub starts (or one is already running)" \
+    '_o=$(zpool scrub rpool 2>&1) || [[ "$_o" == *"currently scrubbing"* ]]'
 
 # ── Datasets ─────────────────────────────────────────────────────────────────
 _section "ZFS Datasets"
