@@ -316,6 +316,50 @@ _allocate_ha_vip() {
         log "  VIP DHCP reservation already present (or net-update unsupported) — continuing"
 
     log "HA-ready: control-plane VIP ${KUBE_VIP_ADDRESS} (reserved out of DHCP)"
+
+    # ── Keep libvirt's DHCP out of the MetalLB pool ──────────────────────────
+    #
+    # kube-init auto-detects the pool as ${subnet}.200-220 from a node's own
+    # address, and libvirt's default range is ${subnet}.2-254 — which CONTAINS
+    # it. So a node can be handed an address MetalLB will later advertise, and
+    # then both ARP for it and the last reply wins. Not theoretical: on fiend
+    # 2026-09-20, kldload-w-1 held 192.168.122.200 while the pool was
+    # 192.168.122.200-220. A coin flip on every cluster, taken on every
+    # install, and silent until a Service gets the losing address.
+    #
+    # The VIP above is reserved with a per-MAC host entry; a RANGE cannot be,
+    # so the range itself is narrowed to stop below the pool. 198 addresses
+    # remain for guests, which is more than this bridge has ever held.
+    #
+    # Only narrows when the current range actually overlaps: an operator who
+    # has already carved their network up keeps their layout.
+    _reserve_metallb_pool() {
+        local net="${1:?subnet prefix}" lo="${2:?pool start octet}"
+        local cur_end
+        # `|| true`: virsh failing here is the case the guard below handles, and
+        # without it `set -e` plus pipefail kills the script ON THE ASSIGNMENT, so
+        # the guard never runs and the caller gets no warning. Third time this
+        # shape appeared today (kube-init, deploy.sh, here) — the one bash footgun
+        # this codebase keeps reloading.
+        cur_end="$(virsh net-dumpxml default 2>/dev/null |
+            sed -n "s/.*<range start='[0-9.]*' end='${net}\.\([0-9]*\)'.*/\1/p" | head -1)" || true
+        [[ -n "$cur_end" ]] || {
+            warn "could not read the default network's DHCP range — MetalLB pool NOT reserved"
+            return 0
+        }
+        ((cur_end >= lo)) || {
+            log "DHCP range already ends at ${net}.${cur_end}, below the MetalLB pool — nothing to do"
+            return 0
+        }
+        local new_end=$((lo - 1))
+        if virsh net-update default modify ip-dhcp-range \
+            "<range start='${net}.2' end='${net}.${new_end}'/>" --live --config >/dev/null 2>&1; then
+            log "DHCP narrowed to ${net}.2-${net}.${new_end} so MetalLB owns ${net}.${lo} upward"
+        else
+            warn "could not narrow the DHCP range — a node may be leased an address MetalLB will advertise"
+        fi
+    }
+    _reserve_metallb_pool "$(printf '%s' "${KUBE_VIP_ADDRESS}" | cut -d. -f1-3)" 200
 }
 
 # _preflight_control_planes — clamp CONTROL_PLANES to a sane, host-fitting, ODD
