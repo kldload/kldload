@@ -273,11 +273,34 @@ if have kldload-doctor; then
     # Same shape as the suite: the doctor's exit status reflects the machine,
     # and its output is what gets summarised.
     _doc="$(S timeout 600 kldload-doctor 2>&1 || true)"
-    _de="$(tr 'A-Z' 'a-z' <<<"$_doc" | _count '(^|[^a-z])(error|fail)')"
+
+    # READ THE DOCTOR'S OWN COUNT, not a line grep for the word "fail".
+    #
+    # This used to be `_count '(^|[^a-z])(error|fail)'` over the lowercased
+    # output, reported as "doctor mentions error/fail on N line(s)". The
+    # doctor emits JSON whose summary ALWAYS contains a "fail": key, so
+    # `"fail": 0` on a perfectly healthy machine matched it too — the warning
+    # fired identically whether the doctor found two problems or none, and the
+    # number it printed was a line count, not a failure count. A warning that
+    # cannot tell the two states apart is not a check.
+    # HISTORY: fiend, 2026-09-21. 11-storage reported "fail": 2 and still came
+    # out PASS, because two real doctor failures arrived as the same warning a
+    # clean machine gets.
+    #
+    # The structured count is authoritative; the grep is only a fallback for a
+    # doctor that is not emitting JSON, and it is reported as unparseable
+    # rather than as a health verdict.
+    _dfail="$(sed -n 's/.*"fail"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$_doc" | tail -1)"
     echo '```'
     sed 's/\x1b\[[0-9;]*m//g' <<<"$_doc" | tail -20
     echo '```'
-    ((_de > 0)) && note_warn "doctor mentions error/fail on ${_de} line(s) — see above"
+    if [[ -n "$_dfail" ]]; then
+        if ((_dfail > 0)); then
+            note_fail "kldload-doctor reports ${_dfail} failing check(s)"
+        fi
+    else
+        note_warn "kldload-doctor output carried no machine-readable summary — health NOT assessed"
+    fi
 else
     note_warn "kldload-doctor is not installed — DID NOT RUN"
 fi
