@@ -75,12 +75,41 @@ section "Sysctl"
 [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" == "1" ]] && pass "ip_forward = 1" || fail "ip_forward not enabled"
 [[ "$(sysctl -n net.bridge.bridge-nf-call-iptables 2>/dev/null)" == "1" ]] && pass "bridge-nf-call-iptables = 1" || warn "bridge-nf-call-iptables not set (ok if using Cilium eBPF)"
 
+# ── Where am I? ────────────────────────────────────────────────────────────
+# kldload runs the cluster in VMs, so the machine this script is on is USUALLY
+# the hypervisor and not a node. Several checks below are node rules, and
+# applying them to a hypervisor produces confident, wrong answers — which is
+# what it did: it FAILED a healthy host on "swap is active" (the host's zram
+# is deliberate; see target-kubernetes.txt) and SKIPPED the entire cluster
+# section on a six-node cluster because it looked for a node's admin.conf on
+# a machine that is not a node (fiend, 2026-09-20).
+#
+# A node has a kubelet config written by kubeadm. A hypervisor has a
+# kubeconfig pointing at a cluster somewhere else. Either can be true; both
+# can be true on a single-machine setup.
+IS_NODE=0
+[[ -f /var/lib/kubelet/config.yaml || -f /etc/kubernetes/kubelet.conf ]] && IS_NODE=1
+
+# The kubeconfig that reaches the cluster from HERE, wherever it lives.
+KUBECONF=""
+for _kc in /etc/kubernetes/admin.conf /root/.kube/config "${HOME:-/root}/.kube/config"; do
+    [[ -r "$_kc" ]] && {
+        KUBECONF="$_kc"
+        break
+    }
+done
+
 # ── 4. Swap ────────────────────────────────────────────────────────────────
 section "Swap"
-if [[ "$(cat /proc/swaps 2>/dev/null | tail -n +2 | wc -l)" == "0" ]]; then
+if [[ "$(tail -n +2 /proc/swaps 2>/dev/null | wc -l)" == "0" ]]; then
     pass "Swap disabled"
-else
+elif ((IS_NODE)); then
     fail "Swap is active (kubeadm requires swap off)"
+else
+    # The hypervisor is allowed swap, and kldload gives it zram on purpose so
+    # systemd-oomd has somewhere to reclaim from. kube-setup strips swap
+    # inside every guest, which is where kubeadm actually runs.
+    pass "Swap active on the hypervisor (deliberate; nodes are stripped by kube-setup)"
 fi
 
 # ── 5. Containerd ──────────────────────────────────────────────────────────
@@ -258,8 +287,9 @@ fi
 
 # ── 13. Cluster Status (if running) ──────────────────────────────────────
 section "Cluster (if running)"
-if [[ -f /etc/kubernetes/admin.conf ]]; then
-    pass "admin.conf exists"
+if [[ -n "$KUBECONF" ]]; then
+    export KUBECONFIG="$KUBECONF"
+    pass "kubeconfig: ${KUBECONF}"
 
     if kubectl cluster-info >/dev/null 2>&1; then
         pass "API server reachable"
@@ -328,7 +358,7 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
         fail "API server not reachable"
     fi
 else
-    skip "No cluster running (admin.conf not found)"
+    skip "No cluster reachable from here (no admin.conf and no ~/.kube/config)"
 fi
 
 # ── Observability pipeline ─────────────────────────────────────────────────
@@ -338,7 +368,7 @@ fi
 # all "up"), label synthesis (dashboards query {k8s_app="cilium"}),
 # Grafana dashboards actually rendering (no unresolved ${DS_PROMETHEUS}),
 # inter-node firewall (policy drop was silently eating metrics traffic).
-if [[ -f /etc/kubernetes/admin.conf ]]; then
+if [[ -n "$KUBECONF" ]]; then
     section "Observability pipeline"
 
     # metrics-server → kubectl top
