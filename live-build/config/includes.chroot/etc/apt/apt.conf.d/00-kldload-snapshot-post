@@ -1,5 +1,16 @@
-// KLDload APT post-transaction snapshot hook
-// Placed at: /etc/apt/apt.conf.d/00-kldload-snapshot-post
-// Creates a ZFS snapshot of rpool/ROOT/default after dpkg transactions complete.
+// kldload APT post-transaction snapshot hook.
+//
+// Role:     snapshot the root dataset AFTER a dpkg transaction, so the pair
+//           of apt-pre/apt-post snapshots brackets exactly what changed.
+// Read by:  apt(8), after every dpkg run. Placed at
+//           /etc/apt/apt.conf.d/00-kldload-snapshot-post.
+// Missing:  the pre snapshot still exists, so rollback still works; what is
+//           lost is the "after" half, which is what makes a diff possible.
+//
+// Same `||` as the pre hook, for the same reason and then one more: a
+// Post-Invoke that fails makes apt report the transaction as failed AFTER the
+// packages are already installed. That is the worst of both — the change
+// landed, and every script reading apt's exit status believes it did not.
+// See 00-kldload-snapshot-pre for the incident and the policy.
 
-DPkg::Post-Invoke {"/usr/local/sbin/snapshot-create.sh apt-post";};
+DPkg::Post-Invoke {"/usr/local/sbin/snapshot-create.sh apt-post || { echo 'kldload: WARNING — post-transaction snapshot FAILED; the packages are installed regardless.' >&2; echo 'kldload: see /var/log/kldload/snapshots.log' >&2; }";};

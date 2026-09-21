@@ -1,6 +1,31 @@
-// KLDload APT pre-transaction snapshot hook
-// Placed at: /etc/apt/apt.conf.d/00-kldload-snapshot-pre
-// Creates a ZFS snapshot of rpool/ROOT/default before APT update or dpkg transactions.
+// kldload APT pre-transaction snapshot hook.
+//
+// Role:     take a ZFS snapshot of the root dataset before apt changes
+//           anything, so `kldload-rollback` has a point to go back to.
+// Read by:  apt(8), every invocation. Placed at
+//           /etc/apt/apt.conf.d/00-kldload-snapshot-pre.
+// Missing:  apt still works; package transactions simply have no rollback
+//           point, and kldload-rollback has nothing to offer for them.
+//
+// WHY the `||` matters, and why this file is not just the bare command:
+//
+// A Pre-Invoke hook that exits non-zero makes apt ABORT THE WHOLE
+// TRANSACTION. That turned the snapshot safety net into the thing preventing
+// installs: on fiend 2026-09-20 the name collided (two hooks, one second,
+// second-resolution timestamps), zfs refused, apt aborted, ansible-core never
+// installed, and a three-control-plane Kubernetes bootstrap failed 29 seconds
+// in — three symptoms deep from a duplicate snapshot name.
+//
+// snapshot-create.sh now tolerates that specific collision, but the general
+// rule still needs stating, and it is the rule the RPM side already follows:
+// kldload-pkg-wrapper warns and proceeds when a snapshot fails, because a
+// missing rollback point is recoverable and a machine that cannot install
+// packages is not. The two families now agree; they did not before, and the
+// half that failed closed is the half that cost a day.
+//
+// The warning still goes to stderr where the operator will see it, and
+// snapshot-create.sh logs the reason to /var/log/kldload/snapshots.log. This
+// is "fail loud", not "fail silent" — what it is not is "fail fatal".
 
-APT::Update::Pre-Invoke {"/usr/local/sbin/snapshot-create.sh apt-pre";};
-DPkg::Pre-Invoke {"/usr/local/sbin/snapshot-create.sh apt-pre";};
+APT::Update::Pre-Invoke {"/usr/local/sbin/snapshot-create.sh apt-pre || { echo 'kldload: WARNING — pre-transaction snapshot FAILED; proceeding without a rollback point.' >&2; echo 'kldload: see /var/log/kldload/snapshots.log' >&2; }";};
+DPkg::Pre-Invoke {"/usr/local/sbin/snapshot-create.sh apt-pre || { echo 'kldload: WARNING — pre-transaction snapshot FAILED; proceeding without a rollback point.' >&2; echo 'kldload: see /var/log/kldload/snapshots.log' >&2; }";};
