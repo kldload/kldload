@@ -293,7 +293,22 @@ esac
 
 # Allocate an id. Reuse the guest's own if it has one — re-running must not
 # renumber a VM out from under its existing peers.
-node_id="$(_ssh 'cat /etc/wireguard/.node-id 2>/dev/null' | tr -cd '0-9')"
+# CAPTURE, THEN CHECK. `_ssh` failing here killed the script ON THE
+# ASSIGNMENT (set -e plus pipefail), so a guest that refuses root SSH exited 1
+# with no message at all -- and the estate sweep maps exit 1 to "without an
+# address", which points whoever reads it at DHCP for what is an
+# authentication problem. The address had been resolved and logged two lines
+# earlier. Fourth site of this exact shape in this codebase (kube-init,
+# deploy.sh, kube-cluster were the others).
+#
+# HISTORY: fiend, 2026-09-21. Clones of the Debian k8s-golden refuse root ssh
+# ("Please login as the user \"debian\" rather than the user \"root\""), so every
+# clone died here and the sweep reported it as having no address.
+if ! node_id="$(_ssh 'cat /etc/wireguard/.node-id 2>/dev/null')"; then
+    warn "${VM}: no SSH as root while reading its node id — cannot enrol on the mesh (DB row was written)"
+    exit 2
+fi
+node_id="$(printf '%s' "$node_id" | tr -cd '0-9')"
 if [[ -n "$FORCE_ID" ]]; then
     node_id="$FORCE_ID"
 elif [[ -z "$node_id" ]]; then
