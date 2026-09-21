@@ -14,6 +14,13 @@ workers**, image building off, AI off, ztest off.
 
 ---
 
+## Beat 0: the trailer
+
+Sixty seconds of rendered title sequence before any of this, making the claim
+the run then checks. It is not footage and it is built elsewhere:
+[trailer.md](trailer.md). Cut straight from its last frame to the bare machine
+on the bench.
+
 ## The five beats
 
 **1. Nothing, then a menu.** Fiend reboots with no disk worth keeping and finds
