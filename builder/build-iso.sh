@@ -3940,7 +3940,26 @@ _iso_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # its Kubernetes stack fresh every build, so the tree is dirty by construction
 # and the commit alone no longer says what an ISO contains — two ISOs from one
 # commit can carry different Cilium versions.
-_k8s_lock_sha="$(sha256sum "$K8S_LOCK" 2>/dev/null | cut -c1-16 || echo none)"
+#
+# COMMENTS ARE STRIPPED BEFORE HASHING, and that is the whole point. The
+# resolver writes "# Resolved <timestamp> on <host>." into the lock, so hashing
+# the file whole measured WHEN the stack was resolved rather than WHAT was
+# resolved: builds 47 and 48 carried a byte-identical stack and recorded
+# 767d88a2c42be744 and f4e110203a6f0ec8. A digest that changes when nothing
+# changed cannot answer the one question it exists to answer — "do these two
+# ISOs carry the same stack?" — and answering it wrongly is worse than not
+# recording it, because the wrong answer looks authoritative.
+# HISTORY: onyx, 2026-09-21. Content-only digest of both: 5c62d78a3495139d.
+# Guarded on the file existing, NOT left to `|| echo none`: with the comment
+# filter in front, a missing lock makes grep fail but sha256sum still hashes
+# EMPTY STDIN and cut still exits 0, so the fallback never fires and VERSION
+# records e3b0c44298fc1c14 -- the hash of nothing -- as if it were a stack.
+# Caught 2026-09-21 by testing the missing-file path of this very line.
+if [[ -s "$K8S_LOCK" ]]; then
+    _k8s_lock_sha="$(grep -v '^#' "$K8S_LOCK" | sha256sum | cut -c1-16)"
+else
+    _k8s_lock_sha=none
+fi
 mkdir -p "${ROOTFS}/etc/kldload"
 cat >"${ROOTFS}/etc/kldload/VERSION" <<VERSIONEOF
 kldload_version = ${VERSION}
