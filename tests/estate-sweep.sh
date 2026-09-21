@@ -313,8 +313,24 @@ for ed in "${EDITIONS[@]}"; do
     # Bounded, and what it waited for is recorded.
     conv=0
     while ((conv < CONVERGE_WAIT)); do
+        # kldload-autodeploy is a oneshot with RemainAfterExit=yes, so
+        # `systemctl is-active` answers "active" for the rest of the machine's
+        # uptime once it SUCCEEDS. Waiting for it to stop being active therefore
+        # waits forever: every edition burned the whole CONVERGE_WAIT and then
+        # reported "first boot had NOT finished", marking its golden counts
+        # suspect, on a machine that had finished half an hour earlier.
+        #
+        # HISTORY: fiend, 2026-09-21, deb-4-k8s. autodeploy logged "complete —
+        # K8s: deployed (3 control planes, 3 workers)" at 07:55; the sweep gave
+        # up at 08:24:52 having learned nothing. Twelve editions of that is
+        # eight hours of waiting and twelve tainted reports. Same shape as
+        # reading Result on a --collect unit: the wrong systemd property,
+        # answering with total confidence.
+        #
+        # SubState is the one that moves: running -> exited.
+        # shellcheck disable=SC2016 # expanded on the bench machine, not here
         if ssh_bench "$ip" 'test -e /var/lib/kldload/firstboot-done' &&
-            ! ssh_bench "$ip" 'systemctl is-active --quiet kldload-autodeploy'; then
+            ssh_bench "$ip" 'case "$(systemctl show -p SubState --value kldload-autodeploy)" in running | start | start-pre | auto-restart) exit 1 ;; *) exit 0 ;; esac'; then
             break
         fi
         sleep 60
