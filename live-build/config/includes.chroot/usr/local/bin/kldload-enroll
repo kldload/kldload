@@ -125,13 +125,27 @@ if [[ "${1:-}" == "--all" ]]; then
         # remaining VM names, so the loop runs exactly once. Observed: a sweep
         # over 10 running VMs reported "1 on the mesh" and silently skipped the
         # other nine (.107, 2026-08-22).
-        "$0" "$_vm" --role "$_sweep_role" ${_sweep_cluster:+--cluster "$_sweep_cluster"} \
-            </dev/null >/dev/null 2>&1 || _rc=$?
+        # The per-VM output is KEPT on failure. It used to go to /dev/null, so a
+        # VM that would not enrol produced one number in the summary line and
+        # nothing else — not its name, not the reason. Chasing a single clone
+        # that never reached the mesh took six separate experiments on
+        # 2026-09-21 for exactly that reason: every layer reported a count and
+        # discarded the cause. A sweep over N machines must say which one and
+        # why, or the count is the only thing anyone can act on and it says
+        # nothing.
+        _out=""
+        _out="$("$0" "$_vm" --role "$_sweep_role" ${_sweep_cluster:+--cluster "$_sweep_cluster"} \
+            </dev/null 2>&1)" || _rc=$?
         case "$_rc" in
         0) _done=$((_done + 1)) ;;
         1) _noip=$((_noip + 1)) ;;
         *) _partial=$((_partial + 1)) ;;
         esac
+        if ((_rc != 0)); then
+            # The last line is the one that says why; the rest is progress.
+            printf '[enroll] sweep: %s did not enrol (exit %d): %s\n' \
+                "$_vm" "$_rc" "$(printf '%s' "$_out" | tail -n1)"
+        fi
     done < <(virsh list --state-running --name 2>/dev/null)
     printf '[enroll] sweep: %d on the mesh, %d without an address, %d incomplete\n' \
         "$_done" "$_noip" "$_partial"
