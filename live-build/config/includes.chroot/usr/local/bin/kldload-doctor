@@ -595,12 +595,34 @@ def check_prometheus_targets():
     # Required jobs are satisfied by ANY of the listed aliases — different
     # firstboot paths / klab vs kldload templates use different job names
     # for the same underlying scrape (host node_exporter especially).
+    # The cilium/hubble/tetragon jobs only exist where there is a CLUSTER.
+    # Requiring them unconditionally failed every machine that was never meant
+    # to have one: an ai, storage, core, server or desktop install has no
+    # Cilium to scrape, and the doctor reported "missing jobs: cilium-agent,
+    # hubble-metrics, tetragon" at HIGH severity on a perfectly correct box.
+    #
+    # This subsystem already knew better in one place and not the other:
+    # check_k8s_nodes() skips with "no cluster or no kubeconfig", while this
+    # check demanded the cluster's scrape jobs regardless. Same shape as
+    # kube-smoke-test judging a hypervisor by a node's rules (3c6096fd).
+    #
+    # HISTORY: fiend, 2026-09-21. deb-9-ai, 9-ai, 11-storage and
+    # deb-11-storage all reported exactly "fail": 2, and both failures were
+    # these, on machines with K8S_BOOTSTRAP=0.
+    _rc_k8s, _out_k8s, _ = _run(
+        ["kubectl", "get", "nodes", "-o=jsonpath={.items[*].metadata.name}"],
+        timeout=10)
+    _clustered = _has("kubectl") and _rc_k8s == 0 and bool(_out_k8s.strip())
+
     required_groups = {
-        "cilium-agent":   ["cilium-agent"],
-        "hubble-metrics": ["hubble-metrics"],
-        "tetragon":       ["tetragon"],
         "host node_exporter": ["node_exporter", "kldload-host", "klab-host", "node"],
     }
+    if _clustered:
+        required_groups.update({
+            "cilium-agent":   ["cilium-agent"],
+            "hubble-metrics": ["hubble-metrics"],
+            "tetragon":       ["tetragon"],
+        })
     missing, broken = [], []
     for label, aliases in required_groups.items():
         present = [a for a in aliases if a in jobs_up]
