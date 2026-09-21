@@ -42,10 +42,16 @@ SERVER=/usr/local/sbin/kldload-netboot-server
 NGINX_LOG=/var/lib/kldload/netboot-serve/nginx-access.log
 INSTALL_WAIT="${INSTALL_WAIT:-3000}" # 50 min: the full image is 15 GB over 1G
 FETCH_WAIT="${FETCH_WAIT:-900}"      # 15 min from PXE to the answers fetch
-# 40 min: an edition with BUILD_IMAGES=1 builds five cloud-image goldens on its
-# first boot, and measuring it before that finishes reports a machine that does
-# not exist yet.
+# An edition that builds no images settles in minutes; 40 is generous.
 CONVERGE_WAIT="${CONVERGE_WAIT:-2400}"
+# BUILD_IMAGES=1 is a different animal and needs its own budget. The comment
+# here used to say five cloud-image goldens take twenty minutes and set 40 to
+# be safe. Measured on fiend, 2026-09-21, deb-3-kvm: first boot was still
+# building at 40 minutes with all five goldens on disk, so the sweep gave up
+# and stamped "treat golden counts with suspicion" on the one edition whose
+# whole point is the golden count. A budget that expires on the healthy case
+# is not a timeout, it is a wrong answer delivered on schedule.
+CONVERGE_WAIT_IMAGES="${CONVERGE_WAIT_IMAGES:-7200}"
 
 # The default order is deliberate: kvm first, because it is the only one that
 # builds goldens and therefore the only one that exercises the estate at all.
@@ -208,6 +214,7 @@ for ed in "${EDITIONS[@]}"; do
     _ran=$((_ran + 1))
     want_profile="$(sudo -n grep -hE '^KLDLOAD_PROFILE=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
     want_distro="$(sudo -n grep -hE '^KLDLOAD_DISTRO=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
+    want_images="$(sudo -n grep -hE '^KLDLOAD_BUILD_IMAGES=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
     say "=== ${ed} (${want_distro}/${want_profile})"
 
     # 0. Is this edition already installing? Decided BEFORE the scan below,
@@ -312,7 +319,33 @@ for ed in "${EDITIONS[@]}"; do
     # verdict the feature ledger guards against with its build-in-flight check.
     # Bounded, and what it waited for is recorded.
     conv=0
-    while ((conv < CONVERGE_WAIT)); do
+    # Per-edition budget: an image-building first boot legitimately takes hours.
+    _conv_max="$CONVERGE_WAIT"
+    [[ "${want_images:-0}" == 1 ]] && _conv_max="$CONVERGE_WAIT_IMAGES"
+
+    # A machine with no first boot has nothing to converge, and waiting for a
+    # marker it will never write burns the entire budget. The core profile
+    # installs no kldload units at all: `systemctl cat kldload-autodeploy`
+    # finds no unit file, /usr/local/bin is EMPTY, and
+    # /var/lib/kldload/firstboot-done is never created. deb-1-core was up in
+    # two minutes and the sweep sat on it for forty (fiend, 2026-09-21), twice
+    # over, because there are two core editions.
+    #
+    # Asked as a CAPABILITY rather than a profile name, deliberately:
+    # smoke-all carries a scar about gating the KVM suite on a profile NAME
+    # and missing every desktop that was really a hypervisor. Any edition that
+    # ships no autodeploy unit is settled as soon as ssh answers.
+    #
+    # `systemctl cat` and not `is-active`/`show -p Result`: for a unit that
+    # does not exist those report "inactive/dead" and "success" with
+    # ExecMainStatus 0, which is indistinguishable from one that ran and
+    # succeeded. cat is the only one that says "there is no such unit".
+    if ! ssh_bench "$ip" 'systemctl cat kldload-autodeploy >/dev/null 2>&1'; then
+        say "${ed}: no kldload-autodeploy unit — nothing to converge, measuring now"
+        _conv_max=0
+    fi
+
+    while ((conv < _conv_max)); do
         # kldload-autodeploy is a oneshot with RemainAfterExit=yes, so
         # `systemctl is-active` answers "active" for the rest of the machine's
         # uptime once it SUCCEEDS. Waiting for it to stop being active therefore
@@ -336,8 +369,8 @@ for ed in "${EDITIONS[@]}"; do
         sleep 60
         conv=$((conv + 60))
     done
-    if ((conv >= CONVERGE_WAIT)); then
-        say "${ed}: first boot had NOT finished after ${conv}s — reporting anyway; treat golden counts with suspicion"
+    if ((_conv_max > 0 && conv >= _conv_max)); then
+        say "${ed}: first boot had NOT finished after ${conv}s (budget ${_conv_max}s, BUILD_IMAGES=${want_images:-0}) — reporting anyway; treat golden counts with suspicion"
     else
         say "${ed}: first boot settled after ${conv}s"
     fi
