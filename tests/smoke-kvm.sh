@@ -111,7 +111,22 @@ _section "KVM / Libvirt"
 test_cmd "virsh" "virsh"
 test_cmd "virt-install" "virt-install"
 test_cmd "qemu-img" "qemu-img"
-test_service_active "libvirtd" "libvirtd"
+# libvirtd is SOCKET-ACTIVATED and shipped DISABLED: it starts when something
+# connects and idles out when nothing does. Asserting the service is resident
+# therefore fails on a correctly configured host that has simply not been asked
+# anything lately, and passes on a busy one — so this check was really testing
+# how recently someone used libvirt.
+#
+# HISTORY: fiend, 2026-09-21, 5-desktop. The report said "libvirtd is inactive"
+# while the machine's own journal showed libvirtd.service "Deactivated
+# successfully" at 15:35:25 and "Started" again at 15:36:29, on demand, with
+# libvirtd.socket active throughout and libvirtd.service `disabled`. Every kvm
+# and k8s edition in the same sweep passed it, because they had VMs running.
+#
+# What matters is that libvirt ANSWERS. The daemon behind the socket is an
+# implementation detail — on the modular split it is virtqemud and there may be
+# no libvirtd at all — so ask the tool instead of the unit.
+test_succeeds "libvirt responds" "virsh --connect qemu:///system list --all"
 
 # virbr0 / default NAT network. In NESTED installs (this guest's uplink is
 # itself on a host's 192.168.122.0/24 libvirt NAT) the default network can
