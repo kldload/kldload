@@ -200,16 +200,28 @@ elif [[ ! -d "$TARGETS_DIR" ]]; then
     _didnotrun "monitoring" "${TARGETS_DIR} does not exist — Prometheus is not configured here"
 else
     # Split by whether anything is SUPPOSED to generate a target for the name.
-    # klab-prom-targets covers klab-blue-*, klab-green-* and kspawn-*; a k8s
-    # node (kldload-cp, kldload-w-N) or a hand-made clone matches none of them,
-    # so failing on those reported a defect against every machine with a
-    # cluster on it. Missing where it is generated is a FAILURE; missing where
-    # nothing generates one is a WARNING that names the gap, because "these VMs
-    # are running and nothing scrapes them" is still worth knowing.
+    # klab-prom-targets covers klab-blue-*, klab-green-* and kspawn-*; a
+    # hand-made clone matches none of them. Missing where it is generated is a
+    # FAILURE; missing where nothing generates one is a WARNING that names the
+    # gap, because "these VMs are running and nothing scrapes them" is still
+    # worth knowing.
+    #
+    # BOTH label spellings count as covered, and that is the point. klab VMs are
+    # written as "vm":"<name>"; k8s nodes are written by the same generator as
+    # "node":"<name>" (kubelet on :10250, plus cilium-agent, hubble-metrics and
+    # tetragon). Grepping only for "vm" reported "no generator covers the name"
+    # for all six cluster nodes on a host where every one of those targets was
+    # UP in Prometheus -- a warning that says nothing scrapes them, about
+    # machines that are scraped four ways. It recurred in three sweeps, which is
+    # how a real warning gets trained into noise.
+    # HISTORY: fiend, 2026-09-21, checked against the Prometheus API rather than
+    # the target files. What IS missing there is host-level metrics: no
+    # node_exporter answers on :9100 on a cluster node. That is a gap in the
+    # golden, not in target generation, and it is not what this check measures.
     _untargeted="" _uncovered=""
     while read -r _vm; do
         [[ -n "$_vm" ]] || continue
-        grep -rqs "\"vm\"[[:space:]]*:[[:space:]]*\"${_vm}\"" "$TARGETS_DIR" && continue
+        grep -rqsE "\"(vm|node)\"[[:space:]]*:[[:space:]]*\"${_vm}\"" "$TARGETS_DIR" && continue
         case "$_vm" in
         klab-blue-* | klab-green-* | kspawn-*) _untargeted+=" ${_vm}" ;;
         *) _uncovered+=" ${_vm}" ;;
