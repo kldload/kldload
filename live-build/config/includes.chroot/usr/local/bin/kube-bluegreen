@@ -604,6 +604,19 @@ _cl_destroy() {
                 _say "wg-k8s brought back up" ||
                 _say "WARNING: wg-k8s.conf restored but the interface did not come up — run: wg-quick up wg-k8s"
         fi
+
+        # The snapshot was taken while the destroyed track was still peered, so
+        # what comes back includes peers for VMs that no longer exist — they sit
+        # there never handshaking. Re-peer the machines that ARE running, which
+        # is what makes the surviving estate consistent again.
+        #
+        # Measured on fiend, 2026-09-21: straight after the restore the host had
+        # 4 of 6 handshakes and could not ping 10.250.0.1; one `kldload-enroll
+        # --all` took it to 6 and the ping came back.
+        if command -v kldload-enroll >/dev/null 2>&1; then
+            _say "re-peering the surviving estate"
+            kldload-enroll --all 2>&1 | tail -1 | while read -r _l; do _say "  ${_l}"; done
+        fi
     fi
     rm -rf "$_snap"
     # By exact name, never a pattern: a destroy driven by a wildcard once took
