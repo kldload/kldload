@@ -3352,17 +3352,40 @@ WPEOF
         fi
         # Metrics: the profile installs node-exporter for this box and nothing
         # enabled it, so :9100 never answered (fiend 2026-09-18, the first
-        # matrix run of storage on Fedora). Same unit name on RPM and Debian.
-        # Kept out of the loop above so it cannot mask "serves nothing".
-        if [[ -e "${target}/usr/lib/systemd/system/prometheus-node-exporter.service" ||
-            -e "${target}/lib/systemd/system/prometheus-node-exporter.service" ]]; then
-            mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
-            ln -sf /usr/lib/systemd/system/prometheus-node-exporter.service \
-                "${target}/etc/systemd/system/multi-user.target.wants/prometheus-node-exporter.service" ||
-                k_log "WARNING: could not enable prometheus-node-exporter — :9100 will not answer"
-        else
-            k_log "WARNING: prometheus-node-exporter.service not on the target — no host metrics"
-        fi
+        # matrix run of storage on Fedora). Kept out of the loop above so it
+        # cannot mask "serves nothing".
+        #
+        # NOT ON DEBIAN/UBUNTU. The comment above said "same unit name on RPM
+        # and Debian" and that is the part that was wrong: the RPM package is
+        # node-exporter and the deb one is prometheus-node-exporter, so this
+        # block only ever fired on the deb side — where the inert-units loop
+        # earlier in this same function has DELIBERATELY disabled that unit
+        # since 2026-09-20, because it binds :9100 and kldload's own
+        # node_exporter.service (written at first boot, and the one wired into
+        # the Prometheus file_sd targets) needs that port.
+        #
+        # So the two fixes were fighting: 09-18 enabled it for storage, 09-20
+        # disabled it for the port clash, and this one runs later and won.
+        # fiend, deb-11-storage, build 50: prometheus-node-exporter.service
+        # Started and holding :9100 while node_exporter.service exited 1 and
+        # restart-looped, which is the exact state 09-20 set out to prevent.
+        # Host metrics on Debian come from kldload's unit, not this one.
+        case "${KLDLOAD_DISTRO:-debian}" in
+        debian | ubuntu)
+            k_log "host metrics: kldload's own node_exporter serves :9100 — leaving prometheus-node-exporter disabled"
+            ;;
+        *)
+            if [[ -e "${target}/usr/lib/systemd/system/prometheus-node-exporter.service" ||
+                -e "${target}/lib/systemd/system/prometheus-node-exporter.service" ]]; then
+                mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
+                ln -sf /usr/lib/systemd/system/prometheus-node-exporter.service \
+                    "${target}/etc/systemd/system/multi-user.target.wants/prometheus-node-exporter.service" ||
+                    k_log "WARNING: could not enable prometheus-node-exporter — :9100 will not answer"
+            else
+                k_log "WARNING: prometheus-node-exporter.service not on the target — no host metrics"
+            fi
+            ;;
+        esac
 
         # Open the ports those daemons listen on. A storage server whose
         # firewall drops NFS is the same failure as one with no NFS installed,
