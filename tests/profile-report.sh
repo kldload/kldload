@@ -291,12 +291,56 @@ if have kldload-doctor; then
     # doctor that is not emitting JSON, and it is reported as unparseable
     # rather than as a health verdict.
     _dfail="$(sed -n 's/.*"fail"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$_doc" | tail -1)"
+
+    # NAME the failing checks, do not just count them.
+    #
+    # This block printed `tail -20` of the doctor's output, which is the JSON
+    # summary and nothing else, and then reported "doctor reports N failing
+    # check(s)". The count was right and the identity was thrown away by the
+    # very block that counted it -- a count is not a result. fiend,
+    # 2026-09-21: deb-4-k8s and 5-desktop both came back FAIL on "1 failing
+    # check" and the report did not say which, on either, so the sweep found
+    # two defects and recorded neither.
+    #
+    # Two traps in parsing this, both hit on the first attempt:
+    #   * the doctor emits results[] AND a subsystems{} grouping that repeats
+    #     every check, so scanning the whole document double-counts. results[]
+    #     is printed first (sort_keys), so stop at "subsystems".
+    #   * it uses sort_keys=True, so within one object "subsystem" sorts AFTER
+    #     "status" -- reading it when status is seen yields the PREVIOUS
+    #     check's subsystem. Print once subsystem arrives instead.
+    # Verified against a real 42-check report with three failures: this names
+    # the same three, with the same subsystems, as a JSON parser does.
+    _dnames="$(awk '
+        /^  "subsystems"[[:space:]]*:/ { exit }
+        /"name"[[:space:]]*:/        { n=$0; sub(/.*"name"[[:space:]]*:[[:space:]]*"/,"",n); sub(/".*/,"",n) }
+        /"remediation"[[:space:]]*:/ { r=$0; sub(/.*"remediation"[[:space:]]*:[[:space:]]*"/,"",r); sub(/".*/,"",r) }
+        /"status"[[:space:]]*:[[:space:]]*"fail"/ { p=1 }
+        /"subsystem"[[:space:]]*:/ {
+            if (p) { s=$0; sub(/.*"subsystem"[[:space:]]*:[[:space:]]*"/,"",s); sub(/".*/,"",s)
+                     printf "%s/%s%s\n", s, n, (r==""?"":" -> " r); p=0 }
+        }' <<<"$_doc")"
+
     echo '```'
+    if [[ -n "$_dnames" ]]; then
+        echo "failing checks:"
+        sed 's/^/  /' <<<"$_dnames"
+        echo
+    fi
     sed 's/\x1b\[[0-9;]*m//g' <<<"$_doc" | tail -20
     echo '```'
     if [[ -n "$_dfail" ]]; then
         if ((_dfail > 0)); then
-            note_fail "kldload-doctor reports ${_dfail} failing check(s)"
+            if [[ -n "$_dnames" ]]; then
+                # Strip each line's remediation, then join. Two things got
+                # this wrong before it was run: ${x%%" -> "*} cuts at the
+                # FIRST arrow in the WHOLE string, reducing three findings to
+                # one; and paste -sd'; ' cycles through a delimiter LIST, so
+                # it alternated ';' and ' ' between fields.
+                note_fail "kldload-doctor reports ${_dfail} failing check(s): $(sed 's/ -> .*//' <<<"$_dnames" | paste -sd';' - | sed 's/;/; /g')"
+            else
+                note_fail "kldload-doctor reports ${_dfail} failing check(s) — and the report could not name them"
+            fi
         fi
     else
         note_warn "kldload-doctor output carried no machine-readable summary — health NOT assessed"
