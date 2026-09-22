@@ -2220,6 +2220,38 @@ DASHSTART
         ((_missed == 0)) ||
             k_log "WARNING: ${_missed} observability binaries did not land — the Metrics view will have nothing behind it"
 
+        # The loop above can only see a binary that IS on the live image, which
+        # is the one case it cannot report: `[[ -x "$_src" ]] || continue` skips
+        # a tool missing from the ISO, so the check designed to catch a missing
+        # binary goes quiet exactly when one is missing. Ask the TARGET instead
+        # — for every unit it will actually start, does its ExecStart exist?
+        #
+        # HISTORY: 2026-09-21, fiend, deb-4-k8s and 4-k8s both. Grafana retired
+        # promtail after loki v3.6.1; the build resolved the newest loki tag,
+        # the promtail asset 404'd, build-iso logged a WARNING and shipped
+        # anyway, and every installed machine got promtail.service enabled with
+        # no /usr/local/bin/promtail. That is not a failed unit — it is one
+        # restarting every 5 s forever, so `systemctl --failed` stayed empty and
+        # the smoke suite reported "failed units: none" on a thrashing machine.
+        _dangling=0
+        shopt -s nullglob
+        for _unit in "${target}"/etc/systemd/system/*.wants/*.service; do
+            _ubase="$(basename "$_unit")"
+            _ufile="${target}/usr/lib/systemd/system/${_ubase}"
+            [[ -f "$_ufile" ]] || _ufile="${target}/etc/systemd/system/${_ubase}"
+            [[ -f "$_ufile" ]] || continue
+            _exec="$(sed -n 's|^ExecStart=-\{0,1\}\([^ ]*\).*|\1|p' "$_ufile" | head -1)"
+            # Only absolute paths are ours to check; a bare name resolves on the
+            # unit's PATH at boot and may legitimately not be here.
+            [[ "$_exec" == /* ]] || continue
+            [[ -e "${target}${_exec}" ]] && continue
+            k_log "WARNING: ${_ubase} is ENABLED on the target but ${_exec} does not exist — it will restart-loop, and it will never show as failed"
+            _dangling=$((_dangling + 1))
+        done
+        shopt -u nullglob
+        ((_dangling == 0)) ||
+            k_log "WARNING: ${_dangling} enabled unit(s) have no ExecStart binary on this target"
+
         # ── Component DEFINITIONS ───────────────────────────────────────
         #
         # kldload-component itself rides the k* glob above, so the CLI has

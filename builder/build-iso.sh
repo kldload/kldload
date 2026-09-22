@@ -107,6 +107,36 @@ _gh_tag() {
         grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4
 }
 
+# _gh_tag_with_asset <repo> <asset-name> [max-releases]
+#
+# Newest release tag that actually PUBLISHES <asset-name>, printed on stdout;
+# empty and non-zero when none of the last N do.
+#
+# _gh_tag alone resolves the newest TAG, which is right until a project stops
+# shipping one of its assets and the tag keeps moving without it. Grafana
+# retired promtail after loki v3.6.1 (it is superseded by Alloy): from v3.7.0
+# the tag resolves fine, promtail-linux-amd64.zip 404s, and the build carried
+# on and shipped an ISO with promtail.service enabled and no binary behind it.
+# Every machine installed from it restart-loops that unit forever -- and never
+# reaches 'failed', so systemctl --failed shows nothing (found on fiend by the
+# estate sweep, both deb-4-k8s and 4-k8s, 2026-09-21).
+#
+# So: derive the version from the asset's existence rather than the tag's.
+_gh_tag_with_asset() {
+    local repo="$1" asset="$2" max="${3:-30}" tag code
+    while read -r tag; do
+        [[ -n "$tag" ]] || continue
+        code="$(curl -o /dev/null -sIw '%{http_code}' -L --max-time 20 \
+            "https://github.com/${repo}/releases/download/${tag}/${asset}" 2>/dev/null)"
+        if [[ "$code" == 200 ]]; then
+            printf '%s' "$tag"
+            return 0
+        fi
+    done < <(curl -sL --max-time 20 "https://api.github.com/repos/${repo}/releases?per_page=${max}" 2>/dev/null |
+        grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
+    return 1
+}
+
 log() { printf '[%s] [build-iso] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die() {
     printf '[%s] [build-iso] ERROR: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
@@ -2057,9 +2087,13 @@ if [[ "$EDITION" != "core" ]]; then
         log "  WARNING loki download failed"
         _obs_ok=0
     fi
-    # promtail (same release)
-    if curl -fsSL -o "${_obs_tmp}/promtail.zip" \
-        "https://github.com/grafana/loki/releases/download/${_LOKI_V}/promtail-linux-amd64.zip" \
+    # promtail. NOT "${_LOKI_V}": promtail was retired after v3.6.1 and the loki
+    # tag keeps moving without it, so this asks which release still carries the
+    # asset. See _gh_tag_with_asset for what shipping the 404 silently cost.
+    _PROMTAIL_V="$(_gh_tag_with_asset grafana/loki promtail-linux-amd64.zip || true)"
+    [[ -n "${_PROMTAIL_V:-}" ]] || log "  WARNING no grafana/loki release publishes promtail-linux-amd64.zip"
+    if [[ -n "${_PROMTAIL_V:-}" ]] && curl -fsSL -o "${_obs_tmp}/promtail.zip" \
+        "https://github.com/grafana/loki/releases/download/${_PROMTAIL_V}/promtail-linux-amd64.zip" \
         >>"$LOG_FILE" 2>&1; then
         (cd "${_obs_tmp}" && unzip -o promtail.zip >>"$LOG_FILE" 2>&1)
         install -m 0755 "${_obs_tmp}/promtail-linux-amd64" "${ROOTFS}/usr/local/bin/promtail"
@@ -2071,10 +2105,24 @@ if [[ "$EDITION" != "core" ]]; then
     # Enable the 4 services in the live ISO rootfs so they start at first
     # boot on the installed target too (profiles.sh copies these). Persistent
     # journal is enabled via includes.chroot/etc/systemd/journald.conf.d.
+    #
+    # Enabling follows the BINARY, never the unit file. The unit files ship in
+    # includes.chroot unconditionally, so keying the enable on them enables a
+    # service whose ExecStart does not exist -- which is not a failed unit, it
+    # is a unit that restarts every 5 s until the machine is turned off, and
+    # 'systemctl --failed' stays empty the whole time. A unit with no binary is
+    # left disabled and said out loud.
     for _svc in zfs_exporter smartctl_exporter loki promtail; do
-        if [[ -f "${ROOTFS}/usr/lib/systemd/system/${_svc}.service" ]]; then
-            chroot "${ROOTFS}" systemctl enable "${_svc}.service" >>"$LOG_FILE" 2>&1 || true
+        [[ -f "${ROOTFS}/usr/lib/systemd/system/${_svc}.service" ]] || continue
+        _svc_bin="$(sed -n 's|^ExecStart=\([^ ]*\).*|\1|p' \
+            "${ROOTFS}/usr/lib/systemd/system/${_svc}.service" | head -1)"
+        if [[ -n "$_svc_bin" && ! -x "${ROOTFS}${_svc_bin}" ]]; then
+            log "  WARNING ${_svc}.service NOT enabled — ${_svc_bin} is not in the image"
+            _obs_ok=0
+            continue
         fi
+        chroot "${ROOTFS}" systemctl enable "${_svc}.service" >>"$LOG_FILE" 2>&1 ||
+            log "  WARNING could not enable ${_svc}.service"
     done
     # Pre-create Loki + promtail state dirs so services come up clean.
     mkdir -p "${ROOTFS}/var/lib/loki" "${ROOTFS}/var/lib/promtail" "${ROOTFS}/var/log/journal"
