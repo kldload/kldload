@@ -281,10 +281,29 @@ for r in d.get("data",{}).get("result",[]):
     m=r.get("metric",{})
     if m.get("vm") and r.get("value",["",""])[1]=="0":
         print(m["vm"])' 2>/dev/null | sort -u | tr '\n' ' ')"
-        if [[ -z "${_down// /}" ]]; then
-            _pass "scrape: every VM target Prometheus knows about is up"
+        # DOWN is only a defect for a machine that is supposed to be up.
+        #
+        # A target file outlives the VM it names: autodeploy powers klab-blue-*
+        # and klab-green-* off once their meshes handshake, the file stays, and
+        # Prometheus goes on scraping an address with nothing behind it. up=0
+        # is then the correct reading of a machine that is correctly off.
+        # 3-kvm failed "targeted but DOWN: klab-green-fedora klab-green-rocky"
+        # for exactly that (fiend, 2026-09-22). Split the two so a real
+        # scrape failure is still a failure and an idle clone is a note.
+        _down_live="" _down_off=""
+        for _d in ${_down}; do
+            if printf '%s\n' "$(vms_running)" | grep -qxF "$_d"; then
+                _down_live+=" ${_d}"
+            else
+                _down_off+=" ${_d}"
+            fi
+        done
+        [[ -z "${_down_off// /}" ]] ||
+            echo "    targeted and DOWN, but powered off, which is expected:${_down_off}"
+        if [[ -z "${_down_live// /}" ]]; then
+            _pass "scrape: every VM target for a RUNNING VM is up"
         else
-            _fail "monitoring scrape" "targeted but DOWN in Prometheus:${_down}"
+            _fail "monitoring scrape" "running and targeted, but DOWN in Prometheus:${_down_live}"
         fi
     fi
 fi
