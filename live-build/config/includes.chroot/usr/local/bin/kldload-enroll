@@ -376,12 +376,30 @@ host_pub="$(cat /etc/wireguard/wg-mgmt.pub 2>/dev/null || true)"
 # the peer is genuinely missing — bouncing wg-mgmt under a live guest for a
 # peer that already exists is pure disruption.
 host_ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7; exit}')"
-if ! grep -qE "^# Node ${node_id}([[:space:]]|\$)" /etc/wireguard/wg-mgmt.conf 2>/dev/null; then
+# Compare the KEY, not just the id. A peer whose id matches and whose key does
+# not is STALE, and re-running enrolment is precisely when an operator expects
+# that repaired — "idempotent by default" means the second run fixes what the
+# first one left, not that it declines to look.
+#
+# HISTORY: fiend, 2026-09-21. `kube-bluegreen cluster destroy green` wiped the
+# hypervisor's wireguard identity; `kube-network init` minted a NEW key and
+# `kldload-enroll --all` then reported "6 on the mesh, 0 incomplete" while
+# every guest still held the OLD one. Six peers, zero handshakes, and the
+# tool said it was done.
+_hv_have="$(awk -v id="$node_id" '
+    $0 ~ "^# Node " id "([[:space:]]|$)" {f=1; next}
+    f && /^PublicKey/ {print $3; exit}' /etc/wireguard/wg-mgmt.conf 2>/dev/null || true)"
+if [[ "$_hv_have" == "$guest_pub" ]]; then
+    log "${VM}: hypervisor already peers ${node_id}"
+else
+    if [[ -n "$_hv_have" ]]; then
+        log "${VM}: hypervisor holds a STALE key for ${node_id} — replacing"
+        kube-network remove-peer "$node_id" >/dev/null 2>&1 ||
+            warn "${VM}: could not remove the stale peer ${node_id}"
+    fi
     kube-network add-peer "$IP" "$guest_pub" "$node_id" >/dev/null 2>&1 &&
         log "${VM}: hypervisor now peers ${node_id}" ||
         warn "${VM}: hypervisor did not accept the peer"
-else
-    log "${VM}: hypervisor already peers ${node_id}"
 fi
 # Match the marker without anchoring the end of the line: kube-network writes
 # "# Node <id>" and a trailing space or CR (a config that has been through an
@@ -389,12 +407,21 @@ fi
 # was already there. Harmless — add-peer is append-and-reload and the count
 # stayed at 1 — but a log line that misdescribes what happened is how the next
 # person mis-diagnoses a real duplicate.
-if ! _ssh "grep -qE '^# Node ${HOST_ID}([[:space:]]|\$)' /etc/wireguard/wg-mgmt.conf"; then
+# Same comparison on the guest: the id alone said "already peers" while the
+# key underneath it was the hypervisor's previous one.
+_g_have="$(_ssh "awk '\$0 ~ \"^# Node ${HOST_ID}([[:space:]]|\$)\" {f=1; next} f && /^PublicKey/ {print \$3; exit}' /etc/wireguard/wg-mgmt.conf" 2>/dev/null || true)"
+_g_have="$(printf '%s' "$_g_have" | tr -d '[:space:]')"
+if [[ "$_g_have" == "$host_pub" ]]; then
+    log "${VM}: guest already peers the hypervisor"
+else
+    if [[ -n "$_g_have" ]]; then
+        log "${VM}: guest holds a STALE hypervisor key — replacing"
+        _ssh "kube-network remove-peer ${HOST_ID}" >/dev/null 2>&1 ||
+            warn "${VM}: could not remove the stale hypervisor peer"
+    fi
     _ssh "kube-network add-peer ${host_ip:-$IP} ${host_pub} ${HOST_ID}" >/dev/null 2>&1 &&
         log "${VM}: guest now peers the hypervisor" ||
         warn "${VM}: guest did not accept the hypervisor peer"
-else
-    log "${VM}: guest already peers the hypervisor"
 fi
 
 # ── Verify the OUTCOME, not the exit codes ──────────────────────────────────
