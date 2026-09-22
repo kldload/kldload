@@ -31,8 +31,96 @@ separate PXE server, no DHCP surgery, nothing to stand up first. The payload is
 the full darksite, deliberately: 15 GB over PXE so a rack can be built with no
 internet at all.
 
-Around it: per-MAC boot snippets so each machine gets its own answers, a boot
-menu so the distribution is chosen at the console, a configurator menu, answers
+Install the first machine with `KLDLOAD_KEEP_NETBOOT=1` in its answers file and
+it keeps the kernel, initrd and squashfs it was installed *from*. That is the
+whole server. `kldload-netboot.service` then lays out an HTTP tree, writes an
+nginx config and a dnsmasq proxyDHCP+TFTP config bound to the LAN interface, and
+brings both up:
+
+```
+$ kldload-netboot-server status
+payload : /var/lib/kldload-netboot (kldload_version = 1.5.0-rc
+iso_name        = kldload-1.5.0-rc-x86_64.iso
+built_at        = 2026-09-22T01:39:40Z
+edition         = free
+profile         = desktop
+arch            = x86_64
+commit          = c4d55933c4cd
+k8s_stack_lock  = 5c62d78a3495139d)
+service : active
+goldens : 0
+armed   : 0 machine(s)
+```
+
+**proxyDHCP**, which is the part that makes this usable on a network you do not
+own: it answers PXE *beside* the existing DHCP server and never hands out
+addresses. There is nothing to reconfigure on the network, and nothing to undo
+afterwards.
+
+**A rack is a directory, and a machine is one file in it named after its MAC.**
+That is the entire management model, and it is worth saying plainly because it is
+the part people expect to be harder than it is. There is no inventory database,
+no state file, no controller to stand up and keep alive. The list of machines is
+`ls`. Editing the fleet is `sed`.
+
+The file is flat `KEY=value` — everything the installer would otherwise ask:
+
+```
+KLDLOAD_DISTRO=fedora
+KLDLOAD_PROFILE=server
+KLDLOAD_DISK=/dev/disk/by-id/nvme-SAMSUNG_MZQL2...
+KLDLOAD_HOSTNAME=kldload-node
+KLDLOAD_ZFS_ENCRYPT=0
+KLDLOAD_ENABLE_SECURE_BOOT=0
+KLDLOAD_K8S_BOOTSTRAP=0
+KLDLOAD_KEEP_NETBOOT=0        # 1 makes this machine a server too
+```
+
+So a twelve-node rack is one template, a list of MACs, and a loop:
+
+```
+# one file per machine, named for the MAC that will boot it
+i=1
+while read -r mac; do
+    sed -e "s/^KLDLOAD_HOSTNAME=.*/KLDLOAD_HOSTNAME=node-$(printf %02d "$i")/" \
+        TEMPLATE.env > "rack/${mac}.env"
+    i=$((i + 1))
+done < macs.txt
+
+# arm the lot: every .env in the directory, refusing duplicate MACs or
+# duplicate hostnames, non-zero unless every machine armed
+kldload-netboot-server arm-all ./rack/
+```
+
+Changing the fleet afterwards is the same shape. Turn Kubernetes on across the
+rack, or move everyone to Debian, and re-arm:
+
+```
+sed -i 's/^KLDLOAD_K8S_BOOTSTRAP=0/KLDLOAD_K8S_BOOTSTRAP=1/' rack/*.env
+kldload-netboot-server arm-all ./rack/
+```
+
+Single machines work the same way, and two variants are worth knowing:
+
+```
+# a box whose management NIC boots but whose 10G NIC should carry the
+# 15 GB payload -- boot on one, pull the root image over the other
+kldload-netboot-server arm-install f0:2f:74:cd:27:50 ./rack/node-07.env \
+    --netdev a0:36:9f:9f:10:1c
+
+# clone rather than install -- receive a golden as a zfs send stream over
+# the same HTTP, no ssh identity needed on either end
+kldload-netboot-server arm-deploy f0:2f:74:cd:27:50 \
+    --golden k8s-worker --disk /dev/nvme0n1
+```
+
+Arming writes `armed/<mac>.ipxe` — one snippet per MAC, and that snippet *is*
+the consent token. `boot.ipxe` probes net0 through net3 and chains the first
+armed snippet it finds; an unarmed NIC gets a 404 and the chain falls through to
+the next, and then to the local boot order. No token, no touch. `disarm <mac>`
+and `disarm-all` take it back.
+
+Around it: a boot menu so the distribution is chosen at the console, answers
 taken from the kernel command line, and golden streams so a built machine can be
 cloned over HTTP rather than reinstalled.
 
