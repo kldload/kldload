@@ -495,11 +495,19 @@ the system instead of a storage plugin.
 I did not invent any of that. I cleaned up the legacy cruft that makes those
 things awkward on Linux, added point-and-shoot replication, boot environments,
 and eBPF on its own WireGuard-encrypted backplane -- and then left it alone. For
-the most part this is a normal install of Fedora, Debian or RHEL. The difference
-is that it is built as a matched set: the kernel, the ZFS module and the NVIDIA
-driver are resolved against each other at build time and locked together, so
-what boots is a combination that was compiled to work rather than one that
-happened to resolve on the day.
+the most part this is a normal install of Fedora, Debian or RHEL.
+
+The difference is that it is built as a matched *set* and then held there: the
+kernel, the ZFS module and the NVIDIA driver are resolved against each other at
+build time, locked together, and pinned with package holds. What boots is a
+combination that was compiled to work rather than one that happened to resolve
+on the day, and it stays that combination for as long as you want it to. Updates
+are security ones; the substrate does not drift underneath you.
+
+Which is also why the machine itself is disposable. When you are finished with
+it, take it out back and shoot it. Nothing worth keeping lived on the machine --
+it lived in datasets, and `zxplore` replicates those wherever you want them,
+whenever you want. The box is a runtime, not an heirloom.
 
 ### Is it open source?
 
