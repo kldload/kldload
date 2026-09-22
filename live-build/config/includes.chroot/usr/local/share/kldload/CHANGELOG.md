@@ -182,15 +182,83 @@ A kldload install reaches a desktop long before it is finished, and the machine
 then spends up to an hour building golden images and a cluster behind a screen
 that looks idle. That gap is now the manual.
 
-The install show holds the screen through the reboot and into first boot: 380
-slides across 20 scenes, with the real build log in a window beside them, driven
-by keys the screen tells you about. It is not decoration — the worked examples
-are real commands with the output the machine actually printed, so the thing you
-watch while waiting is the thing you will type afterwards. F12 hands the machine
-over early if you would rather get on with it; the build carries on behind the
-desktop either way.
+The install show holds the screen through the reboot and into first boot. Part
+one is 202 slides in a remembered shuffle, played while the installer works.
+Part two is 25 scenes, each one a worked example with the real build log in a
+window beside it. It is not decoration — the examples are real commands with the
+output the machine actually printed, so the thing you watch while waiting is the
+thing you will type afterwards.
 
-An install kiosk runs it, so the show needs no desktop underneath it.
+**It tells you its own keys.** The legend shows for the first thirty seconds,
+for twenty more after `K` or `?`, and briefly after any keypress, because keys
+nobody is told about are keys nobody uses:
+
+```
+N NEXT SLIDE   B BACK   S SCENE   + - SPEED   F12 HAND OVER   CTRL+ALT+F2 TERMINAL
+```
+
+| Key | What it does |
+|---|---|
+| `N`, `→` | Next slide |
+| `B`, `←` | Back a slide |
+| `S` | Skip to the next scene |
+| `+` / `-` | Slower or faster, two seconds a press |
+| `K`, `?` | Show the legend again |
+| `F12` | Hand the machine over |
+| `Ctrl+Alt+F2` | A terminal, if you would rather not wait at all |
+
+`F12` is a function key deliberately: `N`, `B`, `S`, `+` and `-` are all letters
+a viewer can hit by accident, and this one ends the presentation. It stops the
+*show*, not the build — `kldload-autodeploy` is its own unit and carries on
+building images and the cluster behind the desktop, with `kldload-build-monitor`
+on screen saying so.
+
+The same thing runs on the console for machines with no graphics, and it is a
+plain command you can drive yourself:
+
+```
+kldload-firstboot-show status        # building | ok | problem, exit 0
+kldload-firstboot-show frame         # draw one frame and exit
+kldload-firstboot-show logtail 40    # the source, then the last 40 cleaned lines
+```
+
+`logtail` is what the graphical show fetches, so the console screen and the
+slides display the same text, redacted the same way. During a live install it
+reads the newest `/var/log/installer/*.log`; afterwards it reads the journals of
+`kldload-firstboot`, `kldload-autodeploy` and `klab-firstboot`.
+
+An install kiosk runs the graphical half, so the show needs no desktop
+underneath it: `cage` with a browser on `127.0.0.1:8099`, on tty1, with the
+console screen still drawing on VT8 underneath and coming back into view if the
+kiosk fails for good.
+
+Which machines get it is a rule rather than a setting (fiend, 2026-09-14): core,
+server and a plain desktop come straight up because they are ready; anything
+building golden images, Kubernetes or KVM keeps the show on screen all the way
+through.
+
+**How it is built, because the constraints picked the technology.** Each half of
+the show is a single self-contained HTML file — `index.html` for the install,
+`firstboot.html` for first boot — served by the web UI off the machine itself.
+No framework, no bundler, no CDN, no fonts fetched, no `<script src>` pointing
+anywhere. That is not minimalism for its own sake: the machine playing the show
+is mid-install with no internet, so anything it cannot draw from its own disk is
+not available to it.
+
+Everything moving is drawn on a **2D canvas at 30 fps, and there is no WebGL
+anywhere in it on purpose** — the comment in the source puts it better than a
+changelog can: *"no WebGL to fall back from."* The show runs during a first boot
+where the NVIDIA driver may still be compiling, under `cage` on a software
+renderer, on a server with no GPU at all. A 2D context is the one thing that
+works in all three cases, so the effects were written to that budget rather than
+the budget being raised to fit the effects. Copper bars, a starfield and
+scrollers — demoscene technique, chosen because it was invented for exactly this
+constraint.
+
+The consequence worth knowing operationally: the slides are text in an array in
+one file. Editing what the machine teaches you is editing `free/index.html` and
+rebuilding — there is no content pipeline, no database and no separate asset
+store to keep in sync.
 
 ### Firecracker microVMs on the same substrate
 
