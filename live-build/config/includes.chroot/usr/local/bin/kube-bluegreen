@@ -413,18 +413,77 @@ _cl_deploy() {
     # kube-cluster does the work. It is the shipped verb and it owns cluster
     # lifecycle; re-implementing any of it here is how a harness ends up
     # reproducing a bug that was fixed in the real tool.
+    # DEPLOY MUST NOT CHANGE WHAT THE DEFAULT KUBECONFIG POINTS AT. That is
+    # promote's job, and it is the only thing that should move it. kube-cluster
+    # bootstrap always publishes /root/.kube/config for the cluster it just
+    # built, so building a track silently retargets the operator's kubectl at
+    # the new one.
+    #
+    # HISTORY: fiend, 2026-09-21. `cluster deploy green` against a host with a
+    # live six-node cluster left `kubectl get nodes` answering with green's
+    # TWO nodes. The first attempt at this fixed the ADDRESS the config used
+    # (a node's DHCP lease, which green could inherit — a real bug, fixed in
+    # kube-cluster) and missed that the file is overwritten wholesale, which is
+    # the bigger half. Re-running the cycle on the fixed build is what showed
+    # the config now correctly naming a VIP — green's.
+    local _kc_prev=""
+    if [[ -r "${_CL_KUBE_DIR}/config" && ! -L "${_CL_KUBE_DIR}/config" ]]; then
+        _kc_prev="$(mktemp)"
+        cp -a "${_CL_KUBE_DIR}/config" "$_kc_prev"
+    fi
+
     CLUSTER_NAME="$(_cl_name "$track")" \
     KUBE_VIP_ADDRESS="$vip" \
     METALLB_POOL="$pool" \
     METALLB_POOL_NAME="kldload-${track}-pool" \
-        kube-cluster bootstrap "$@" || _die "kube-cluster bootstrap failed for ${track}"
+        kube-cluster bootstrap "$@" || {
+        [[ -n "$_kc_prev" ]] && rm -f "$_kc_prev"
+        _die "kube-cluster bootstrap failed for ${track}"
+    }
 
     # kube-cluster writes /root/.kube/config for whichever cluster it just
-    # built. Move it to this track's file so the next deploy cannot overwrite
+    # built. Copy it to this track's file so the next deploy cannot overwrite
     # the other track's credentials.
     if [[ -r "${_CL_KUBE_DIR}/config" && ! -L "${_CL_KUBE_DIR}/config" ]]; then
         install -m 0600 "${_CL_KUBE_DIR}/config" "$(_cl_kubeconfig "$track")"
         _say "kubeconfig saved: $(_cl_kubeconfig "$track")"
+    fi
+
+    # ...and give the operator back the one they had. Only when there WAS one:
+    # on a host with no prior cluster, leaving the new track's config in place
+    # is the useful thing to do.
+    if [[ -n "$_kc_prev" ]]; then
+        install -m 0600 "$_kc_prev" "${_CL_KUBE_DIR}/config"
+        rm -f "$_kc_prev"
+        _say "default kubeconfig left pointing where it did — use 'cluster promote ${track}' to switch"
+    fi
+
+    # The bootstrap re-inits the HOST's wireguard identity and tears the
+    # interfaces down, so every node of the OTHER cluster is left holding a
+    # peer entry for a key that no longer exists. The host has one mesh
+    # identity and both tracks must share it, so the answer is not to put the
+    # old key back — green's new nodes peered the new one — it is to re-peer
+    # everything against the key that now exists.
+    #
+    # HISTORY: fiend, 2026-09-21. After `cluster deploy green`, wg-mgmt and
+    # wg-k8s were ABSENT while `systemctl is-active wg-quick@wg-mgmt` still
+    # said "active", the config held six peers that had never reached the
+    # kernel, and the six-node cluster had zero handshakes.
+    local _i
+    for _i in wg-mgmt wg-k8s; do
+        [[ -e "/etc/wireguard/${_i}.conf" ]] || continue
+        ip link show "$_i" >/dev/null 2>&1 && continue
+        # restart, not `up`: the unit can report active with no interface, and
+        # `wg-quick up` then refuses because the unit "is already running".
+        systemctl restart "wg-quick@${_i}" >/dev/null 2>&1 ||
+            wg-quick up "$_i" >/dev/null 2>&1 ||
+            _say "WARNING: ${_i} did not come back — run: wg-quick up ${_i}"
+        ip link show "$_i" >/dev/null 2>&1 &&
+            _say "${_i} brought back up after the bootstrap"
+    done
+    if command -v kldload-enroll >/dev/null 2>&1; then
+        _say "re-peering every VM against the host's current mesh key"
+        kldload-enroll --all 2>&1 | tail -1 | while read -r _l; do _say "  ${_l}"; done
     fi
 
     _cl_ready "$track" && _say "${track} is Ready" || _say "WARNING: ${track} deployed but not all nodes are Ready yet"
