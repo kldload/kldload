@@ -381,13 +381,29 @@ for ed in "${EDITIONS[@]}"; do
     # to be filed, not a reason to abandon the sweep. The report is judged by
     # its VERDICT line below.
     SSH_T=2400 ssh_bench "$ip" 'bash /tmp/profile-report.sh' >"${OUT}/report.md" 2>"${OUT}/report.stderr" || true
-    verdict="$(grep -oE '\*\*(PASS|FAIL)[^*]*\*\*' "${OUT}/report.md" | head -1 | tr -d '*' || echo '?')"
+    # `|| true`, NOT `|| echo '?'`: this script runs pipefail, so a grep that
+    # matches nothing fails the whole pipeline and the fallback fires — which
+    # made verdict a literal "?" and left the TRUNCATED branch below
+    # unreachable. deb-3-kvm's report came back 0 bytes on 2026-09-22 and the
+    # summary said "?" instead of saying the report was empty.
+    verdict="$(grep -oE '\*\*(PASS|FAIL)[^*]*\*\*' "${OUT}/report.md" | head -1 | tr -d '*' || true)"
     # No verdict line means the report did not finish — killed by a timeout, or
     # it died. Say TRUNCATED rather than leaving an empty cell that reads like
     # a pass at a glance.
     if [[ -z "$verdict" ]]; then
         verdict="TRUNCATED ($(wc -l <"${OUT}/report.md") lines)"
         RC=1
+        # An edition that timed out is the one we know least about, so take the
+        # cheap readings the loaded machine can still answer rather than leaving
+        # a black hole. These cost one SSH each and no ZFS work.
+        {
+            echo "# ${ed} — report did not finish"
+            echo
+            echo 'The full profile-report produced no verdict line. What the machine could still answer:'
+            echo '```'
+            SSH_T=60 ssh_bench "$ip" 'kldload-install-status 2>&1 | head -3; echo "--- autodeploy phases ---"; ls -1 /var/lib/kldload/phases/ 2>/dev/null | tail -8 || echo "(no phase dir)"; echo "--- last 20 lines of first boot ---"; kldload-firstboot-show logtail 20 2>&1 | tail -20' 2>&1 || echo "(the machine did not answer)"
+            echo '```'
+        } >>"${OUT}/report.md"
     fi
     sp="" sf="" sw=""
     # `|| true`: a core install ships no smoke suite, so its report carries no
