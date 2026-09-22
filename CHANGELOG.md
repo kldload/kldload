@@ -58,10 +58,9 @@ addresses. There is nothing to reconfigure on the network, and nothing to undo
 afterwards.
 
 **A rack is a directory, and a machine is one file in it named after its MAC.**
-That is the entire management model, and it is worth saying plainly because it is
-the part people expect to be harder than it is. There is no inventory database,
-no state file, no controller to stand up and keep alive. The list of machines is
-`ls`. Editing the fleet is `sed`.
+That is the entire management model. There is no inventory database, no state
+file, no controller to stand up and keep alive. The list of machines is `ls`.
+Editing the fleet is `sed`.
 
 The file is flat `KEY=value` — everything the installer would otherwise ask:
 
@@ -100,7 +99,7 @@ sed -i 's/^KLDLOAD_K8S_BOOTSTRAP=0/KLDLOAD_K8S_BOOTSTRAP=1/' rack/*.env
 kldload-netboot-server arm-all ./rack/
 ```
 
-Single machines work the same way, and two variants are worth knowing:
+Single machines work the same way, with two variants:
 
 ```
 # a box whose management NIC boots but whose 10G NIC should carry the
@@ -128,9 +127,6 @@ Four ways a netboot used to end quietly are now loud.
 
 ### The netboot menu
 
-The biggest single piece of new surface in this release, and the thing most
-worth looking at first.
-
 A netbooted machine used to do exactly what its answers file said, silently. It
 now shows a menu before it fetches anything large. An armed target gets a summary
 card of what it is about to do and a ten-second countdown; if nobody touches it,
@@ -157,8 +153,7 @@ fails the build rather than the rack. `snponly` rather than the full image,
 because the full one kills the USB keyboard on real hardware. The menu can also
 boot a live desktop, the local disk, or drop to an iPXE shell.
 
-Two smaller things in the same area matter more than they sound. A machine can
-now **boot on one NIC and pull the root image over another**, which is what a
+A machine can now **boot on one NIC and pull the root image over another**, which is what a
 box with a management port and a 10G data port actually needs. And RHEL and Arch
 netboot the 2 GB net image rather than the 15 GB full one, because they were
 never darksite-complete and pretending otherwise just made the download longer.
@@ -193,9 +188,9 @@ slides in two halves, with the real build log in a window beside them.
 Part one is 202 slides in a remembered shuffle, played while the installer
 works. Part two is 150 more for first boot — 28 ordered lessons, 62 tips, and
 the rest grouped by subject — over 25 animated scenes, with a 41-entry command
-manual underneath. It is not decoration — the examples are real commands with the
-output the machine actually printed, so the thing you watch while waiting is the
-thing you will type afterwards.
+manual underneath. The examples are real commands with the output the machine
+actually printed, so the thing you watch while waiting is the thing you will
+type afterwards.
 
 **It tells you its own keys.** The legend shows for the first thirty seconds,
 for twenty more after `K` or `?`, and briefly after any keypress, because keys
@@ -263,8 +258,7 @@ the budget being raised to fit the effects. Copper bars, a starfield and
 scrollers — demoscene technique, chosen because it was invented for exactly this
 constraint.
 
-The consequence worth knowing operationally: the slides are text in an array in
-one file. Editing what the machine teaches you is editing `free/index.html` and
+The slides are text in an array in one file. Editing what the machine teaches you is editing `free/index.html` and
 rebuilding — there is no content pipeline, no database and no separate asset
 store to keep in sync.
 
@@ -306,8 +300,7 @@ wholesale, which only showed up on the second run of the fixed build.
 
 ### Failures that reported success
 
-The largest single class of fix this cycle, and the one worth reading if you read
-nothing else.
+The largest single class of fix this cycle.
 
 `klab` announced fifteen golden images ready and exited 0 after every one of
 them had failed to build. The exit status is what the orchestrator reads, so it
@@ -336,8 +329,7 @@ baselines.
 
 ### Why the shape is what it is
 
-Worth stating plainly, because most of what is above only makes sense if you
-know what was deliberately left out.
+Most of what is above only makes sense with what was deliberately left out.
 
 **ZFS is the substrate, not a storage plugin.** Proxmox supports ZFS well, among
 LVM-thin, directory storage, Ceph and the rest — which means nothing in it can
@@ -357,7 +349,7 @@ machine in front of you and prints the milliseconds it took — a 40 GB disk,
 created by writing metadata. It is not a benchmark we are asking you to believe;
 it is a command you run.
 
-The knock-on effects are the interesting part. Every node in a six-node cluster
+Every node in a six-node cluster
 stores only the blocks that diverged from the one golden image, so cluster size
 stops being a disk-capacity question. Compression and the ARC operate on real
 blocks rather than through a format layer. A snapshot of a running VM is
@@ -400,7 +392,7 @@ the machine booted, because a restore can succeed, boot, and still be a week
 old. That distinction is the whole difference between a backup and a backup you
 have tested.
 
-**The class of work that disappears.** This is the part worth saying out loud.
+**The class of work that disappears.**
 
 When a node is a clone of a golden image, and the install that produced the
 golden is reproducible from a manifest rather than patched into shape by hand,
