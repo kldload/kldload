@@ -260,6 +260,18 @@ one file. Editing what the machine teaches you is editing `free/index.html` and
 rebuilding — there is no content pipeline, no database and no separate asset
 store to keep in sync.
 
+The debt is acknowledged inside the show rather than in a footer, because that
+is where anyone will actually read it. Four slides credit the Amiga for the
+grammar every effect here is borrowed from — *"copper bars, sine scrollers,
+starfields, greets: every visual idea in this show was invented on that machine
+by people giving it away for the credit"* — and tie it to the argument rather
+than just tipping a hat: three coprocessors doing work the CPU should not have
+to is the same trade as eBPF and the GPU in this box, and a demo that arrived as
+one file and ran on any Amiga every time is a machine you can reproduce exactly,
+which is not a new idea but a very old one that got lost. The effects are
+original drawings; where one is a nod to something specific the source says
+`Homage only, drawn from nothing`.
+
 ### Firecracker microVMs on the same substrate
 
 Appliances can now be stamped as Firecracker microVMs from the ZFS zvols they
