@@ -1820,11 +1820,9 @@ modprobe zfs || {
 }
 fi
 
-# node_exporter for observability
-if ! command -v node_exporter >/dev/null 2>&1; then
-  curl -fsSL https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz \
-    | tar -xz -C /tmp 2>/dev/null && install -m 755 /tmp/node_exporter-*/node_exporter /usr/local/bin/ && rm -rf /tmp/node_exporter-* || true
-fi
+# node_exporter is installed once, in the COMMON block below, where its
+# failure is reported instead of swallowed. It used to be fetched here too —
+# the same curl, twice.
 
 # Create loopback devices for zfs-tests.sh (dev tools only)
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
@@ -2020,11 +2018,9 @@ fi
 
 modprobe zfs 2>/dev/null || true
 
-# node_exporter
-if ! command -v node_exporter >/dev/null 2>&1; then
-  curl -fsSL https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz \
-    | tar -xz -C /tmp 2>/dev/null && install -m 755 /tmp/node_exporter-*/node_exporter /usr/local/bin/ && rm -rf /tmp/node_exporter-* || true
-fi
+# node_exporter is installed once, in the COMMON block below, where its
+# failure is reported instead of swallowed. It used to be fetched here too —
+# the same curl, twice.
 
 # Loopback vdevs for zfs-tests.sh (dev tools only)
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
@@ -2149,6 +2145,40 @@ kprobe:arc_read_done { @misses = count(); }
 interval:s:5 { print(@); clear(@); }
 BT
 
+# node_exporter: install, run, and SAY SO IF IT DID NOT WORK.
+#
+# This was a curl to github.com in each per-distro block with `2>/dev/null`
+# and `|| true` on the end, and the unit block below was gated on the binary
+# existing. So a fetch that failed — an air-gapped host, github unreachable,
+# a transient 5xx — erased itself, the unit was silently never created, and
+# the guest sat there with nothing on :9100 while klab-prom-targets went on
+# advertising it to Prometheus. That is what "targeted but DOWN" was:
+# klab-blue-centos and klab-blue-rocky on both kvm editions, fiend 2026-09-21.
+#
+# The distro's own package first, because that comes from the mirror the guest
+# already has and works on a darksite install; the upstream tarball only as a
+# fallback, and a failure of both is REPORTED.
+if ! command -v node_exporter >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y prometheus-node-exporter >/dev/null 2>&1 || true
+    [ -x /usr/bin/prometheus-node-exporter ] && ln -sf /usr/bin/prometheus-node-exporter /usr/local/bin/node_exporter
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y golang-github-prometheus-node-exporter >/dev/null 2>&1 ||
+      dnf install -y node_exporter >/dev/null 2>&1 || true
+    for _c in /usr/bin/node_exporter /usr/bin/prometheus-node-exporter; do
+      [ -x "$_c" ] && ln -sf "$_c" /usr/local/bin/node_exporter && break
+    done
+  fi
+fi
+if ! command -v node_exporter >/dev/null 2>&1; then
+  echo "klab: node_exporter not packaged here — falling back to the upstream tarball" >&2
+  if curl -fsSL https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz | tar -xz -C /tmp; then
+    install -m 755 /tmp/node_exporter-*/node_exporter /usr/local/bin/ && rm -rf /tmp/node_exporter-*
+  else
+    echo "klab: WARNING: could not install node_exporter — this guest will be scraped and will NOT answer on :9100" >&2
+  fi
+fi
+
 # node_exporter systemd unit
 if command -v node_exporter >/dev/null 2>&1 && ! systemctl is-active node_exporter >/dev/null 2>&1; then
   cat > /etc/systemd/system/node_exporter.service <<'SVC'
@@ -2164,6 +2194,12 @@ WantedBy=multi-user.target
 SVC
   systemctl daemon-reload
   systemctl enable --now node_exporter 2>/dev/null || true
+fi
+# Outcome, not exit codes: the only thing that matters is whether :9100
+# answers, because that is what Prometheus will ask.
+if command -v curl >/dev/null 2>&1; then
+  curl -fsS --max-time 4 http://127.0.0.1:9100/metrics >/dev/null 2>&1 ||
+    echo "klab: WARNING: :9100 does not answer in this guest — its Prometheus target will be DOWN" >&2
 fi
 
 cat > /etc/motd <<'MOTD'
