@@ -206,17 +206,30 @@ fi
 _section "ZFS Snapshot Test"
 
 SNAP_NAME="smoketest-$(date +%Y%m%d-%H%M%S)"
-if zfs snapshot "rpool@${SNAP_NAME}" 2>/dev/null; then
+# KEEP THE ERROR. This read `zfs snapshot ... 2>/dev/null` and reported the
+# failure as the bare string "zfs snapshot failed", so when 9-ai failed it on
+# fiend (2026-09-22) there was nothing to diagnose from: the pool was ONLINE,
+# scrubbed clean, with 229 snapshots and no errors, and the one fact that would
+# have explained it had been sent to /dev/null by the check itself.
+# head -1: zfs prints its whole usage block after the real message, and the
+# report is read in a terminal.
+_snap_err="$(zfs snapshot "rpool@${SNAP_NAME}" 2>&1 | head -1)" && _snap_rc=0 || _snap_rc=$?
+if ((_snap_rc == 0)); then
     _pass "Can create snapshot (rpool@${SNAP_NAME})"
     if zfs list -t snapshot "rpool@${SNAP_NAME}" >/dev/null 2>&1; then
         _pass "Snapshot visible in list"
     else
         _fail "Snapshot visible" "snapshot created but not in list"
     fi
-    zfs destroy "rpool@${SNAP_NAME}" 2>/dev/null
-    _pass "Snapshot destroyed cleanly"
+    # Report a destroy that did not work rather than assuming it did: a
+    # leaked smoketest snapshot on every run is how a pool fills up quietly.
+    if _destroy_err="$(zfs destroy "rpool@${SNAP_NAME}" 2>&1 | head -1)"; then
+        _pass "Snapshot destroyed cleanly"
+    else
+        _fail "Snapshot destroyed" "rpool@${SNAP_NAME} is STILL THERE: ${_destroy_err:-no error text}"
+    fi
 else
-    _fail "Can create snapshot" "zfs snapshot failed"
+    _fail "Can create snapshot" "zfs snapshot rpool@${SNAP_NAME} exited ${_snap_rc}: ${_snap_err:-no error text}"
 fi
 
 # ── Debug bundle tool ────────────────────────────────────────────────────────
