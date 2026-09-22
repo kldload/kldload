@@ -79,11 +79,11 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
-VERSION="${KLDLOAD_VERSION:-1.5.0-rc}"
+VERSION="${KLDLOAD_VERSION:-1.5.0}"
 # The name says what is inside: -net carries no payload, -core no tools. The
 # plain name stays the full free image the download page links to.
 _iso_suffix=""
-# one mirror alone names the image after it: kldload-1.5.0-rc-x86_64-fedora.iso
+# one mirror alone names the image after it: kldload-<version>-x86_64-fedora.iso
 if [[ "$PAYLOAD" != "net" && $(echo "$DARKSITES" | wc -w) -eq 1 ]]; then
     _iso_suffix="-${DARKSITES// /}"
 fi
