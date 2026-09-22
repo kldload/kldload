@@ -379,6 +379,27 @@ is installed by hand, retains its netboot payload, and provisions the rest of
 the rack over PXE with the full offline mirror — no DHCP surgery, no separate
 server, no internet.
 
+And the same path raises a node *back*. A destroyed machine does not have to be
+reinstalled and reconfigured into something resembling what it was: arm its MAC
+for deploy instead of install, and it netboots, receives its own replicated
+snapshot as a `zfs send` stream over HTTP, and comes back as the machine it was
+— operating system, VMs, state and identity, from the pool that already held
+them. No USB, nobody in the room, and no ssh identity on either end, which is
+the reason that transport is HTTP.
+
+Two things a receive alone cannot fix are fixed with it, both measured by
+restoring a real machine and booting it (onyx, 2026-09-09). The initramfs
+imports by cache file, and a cache records the vdev paths of the machine that
+wrote it, so recovered hardware lands in emergency with "no such pool
+available"; restores switch to scan-based import and rebuild the initramfs. And
+the ESP is not in ZFS, so the restored `/etc/fstab` names an ESP UUID that no
+longer exists and `local-fs.target` fails with a perfectly good pool underneath.
+
+The drill that proves it round-trips a canary token rather than checking that
+the machine booted, because a restore can succeed, boot, and still be a week
+old. That distinction is the whole difference between a backup and a backup you
+have tested.
+
 **The class of work that disappears.** This is the part worth saying out loud.
 
 When a node is a clone of a golden image, and the install that produced the
