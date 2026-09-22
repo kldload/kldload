@@ -477,6 +477,30 @@ direct hypervisor import.
 
 ## The project
 
+### Why is it called kldload?
+
+`kldload` is FreeBSD's command for loading a kernel module. The Linux
+equivalent is `modprobe`; type `kldload` on a Linux box and nothing happens.
+
+That is the joke, and it is also the thesis. The module this platform exists to
+load is ZFS -- which came from Solaris, by way of BSD, and is still out-of-tree
+on Linux because of the licence. So the name is a BSD command pointed at a Linux
+machine, to load the filesystem Linux will not take in-tree.
+
+What it means in practice: Linux with the abilities you get by default on BSD or
+illumos. Boot environments you can roll back into. Replication that is one
+command rather than a backup product. A filesystem that is a first-class part of
+the system instead of a storage plugin.
+
+I did not invent any of that. I cleaned up the legacy cruft that makes those
+things awkward on Linux, added point-and-shoot replication, boot environments,
+and eBPF on its own WireGuard-encrypted backplane -- and then left it alone. For
+the most part this is a normal install of Fedora, Debian or RHEL. The difference
+is that it is built as a matched set: the kernel, the ZFS module and the NVIDIA
+driver are resolved against each other at build time and locked together, so
+what boots is a combination that was compiled to work rather than one that
+happened to resolve on the day.
+
 ### Is it open source?
 
 Yes, BSD 3-Clause. Not a trial, not a community edition, not open core with the
