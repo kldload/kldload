@@ -2910,6 +2910,38 @@ fi
 # re-exec inside a function body is above the help case in the file and below it
 # at runtime, so line order proves nothing. Tools with no handler yet are listed
 # in tests/help-without-root-baseline.txt, which may only ever shrink.
+_section "Man pages"
+
+# mdoc lint on every tracked man page.
+#
+# EXCLUDING "referenced manual not found", which is a property of THIS MACHINE
+# and not of the page: onyx has no man database, so mandoc reports it for
+# `Xr ls 1` too. 33 of 34 warnings on 2026-09-22 were that, and chasing them
+# would have meant deleting correct SEE ALSO entries. Everything else mandoc
+# says is a real defect in the source.
+#
+# A missing mandoc is reported as DID NOT RUN, never as a pass.
+_mp_files=()
+while IFS= read -r _f; do _mp_files+=("$_f"); done < <(
+    cd "$ROOT" && git ls-files | grep -E '\.[1-8]$' || true
+)
+if ((${#_mp_files[@]} == 0)); then
+    _didnotrun "man pages" "no tracked man pages found — the glob or the tree changed"
+elif ! command -v mandoc >/dev/null 2>&1; then
+    _didnotrun "man pages" "mandoc is not installed — ${#_mp_files[@]} page(s) NOT linted"
+else
+    _mp_bad=0
+    for _f in "${_mp_files[@]}"; do
+        _mp_out="$(mandoc -T lint "$ROOT/$_f" 2>&1 | grep -v 'referenced manual not found' || true)"
+        if [[ -n "$_mp_out" ]]; then
+            _fail "man page $(basename "$_f")" "$(printf '%s' "$_mp_out" | head -n 2 | tr '\n' ' ')"
+            _mp_bad=$((_mp_bad + 1))
+        fi
+    done
+    ((_mp_bad == 0)) &&
+        _pass "man pages: ${#_mp_files[@]} page(s) mdoc-clean"
+fi
+
 _section "--help without root"
 
 _hr_script="$ROOT/tests/check-help-without-root.sh"
