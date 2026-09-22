@@ -89,15 +89,44 @@ if ((_vm_count == 0)); then
 elif ! have ansible || ! have kldload-inventory; then
     _didnotrun "ansible reach" "ansible or kldload-inventory is not installed"
 else
-    _inv_n="$(inv_hosts | _count .)"
+    # Expect an answer only from hosts that are RUNNING.
+    #
+    # The inventory lists every machine the estate knows, which is correct and
+    # is not the same set as the machines that can answer a ping. autodeploy
+    # deliberately powers klab-blue-* and klab-green-* off once their meshes
+    # have handshaked, to give the ztest phase back eight VMs' worth of RAM --
+    # "nothing later reads from them" is the design. They stay in the inventory
+    # because they still exist.
+    #
+    # Counting those as unreachable made 3-kvm report "1 of 4 answered
+    # (3 unreachable): klab-green-fedora klab-green-rocky klab-green-ubuntu"
+    # for machines that were off on purpose (fiend, 2026-09-22). The monitoring
+    # and mesh sections below already scope themselves to running VMs; this one
+    # did not, and was the only one that failed.
+    _inv_all="$(inv_hosts)"
+    _running="$(vms_running)"
+    # grep -xF -f, not a loop: a `grep -q ... && printf` inside a while body
+    # returns 1 for every host that is NOT running, and under `set -e` that
+    # aborts the loop on the first powered-off machine. The gates were happy
+    # with the loop; running it was what showed it stopping early.
+    # || true: no overlap is a RESULT here, not an error.
+    _inv_live="$(printf '%s\n' "$_inv_all" | grep -xF -f <(printf '%s\n' "$_running") || true)"
+    _inv_n="$(printf '%s\n' "$_inv_live" | _count .)"
+    _inv_off="$(($(printf '%s\n' "$_inv_all" | _count .) - _inv_n))"
+    ((_inv_off == 0)) ||
+        echo "    ${_inv_off} inventory host(s) are powered off and are not expected to answer"
     if ((_inv_n == 0)); then
-        _fail "ansible reach" "${_vm_count} VM(s) running and the inventory is EMPTY"
+        _fail "ansible reach" "${_vm_count} VM(s) running and no running VM is in the inventory"
     else
         # -o gives one line per host; a host that answers prints SUCCESS.
         # ansible exits non-zero when ANY host is unreachable, which is the
         # case this check exists to measure — so the status is discarded and
         # the output is what gets judged, host by host, below.
-        _ping_out="$(timeout 180 ansible all -i "$INV" -m ping -o 2>/dev/null || true)"
+        # A comma-separated pattern, not "all": asking ansible for machines
+        # that are switched off just manufactures the failure this check was
+        # measuring.
+        _ping_pat="$(printf '%s\n' "$_inv_live" | paste -sd, -)"
+        _ping_out="$(timeout 180 ansible "$_ping_pat" -i "$INV" -m ping -o 2>/dev/null || true)"
         _ok="$(printf '%s\n' "$_ping_out" | _count 'SUCCESS')"
         _bad="$(printf '%s\n' "$_ping_out" | _count 'UNREACHABLE|FAILED')"
         if ((_ok == _inv_n)); then
