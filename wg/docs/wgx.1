@@ -9,9 +9,11 @@
 .Nd the WireGuard estate console: sweep, join, explain
 .Sh SYNOPSIS
 .Nm
-.Op Cm tui | Cm estate | Cm check | Cm show
+.Op Cm gui | Cm tui | Cm estate | Cm check | Cm show | Cm dump
 .Nm
 .Cm attach Ar interface Ar container
+.Nm
+.Fl -version
 .Sh DESCRIPTION
 .Nm
 is a keyboard-driven console for kernel WireGuard across a fleet.
@@ -122,7 +124,13 @@ This console is pointed at estates it did not build, and a hand-rolled
 is a legitimate thing to look at.
 Planes that do not exist on this estate are omitted entirely.
 .Ss Views
+With no argument at all,
+.Nm
+opens the native window and falls back to the terminal console when that build
+has no GUI or no display is available.
 .Bl -tag -width "estate"
+.It Cm gui
+Force the native window, and fail rather than falling back.
 .It Cm tui
 Force the terminal console.
 Estate tree on the left, dossier on the right.
@@ -134,6 +142,14 @@ Silent on a healthy estate apart from one line per plane, which is what makes
 it usable in a loop.
 .It Cm show
 One-shot peer dossiers for the local host.
+.It Cm dump
+Print the raw
+.Ql wg show all dump
+and nothing else.
+This is the privileged helper the window and the console call through
+.Xr pkexec 1
+when they run as an ordinary user; it is documented because it appears in a
+password prompt, not because it is meant to be typed.
 .El
 .Ss Verbs
 .Bl -tag -width "attach"
@@ -175,6 +191,12 @@ the verbs compose with
 .Ic &&
 and
 .Ic || .
+.Pp
+An unrecognised verb prints the usage and exits
+.Er 64 ,
+.Dv EX_USAGE ,
+rather than 1, so a caller can tell "you typed it wrong" from "it ran and
+failed".
 .Pp
 .Cm check
 exits zero whether or not it finds anything; its findings are advisory, and a

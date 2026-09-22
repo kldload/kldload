@@ -9,6 +9,7 @@
 .Cm golden
 .Ar vm
 .Op Fl -force
+.Op Fl -port Ar n
 .Nm
 .Cm goldens
 .Nm
@@ -69,7 +70,7 @@ together with its zvols, tap device, seed and database row, so the estate
 never carries a microVM that nothing can see or take away.
 .Ss Verbs
 .Bl -tag -width "golden-destroy"
-.It Cm golden Ar vm Op Fl -force
+.It Cm golden Ar vm Oo Fl -force Oc Oo Fl -port Ar n Oc
 Snapshot the shut-off VM's root zvol, and its data zvol when it has one, as
 .Ql @kfire ,
 and copy the guest's kernel and initramfs out of its root filesystem into
@@ -82,6 +83,16 @@ the bzImage is unpacked with the kernel tree's own
 .Pa scripts/extract-vmlinux
 when a kernel-devel or linux-headers tree is present, and by the same
 search done inline otherwise.
+.Pp
+.Fl -port Ar n
+records the TCP port this golden's clones answer on, so
+.Cm clone Fl -wait
+knows what to wait for and
+.Cm list
+can say whether an instance is serving.
+The default is 80; an RDP appliance wants 3389.
+.Fl -force
+replaces an existing golden of the same name.
 .It Cm goldens
 List goldens with their size, root device and clone count.
 .It Cm golden-destroy Ar golden
@@ -192,8 +203,8 @@ on PATH.
 .It Ev KFIRE_NO_JAIL
 Set to
 .Ql 1 ,
-run Firecracker as root under systemd rather than jailed — for a host with
-no jailer, or to take the jail out of a diagnosis.
+run Firecracker as root under systemd rather than jailed — for a
+host with no jailer, or to take the jail out of a diagnosis.
 .El
 .Sh FILES
 .Bl -tag -width "/var/lib/kfire/instances/<name>/" -compact
@@ -339,6 +350,13 @@ appends its own
 .Ql root=/dev/vda
 after the boot arguments when a drive is marked the root device, and the
 kernel takes the last one.
+.Pp
+.Cm clone
+was called
+.Cm stamp
+until 2026-09-21.
+The old name still works and prints a notice; it will be removed in a later
+release.
 .Sh CAVEATS
 Firecracker offers no PCI passthrough, no GPU, no display and no USB.
 Tiles that need a radio, a tuner, a desktop or sound stay on libvirt.
