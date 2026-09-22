@@ -122,13 +122,35 @@ in_prometheus() { grep -rqs "\"vm\"[[:space:]]*:[[:space:]]*\"${1}\"" /etc/prome
 
 # The mesh is keyed by public key, not name, so the question is asked of the
 # estate's own view rather than of `wg show` directly.
+# on_mesh <name> — 0 when the estate says that machine is on the WireGuard
+# mesh, 1 otherwise. Used in BOTH directions: join waits for yes, unjoin for no.
+#
+# HISTORY: fiend, 2026-09-21. This could not return 0, so "join: WireGuard
+# mesh — <probe> never appeared (900s)" failed on all four editions that run
+# the lifecycle, across two distributions, and was carried for days as an
+# unexplained product defect. The mesh was healthy the whole time: wg-show on
+# those same machines had every peer handshaking with keepalives.
+#
+# Three faults, all in this function:
+#   * kldload-estate has no --json. Its options are --table, --drift, --probe,
+#     and it already emits JSON by DEFAULT. argparse exited 2 and printed the
+#     usage to stderr, which 2>/dev/null discarded, so stdout was empty and
+#     json.load raised on every call.
+#   * there is no wg_ip and no wg_pubkey. The keys are in_mesh (bool) and
+#     mesh_ifaces (string).
+#   * so the join check could never pass, and the UNJOIN check -- which waits
+#     for this to return 1 -- passed instantly and always, on a machine that
+#     was still meshed. It was decoration reporting success.
+#
+# The lesson is the cheap one: this probe agreed with a failure every single
+# time and nobody asked what it prints when the answer is yes.
 on_mesh() {
     have kldload-estate || return 1
-    kldload-estate --json 2>/dev/null | python3 -c 'import json,sys
+    kldload-estate 2>/dev/null | python3 -c 'import json,sys
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(1)
 for m in d.get("machines",[]) if isinstance(d,dict) else []:
-    if m.get("name")==sys.argv[1] and (m.get("wg_ip") or m.get("wg_pubkey")):
+    if m.get("name")==sys.argv[1] and (m.get("in_mesh") or m.get("mesh_ifaces")):
         sys.exit(0)
 sys.exit(1)' "$1" 2>/dev/null
 }
