@@ -5,6 +5,18 @@
 449 commits since 1.4.2: 86 features, 298 fixes, 349 files changed,
 40,227 lines added.
 
+1. [One key provisions the rack](#one-key-provisions-the-rack)
+2. [The netboot menu](#the-netboot-menu)
+3. [Rebuild a node from its replica](#rebuild-a-node-from-its-replica)
+4. [The first boot explains itself](#the-first-boot-explains-itself)
+5. [Firecracker microVMs on the same substrate](#firecracker-microvms-on-the-same-substrate)
+6. [Blue/green, one layer down](#bluegreen-one-layer-down)
+7. [Failures that reported success](#failures-that-reported-success)
+8. [Why the shape is what it is](#why-the-shape-is-what-it-is)
+9. [Two defaults changed](#two-defaults-changed)
+10. [Also](#also)
+11. [Known issues](#known-issues)
+
 ---
 
 This release is about provisioning and recovery — getting a rack built without a
