@@ -1,20 +1,25 @@
 # Changelog
 
-## 1.5.0 — 16 September 2026
+## 1.5.0 — 21 September 2026
 
-267 commits since 1.4.2: 60 features, 174 fixes, 278 files changed.
+449 commits since 1.4.2: 86 features, 298 fixes, 349 files changed,
+40,227 lines added.
 
 ---
 
 This release is about provisioning and recovery — getting a rack built without a
 person at each keyboard, and getting a machine back when one dies. The ratio
-tells the rest of the story: 168 fixes against 60 features. Nearly every fix
+tells the rest of the story: 298 fixes against 86 features. Nearly every fix
 below was found the same way 1.4.2's were, by installing on real hardware and
-measuring what actually landed. This cycle that meant seven editions installed
-end to end on the same machine, repeatedly: core, server, net and desktop
-verified, and the three that did not — kvm, k8s and full — are what the last
-four fixes below came from. kvm has since verified clean on this build, with
-all ten golden images sealed and a first-boot smoke suite of 191 checks passing.
+measuring what actually landed.
+
+This cycle that meant eleven editions installed end to end on the same machine,
+repeatedly, across both Debian and Fedora: core, server, net, desktop, kvm, k8s,
+storage and full. Every install succeeded. Everything that failed, failed
+*after* the install — a cluster that came up without its mesh, a golden that
+sealed empty, two fixes from different weeks quietly cancelling each other out
+1,270 lines apart. That is the class of defect this release is mostly made of,
+and it is only findable by standing the whole estate up and using it.
 
 ### One key provisions the rack
 
@@ -32,6 +37,46 @@ taken from the kernel command line, and golden streams so a built machine can be
 cloned over HTTP rather than reinstalled.
 
 Four ways a netboot used to end quietly are now loud.
+
+### The netboot menu
+
+The biggest single piece of new surface in this release, and the thing most
+worth looking at first.
+
+A netbooted machine used to do exactly what its answers file said, silently. It
+now shows a menu before it fetches anything large. An armed target gets a summary
+card of what it is about to do and a ten-second countdown; if nobody touches it,
+the armed answers file runs exactly as before and the rack builds itself. Press
+any key and the countdown stops and hands over the whole configuration:
+
+- **Profile** — core, server, desktop, kvm, k8s, storage or ai, each with the
+  one-line description of what it turns on.
+- **Distribution** — whichever of the verified set the server was told to offer.
+- **Security** — ZFS encryption and Secure Boot, as ticks.
+- **Components** — KVM, golden images, Kubernetes, the ZFS lab, AI. Ticks again,
+  so the machine you are standing in front of gets what you want rather than
+  what the template assumed.
+- **Identity** — hostname, user, time zone, keyboard.
+- **Credentials** — login password and ZFS passphrase, entered on the machine's
+  own screen with a show/hide toggle, confirmed twice.
+
+Every choice rides out on the kernel command line as `kldload.<key>=`. Secrets
+never do — a password or passphrase is asked for on the console, never written
+into an answers file served to the LAN, and never visible in a process list.
+
+Under it: iPXE is compiled as part of the build and gated on, so a broken menu
+fails the build rather than the rack. `snponly` rather than the full image,
+because the full one kills the USB keyboard on real hardware. The menu can also
+boot a live desktop, the local disk, or drop to an iPXE shell.
+
+Two smaller things in the same area matter more than they sound. A machine can
+now **boot on one NIC and pull the root image over another**, which is what a
+box with a management port and a 10G data port actually needs. And RHEL and Arch
+netboot the 2 GB net image rather than the 15 GB full one, because they were
+never darksite-complete and pretending otherwise just made the download longer.
+
+The consent model is unchanged and is the important part: an unarmed MAC 404s
+and falls through to the local boot order. No token, no touch.
 
 ### Rebuild a node from its replica
 
@@ -68,6 +113,20 @@ teardown run in parallel, with a TCP readiness probe for the clones that do not
 speak HTTP.
 
 Arbitrary VMs can also be put on a private WireGuard mesh.
+
+### Blue/green, one layer down
+
+`kube-bluegreen` could already preview a workload, cut over to it and roll back.
+It now does the same thing to an entire cluster: deploy a second one beside the
+first, promote it, destroy the loser. Three tiers of the same idea — workload,
+cluster, and the klab golden VMs underneath both.
+
+Two defects in it were found by running the cycle rather than reading it, and
+both had the same shape: deploying green quietly took over the default
+kubeconfig, so `kubectl` pointed at the new cluster while you still believed you
+were talking to the old one, and destroying a track left the mesh unpeered. The
+first fix corrected the address and missed that deploy rewrites the file
+wholesale, which only showed up on the second run of the fixed build.
 
 ### Failures that reported success
 
@@ -205,16 +264,41 @@ Neither breaks an existing answers file, but both change what a machine does:
 - The installer refuses to create `rpool` while another importable pool already
   has that name — three importable pools called `rpool` is how a machine boots
   into the wrong one
+- A storage profile that actually serves something: NFS, SMB and iSCSI, verified
+  against real clients rather than against a running daemon
+- The encrypted root can be unlocked by the TPM, bound to Secure Boot through
+  PCR 7. Inert until you seal it, and not yet tested on real hardware
+- Every ISO records the commit it was built from and a digest of the resolved
+  Kubernetes stack, so an image can be traced to a tree rather than a date
+- The darksite resolves the Kubernetes stack fresh on every build and then locks
+  it, instead of carrying a pinned literal that goes stale without saying so
+- KVM is on by default on every profile but core
+- Xfce and KDE golden lineages beside GNOME
+
+Two things were taken back out before release. The vdi/rdp desktop profiles and
+the proxmox profile were reverted — they were half-built and shipping them would
+have meant four more editions to verify for no one who had asked. The arcade
+session was reverted because it segfaulted on the first keypress.
 
 ### Known issues
 
-- Around forty shipped tools have no `-h`/`--help` handler and will run their
-  actual job if handed one. Thirteen were fixed this cycle; the rest are queued.
 - `builder/build-iso.sh` is the last script not running under strict mode, held
   back deliberately because the only honest test of it is a full build.
-- The installation media carries a shared module-signing key. This is currently
-  by design — any machine installed from that media can be resurrected by it —
-  but a per-site key generated at build time is the intended replacement.
+- Arch is demoted, not deleted. An encrypted Arch install panics at boot because
+  the initcpio ZFS hook exits; the code is still there and the distribution is
+  off the netboot list until that is fixed.
+- Debian Kubernetes golden clones refuse root SSH, which is why the estate mesh
+  does not come up on that lineage. Fedora is unaffected. The mechanism is
+  identified but not yet fixed.
+- The `|| true` ratchet holds at its baseline but the baseline is still large,
+  and 45 of those swallows are continuation-blind — they cannot distinguish a
+  harmless case from a real failure. Only the install path has been cleaned.
+
+Two things that were on this list in the 1.5.0 pre-releases are now closed:
+the module-signing **private** key no longer ships in the installation media
+(the build fails on any private key found in the rootfs, and installs use BYOK
+or a per-install key), and every shipped tool now answers `-h`/`--help` without
+root and without side effects — that baseline is empty and gated.
 
 ## 1.4.2 — 28 August 2026
 
