@@ -454,8 +454,10 @@ Neither breaks an existing answers file, but both change what a machine does:
 
 ### Also
 
-- The desktop keymap rotates workspaces, `Super+G` tiles into a grid, and
-  `Ctrl+Delete` opens a command center
+- The desktop keymap rotates workspaces, and `Super+G` tiles every ordinary
+  window on the workspace into an even grid — four windows become four
+  quarters, where stock mutter only tiles one window to a half. It does not
+  un-tile: the previous geometry is not recorded, so the way back is by hand
 - A metrics explorer that walks the machine as a tree, BPF run-time statistics,
   and dashboards that read zero rather than blank when there is nothing to show
 - Storage controller, firmware and drive health reported without a vendor tool
