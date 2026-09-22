@@ -385,8 +385,11 @@ _allocate_ha_vip() {
 
         # Outcome, not exit code: read the range back out of the network.
         local now_end
-        now_end="$(virsh net-dumpxml default 2>/dev/null |
-            sed -n "s/.*<range start='[0-9.]*' end='${net}\.\([0-9]*\)'.*/\1/p" | head -1)" || true
+        # `|| true`: virsh or the parse failing here is the case the comparison
+        # below reports; without it `set -e` plus pipefail kills the function on
+        # the assignment and the caller is told nothing. One line, not two, so
+        # this comment is the line the ratchet actually reads.
+        now_end="$(virsh net-dumpxml default 2>/dev/null | sed -n "s/.*<range start='[0-9.]*' end='${net}\.\([0-9]*\)'.*/\1/p" | head -1)" || true
         if [[ "$now_end" == "$new_end" ]]; then
             log "DHCP narrowed to ${cur_start}-${net}.${new_end} so MetalLB owns ${net}.${lo} upward"
         else

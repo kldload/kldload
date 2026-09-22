@@ -386,9 +386,10 @@ host_ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7; exit}')"
 # `kldload-enroll --all` then reported "6 on the mesh, 0 incomplete" while
 # every guest still held the OLD one. Six peers, zero handshakes, and the
 # tool said it was done.
-_hv_have="$(awk -v id="$node_id" '
-    $0 ~ "^# Node " id "([[:space:]]|$)" {f=1; next}
-    f && /^PublicKey/ {print $3; exit}' /etc/wireguard/wg-mgmt.conf 2>/dev/null || true)"
+_peer_key_awk='$0 ~ "^# Node " id "([[:space:]]|$)" {f=1; next} f && /^PublicKey/ {print $3; exit}'
+# `|| true`: no peer block for this id is the ANSWER (it means "add it"), not an
+# error, and awk over a missing conf must not kill the script on the assignment.
+_hv_have="$(awk -v id="$node_id" "$_peer_key_awk" /etc/wireguard/wg-mgmt.conf 2>/dev/null || true)"
 if [[ "$_hv_have" == "$guest_pub" ]]; then
     log "${VM}: hypervisor already peers ${node_id}"
 else
