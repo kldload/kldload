@@ -960,6 +960,19 @@ _section "Install slides"
 # body]; the kicker picks the accent colour. A kicker missing from ACCENT renders in
 # the default blue, a duplicate title reads as the show repeating itself, and the
 # operator asked for 150-200 slides (2026-09-13).
+#
+# That 150 floor was written when there was ONE deck. The show is now two: part
+# one plays during the install (minutes) and part two during the image and
+# cluster build (up to two hours). Part one was cut from 202 to 92 on
+# 2026-09-21 at the operator's instruction, because 202 slides at 10 s is 34
+# minutes of material for an install that takes minutes, so a viewer saw maybe
+# forty of them and the rest never played.
+#
+# The floor still has to mean "the show has enough material", so it now counts
+# BOTH decks. firstboot.html carries its own PART1 plus PART2 and LESSONS, and
+# deal() interleaves them, so that is where the length lives: 390 there against
+# 92 here. Lowering the part-one number alone would have been silencing this
+# check rather than correcting it.
 _sl_html="${ROOT}/live-build/config/includes.chroot/usr/local/share/kldload-webui/free/index.html"
 if command -v python3 >/dev/null 2>&1; then
     _sl_out="$(
@@ -972,8 +985,37 @@ slides = json.loads(s[a + len("  var SLIDES = "):b + 4])
 ai = s.index("  var ACCENT = {")
 accent = set(re.findall(r'"([^"]+)"\s*:\s*"#[0-9a-fA-F]{6}"', s[ai:s.index("};", ai)]))
 errs = []
-if len(slides) < 150:
-    errs.append("only %d slides (want at least 150)" % len(slides))
+if len(slides) < 85:
+    errs.append("part 1 has only %d slides (want at least 85)" % len(slides))
+
+# Part two's pool, in the other file — this is where the show's length now is.
+import os
+fb = os.path.join(os.path.dirname(sys.argv[1]), "firstboot.html")
+p2total = 0
+if os.path.exists(fb):
+    fbs = open(fb, encoding="utf-8").read()
+    for name in ("PART1", "PART2", "LESSONS"):
+        m = re.search(r'var %s\s*=\s*\[' % name, fbs)
+        if not m:
+            errs.append("firstboot.html has no %s array" % name)
+            continue
+        i = m.end() - 1
+        d = 0
+        for j in range(i, len(fbs)):
+            if fbs[j] == '[':
+                d += 1
+            elif fbs[j] == ']':
+                d -= 1
+                if d == 0:
+                    break
+        n = len(re.findall(r'^\s{4}\[', fbs[i:j + 1], re.M))
+        if name == "PART1" and n < len(slides):
+            errs.append("firstboot PART1 (%d) has fewer slides than part 1 (%d) — a part-1 slide was dropped without landing in part 2" % (n, len(slides)))
+        p2total += n
+    if p2total < 350:
+        errs.append("part 2 pool is only %d slides (want at least 350)" % p2total)
+else:
+    errs.append("firstboot.html not found — part 2 pool NOT checked")
 titles = [x[1] for x in slides]
 dup = sorted({t for t in titles if titles.count(t) > 1})
 if dup:
@@ -984,7 +1026,7 @@ if bad:
 shape = [str(i) for i, x in enumerate(slides) if len(x) != 3 or not all(isinstance(y, str) and y.strip() for y in x)]
 if shape:
     errs.append("malformed slides at index " + ",".join(shape))
-print("ERR " + " | ".join(errs) if errs else "OK %d slides, %d kickers" % (len(slides), len({x[0] for x in slides})))
+print("ERR " + " | ".join(errs) if errs else "OK %d part-1 slides + %d in part 2's pool, %d kickers" % (len(slides), p2total, len({x[0] for x in slides})))
 PYSLIDES
     )"
     if [[ "$_sl_out" == OK* ]]; then
