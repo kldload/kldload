@@ -187,10 +187,13 @@ hours of building images, I may as well make it entertaining — and if somethin
 has your attention for two hours anyway, it should teach you the machine you are
 waiting for.
 
-The install show holds the screen through the reboot and into first boot. Part
-one is 202 slides in a remembered shuffle, played while the installer works.
-Part two is 25 scenes, each one a worked example with the real build log in a
-window beside it. It is not decoration — the examples are real commands with the
+The install show holds the screen through the reboot and into first boot: 352
+slides in two halves, with the real build log in a window beside them.
+
+Part one is 202 slides in a remembered shuffle, played while the installer
+works. Part two is 150 more for first boot — 28 ordered lessons, 62 tips, and
+the rest grouped by subject — over 25 animated scenes, with a 41-entry command
+manual underneath. It is not decoration — the examples are real commands with the
 output the machine actually printed, so the thing you watch while waiting is the
 thing you will type afterwards.
 
