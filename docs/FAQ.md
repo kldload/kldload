@@ -10,7 +10,7 @@ longer existed, and `docs/demo/pitch.md` is right that one catchable claim is
 enough to lose a technical reader. Where something is only partly true it says
 so. Where a number is measured, it says where it was measured.
 
-**Last checked against the tree:** 2026-09-20, at release 1.4.2.
+**Last checked against the tree:** 2026-09-21, at release 1.4.2.
 
 ---
 
@@ -61,9 +61,11 @@ yours: BSD-3, no licence server, no account, no vendor to stay solvent.
 
 ### Who is it for?
 
-People who run machines: homelabs, small racks, test benches, lab fleets, and
-anyone who has to rebuild the same box more than once. It is aimed at someone
-comfortable with Linux who is tired of doing ZFS-on-root by hand.
+People who want a genuinely offline point-and-shoot estate. Homelabs, small
+racks, test benches, lab fleets, and anyone who has to rebuild the same box
+more than once. It is particularly suited to testing, QA and multi-distribution
+build work, where the value of standing up the same fleet identically, offline,
+on demand, is the whole job.
 
 It is not aimed at someone who wants an appliance. The installed system is a
 full, ordinary, mutable Linux and it does not want the whole machine to itself.
@@ -229,6 +231,39 @@ real transaction runs, the root is snapshotted. If the upgrade breaks something:
 | `apt rollback list` | Shows which transactions you could go back to |
 | `apt rollback cancel` | Un-stages it -- nothing has changed until you reboot |
 | `kldload-rollback` | The same machinery directly, with boot-environment control |
+
+### What does blue/green mean at the OS level?
+
+Blue/green is normally a container or Kubernetes idea: run the new version
+alongside the old, cut over, roll back if it is wrong. `kube-bluegreen` does
+that here for workloads and for entire clusters.
+
+The same pattern also applies one layer down, to the operating system itself.
+A boot environment is a green: the running system is blue, the new one is a
+clone, and the cutover is a reboot into a different dataset. Nothing was
+upgraded in place, so nothing has to be un-upgraded. That is why there is no
+upgrade path in the usual sense -- there is a build, and there is a cutover.
+
+### Is there a backup?
+
+Not in the sense the word usually carries, and that is the point. There is
+no separate copy of your data living in another product's format, waiting to
+be restored by a procedure nobody has rehearsed. There is a filesystem that
+remembers what it looked like at a series of points in time, by default every
+15 minutes, and replication that sends those points somewhere else.
+
+So when something goes wrong there are two moves, and they are the only two:
+
+1. It was local and self-inflicted -- a bad package, a bad config, a bad
+   click. Roll back to before it. Seconds, no restore, no downtime.
+2. The machine itself is gone or untrusted. Do not repair it. Replace it from
+   the replicated stream on another box, and the whole machine comes back --
+   operating system, VMs, state, identity.
+
+The second one is why fleet size stops mattering. A hypervisor holding 50 VMs
+is 51 separate things that can break and 51 separate things to repair. When
+the host and its guests are datasets in one pool, there is one thing to repair
+and one command that does it.
 
 ### Is the rollback instant?
 
@@ -426,6 +461,19 @@ No. NVIDIA drivers and CUDA are opt-in at install. If you do have one, the GPU
 is time-sliced across the local model and guest VMs, so PCIe passthrough is not
 required to share it.
 
+### Can I use it as a desktop? Can I play games on it?
+
+Yes, and this is a more useful question than it sounds, because it is the
+cleanest test of whether something is an appliance. The `desktop` profile is
+a full desktop Linux with the proprietary NVIDIA driver, kernel-matched and
+held with the rest of the substrate, so the driver does not come apart on the
+next kernel. Steam and the rest install exactly as they would on any Fedora
+or Debian box -- they are not special-cased, because nothing here is.
+
+One wrinkle worth knowing on a single-GPU machine: a resident AI model holds
+VRAM. `bobctl off` evicts it and gives the card back; `bobctl on` brings it
+back. On a 10 GB card with a 14B model that is roughly 8 GB either way.
+
 ### What is the local AI stack, and does it phone home?
 
 Ollama with Open WebUI, RAG over your own documents via ChromaDB, voice in and
@@ -460,6 +508,30 @@ then leaving you an ordinary mutable Linux: same package manager, same paths,
 same `/etc`, and every skill you already have still works. The rollback story
 is comparable in effect; the price is different. Nix asks you to learn a
 language. This asks you to accept its opinions about layer zero.
+
+### How is this different from Talos?
+
+Talos is a locked-down appliance: an immutable, API-driven OS whose whole
+value is that there is no shell and no userland to get wrong. That is a
+legitimate and well-executed answer to the same problem, and if a Kubernetes
+node is all the machine will ever be, it is a good one.
+
+This goes the other way. The deployment is reproducible and the substrate is
+version-locked, but what you end up with is a complete, mutable Linux you can
+log into, install things on, and use as a workstation. Same goal -- machines
+you rebuild rather than nurse -- opposite trade on what you give up to get it.
+
+### How is this different from netboot.xyz?
+
+netboot.xyz is a boot menu that points a machine at a distribution's own
+network installer, so the install is whatever the vendor serves that day and
+it needs the internet to work at all.
+
+This builds the distribution into an artifact first. The packages, container
+images, Kubernetes manifests, Helm charts and drivers are resolved and baked
+at build time into an offline mirror, and the install consumes that mirror.
+Same convenience of booting a machine over the network; the difference is
+that the result is identical every time and works with the uplink unplugged.
 
 ### How is this different from just running Ubuntu Server?
 
