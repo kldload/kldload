@@ -182,6 +182,11 @@ A kldload install reaches a desktop long before it is finished, and the machine
 then spends up to an hour building golden images and a cluster behind a screen
 that looks idle. That gap is now the manual.
 
+The reasoning was not complicated: if I am going to make you sit through two
+hours of building images, I may as well make it entertaining — and if something
+has your attention for two hours anyway, it should teach you the machine you are
+waiting for.
+
 The install show holds the screen through the reboot and into first boot. Part
 one is 202 slides in a remembered shuffle, played while the installer works.
 Part two is 25 scenes, each one a worked example with the real build log in a
