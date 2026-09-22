@@ -2910,6 +2910,36 @@ fi
 # re-exec inside a function body is above the help case in the file and below it
 # at runtime, so line order proves nothing. Tools with no handler yet are listed
 # in tests/help-without-root-baseline.txt, which may only ever shrink.
+_section "Clone root access"
+
+# kvm-clone must leave a clone that kldload-enroll can actually log into.
+#
+# A key in authorized_keys is not access: sshd still has to permit root. Four
+# tools grew their own drop-in for this -- kube-cluster writes 99-kldload.conf,
+# klab writes 99-klab.conf twice, the webui writes a third -- and all four call
+# kvm-clone to do the cloning. kvm-clone was the one that did not, so a clone
+# made with the shipped verb alone was unenrollable: the sweep logged "no SSH
+# as root while reading its node id", wrote the DB row, and left the guest off
+# the mesh (fiend, 2026-09-22, deb-4-k8s).
+#
+# It went unseen because estate-lifecycle's mesh check could not pass either.
+# Two broken things agreeing is not evidence.
+_kc="$ROOT/live-build/config/includes.chroot/usr/local/bin/kvm-clone"
+if [[ ! -r "$_kc" ]]; then
+    _fail "clone root access" "kvm-clone is missing"
+else
+    _kc_bad=""
+    grep -q '^[[:space:]]*echo "disable_root: false"' "$_kc" ||
+        _kc_bad+="no disable_root:false (cloud-init will install the forced-command banner in root's authorized_keys); "
+    grep -q 'PermitRootLogin' "$_kc" ||
+        _kc_bad+="no PermitRootLogin drop-in (the key lands and sshd still refuses root); "
+    if [[ -n "$_kc_bad" ]]; then
+        _fail "clone root access" "${_kc_bad%; }"
+    else
+        _pass "kvm-clone seeds root's key, disables disable_root and permits the login"
+    fi
+fi
+
 _section "Man pages"
 
 # mdoc lint on every tracked man page.

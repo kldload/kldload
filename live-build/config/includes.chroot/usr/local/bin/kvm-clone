@@ -186,6 +186,10 @@ if [[ -n "$_mkiso" ]]; then
         echo "hostname: ${DEST}"
         echo "manage_etc_hosts: true"
         echo "preserve_hostname: false"
+        # disable_root defaults to TRUE, and that is what installs the
+        # forced-command banner in root's authorized_keys. Everything in this
+        # estate connects as root, so say so here rather than undoing it below.
+        echo "disable_root: false"
         [[ -n "$_ssh_pub" ]] && printf 'ssh_authorized_keys:\n  - %s\n' "$_ssh_pub"
         # ROOT's key, explicitly. The line above is cloud-init's top-level form,
         # which installs the key for the DEFAULT user only — root keeps whatever
@@ -221,6 +225,26 @@ if [[ -n "$_mkiso" ]]; then
         # shell quoting.
         [[ -n "$_ssh_pub" ]] &&
             echo "  - [ sh, -c, \"install -d -m 0700 /root/.ssh && install -m 0600 -o root -g root /root/.ssh/kldload_authorized_key /root/.ssh/authorized_keys\" ]"
+        # PERMIT THE LOGIN THE KEY IS FOR.
+        #
+        # A key in authorized_keys is not access: sshd still has to allow root.
+        # Four tools each grew their own drop-in for exactly this -- kube-cluster
+        # writes 99-kldload.conf, klab writes 99-klab.conf in two places, the
+        # webui writes a third -- and every one of them calls THIS script to do
+        # the cloning. kvm-clone, the verb they all go through, was the only one
+        # that did not, so a clone made with kvm-clone alone could not be
+        # enrolled: kldload-enroll connects as root, got refused, wrote the DB
+        # row and left the guest off the mesh.
+        #
+        # fiend, 2026-09-22, deb-4-k8s: "estate-probe-...: no SSH as root while
+        # reading its node id — cannot enrol on the mesh". The cluster's own six
+        # nodes were meshed in the same sweep, because kube-cluster had added
+        # its drop-in on top. The estate-lifecycle mesh check had never been able
+        # to pass, so this went unseen for as long as both were broken.
+        #
+        # prohibit-password, not yes: enrollment is key-only, and the callers
+        # that genuinely want a password still layer their own drop-in over this.
+        echo "  - [ sh, -c, \"mkdir -p /etc/ssh/sshd_config.d && printf 'PermitRootLogin prohibit-password\\n' > /etc/ssh/sshd_config.d/99-kldload-clone.conf && systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; true\" ]"
     } >"${_tmp}/user-data"
 
     mkdir -p "$_seed_dir"
