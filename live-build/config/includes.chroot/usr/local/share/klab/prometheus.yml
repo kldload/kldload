@@ -11,14 +11,16 @@ global:
 #   targets/klab-blue.json           — klab blue-site VMs
 #   targets/klab-green.json          — klab green-site VMs
 #   targets/klab-kspawn.json         — any cluster spawned via kspawn
+#   targets/klab-vms.json            — every other VM kldload-enroll meshed
 #   targets/cilium-agent.json        — cilium metrics per K8s node (9962)
 #   targets/cilium-operator.json     — cilium-operator hostPort (9963)
 #   targets/hubble-metrics.json      — hubble flow metrics (9965)
 #   targets/tetragon.json            — tetragon syscall metrics (2112)
 #   targets/kubelet.json             — kubelet metrics (10250)
 #
-# To add a new target type, extend klab-prom-targets to write one more
-# JSON file. No edits to this YAML needed.
+# To add a new target type, extend klab-prom-targets to write one more JSON
+# file AND add a job for it below: every job names its file, so a new file
+# with no job is written, refreshed every 30s, and never read.
 
 scrape_configs:
   # Host system metrics (localhost — the one IP that can't lie)
@@ -47,6 +49,11 @@ scrape_configs:
   - job_name: klab-kspawn
     file_sd_configs:
       - files: ['/etc/prometheus/targets/klab-kspawn.json']
+        refresh_interval: 30s
+  # Any other VM on the mesh: kvm-clones of any golden, kvm-create.
+  - job_name: klab-vms
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/klab-vms.json']
         refresh_interval: 30s
 
   # ── Kubernetes cluster observability ──────────────────────────────────

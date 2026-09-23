@@ -140,6 +140,31 @@ if command -v virsh >/dev/null 2>&1; then
     done
 fi
 
+# ── Enrolled VMs: anything kldload-enroll put on the mesh ──────────────
+# The three name patterns above are klab's own machines. Every other VM --
+# a kvm-clone of any golden, a kvm-create -- was on the mesh and in Ansible
+# and invisible to monitoring (the estate lifecycle warned about it on every
+# edition). kldload-enroll records each enrolment in
+# /var/lib/kldload/mesh/enrolled/<vm> and kvm-delete removes the record, so
+# that directory is exactly the set of machines that should be scraped.
+# Addressed by lease, like the klab targets, so a scrape does not depend on
+# the tunnel being up.
+vms_json='['
+_first_vm=1
+for _rec in /var/lib/kldload/mesh/enrolled/*; do
+    [[ -f "$_rec" ]] || continue
+    vm="${_rec##*/}"
+    case "$vm" in
+    klab-blue-* | klab-green-* | kspawn-*) continue ;; # already a target above
+    esac
+    [[ "$(virsh domstate "$vm" 2>/dev/null)" == running ]] || continue
+    ip="${DHCP[$vm]:-}"
+    [[ -z "$ip" ]] && continue
+    [[ $_first_vm -eq 1 ]] && _first_vm=0 || vms_json="${vms_json},"
+    vms_json="${vms_json}$(printf '{"targets":["%s:9100"],"labels":{"site":"vm","vm":"%s"}}' "$ip" "$vm")"
+done
+
+write_json "${TARGETS_DIR}/klab-vms.json" "${vms_json}]"
 write_json "${TARGETS_DIR}/klab-blue.json" "${blue_json}]"
 write_json "${TARGETS_DIR}/klab-green.json" "${green_json}]"
 write_json "${TARGETS_DIR}/klab-kspawn.json" "${kspawn_json}]"
