@@ -2956,6 +2956,21 @@ Name=en* eth*
 [Network]
 DHCP=yes
 NETD
+# ONE DHCP client per NIC. klab's choice, made just above, is networkd for every
+# golden. A desktop golden also carries NetworkManager (GNOME pulls it), which
+# ASSUMED enp1s0 on a clone's first boot and ran its own DHCP beside networkd:
+# two addresses, and the estate could not match the mesh peer to the machine
+# (klab-desktop-debian, fiend + onyx, 2026-09-23: .23 and .24). Tell it to leave
+# ethernet alone -- only where networkd exists, so a golden without networkd
+# keeps NetworkManager as its single client.
+if systemctl cat systemd-networkd.service >/dev/null 2>&1; then
+    systemctl enable systemd-networkd.service 2>/dev/null || true
+    if systemctl is-enabled NetworkManager >/dev/null 2>&1; then
+        mkdir -p /etc/NetworkManager/conf.d
+        printf '[keyfile]\nunmanaged-devices=interface-name:en*;interface-name:eth*\n' \
+            >/etc/NetworkManager/conf.d/90-kldload-networkd-owns-nic.conf
+    fi
+fi
 echo "V_SEALED=OK"
 shutdown -h now 2>/dev/null || true
 VALIDATE
