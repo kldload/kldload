@@ -254,6 +254,84 @@ fi
 echo '```'
 echo
 
+# ─── 5b. Workloads answer ───────────────────────────────────────────────────
+#
+# The cluster checks prove nodes are Ready and a pod schedules; nothing sent a
+# request to what the cluster actually serves. A workload deployed and not
+# answering passed every check. (Operator, 2026-09-23: "are you getting a 200
+# when sending a test to the running workload?" -- we were not asking.)
+#
+# Two paths, because they fail differently:
+#   * every LoadBalancer service, from THIS host, through its MetalLB address
+#     -- the path an operator uses; exercises MetalLB, L2 and the backends
+#   * every other ClusterIP service outside the system namespaces, through the
+#     API server's service proxy -- a real HTTP request with no pod created
+#     and nothing left behind on the cluster
+# Any HTTP status is an answer; 000 (nothing answered) and 5xx are failures.
+# Services whose first port is not HTTP (redis, dex's gRPC) are skipped by name
+# of the port where the chart says so, otherwise probed and reported as such.
+if have kubectl && [[ -r /root/.kube/config ]]; then
+    export KUBECONFIG=/root/.kube/config
+    echo "## Workloads"
+    echo
+    echo '```'
+    # ns/name=ip:port for LoadBalancers with an address
+    mapfile -t _lbs < <(S timeout 20 kubectl get svc -A -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}/{.metadata.name}={.status.loadBalancer.ingress[0].ip}:{.spec.ports[0].port}{"\n"}{end}')
+    _wl_n=0
+    _wl_bad=()
+    for _row in "${_lbs[@]}"; do
+        [[ -n "$_row" ]] || continue
+        _svc="${_row%%=*}"
+        _hp="${_row#*=}"
+        _wl_n=$((_wl_n + 1))
+        if [[ "$_hp" == :* ]]; then
+            printf '%-40s %s\n' "$_svc" "LoadBalancer with NO address (MetalLB did not assign one)"
+            _wl_bad+=("${_svc}(no-address)")
+            continue
+        fi
+        _code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "http://${_hp}/" 2>/dev/null || true)"
+        [[ "$_code" == 000 ]] &&
+            _code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "https://${_hp}/" 2>/dev/null || true)"
+        printf '%-40s %-24s -> %s\n' "$_svc" "LB ${_hp}" "${_code:-000}"
+        [[ "${_code:-000}" == 000 || "${_code:-000}" == 5* ]] && _wl_bad+=("${_svc}(${_code:-000})")
+    done
+    # ns/name:port for app ClusterIP services (not LoadBalancer, not headless)
+    mapfile -t _cips < <(S timeout 20 kubectl get svc -A -o jsonpath='{range .items[?(@.spec.type=="ClusterIP")]}{.metadata.namespace}/{.metadata.name}:{.spec.ports[0].port}:{.spec.clusterIP}:{.spec.ports[0].name}{"\n"}{end}' |
+        grep -vE '^(kube-system|kube-public|metallb-system|local-path-storage|cilium-secrets|openebs)/' |
+        grep -vE '^default/kubernetes:' | grep -vE ':None:')
+    for _row in "${_cips[@]}"; do
+        [[ -n "$_row" ]] || continue
+        IFS=: read -r _svc _port _cip _pname <<<"$_row"
+        # Not HTTP by declaration: skip rather than report a protocol mismatch.
+        case "$_pname" in
+        *grpc* | *redis* | tcp-* | metrics*) continue ;;
+        esac
+        _ns="${_svc%%/*}"
+        _name="${_svc#*/}"
+        _wl_n=$((_wl_n + 1))
+        if S timeout 15 kubectl get --raw "/api/v1/namespaces/${_ns}/services/${_name}:${_port}/proxy/" >/dev/null; then
+            printf '%-40s %-24s -> %s\n' "$_svc" "proxy :${_port}" "answered"
+        else
+            _err="$(timeout 15 kubectl get --raw "/api/v1/namespaces/${_ns}/services/${_name}:${_port}/proxy/" 2>&1 >/dev/null | head -1 | cut -c1-80 || true)"
+            # A 4xx through the proxy is still the backend answering.
+            if [[ "$_err" =~ \((NotFound|Forbidden|Unauthorized|BadRequest|MethodNotAllowed)\) ]]; then
+                printf '%-40s %-24s -> %s\n' "$_svc" "proxy :${_port}" "answered (${BASH_REMATCH[1]})"
+            else
+                printf '%-40s %-24s -> %s\n' "$_svc" "proxy :${_port}" "NO ANSWER: ${_err:-no error text}"
+                _wl_bad+=("${_svc}")
+            fi
+        fi
+    done
+    echo "probed ${_wl_n} service(s), ${#_wl_bad[@]} not answering"
+    echo '```'
+    echo
+    if ((_wl_n == 0)); then
+        note_warn "workloads: the cluster serves nothing to probe (no LoadBalancer or app ClusterIP service)"
+    elif ((${#_wl_bad[@]} > 0)); then
+        note_fail "workloads not answering: ${_wl_bad[*]}"
+    fi
+fi
+
 # ─── 6. Shipped test suite ──────────────────────────────────────────────────
 #
 # kldload-test IS smoke-all. Driving the shipped verb rather than a copy is the
