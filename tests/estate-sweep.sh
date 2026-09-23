@@ -232,13 +232,27 @@ for ed in "${EDITIONS[@]}"; do
 
     # 1. where is the bench machine now? Any profile will do — it is about to
     #    be reinstalled; all that is needed is a way to reboot it.
+    # Keep looking for BENCH_WAIT seconds, not one pass. A bench machine that
+    # is rebooting, or waiting at a ZFSBootMenu passphrase prompt, answers
+    # nothing for minutes; one pass failed the edition "machine not found" and
+    # moved on, so a sweep could burn through all fifteen editions while the
+    # machine came up (fiend, build 62, 2026-09-23 -- only an operator at the
+    # console stopped it).
     cur=""
-    for p in "$want_profile" desktop server core kvm storage ai master; do
-        ((_adopt == 1)) && break
-        # find_bench returns 1 when that profile is not on the subnet, which
-        # is expected for all but one of the profiles tried here.
-        cur="$(find_bench "$p" || true)"
-        [[ -n "$cur" ]] && break
+    _bw=0
+    while :; do
+        for p in "$want_profile" desktop server core kvm storage ai master; do
+            ((_adopt == 1)) && break
+            # find_bench returns 1 when that profile is not on the subnet, which
+            # is expected for all but one of the profiles tried here.
+            cur="$(find_bench "$p" || true)"
+            [[ -n "$cur" ]] && break
+        done
+        [[ -n "$cur" || "$_adopt" == 1 ]] && break
+        ((_bw >= ${BENCH_WAIT:-1200})) && break
+        say "${ed}: bench machine not on ${SUBNET}.0/24 yet — looking again (${_bw}s of ${BENCH_WAIT:-1200}s)"
+        sleep 60
+        _bw=$((_bw + 60))
     done
     if [[ -z "$cur" && "$_adopt" == 0 ]]; then
         say "${ed}: cannot find the bench machine on ${SUBNET}.0/24 — is it powered on?"
