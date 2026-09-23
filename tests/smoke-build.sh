@@ -3013,6 +3013,25 @@ else
     fi
 fi
 
+# A comment inside a multi-line command ends the command there, and bash -n,
+# the linters all accept it. Three installer paths broke that way on
+# 2026-09-15 and shipped for a week (the version stamp, the DKMS re-signer).
+_section "comments inside commands"
+
+_cc_script="$ROOT/tests/check-comment-in-command.sh"
+if [[ ! -r "$_cc_script" ]]; then
+    _didnotrun "comments inside commands" "tests/check-comment-in-command.sh is missing"
+else
+    _cc_out="$(cd "$ROOT" && bash "$_cc_script" 2>&1)" && _cc_rc=0 || _cc_rc=$?
+    if [[ "$_cc_rc" -eq 0 ]]; then
+        _pass "comments inside commands: $(printf '%s' "$_cc_out" | tail -n 1 | sed 's/^check-comment-in-command: //')"
+    elif [[ "$_cc_rc" -eq 2 ]]; then
+        _didnotrun "comments inside commands" "$(printf '%s' "$_cc_out" | tail -n 1)"
+    else
+        _fail "comments inside commands" "$(printf '%s' "$_cc_out" | grep -E ':[AB]$' | head -n 5 | tr '\n' ' ')"
+    fi
+fi
+
 _section "systemd drop-ins"
 
 _di_src="$ROOT/live-build/config/includes.chroot/usr/lib/systemd/system"

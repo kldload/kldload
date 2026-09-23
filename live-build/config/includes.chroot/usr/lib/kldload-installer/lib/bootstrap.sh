@@ -783,10 +783,13 @@ KVER="${1:?}" MOD="${2:?}"
 KEY=/var/lib/dkms/mok.key
 CERT=/var/lib/dkms/mok.pub
 # Search both Debian and CentOS/RHEL paths for the kernel sign-file tool
+# swallow: find exits 1 when a searched dir is absent; the empty case is handled below.
+# HISTORY: this comment used to sit INSIDE the continued find (bbaf6f54, 09-15), which
+# ended the command there: -name never reached find and SIGN_FILE held the whole kernel
+# tree (25,287 lines on onyx), so every module went unsigned with exit 0.
 SIGN_FILE=$(find /usr/src/kernels/"${KVER}" \
                  /usr/src/linux-headers-"${KVER}" \
                  /usr/lib/linux-kbuild-"${KVER%%.*}"* \
-                 # swallow: find exits 1 when the kernel ships no sign-file; the empty case is handled below
                  -name sign-file -type f 2>/dev/null | head -1 || true)
 [[ -x "${SIGN_FILE}" ]] || { echo "sign-file not found for ${KVER}" >&2; exit 0; }
 exec "${SIGN_FILE}" sha256 "${KEY}" "${CERT}" "${MOD}"
