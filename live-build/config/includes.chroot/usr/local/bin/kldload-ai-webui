@@ -142,6 +142,15 @@ fi
 # OFFLINE_MODE=true sets HF_HUB_OFFLINE for anything left.
 "$_crt" rm -f open-webui >>"$LOG" 2>&1 || true
 # swallow: only fails when no such container exists, the normal first run.
+#
+# ANONYMIZED_TELEMETRY / DO_NOT_TRACK / SCARF_NO_ANALYTICS: the README, the FAQ
+# and the website all say "no cloud, no telemetry", and until 2026-09-22 nothing
+# here enforced it. OFFLINE_MODE is not a telemetry switch -- it sets
+# HF_HUB_OFFLINE so model downloads do not reach out. Open WebUI bundles
+# ChromaDB, whose ANONYMIZED_TELEMETRY defaults to ON, so on a machine with a
+# network the claim rested on the image happening not to phone home rather than
+# on anything set here. A published privacy claim should be true by
+# construction, so it is set explicitly.
 if "$_crt" run -d \
     --name open-webui \
     --network host \
@@ -150,6 +159,9 @@ if "$_crt" run -d \
     -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
     -e HOST=127.0.0.1 \
     -e OFFLINE_MODE=true \
+    -e ANONYMIZED_TELEMETRY=false \
+    -e DO_NOT_TRACK=true \
+    -e SCARF_NO_ANALYTICS=true \
     -e WHISPER_MODEL=/whisper/base \
     -e RAG_EMBEDDING_ENGINE=ollama \
     -e RAG_EMBEDDING_MODEL=nomic-embed-text \
