@@ -309,8 +309,14 @@ if have kubectl && [[ -r /root/.kube/config ]]; then
         _ns="${_svc%%/*}"
         _name="${_svc#*/}"
         _wl_n=$((_wl_n + 1))
+        # https: as well as plain: a TLS backend reached over http through the
+        # proxy just hangs until the timeout. argocd-dex-server serves TLS on
+        # 5556 and was reported "NO ANSWER: no error text" on 4-k8s, build 60
+        # (2026-09-23) while it was up. Either scheme answering is an answer.
         if S timeout 15 kubectl get --raw "/api/v1/namespaces/${_ns}/services/${_name}:${_port}/proxy/" >/dev/null; then
             printf '%-40s %-24s -> %s\n' "$_svc" "proxy :${_port}" "answered"
+        elif S timeout 15 kubectl get --raw "/api/v1/namespaces/${_ns}/services/https:${_name}:${_port}/proxy/" >/dev/null; then
+            printf '%-40s %-24s -> %s\n' "$_svc" "proxy :${_port}" "answered (https)"
         else
             _err="$(timeout 15 kubectl get --raw "/api/v1/namespaces/${_ns}/services/${_name}:${_port}/proxy/" 2>&1 >/dev/null | head -1 | cut -c1-80 || true)"
             # A 4xx through the proxy is still the backend answering.
