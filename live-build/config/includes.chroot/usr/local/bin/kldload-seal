@@ -317,6 +317,21 @@ log "  removed /etc/ssh/ssh_host_* keys"
 rm -f "$MNT/etc/hostid"
 log "  removed /etc/hostid"
 
+# 3b. Mesh identity — a WireGuard key and node id baked into an image are
+#     copied into every clone, and clones sharing one key overwrite each
+#     other as peers: six k8s nodes with one key left the API unreachable
+#     (fiend, build 61, 2026-09-23). kube-network init re-creates both, and
+#     re-enables the units, when the clone is enrolled.
+rm -f "$MNT/etc/wireguard/wg-mgmt."{conf,key,pub} "$MNT/etc/wireguard/wg-k8s."{conf,key,pub} \
+    "$MNT/etc/wireguard/.node-id"
+rm -f "$MNT/etc/systemd/system/multi-user.target.wants/wg-quick@wg-mgmt.service" \
+    "$MNT/etc/systemd/system/multi-user.target.wants/wg-quick@wg-k8s.service"
+log "  removed the WireGuard mesh identity (keys, configs, node id)"
+
+# 3c. DHCP leases — otherwise every clone asks for this image's last address
+rm -f "$MNT/var/lib/NetworkManager/"*.lease "$MNT/var/lib/dhclient/"*.lease* "$MNT/var/lib/dhcp/"*.leases
+log "  forgot DHCP leases"
+
 # 4. cloud-init — wipe seed/instance state, write portable datasource list
 rm -rf "$MNT/var/lib/cloud/data" \
     "$MNT/var/lib/cloud/instance" \

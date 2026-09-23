@@ -2744,6 +2744,10 @@ build_golden_single() {
         # Leases too, or every clone asks for the golden's last address (see
         # seal-golden.yml, "Forget DHCP leases").
         _ssh_cmd "$golden_ip" "rm -f /var/lib/NetworkManager/*.lease /var/lib/dhclient/*.lease* /var/lib/dhcp/*.leases"
+        # And the mesh identity: a golden enrolled while it was being built
+        # passed its WireGuard key and node id to every clone (see
+        # seal-golden.yml, "Forget the WireGuard mesh identity").
+        _ssh_cmd "$golden_ip" "systemctl disable wg-quick@wg-mgmt wg-quick@wg-k8s 2>/dev/null; rm -f /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-mgmt.key /etc/wireguard/wg-mgmt.pub /etc/wireguard/wg-k8s.conf /etc/wireguard/wg-k8s.key /etc/wireguard/wg-k8s.pub /etc/wireguard/.node-id"
         _ssh_cmd "$golden_ip" "systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true"
         _ssh_cmd "$golden_ip" "shutdown -h now" || true
 
@@ -2943,6 +2947,9 @@ rm -f /etc/machine-id; touch /etc/machine-id
 truncate -s 0 /etc/hostname
 # DHCP leases: otherwise every clone asks for this golden's last address.
 rm -f /var/lib/NetworkManager/*.lease /var/lib/dhclient/*.lease* /var/lib/dhcp/*.leases
+# Mesh identity: a WireGuard key and node id here end up in every clone.
+systemctl disable wg-quick@wg-mgmt wg-quick@wg-k8s 2>/dev/null || true
+rm -f /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-mgmt.key /etc/wireguard/wg-mgmt.pub /etc/wireguard/wg-k8s.conf /etc/wireguard/wg-k8s.key /etc/wireguard/wg-k8s.pub /etc/wireguard/.node-id
 # See the note at the other seal site: without this every clone of this golden
 # serves the same SSH host key. sshd regenerates on first boot (sshd-keygen on
 # EL, ssh-keygen -A via the ssh unit on Debian/Ubuntu).
