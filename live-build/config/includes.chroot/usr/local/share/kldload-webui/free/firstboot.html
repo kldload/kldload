@@ -2210,7 +2210,10 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     x += ptext(s.label + " " + s.count(), x, y, px, C.amber, 8) + px * 10;
     x += ptext("REPLACED " + pad(replaced, 4), x, y, px, C.beam, 8) + px * 10;
     ptext("UP " + hh + ":" + mm + ":" + ss, x, y, px, C.ink, 6);
-    if ((clock * 1.1 | 0) % 2 === 0) { var m = "NO COIN REQUIRED"; ptext(m, right() - textW(m, px) / 2, Math.min(H * .9, AY(1) - 8 * px), px, C.amber, 8); }
+    // Not while the key legend is up: the legend sits at the bottom left and this
+    // line is centred on the scene area, so on every left-hand layout the two drew
+    // over each other and neither could be read (headless frames, 2026-09-23).
+    if (legendAlpha() <= 0 && (clock * 1.1 | 0) % 2 === 0) { var m = "NO COIN REQUIRED"; ptext(m, right() - textW(m, px) / 2, Math.min(H * .9, AY(1) - 8 * px), px, C.amber, 8); }
     var since = clock - curAt;
     // The scene number and name card is for reviewing scenes only; on the machine it
     // read as a caption over every change (operator, fiend 3-kvm build 18, 2026-09-15).
@@ -2324,7 +2327,11 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
       g.traces.push(tr([[W * .1, m], [W * .6, m]], { a: .14 })); g.traces.push(tr([[W * .4, H - m], [W * .96, H - m]], { a: .14 }));
       return g;
     },
-    "digital rain": function (r) { return { deepRain: 70 }; }, // a slower, fainter rain further back
+    // No "digital rain" entry, on purpose: that scene IS a rain. Its backdrop
+    // added a second one -- 70 Katakana columns at 14px scattered over the whole
+    // screen, off the scene's grid, in a different alphabet and size -- which read
+    // as a stray overlay of letters on top of the scene (operator, 2026-09-23),
+    // and as boxes wherever the kiosk font has no Katakana.
     "file system": function (r) { // the dataset tree: pool at the root, branches to datasets, replication running down it
       var g = { traces: [] }, rootX = W * .04, rootY = H * .12, cols = ["rpool", "ROOT", "home", "var", "srv", "k8s", "klab"];
       g.labels = [];
@@ -2375,7 +2382,6 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
     g.traces = (g.traces || []).filter(function (t) { return t.pts.length > 1; });
     g.stars = g.stars ? Array.from({ length: g.stars }, function () { return { x: r() * W, y: r() * H, z: .3 + r() * .7, ph: r() * 6 }; }) : null;
     g.rainDrops = g.rain ? Array.from({ length: g.rain }, function () { return { x: r() * W, y: r() * H, v: 500 + r() * 500, l: 8 + r() * 18 }; }) : null;
-    g.deep = g.deepRain ? Array.from({ length: g.deepRain }, function () { return { x: r() * W, y: r() * H, v: 14 + r() * 26, s: 10 + r() * 6 }; }) : null;
     g.pulses = []; g.rowY = 0;
     backs.push({ g: g, born: clock, dying: 0, col: [C.vec, C.beam, C.amber, C.ink] });
   }
@@ -2394,7 +2400,6 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--m
       bx.globalAlpha = life;
       if (g.rows) { bx.font = "12px " + getComputedStyle(document.body).fontFamily; bx.fillStyle = "rgba(170,185,200,.08)"; g.rowY -= 11 * dt; var rh = 22, first = Math.floor(-g.rowY / rh);
         for (var ri = 0; ri * rh < H + rh; ri++) { var idx = first + ri, yy = idx * rh + g.rowY + H * .1; bx.fillText(g.rows[((idx % g.rows.length) + g.rows.length) % g.rows.length], W * .03 + (idx % 3) * 16, yy); } }
-      if (g.deep) { bx.font = "14px monospace"; g.deep.forEach(function (d) { d.y += d.v * dt; if (d.y > H + 40) { d.y = -40; d.x = Math.random() * W; } for (var q = 0; q < 8; q++) { bx.fillStyle = q ? vec : "#d8ffe0"; bx.globalAlpha = life * (q ? .1 * (1 - q / 8) : .16); bx.fillText(String.fromCharCode(0x30A0 + ((d.x + q * 7 + (clock * 3 | 0)) % 90 | 0)), d.x, d.y - q * d.s); } }); bx.globalAlpha = life; }
       if (g.rainDrops) { bx.strokeStyle = "rgba(190,215,255,.1)"; bx.lineWidth = 1; bx.beginPath(); g.rainDrops.forEach(function (d) { d.y += d.v * dt; d.x -= d.v * .12 * dt; if (d.y > H) { d.y = -20; d.x = Math.random() * W * 1.1; } bx.moveTo(d.x, d.y); bx.lineTo(d.x + d.l * .12, d.y - d.l); }); bx.stroke(); bx.lineWidth = 1.1; }
       (g.traces || []).forEach(function (t) {
         var show = t.len * ease; bx.strokeStyle = vec; bx.globalAlpha = life * t.a; bx.beginPath(); bx.moveTo(t.pts[0][0], t.pts[0][1]); var d = 0;
