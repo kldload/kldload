@@ -1137,6 +1137,109 @@ _k_nvidia_will_load() {
     return 1
 }
 
+# ─── Package signatures on the installed system ─────────────────────────────
+#
+# Every upstream repo this installer writes was gpgcheck=0 -- fedora and
+# fedora-updates, rhel, centos, rocky, epel, the EL zfs repo (plain HTTP, the
+# only way download.zfsonlinux.org serves), and CUDA -- and they persisted onto
+# the installed system, so every RPM install and update ran as root without a
+# signature check (found on onyx and fresh sweep installs, 2026-09-23: "skipped
+# OpenPGP checks for N packages from repository: fedora"). The packages had in
+# fact been genuine; nothing would have stopped one that was not.
+#
+# The install-time repos stay as they are: they run before the target holds its
+# keys, and changing that is where a mistake bricks an install. This runs AFTER
+# the main transaction, when each distro's key package is on the target, and
+# turns checking on for the system that boots. The key per repo is the one the
+# vendor's own repo file uses (read from the real packages and images: Fedora,
+# CentOS Stream 10, Rocky 10, zfs-release-2-8.el10). A repo whose key file is
+# not on the target is STILL switched on and named in the log: updates from it
+# then fail loudly, which is failing closed, instead of installing unverified.
+#
+# Left alone on purpose: repos that sign their metadata instead of packages
+# (repo_gpgcheck=1 with a gpgkey -- NVIDIA's container toolkit ships exactly
+# that), the install-time darksite repo (removed at first boot), and
+# kldload-custom.repo (the operator's own mirror; documented as unsigned).
+
+# _k_repo_key <repo basename> <distro> <release> — the gpgkey URI for a repo
+# file, on stdout; empty when the file has no vendor key we know of.
+_k_repo_key() {
+    local base="$1" distro="$2" release="$3" k=/etc/pki/rpm-gpg
+    case "$base" in
+    fedora.repo | fedora-updates.repo) printf 'file://%s/RPM-GPG-KEY-fedora-$releasever-$basearch' "$k" ;;
+    rhel.repo) printf 'file://%s/RPM-GPG-KEY-redhat-release' "$k" ;;
+    centos.repo)
+        # CentOS Stream 10 names it -SHA256; 9 used the plain name.
+        if [[ -f "${KLDLOAD_TARGET:-}${k}/RPM-GPG-KEY-centosofficial-SHA256" ]]; then
+            printf 'file://%s/RPM-GPG-KEY-centosofficial-SHA256' "$k"
+        else
+            printf 'file://%s/RPM-GPG-KEY-centosofficial' "$k"
+        fi
+        ;;
+    rocky.repo) printf 'file://%s/RPM-GPG-KEY-Rocky-%s' "$k" "$release" ;;
+    epel.repo) printf 'file://%s/RPM-GPG-KEY-EPEL-%s' "$k" "$release" ;;
+    zfs.repo) [[ "$distro" != fedora ]] && printf 'file://%s/RPM-GPG-KEY-openzfs-el-%s' "$k" "$release" ;;
+    esac
+    return 0
+}
+
+# k_harden_repo_signatures <target> <distro> <release> — set gpgcheck=1 (and
+# the vendor gpgkey) on every persistent repo section that had it off. Logs one
+# line per repo and a summary; returns 0 (a missing key is logged, and fails
+# closed at update time, rather than failing the install).
+k_harden_repo_signatures() {
+    local target="$1" distro="$2" release="$3" log="${KLDLOAD_BOOTSTRAP_LOG:-/dev/null}"
+    local f base key keyfile _fixed=0 _nokey=0 _skipped=0
+    for f in "${target}"/etc/yum.repos.d/*.repo; do
+        [[ -f "$f" ]] || continue
+        base="$(basename "$f")"
+        case "$base" in
+        kldload-darksite.repo | kldload-custom.repo | centos-tmp.repo)
+            _skipped=$((_skipped + 1))
+            continue
+            ;;
+        esac
+        key="$(KLDLOAD_TARGET="$target" _k_repo_key "$base" "$distro" "$release")"
+        # Sections with gpgcheck=0 that do NOT sign their metadata instead.
+        # One awk pass over the file: buffer each section, emit it fixed.
+        local _before _after
+        _before="$(grep -c '^gpgcheck=0' "$f" || true)" # grep -c exits 1 on zero, which is the ANSWER here
+        awk -v key="$key" '
+            function flush() {
+                if (n == 0) return
+                for (i = 1; i <= n; i++) {
+                    line = buf[i]
+                    if (line ~ /^gpgcheck=0/ && !metasigned) line = "gpgcheck=1"
+                    print line
+                }
+                if (hadoff && !metasigned && !haskey && key != "") print "gpgkey=" key
+                n = 0; hadoff = 0; haskey = 0; metasigned = 0
+            }
+            /^\[/ { flush() }
+            { buf[++n] = $0 }
+            /^gpgcheck=0/ { hadoff = 1 }
+            /^gpgkey=/ { haskey = 1 }
+            /^repo_gpgcheck=1/ { rg = 1; metasigned = 1 }
+            END { flush() }
+        ' "$f" >"${f}.kldload-new" && mv -f "${f}.kldload-new" "$f"
+        _after="$(grep -c '^gpgcheck=0' "$f" || true)" # as above: zero matches is the goal
+        if ((_before > _after)); then
+            _fixed=$((_fixed + _before - _after))
+            keyfile="${key#file://}"
+            keyfile="${keyfile//\$releasever/$release}"
+            keyfile="${keyfile//\$basearch/$(uname -m)}"
+            if [[ -n "$key" && -f "${target}${keyfile}" ]]; then
+                k_log_to "$log" "  signatures on: ${base} ($((_before - _after)) section(s), key ${keyfile})"
+            else
+                _nokey=$((_nokey + 1))
+                k_log_to "$log" "  WARNING: signatures on for ${base}, but its key ${keyfile:-(none known)} is not on this system — updates from it will be REFUSED until the key is installed"
+            fi
+        fi
+    done
+    k_log_to "$log" "Repo signatures: ${_fixed} section(s) switched to gpgcheck=1, ${_nokey} repo(s) without a key on the system, ${_skipped} install-time/custom repo(s) left alone"
+    return 0
+}
+
 _k_bootstrap_dnf() {
     local target="${KLDLOAD_TARGET:?}"
     local release="${KLDLOAD_RELEASE:-10}"
@@ -2811,6 +2914,34 @@ CUSTOMREPO
         k_log_to "$log" "Re-enabled base repos on target (installed system can install + update; KLDLOAD_KEEP_OFFLINE_REPOS=1 to keep strict air-gap)"
     fi
 
+    # EL keeps hand-written epel.repo and zfs.repo, and never installed the
+    # vendor packages that carry their keys, so the keys were not on the target
+    # at all. Fetch those two packages (HTTPS, from EPEL and OpenZFS) for the
+    # keys; our repo files stay, and rpm leaves the vendors' copies as .rpmnew.
+    # EL is network-mode here (there is no EL darksite), so the network is
+    # already a requirement of this path.
+    if [[ "$distro" != "fedora" ]]; then
+        _k_vendor_keypkg() { # $1=label $2..=candidate URLs, first that installs wins
+            local _label="$1" _u
+            shift
+            for _u in "$@"; do
+                if chroot "${target}" dnf -y install "$_u" >>"$log" 2>&1; then
+                    k_log_to "$log" "  ${_label}: installed $(basename "$_u") for its signing key"
+                    return 0
+                fi
+            done
+            k_log_to "$log" "  WARNING: could not install ${_label} — its repo's signatures will be required with no key present (updates from it will be refused)"
+            return 0
+        }
+        _k_vendor_keypkg epel-release "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${release}.noarch.rpm"
+        _k_vendor_keypkg zfs-release \
+            "https://zfsonlinux.org/epel/zfs-release-3-0.el${release}.noarch.rpm" \
+            "https://zfsonlinux.org/epel/zfs-release-2-10.el${release}.noarch.rpm" \
+            "https://zfsonlinux.org/epel/zfs-release-2-9.el${release}.noarch.rpm" \
+            "https://zfsonlinux.org/epel/zfs-release-2-8.el${release}.noarch.rpm"
+    fi
+    k_harden_repo_signatures "$target" "$distro" "${release:-${KLDLOAD_FEDORA_RELEASE:-44}}"
+
     # dnf5 writes the rpm db to /usr/lib/sysimage/rpm (modern Fedora
     # default). EL9's rpm config still reads /var/lib/rpm. Sync them so
     # the installed system's rpm can find what dnf wrote — without this,
@@ -3412,12 +3543,24 @@ NOUVEAU
                     break
                 fi
             done
+            # Signed, with the key NVIDIA's own repo file names. The key id is
+            # per release (D42D0685.pub for fedora42), so it is read from
+            # NVIDIA's published .repo, not written down here. No answer means
+            # gpgcheck=1 with no key -- updates from CUDA are then refused and
+            # the log says why, rather than installing unverified driver code.
+            local _cuda_key=""
+            _cuda_key="$(curl -fsS --max-time 20 \
+                "https://developer.download.nvidia.com/compute/cuda/repos/fedora${_nv_alt_release}/x86_64/cuda-fedora${_nv_alt_release}.repo" 2>/dev/null |
+                sed -n 's/^gpgkey=//p' | head -1 || true)"
+            [[ -n "$_cuda_key" ]] ||
+                k_log_to "$log" "WARNING: could not read NVIDIA's CUDA repo file for its signing key — cuda.repo is gpgcheck=1 with no key, so CUDA updates will be refused until one is set"
             cat >"${target}/etc/yum.repos.d/cuda.repo" <<CUDAREPO
 [cuda-fedora${_nv_alt_release}]
 name=NVIDIA CUDA for fedora${_nv_alt_release}
 baseurl=https://developer.download.nvidia.com/compute/cuda/repos/fedora${_nv_alt_release}/x86_64/
 enabled=1
-gpgcheck=0
+gpgcheck=1
+${_cuda_key:+gpgkey=${_cuda_key}}
 CUDAREPO
             # akmod will build on first boot; mark for the firstboot service to
             # confirm the build succeeded and re-attempt if not.
