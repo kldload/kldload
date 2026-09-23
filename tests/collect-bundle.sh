@@ -128,6 +128,19 @@ cap wg-show wg show all
 [[ -d /etc/prometheus/targets ]] &&
     cp -a /etc/prometheus/targets "${OUT}/prometheus-targets" 2>/dev/null
 
+# ── Kubernetes, when this machine drives a cluster ─────────────────────────
+# The doctor failed "k8s-stack/metallb" on 4-k8s and deb-4-k8s (2026-09-22 and
+# -23) and nothing kept the pods, so both failures were unexplainable after
+# the machine was reinstalled for the next edition. Timeouts because the API
+# VIP lives on the mesh and a stopped cluster makes kubectl hang.
+if command -v kubectl >/dev/null 2>&1 && [[ -r /root/.kube/config ]]; then
+    export KUBECONFIG=/root/.kube/config
+    cap k8s-nodes timeout 20 kubectl get nodes -o wide
+    cap k8s-pods timeout 20 kubectl get pods -A -o wide
+    cap k8s-events timeout 20 kubectl get events -A --sort-by=.lastTimestamp
+    cap k8s-metallb timeout 20 kubectl -n metallb-system describe pods
+fi
+
 # ── anything the suites already wrote ───────────────────────────────────────
 cp /tmp/kldload-smoke-report-*.txt "${OUT}/" 2>/dev/null || true
 

@@ -333,14 +333,19 @@ if have kldload-doctor; then
     #     check's subsystem. Print once subsystem arrives instead.
     # Verified against a real 42-check report with three failures: this names
     # the same three, with the same subsystems, as a JSON parser does.
+    # actual/expected ride along: "metallb failed" twice with no numbers left
+    # nothing to go on once the machine was reinstalled (2026-09-23). Both keys
+    # sort BEFORE "name", so they are captured as they pass, like remediation.
     _dnames="$(awk '
         /^  "subsystems"[[:space:]]*:/ { exit }
+        /"actual"[[:space:]]*:/      { a=$0; sub(/.*"actual"[[:space:]]*:[[:space:]]*"?/,"",a); sub(/"?,?[[:space:]]*$/,"",a) }
+        /"expected"[[:space:]]*:/    { e=$0; sub(/.*"expected"[[:space:]]*:[[:space:]]*"?/,"",e); sub(/"?,?[[:space:]]*$/,"",e) }
         /"name"[[:space:]]*:/        { n=$0; sub(/.*"name"[[:space:]]*:[[:space:]]*"/,"",n); sub(/".*/,"",n) }
         /"remediation"[[:space:]]*:/ { r=$0; sub(/.*"remediation"[[:space:]]*:[[:space:]]*"/,"",r); sub(/".*/,"",r) }
         /"status"[[:space:]]*:[[:space:]]*"fail"/ { p=1 }
         /"subsystem"[[:space:]]*:/ {
             if (p) { s=$0; sub(/.*"subsystem"[[:space:]]*:[[:space:]]*"/,"",s); sub(/".*/,"",s)
-                     printf "%s/%s%s\n", s, n, (r==""?"":" -> " r); p=0 }
+                     printf "%s/%s [got %s, want %s]%s\n", s, n, a, e, (r==""?"":" -> " r); p=0 }
         }' <<<"$_doc")"
 
     echo '```'
