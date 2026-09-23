@@ -320,7 +320,36 @@ if [[ -n "$KUBECONF" ]]; then
         # Pod test — create and delete a test pod
         echo ""
         echo -e "  ${D}Running pod test...${N}"
-        if kubectl run smoke-test --image=busybox --restart=Never --command -- sleep 30 >/dev/null 2>&1; then
+        # RETRY THE CREATE, AND KEEP ITS ERROR.
+        #
+        # This was a one-shot with 2>&1 >/dev/null, so an API server that was
+        # not accepting yet produced "Could not create test pod" and nothing
+        # else. fiend, 2026-09-22, 4-k8s: the smoke ran nine minutes after
+        # first boot, failed here, and the unit went to failed -- while the
+        # cluster was simply still converging. Checked twenty minutes later:
+        # six nodes Ready and a pod Running in five seconds.
+        #
+        # A system in motion has no state. Give the control plane a bounded
+        # chance to start accepting, and if it never does, say what kubectl
+        # actually said instead of that something did not happen.
+        # THE IMAGE HAS TO BE ONE THE NODE ALREADY HAS.
+        #
+        # This pulled `busybox` from Docker Hub. On fiend 2026-09-22 a worker
+        # carried fourteen images and busybox was not among them, so on a
+        # genuinely air-gapped install -- the thing this product is for -- the
+        # pod would sit in ImagePullBackOff and the scheduling test would fail
+        # for a reason that has nothing to do with scheduling. pause is the
+        # sandbox image: every node running a pod already has it, by
+        # definition, and it is enough to prove a pod can be placed and run.
+        _probe_img="$(kubectl get pod -n kube-system -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null)"
+        _probe_img="${_probe_img:-registry.k8s.io/pause:3.10}"
+        _pod_err=""
+        for _try in $(seq 1 12); do
+            _pod_err="$(kubectl run smoke-test --image="$_probe_img" --restart=Never 2>&1)" && break
+            _pod_err="${_pod_err##*$'\n'}"
+            sleep 5
+        done
+        if [[ "$_try" -le 12 ]] && kubectl get pod smoke-test >/dev/null 2>&1; then
             # Wait up to 30s for pod to start (image pull may take time on first run)
             pod_status=""
             for _i in $(seq 1 15); do
@@ -335,24 +364,43 @@ if [[ -n "$KUBECONF" ]]; then
             fi
             kubectl delete pod smoke-test --grace-period=0 --force >/dev/null 2>&1 || true
         else
-            fail "Could not create test pod"
+            fail "Could not create test pod after 60s: ${_pod_err:-no error text}"
         fi
 
         # DNS test — use exec into a running pod instead of interactive kubectl run
         echo -e "  ${D}Running DNS test...${N}"
-        if kubectl run dns-test --image=busybox --restart=Never --command -- sleep 30 >/dev/null 2>&1; then
-            sleep 5
-            dns_output="$(kubectl exec dns-test -- nslookup kubernetes.default.svc.cluster.local 2>/dev/null || true)"
-            dns_result="$(echo "$dns_output" | grep -c 'Address' || echo 0)"
-            if [[ "$dns_result" -gt 0 ]]; then
-                pass "Cluster DNS resolves kubernetes.default"
-            else
-                warn "DNS test inconclusive (may need more time)"
-            fi
+        # WHAT CAN ACTUALLY BE CHECKED HERE, OFFLINE.
+        #
+        # This pulled busybox from Docker Hub to run nslookup. On an air-gapped
+        # install -- the thing this product is for -- that pod never starts, and
+        # the check fails for a reason that has nothing to do with DNS.
+        #
+        # Every alternative was tried on fiend, 2026-09-22, and none works
+        # offline: the cilium pods run hostNetwork, so their resolv.conf is the
+        # node's (nameserver 192.168.122.1) and they are not on cluster DNS at
+        # all; their image has no nslookup and getent exits 2; and the host has
+        # no dig, nslookup or host, while a raw UDP query to a CoreDNS pod IP
+        # times out because the host is not on the pod network.
+        #
+        # So the end-to-end resolution test CANNOT run offline, and pretending
+        # otherwise would mean either a false warning every run or reaching the
+        # internet in a suite that exists to prove the machine does not need it.
+        # What IS checkable is that CoreDNS is deployed and has ready endpoints
+        # for something to resolve against. That is reported as what it is, and
+        # the part that did not run says so rather than passing quietly.
+        _dns_eps="$(kubectl get endpoints -n kube-system kube-dns \
+            -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)"
+        _dns_n="$(printf '%s' "$_dns_eps" | wc -w)"
+        _dns_ready="$(kubectl get pod -n kube-system -l k8s-app=kube-dns \
+            --no-headers 2>/dev/null | grep -c ' Running ' || true)"
+        if ((_dns_n > 0 && _dns_ready > 0)); then
+            pass "CoreDNS is serving: ${_dns_ready} pod(s) Running, ${_dns_n} ready endpoint(s)"
+        elif ((_dns_ready > 0)); then
+            fail "CoreDNS pods are Running but kube-dns has NO ready endpoints — nothing can resolve"
         else
-            warn "DNS test pod creation failed (non-fatal)"
+            fail "CoreDNS is not running — cluster DNS is down"
         fi
-        kubectl delete pod dns-test --grace-period=0 --force >/dev/null 2>&1 || true
+        warn "cluster DNS resolution DID NOT RUN — needs a pod image with a resolver, and none is in the darksite"
 
     else
         fail "API server not reachable"
