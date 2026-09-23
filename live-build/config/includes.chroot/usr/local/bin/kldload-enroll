@@ -84,6 +84,29 @@ usage() {
 # A sweep is indifferent to which tool made the VM, so it covers kvm-create,
 # kvm-clone, kspawn and anything added later without touching them. Run it from
 # cron, from a timer, or by hand after starting a batch.
+# _is_template <vm> — 0 when the VM is a golden, sealed or still being built.
+#
+# A golden must never be enrolled. Enrolling gives the guest a WireGuard key and
+# a mesh id, and a golden that has them passes BOTH to every clone made from it.
+# fiend, build 61, 2026-09-23: the sweep timer fired while k8s-golden was being
+# built, enrolled it as node 150, the seal kept /etc/wireguard, and all six
+# cluster nodes cloned from it came up with the same key and the same id. On
+# the host each peer overwrote the last, one survived, and the Kubernetes API
+# became unreachable. It hid until 5923203c, because until then enrolling the
+# first VM on a peerless host crashed, so the golden never got that far.
+#
+# A golden has no marker while it is being built -- klab registers it only
+# after the seal -- so this goes by what is certain: the names the builders
+# use (klab's golden_name(), kube-cluster's k8s-golden, anything "golden"),
+# or an existing @golden snapshot on its zvol.
+_is_template() {
+    local vm="$1"
+    case "$vm" in
+    *golden* | klab-ztest-* | klab-desktop-* | klab-xfce-* | klab-kde-* | klab-db-*) return 0 ;;
+    esac
+    zfs list -H -o name "${KLDLOAD_VM_POOL:-rpool/vms}/${vm}@golden" >/dev/null 2>&1
+}
+
 if [[ "${1:-}" == "--all" ]]; then
     shift
     _sweep_role="vm"
@@ -117,8 +140,13 @@ if [[ "${1:-}" == "--all" ]]; then
     _done=0
     _noip=0
     _partial=0
+    _tmpl=0
     while read -r _vm; do
         [[ -n "$_vm" ]] || continue
+        if _is_template "$_vm"; then
+            _tmpl=$((_tmpl + 1))
+            continue
+        fi
         _rc=0
         # </dev/null is load-bearing. Without it the child inherits this loop's
         # stdin — the process substitution feeding `read` — and consumes the
@@ -147,8 +175,8 @@ if [[ "${1:-}" == "--all" ]]; then
                 "$_vm" "$_rc" "$(printf '%s' "$_out" | tail -n1)"
         fi
     done < <(virsh list --state-running --name 2>/dev/null)
-    printf '[enroll] sweep: %d on the mesh, %d without an address, %d incomplete\n' \
-        "$_done" "$_noip" "$_partial"
+    printf '[enroll] sweep: %d on the mesh, %d without an address, %d incomplete, %d golden(s) left alone\n' \
+        "$_done" "$_noip" "$_partial" "$_tmpl"
     exit 0
 fi
 
@@ -162,6 +190,10 @@ case "$1" in -h | --help | help) usage 0 ;; esac
 declare -a _ORIG_ARGV=("$@")
 
 VM="$1"
+if _is_template "$VM"; then
+    echo "[enroll] ${VM} is a golden (by name or its @golden snapshot) -- not enrolling it: a golden's mesh identity would be copied into every clone" >&2
+    exit 2
+fi
 shift
 IP=""
 ROLE="vm"
