@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>kfire wall</title>
+<!--
+  kfire-wall.html — the microVM wall, drawn from LIVE kfire state.
+
+  An OBS browser source composited over a screen capture. Every tile is an
+  instance kfire actually reports; its colour is the golden it was cloned from
+  and it lights when it has an address. Nothing here is on a timer pretending
+  to be progress: if a clone does not come up, its tile stays dark, and the
+  recording shows that.
+
+  Drawn on a 2D canvas, deliberately, for the same reason the install show is:
+  it has to run anywhere, including over a software renderer, and copper bars
+  and a sine scroller were invented for exactly this budget. No WebGL, no CDN,
+  no fonts fetched — one file, like the demos this borrows its grammar from.
+
+  MINIMAL BY DEFAULT. Tiles, a title, a tally. Nothing moves that is not
+  state changing. ?unfiltered turns on the demoscene treatment — starfield and
+  a sine scroller — for the takes that want it.
+
+  No copper bars: they were tried and rejected on the first tribute cut, and a
+  effect nobody likes is not made better by being traditional.
+
+  Keys:  1 wall · 2 one tile (SHOW ONE) · 0 chrome only · SPACE freeze
+         U toggles unfiltered
+  Query: ?feed=feed.json  ?title=...  ?scroll=...  ?unfiltered=1
+-->
+<style>
+  html,body{margin:0;height:100%;background:transparent;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas id="w"></canvas>
+<script>
+"use strict";
+const Q = new URLSearchParams(location.search);
+const FEED = Q.get("feed") || "feed.json";
+const TITLE = Q.get("title") || "kfire";
+let UNFILTERED = Q.get("unfiltered") !== null && Q.get("unfiltered") !== "0";
+const SCROLL_TEXT = Q.get("scroll") ||
+  "ONE GOLDEN  ·  FIFTY MICROVMS  ·  EACH A ZFS CLONE, NOT A COPY  ·  " +
+  "THE TILES ARE LIVE STATE, NOT AN ANIMATION  ·  IF A CLONE DOES NOT COME UP THE TILE STAYS DARK  ·  ";
+
+const c = document.getElementById("w"), x = c.getContext("2d", { alpha: true });
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = c.clientWidth; H = c.clientHeight;
+  c.width = Math.round(W * DPR); c.height = Math.round(H * DPR);
+  x.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+addEventListener("resize", resize);
+
+// ── live state ────────────────────────────────────────────────────────────
+// Instances keyed by name so a tile keeps its position as the list grows.
+let instances = [], order = [], goldens = [], frozen = false, mode = 1, focus = 0;
+let lastFeed = 0, feedErr = "";
+
+async function poll() {
+  try {
+    const r = await fetch(FEED + "?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    if (!Array.isArray(j)) throw new Error("feed is not an array");
+    instances = j; feedErr = ""; lastFeed = Date.now();
+    for (const i of j) if (!order.includes(i.name)) order.push(i.name);
+    const gs = [...new Set(j.map(i => i.golden).filter(Boolean))].sort();
+    for (const g of gs) if (!goldens.includes(g)) goldens.push(g);
+  } catch (e) { feedErr = String(e.message || e); }
+}
+poll(); setInterval(poll, 500);
+
+addEventListener("keydown", e => {
+  if (e.key === "1") mode = 1;
+  else if (e.key === "2") mode = 2;
+  else if (e.key === "0") mode = 0;
+  else if (e.key === "u" || e.key === "U") UNFILTERED = !UNFILTERED;
+  else if (e.key === " ") { frozen = !frozen; e.preventDefault(); }
+  else if (e.key === "ArrowRight") focus = (focus + 1) % Math.max(1, order.length);
+  else if (e.key === "ArrowLeft") focus = (focus - 1 + Math.max(1, order.length)) % Math.max(1, order.length);
+});
+
+// Colour per golden, from a fixed palette so a given golden looks the same
+// across takes. Amiga-ish on purpose.
+const PAL = ["#5DCAA5", "#FFCF4D", "#FF3B5C", "#00B8D9", "#C06CFF", "#FF9F40", "#7FE04A", "#FF6FB5"];
+const colourOf = g => PAL[Math.max(0, goldens.indexOf(g)) % PAL.length];
+
+function byName(n) { return instances.find(i => i.name === n); }
+
+// ── effects ───────────────────────────────────────────────────────────────
+const stars = Array.from({ length: 150 }, () => ({ x: Math.random(), y: Math.random(), z: Math.random() * 0.8 + 0.2 }));
+function starfield(t) {
+  for (const s of stars) {
+    const sx = ((s.x - (t * 0.00004 * s.z)) % 1 + 1) % 1;
+    x.fillStyle = "rgba(255,255,255," + (0.10 + 0.25 * s.z).toFixed(3) + ")";
+    x.fillRect(sx * W, s.y * H, 1.5 * s.z, 1.5 * s.z);
+  }
+}
+
+function scroller(t) {
+  const y = H - 26, fs = 20;
+  x.font = "600 " + fs + "px ui-monospace, Menlo, monospace";
+  const txt = SCROLL_TEXT, wid = x.measureText(txt).width;
+  let off = -((t * 0.14) % wid);
+  while (off < W) {
+    for (let i = 0; i < txt.length; i++) {
+      const ch = txt[i], cw = x.measureText(ch).width;
+      const cx = off + x.measureText(txt.slice(0, i)).width;
+      if (cx > -20 && cx < W + 20) {
+        const bob = Math.sin((t * 0.004) + cx * 0.012) * 7;
+        x.fillStyle = "rgba(93,202,165,0.92)";
+        x.fillText(ch, cx, y + bob);
+      }
+      void cw;
+    }
+    off += wid;
+  }
+}
+
+// ── the wall ──────────────────────────────────────────────────────────────
+function wall(t) {
+  const n = order.length;
+  if (n === 0) {
+    x.font = "600 22px ui-monospace, monospace";
+    x.fillStyle = "rgba(255,255,255,0.55)";
+    x.fillText(feedErr ? ("feed: " + feedErr) : "waiting for the first instance…", 40, H / 2);
+    return;
+  }
+  const pad = 46, top = 96, bot = H - 70;
+  const cols = Math.ceil(Math.sqrt(n * (W / (bot - top))));
+  const rows = Math.ceil(n / cols);
+  const cw = (W - pad * 2) / cols, ch = (bot - top) / rows;
+  const s = Math.min(cw, ch) * 0.86;
+
+  order.forEach((name, i) => {
+    const inst = byName(name);
+    const cx = pad + (i % cols) * cw + (cw - s) / 2;
+    const cy = top + Math.floor(i / cols) * ch + (ch - s) / 2;
+    const live = inst && inst.state === "running" && inst.ip;
+    const col = inst ? colourOf(inst.golden) : "#666";
+    // A tile that has not come up is DARK. That is the honest state and the
+    // reason this reads the feed rather than animating on a timer.
+    const pulse = live ? 0.75 + 0.25 * Math.sin(t * 0.004 + i * 0.7) : 0.16;
+    x.globalAlpha = pulse;
+    x.fillStyle = col;
+    x.fillRect(cx, cy, s, s * 0.62);
+    x.globalAlpha = 1;
+    x.strokeStyle = "rgba(255,255,255," + (live ? 0.30 : 0.12) + ")";
+    x.lineWidth = 1;
+    x.strokeRect(cx + 0.5, cy + 0.5, s, s * 0.62);
+    if (s > 54) {
+      x.font = "600 " + Math.max(9, Math.round(s * 0.11)) + "px ui-monospace, monospace";
+      x.fillStyle = live ? "rgba(0,0,0,0.78)" : "rgba(255,255,255,0.40)";
+      x.fillText(name.slice(-14), cx + 6, cy + s * 0.62 - 7);
+    }
+  });
+}
+
+// SHOW ONE — the same data, one tile, everything it knows.
+function one(t) {
+  if (!order.length) return wall(t);
+  const name = order[focus % order.length], inst = byName(name);
+  const bw = Math.min(W * 0.62, 760), bh = 300;
+  const bx = (W - bw) / 2, by = (H - bh) / 2;
+  x.globalAlpha = 0.93; x.fillStyle = "rgba(8,12,16,0.93)";
+  x.fillRect(bx, by, bw, bh); x.globalAlpha = 1;
+  x.strokeStyle = inst ? colourOf(inst.golden) : "#666"; x.lineWidth = 2;
+  x.strokeRect(bx + 1, by + 1, bw - 2, bh - 2);
+  x.font = "700 26px ui-monospace, monospace";
+  x.fillStyle = inst ? colourOf(inst.golden) : "#999";
+  x.fillText(name, bx + 26, by + 48);
+  const rows = inst ? [
+    ["state", inst.state || "-"], ["ip", inst.ip || "(none yet)"],
+    ["golden", inst.golden || "-"], ["vcpus", String(inst.vcpus ?? "-")],
+    ["ram", (inst.ram_mb ?? "-") + " MB"], ["tap", inst.tap || "-"],
+  ] : [["state", "not in the feed"]];
+  x.font = "400 19px ui-monospace, monospace";
+  rows.forEach((r, i) => {
+    x.fillStyle = "rgba(255,255,255,0.45)"; x.fillText(r[0], bx + 26, by + 92 + i * 32);
+    x.fillStyle = "rgba(255,255,255,0.92)"; x.fillText(String(r[1]), bx + 150, by + 92 + i * 32);
+  });
+  x.font = "400 15px ui-monospace, monospace";
+  x.fillStyle = "rgba(255,255,255,0.35)";
+  x.fillText("← → to walk the fleet · 1 for the wall", bx + 26, by + bh - 20);
+}
+
+function chrome(t) {
+  // A hairline, not a copper bar. The brief is minimal; the bar was rejected.
+  x.fillStyle = "rgba(93,202,165,0.55)";
+  x.fillRect(0, 52, W, 1);
+  x.font = "700 30px ui-monospace, monospace";
+  x.fillStyle = "rgba(255,255,255,0.95)";
+  x.fillText(TITLE, 40, 38);
+  const live = instances.filter(i => i.state === "running" && i.ip).length;
+  const tally = live + " / " + order.length + " up";
+  x.font = "600 22px ui-monospace, monospace";
+  x.fillStyle = "rgba(93,202,165,0.95)";
+  x.fillText(tally, W - 40 - x.measureText(tally).width, 37);
+  // Stale feed is said out loud rather than left looking live.
+  if (lastFeed && Date.now() - lastFeed > 4000) {
+    x.font = "600 16px ui-monospace, monospace";
+    x.fillStyle = "rgba(255,90,90,0.95)";
+    const m = "FEED STALE " + Math.round((Date.now() - lastFeed) / 1000) + "s";
+    x.fillText(m, W - 40 - x.measureText(m).width, 66);
+  }
+  if (UNFILTERED) {
+    x.fillStyle = "rgba(93,202,165,0.35)";
+    x.fillRect(0, H - 54, W, 1);
+    scroller(t);
+  }
+}
+
+let t0 = performance.now(), tf = 0;
+function frame(now) {
+  const t = frozen ? tf : (tf = now - t0);
+  x.clearRect(0, 0, W, H);
+  if (UNFILTERED) starfield(t);
+  if (mode === 1) wall(t);
+  else if (mode === 2) one(t);
+  chrome(t);
+  requestAnimationFrame(frame);
+}
+resize(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>
