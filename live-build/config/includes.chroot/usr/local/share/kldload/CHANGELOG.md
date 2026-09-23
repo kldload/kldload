@@ -340,6 +340,14 @@ a third layer: the klab goldens carry WireGuard but not `kube-network`, the
 guest half of the mesh, so every clone of them was refused as "not a kldload
 image". The enroller now carries the host's own copy across.
 
+Fixing that uncovered a race that had been hidden behind it. The enrol sweep
+runs on a timer, and if it fired while a golden was still being built, it
+enrolled the golden: a WireGuard key and a mesh id, which the seal then kept and
+every clone inherited. A Kubernetes cluster cloned from such a golden came up
+with six nodes sharing one key and one id, overwriting each other on the host,
+and its API unreachable. Goldens are now never enrolled, and every seal forgets
+the mesh identity the way it already forgot SSH host keys.
+
 The other half had never worked either. Deleting a VM left it a peer on both
 mesh planes, because nothing on the delete path removed peers — and the check
 meant to catch it asked the estate for the machine by name, which a deleted
