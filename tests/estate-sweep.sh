@@ -375,6 +375,29 @@ for ed in "${EDITIONS[@]}"; do
         say "${ed}: first boot settled after ${conv}s"
     fi
 
+    # 4b. one Prometheus scrape before anything asks about scrapes.
+    #
+    # "Settled" means first boot finished, not that the metrics plane has
+    # looked at anything yet. 2-server (build 57, 2026-09-23) settled in 60s,
+    # node_exporter came up at 07:31:59 and the doctor ran seconds later, so
+    # "host node_exporter: all targets down" failed an edition whose exporter
+    # was listening -- a reading of a system still in motion. Bounded: a
+    # Prometheus that never gets a target up is left for the doctor to report.
+    # shellcheck disable=SC2016 # expanded on the bench machine, not here
+    if ssh_bench "$ip" 'test -d /etc/prometheus && systemctl is-active --quiet prometheus'; then
+        _pw=0
+        until ssh_bench "$ip" 'curl -fsS --max-time 5 "http://localhost:9090/api/v1/query?query=up%3D%3D1" | grep -q "\"result\":\[{"'; do
+            ((_pw >= 180)) && break
+            sleep 15
+            _pw=$((_pw + 15))
+        done
+        if ((_pw >= 180)); then
+            say "${ed}: Prometheus had no target up after ${_pw}s — reporting anyway, the doctor will say which"
+        else
+            say "${ed}: Prometheus had a target up after ${_pw}s"
+        fi
+    fi
+
     # 5. the manifest
     scp_to "$ip" "${REPO}/tests/profile-report.sh" "${REPO}/tests/collect-bundle.sh" /tmp/ || true
     # profile-report exits 1 when the machine has defects — which is a result
