@@ -138,9 +138,24 @@ run_suite() {
     echo "" | tee_report
     header "$name" | tee_report
 
-    # Run the test and capture output + exit code
-    local output
-    output=$(bash "$script" 2>&1) || true
+    # Run the suite under a bound, into a FILE rather than $(...).
+    #
+    # Fedora AI on fiend (2026-09-23): the server suite ran nvidia-smi against
+    # a wedged driver, nvidia-smi sat in uninterruptible sleep, and the whole
+    # run stopped there until the caller's 30-minute timeout -- with nothing
+    # after "Server Tests" in the report. $(...) waits for EOF on the pipe, and
+    # a stuck grandchild holds the pipe open for ever, so neither a timeout
+    # around $(...) nor killing bash could end it. timeout only waits for its
+    # direct child (bash, which is always killable), and the file has no EOF
+    # to wait for. SUITE_TIMEOUT overrides the bound.
+    local output _suite_out _src=0
+    _suite_out="$(mktemp)"
+    timeout -k 10 "${SUITE_TIMEOUT:-900}" bash "$script" </dev/null >"$_suite_out" 2>&1 || _src=$?
+    output="$(cat "$_suite_out")"
+    rm -f "$_suite_out"
+    if ((_src == 124 || _src == 137)); then
+        output+=$'\n'"  ✗ FAIL  ${name} — did not finish within ${SUITE_TIMEOUT:-900}s; last line: $(printf '%s\n' "$output" | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-120)"
+    fi
     echo "$output" | tee_report
 
     # Parse results from output.

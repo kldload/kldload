@@ -266,7 +266,13 @@ if have kldload-test; then
     # thing being tallied — so the status is discarded and the counts below
     # decide. (Since 2026-09-19 it also exits 1 when it ran nothing, which the
     # zero-pass check further down catches.)
-    _smoke="$(S timeout 1800 kldload-test 2>&1 || true)"
+    #
+    # But a KILLED suite is not a result. Fedora AI on fiend (2026-09-23) hung
+    # on an unkillable nvidia-smi, the timeout below ended it after 1800s, and
+    # the 50 passes it had reached so far were reported as a PASS edition --
+    # against 196 on every earlier run. So: the timeout's own status, and the
+    # suite's last line ("Report saved:"), which only a finished run prints.
+    _smoke="$(timeout 1800 kldload-test 2>&1)" && _src=0 || _src=$?
     _sp="$(_count '✓ PASS' <<<"$_smoke")"
     _sf="$(_count '✗ FAIL' <<<"$_smoke")"
     _sw="$(_count '⚠ WARN' <<<"$_smoke")"
@@ -283,6 +289,11 @@ if have kldload-test; then
     fi
     # A suite that ran nothing is not a pass.
     ((_sp == 0)) && note_fail "smoke suite produced NO passes — it did not really run"
+    if ((_src == 124)); then
+        note_fail "smoke suite TIMED OUT after 1800s and was killed — the counts above are partial; last line: $(sed 's/\x1b\[[0-9;]*m//g' <<<"$_smoke" | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-120)"
+    elif ! grep -q 'Report saved:' <<<"$_smoke"; then
+        note_fail "smoke suite did not finish (no 'Report saved:' line, exit ${_src}) — the counts above are partial"
+    fi
 else
     note_warn "kldload-test is not installed — the smoke suite DID NOT RUN"
 fi
