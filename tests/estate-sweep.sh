@@ -422,37 +422,72 @@ for ed in "${EDITIONS[@]}"; do
     # copy is what runs -- a harness that re-implements the thing it tests has
     # blamed a healthy machine before.
     if ssh_bench "$ip" 'command -v virsh >/dev/null 2>&1'; then
-        say "${ed}: estate lifecycle (clone -> join -> delete -> unjoin)"
-        # 1800s, not the 120s default: this test creates a VM and then waits,
-        # bounded, for four registries to notice it and four to release it.
-        # At 120s it was killed after the third check and the file stopped
-        # mid-run (deb-4-k8s, 2026-09-20) — the same truncation the report
-        # call had, one call site later.
-        SSH_T=1800 ssh_bench "$ip" 'sudo -n bash /usr/local/share/kldload/tests/estate-lifecycle.sh' \
-            >"${OUT}/estate-lifecycle.txt" 2>&1 ||
-            true # its verdict is in the file; a failed lifecycle is a result, not a reason to stop
-        # grep -c exits 1 when there are no failures, which is the GOOD case.
-        _lc="$(grep -cE '✗ FAIL' "${OUT}/estate-lifecycle.txt" 2>/dev/null || true)"
-        # ...and likewise none of the other kind on a run that died early.
-        _lp="$(grep -cE '✓ PASS' "${OUT}/estate-lifecycle.txt" 2>/dev/null || true)"
-        # The script prints a summary line last. Without it the run did not
-        # finish, and counting only its passes would report a killed test as a
-        # clean one.
-        if ! grep -q 'estate lifecycle:' "${OUT}/estate-lifecycle.txt" 2>/dev/null; then
-            say "${ed}: lifecycle did NOT finish — recorded as truncated"
-            _lifecycle="lifecycle TRUNCATED (${_lp} before it stopped)"
-            RC=1
-            _lc=truncated
+        # EVERY golden, not the first one found. Each golden is its own build
+        # with its own seal, packages and network stack, and they fail
+        # differently: the k8s golden ran two DHCP clients and shipped no
+        # exporter while the klab goldens did not (onyx, 2026-09-22). One
+        # probe per golden, one file per golden, one row that names the ones
+        # that failed.
+        #
+        # A golden is a VM with a sealed @golden snapshot AND a libvirt
+        # domain -- the snapshot is what klab and kube-cluster take at seal
+        # time; the domain excludes data zvols that carry one.
+        # shellcheck disable=SC2016 # expanded on the bench machine, not here
+        mapfile -t _goldens < <(SSH_T=60 ssh_bench "$ip" 'sudo -n zfs list -H -t snapshot -o name -r rpool/vms 2>/dev/null |
+            sed -n "s#^rpool/vms/\([^@/]*\)@golden\$#\1#p" | while read -r g; do
+                sudo -n virsh dominfo "$g" >/dev/null 2>&1 </dev/null && echo "$g"
+            done' || true)
+        : >"${OUT}/estate-lifecycle.txt"
+        _g_ok=0
+        _g_bad=()
+        if ((${#_goldens[@]} == 0)); then
+            say "${ed}: no sealed golden on the bench — lifecycle not run"
+            if [[ "${want_images:-0}" == 1 ]]; then
+                # Asked for images and has none: that is the finding.
+                _lifecycle="lifecycle: 0 goldens though BUILD_IMAGES=1"
+                RC=1
+            else
+                _lifecycle="lifecycle: no goldens"
+            fi
         fi
-        say "${ed}: lifecycle ${_lp} passed, ${_lc} failed"
-        if [[ "$_lc" == truncated ]]; then
-            : # already recorded above
-        elif [[ "${_lc:-0}" != 0 ]]; then
-            RC=1
-            # Surface it in the summary row rather than only in a side file.
-            _lifecycle="lifecycle ${_lp} passed / ${_lc} failed"
-        else
-            _lifecycle="lifecycle ok (${_lp})"
+        for _g in "${_goldens[@]}"; do
+            [[ -n "$_g" ]] || continue
+            _gf="${OUT}/lifecycle-${_g}.txt"
+            say "${ed}: estate lifecycle on ${_g} (clone -> join -> plays -> metrics -> delete -> unjoin)"
+            # 1800s per golden: a clone, then bounded waits on every registry
+            # to notice it and to release it. At 120s it was killed mid-run
+            # (deb-4-k8s, 2026-09-20).
+            SSH_T=1800 ssh_bench "$ip" "sudo -n bash /usr/local/share/kldload/tests/estate-lifecycle.sh --source '${_g}'" \
+                >"$_gf" 2>&1 ||
+                true # its verdict is in the file; a failed lifecycle is a result, not a reason to stop
+            {
+                printf '\n===== %s =====\n' "$_g"
+                cat "$_gf"
+            } >>"${OUT}/estate-lifecycle.txt"
+            # grep -c exits 1 on zero matches, which is the GOOD case here.
+            _lc="$(grep -cE '✗ FAIL' "$_gf" 2>/dev/null || true)"
+            _lp="$(grep -cE '✓ PASS' "$_gf" 2>/dev/null || true)"
+            # No summary line means the run did not finish; counting only its
+            # passes would report a killed test as a clean one.
+            if ! grep -q 'estate lifecycle:' "$_gf" 2>/dev/null; then
+                say "${ed}: ${_g}: lifecycle did NOT finish — truncated after ${_lp} passes"
+                _g_bad+=("${_g}(truncated)")
+            elif [[ "${_lc:-0}" != 0 ]]; then
+                say "${ed}: ${_g}: ${_lp} passed, ${_lc} FAILED"
+                _g_bad+=("${_g}(${_lc})")
+            else
+                say "${ed}: ${_g}: ${_lp} passed"
+                _g_ok=$((_g_ok + 1))
+            fi
+        done
+        if ((${#_goldens[@]} > 0)); then
+            # A count against what it was given: N of M goldens, and which.
+            if ((${#_g_bad[@]} == 0)); then
+                _lifecycle="lifecycle ok: ${_g_ok}/${#_goldens[@]} goldens"
+            else
+                RC=1
+                _lifecycle="lifecycle ${_g_ok}/${#_goldens[@]} goldens ok; failed: ${_g_bad[*]}"
+            fi
         fi
     else
         _lifecycle="no hypervisor"
