@@ -24,9 +24,17 @@
   No copper bars: they were tried and rejected on the first tribute cut, and a
   effect nobody likes is not made better by being traditional.
 
+  PRODUCTION MODE: ?capture=<file.jsonl> replays a recorded run instead of
+  polling. The state shown is whatever the capture says it was at score time,
+  so the same T always draws the same frame — which is what the demoscene
+  runtime requires of anything it renders offline, and what the live path
+  cannot promise. window.WALL.at(T) is the hook for that runtime; ?t=<seconds>
+  seeks by hand.
+
   Keys:  1 wall · 2 one tile (SHOW ONE) · 0 chrome only · SPACE freeze
          U toggles unfiltered
-  Query: ?feed=feed.json  ?title=...  ?scroll=...  ?unfiltered=1
+  Query: ?feed=feed.json  ?capture=run.jsonl  ?t=12.5
+         ?title=...  ?scroll=...  ?unfiltered=1
 -->
 <style>
   html,body{margin:0;height:100%;background:transparent;overflow:hidden}
@@ -60,6 +68,41 @@ addEventListener("resize", resize);
 let instances = [], order = [], goldens = [], frozen = false, mode = 1, focus = 0;
 let lastFeed = 0, feedErr = "";
 
+// ── production mode: a recorded run, replayed on score time ───────────────
+const CAPTURE = Q.get("capture");
+let frames = [], captureDur = 0;
+
+function applyAt(T) {
+  if (!frames.length) return;
+  let f = frames[0];
+  for (const fr of frames) { if (fr.t <= T) f = fr; else break; }
+  instances = f.instances || [];
+  for (const i of instances) if (!order.includes(i.name)) order.push(i.name);
+  const gs = [...new Set(instances.map(i => i.golden).filter(Boolean))].sort();
+  for (const g of gs) if (!goldens.includes(g)) goldens.push(g);
+  lastFeed = Date.now();
+}
+
+async function loadCapture() {
+  const r = await fetch(CAPTURE, { cache: "force-cache" });
+  if (!r.ok) throw new Error("capture: HTTP " + r.status);
+  frames = (await r.text()).split("\n").filter(Boolean).map(JSON.parse)
+                           .sort((a, b) => a.t - b.t);
+  captureDur = frames.length ? frames[frames.length - 1].t : 0;
+  // Names in capture order, so tile positions are stable across renders.
+  order = []; goldens = [];
+  for (const fr of frames) for (const i of (fr.instances || [])) if (!order.includes(i.name)) order.push(i.name);
+  applyAt(Number(Q.get("t") || 0));
+}
+
+// The hook the deterministic runtime calls: set the world to score time T and
+// draw one frame. Reads nothing but T.
+window.WALL = {
+  at(T) { applyAt(T); tf = T * 1000; frozen = true; drawOnce(); },
+  duration() { return captureDur; },
+  frames() { return frames.length; },
+};
+
 async function poll() {
   try {
     const r = await fetch(FEED + "?t=" + Date.now(), { cache: "no-store" });
@@ -72,7 +115,8 @@ async function poll() {
     for (const g of gs) if (!goldens.includes(g)) goldens.push(g);
   } catch (e) { feedErr = String(e.message || e); }
 }
-poll(); setInterval(poll, 500);
+if (CAPTURE) { loadCapture().catch(e => { feedErr = String(e.message || e); }); }
+else { poll(); setInterval(poll, 500); }
 
 addEventListener("keydown", e => {
   if (e.key === "1") mode = 1;
@@ -215,8 +259,17 @@ function chrome(t) {
 }
 
 let t0 = performance.now(), tf = 0;
+function drawOnce() {
+  const t = tf;
+  x.clearRect(0, 0, W, H);
+  if (UNFILTERED) starfield(t);
+  if (mode === 1) wall(t); else if (mode === 2) one(t);
+  chrome(t);
+}
 function frame(now) {
+  if (CAPTURE && frozen) { requestAnimationFrame(frame); return; }
   const t = frozen ? tf : (tf = now - t0);
+  if (CAPTURE) applyAt(t / 1000);
   x.clearRect(0, 0, W, H);
   if (UNFILTERED) starfield(t);
   if (mode === 1) wall(t);
