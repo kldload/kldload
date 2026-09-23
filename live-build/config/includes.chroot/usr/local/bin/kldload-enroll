@@ -234,6 +234,14 @@ _ssh() {
         -i /root/.ssh/id_ed25519 "root@${IP}" "$@" 2>/dev/null
 }
 
+# _ssh_stdin — _ssh WITHOUT -n, for the one call that feeds the guest a file on
+# stdin. Kept separate so the -n rule above stays true for everything else.
+_ssh_stdin() {
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 -o BatchMode=yes \
+        -i /root/.ssh/id_ed25519 "root@${IP}" "$@" 2>/dev/null
+}
+
 # ── State DB registration ───────────────────────────────────────────────────
 # Done FIRST and independently of the mesh. A VM the inventory knows about but
 # which is not yet meshed is useful — Ansible can still reach it over the
@@ -266,9 +274,29 @@ if ! _ssh true; then
     warn "${VM}: no SSH as root — cannot enrol on the mesh (DB row was written)"
     exit 2
 fi
+# kube-network is the guest half of the mesh. The k8s golden ships it; the klab
+# goldens (klab-golden-*, klab-desktop-*) ship wireguard-tools but not the
+# script, so every clone of them was refused here as "not a kldload image" --
+# ten goldens per KVM edition, none enrolable (fiend, sweep of build 57,
+# 2026-09-23). The script is self-contained (wg, wg-quick, systemd, nft), so
+# the host carries ITS OWN copy across rather than anything re-implementing it.
 if ! _ssh 'command -v kube-network >/dev/null 2>&1'; then
-    warn "${VM}: kube-network absent in the guest — not a kldload image? (DB row was written)"
-    exit 2
+    if ! _ssh 'command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1'; then
+        warn "${VM}: neither kube-network nor wireguard-tools in the guest — cannot enrol on the mesh (DB row was written)"
+        exit 2
+    fi
+    _kn_src="$(command -v kube-network || true)"
+    if [[ -z "$_kn_src" ]]; then
+        warn "${VM}: kube-network is not installed on this host either — nothing to carry across (DB row was written)"
+        exit 2
+    fi
+    if _ssh_stdin 'install -d -m 0755 /usr/local/bin && install -m 0755 /dev/stdin /usr/local/bin/kube-network' <"$_kn_src" &&
+        _ssh 'command -v kube-network >/dev/null 2>&1'; then
+        log "${VM}: kube-network carried into the guest from ${_kn_src}"
+    else
+        warn "${VM}: could not install kube-network in the guest — cannot enrol on the mesh (DB row was written)"
+        exit 2
+    fi
 fi
 
 # ── Identity: give the guest its own name ───────────────────────────────────
