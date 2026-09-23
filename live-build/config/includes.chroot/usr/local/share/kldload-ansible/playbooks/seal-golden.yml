@@ -111,6 +111,15 @@
         rm -f /var/lib/cloud/seed/nocloud-net/* 2>/dev/null || true
       changed_when: false
 
+    # A lease file makes every clone ask for the GOLDEN's last address. On
+    # onyx 2026-09-22 each k8s-golden clone replayed .200 from a lease the
+    # golden kept from 08-30, held it beside its real lease, and WireGuard
+    # followed the wrong one. Forget them: a clone asks the way a new machine does.
+    - name: Forget DHCP leases
+      shell: |
+        rm -f /var/lib/NetworkManager/*.lease /var/lib/dhclient/*.lease* /var/lib/dhcp/*.leases
+      changed_when: false
+
     - name: Truncate journal
       shell: journalctl --rotate && journalctl --vacuum-time=1s
       failed_when: false

@@ -457,6 +457,40 @@ setup_zfs_for_k8s() {
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────
+# install_node_exporter — host metrics on :9100, so a clone of this golden is
+# scraped like every klab guest. The hypervisor's klab-prom-targets lists
+# every enrolled VM (klab-vms.json); a k8s-golden clone was in that list and
+# refused the connection, because nothing here ever installed an exporter
+# (onyx, 2026-09-22).
+#
+# Package names, checked against the repos on 2026-09-22: Fedora 44 and EL10
+# (EPEL) ship `node-exporter`; Debian ships `prometheus-node-exporter`. All
+# three install prometheus-node-exporter.service, so that is the unit enabled.
+# Returns 0 either way -- a missing exporter costs metrics, not the golden --
+# but says so loudly, and the estate lifecycle checks the scrape itself.
+install_node_exporter() {
+    log "Installing node_exporter..."
+    local _ok=0
+    if [[ "$PM" == "dnf" ]]; then
+        dnf install -y node-exporter && _ok=1
+    else
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            prometheus-node-exporter && _ok=1
+    fi
+    if ((_ok == 0)); then
+        warn "node_exporter did not install -- clones of this golden will not answer on :9100"
+        return 0
+    fi
+    # Outcome: the unit exists and is enabled in the image that gets sealed.
+    systemctl enable --now prometheus-node-exporter.service ||
+        warn "prometheus-node-exporter.service did not enable"
+    if systemctl is-enabled prometheus-node-exporter.service >/dev/null 2>&1; then
+        log "  node_exporter enabled (prometheus-node-exporter.service)"
+    else
+        warn "node_exporter installed but NOT enabled -- clones will not answer on :9100"
+    fi
+}
+
 main() {
     log "Setting up Kubernetes node on $(hostname)"
     echo ""
@@ -467,6 +501,7 @@ main() {
     install_k8s_packages
     install_helm
     install_cilium_cli
+    install_node_exporter
 
     # Pre-pull all container images so clones deploy without internet.
     # kubeadm images + Cilium + MetalLB + Hubble — everything needed for
@@ -531,7 +566,25 @@ DHCP=yes
 UseDomains=yes
 ClientIdentifier=mac
 NETD
-    systemctl enable systemd-networkd 2>/dev/null || true
+    # ONE DHCP client per NIC. Where NetworkManager already owns the
+    # interface (the whole RPM family), enabling networkd as well ran two
+    # clients on enp1s0: every clone held two addresses, and WireGuard
+    # roamed its endpoint to the one nothing had recorded, so the estate
+    # said "not on the mesh" for a peer that was handshaking.
+    # HISTORY: onyx, 2026-09-22, a k8s-golden clone with 192.168.122.197
+    # (networkd) and .200 (NetworkManager, replaying the golden's lease
+    # file). NM alone, with the MAC client-id below: one address, the right
+    # endpoint. The non-NM branch is unchanged and unverified here -- the
+    # estate lifecycle now checks for exactly one address on every clone.
+    if systemctl is-enabled NetworkManager >/dev/null 2>&1; then
+        # swallow: the sockets are absent on images that never shipped networkd
+        systemctl disable systemd-networkd.service systemd-networkd.socket >/dev/null 2>&1 || true
+        rm -f /etc/systemd/network/10-dhcp.network
+        log "  NetworkManager owns the NIC -- systemd-networkd left disabled"
+    else
+        # swallow: networkd absent means the ifupdown/dhclient paths below carry it
+        systemctl enable systemd-networkd 2>/dev/null || true
+    fi
 
     # ifupdown fallback (Debian/Ubuntu only — RPM family uses NetworkManager)
     if [[ -d /etc/network ]]; then
