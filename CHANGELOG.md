@@ -329,6 +329,11 @@ no `--json` flag, so it read an empty stdout and returned "not on the mesh" ever
 time — including for the machines that were. Two broken things agreeing is not
 evidence, and it cost days.
 
+Fixing both proved the fix on Fedora and left Debian still failing, which is
+recorded under Known issues rather than claimed as solved. The lesson is the
+same one twice: a defect that two broken instruments agreed about needs each
+instrument fixed separately before anything is concluded.
+
 `klab` announced fifteen golden images ready and exited 0 after every one of
 them had failed to build. The exit status is what the orchestrator reads, so it
 wrote a ready marker over an empty pool. A golden is now "ready" when ZFS has the
@@ -505,6 +510,12 @@ session was reverted because it segfaulted on the first keypress.
 - Arch is demoted, not deleted. An encrypted Arch install panics at boot because
   the initcpio ZFS hook exits; the code is still there and the distribution is
   off the netboot list until that is fixed.
+- A clone made by `kvm-clone` cannot be enrolled on the mesh **on Debian**.
+  `kvm-clone` now sets `disable_root: false` and writes a `PermitRootLogin`
+  drop-in, and that is verified working on Fedora — root SSH to a freshly cloned
+  probe succeeds. The same build still logs "no SSH as root while reading its
+  node id" on the Debian lineage, so something further is in the way there and it
+  is not yet identified. Fedora is unaffected.
 - The `|| true` baseline is still large even though the ratchet holds, and 45 of
   those swallows are continuation-blind — they cannot distinguish a harmless case
   from a real failure. Only the install path has been cleaned.
