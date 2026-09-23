@@ -374,6 +374,12 @@ cycle's own silent-failure cleanup: a comment explaining an error swallow was
 placed inside a multi-line command, which ends the command there, and every
 linter accepted it. A gate now fails the build on a comment inside a command.
 
+MetalLB's doctor check failed on Kubernetes installs with every node Ready. The
+chart deploys FRR, a BGP routing daemon, beside every speaker by default, and on
+one node FRR's zebra never started, so that speaker sat at three of four
+containers ready. kldload announces its address pool in L2 mode and never speaks
+BGP, so FRR is now turned off: each speaker is one container.
+
 Building the core or single-mirror edition beside the full one renamed the full
 ISO to `.prev`, because the keep-the-previous-image step knew only the `-net`
 suffix. It now derives the name exactly as the builder does.
@@ -554,10 +560,9 @@ session was reverted because it segfaulted on the first keypress.
 - Arch is demoted, not deleted. An encrypted Arch install panics at boot because
   the initcpio ZFS hook exits; the code is still there and the distribution is
   off the netboot list until that is fixed.
-- The `k8s-stack/metallb` doctor check failed on two Kubernetes installs, one
-  Debian and one Fedora, with every node Ready. The pods behind it were not
-  recorded, so the cause is not known yet; the install report and bundle now
-  keep the measured value and the cluster's pod state for the next occurrence.
+- MetalLB installs chart 0.14.9 from its upstream repository at first boot,
+  while the build resolves and mirrors 0.16.1. The installed version is not the
+  one the build locked, and a Kubernetes bootstrap needs the network for it.
 - The `|| true` baseline is still large even though the ratchet holds, and 45 of
   those swallows are continuation-blind — they cannot distinguish a harmless case
   from a real failure. Only the install path has been cleaned.
