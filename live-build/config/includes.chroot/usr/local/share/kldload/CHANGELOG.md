@@ -510,12 +510,17 @@ session was reverted because it segfaulted on the first keypress.
 - Arch is demoted, not deleted. An encrypted Arch install panics at boot because
   the initcpio ZFS hook exits; the code is still there and the distribution is
   off the netboot list until that is fixed.
-- A clone made by `kvm-clone` cannot be enrolled on the mesh **on Debian**.
-  `kvm-clone` now sets `disable_root: false` and writes a `PermitRootLogin`
-  drop-in, and that is verified working on Fedora — root SSH to a freshly cloned
-  probe succeeds. The same build still logs "no SSH as root while reading its
-  node id" on the Debian lineage, so something further is in the way there and it
-  is not yet identified. Fedora is unaffected.
+- Mesh enrolment of a freshly cloned VM is **fixed but not fully confirmed in a
+  sweep**. `kvm-clone` now sets `disable_root: false` and writes a
+  `PermitRootLogin` drop-in, and that was verified by cloning real goldens and
+  logging in as root: a Debian 13 klab golden and a Fedora 44 k8s golden both
+  accept it. The Fedora case proves the fix is load-bearing rather than
+  incidental — that clone also carries the installer's own hardening drop-in
+  setting `PermitRootLogin no`, and the clone drop-in sorts ahead of it, so
+  without this change root SSH is refused and enrolment cannot happen at all.
+  One sweep edition still logged "no SSH as root" with the fix present; the
+  remaining candidate is the enrol sweep running before cloud-init finishes on
+  the clone rather than anything in the configuration, and that is unconfirmed.
 - The `|| true` baseline is still large even though the ratchet holds, and 45 of
   those swallows are continuation-blind — they cannot distinguish a harmless case
   from a real failure. Only the install path has been cleaned.
