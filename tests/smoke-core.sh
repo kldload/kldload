@@ -202,6 +202,40 @@ else
     _pass "core-only checks skipped (profile: ${_kld_profile})"
 fi
 
+# ── Package signatures ───────────────────────────────────────────────────────
+# Every upstream RPM repo the installer wrote was gpgcheck=0 and stayed that way
+# on the installed system, so updates ran as root unverified -- the EL ZFS repo
+# over plain HTTP included (found 2026-09-23). An enabled section must check
+# package signatures, or sign its metadata (repo_gpgcheck=1 with a gpgkey,
+# NVIDIA's model). kldload-custom.repo is the operator's own mirror, documented
+# as unsigned, and is the one exception. apt has no equivalent gap: the final
+# sources.list carries no trusted=yes.
+_section "Package signatures"
+if compgen -G "/etc/yum.repos.d/*.repo" >/dev/null; then
+    _unsigned="$(awk '
+        FNR == 1 { flush(); file = FILENAME; sub(/.*\//, "", file) }
+        /^\[/ { flush(); sec = $0; en = 1; gc = -1; rg = 0; gk = 0; next }
+        /^enabled *= *0/ { en = 0 }
+        /^gpgcheck *= *1/ { gc = 1 }
+        /^gpgcheck *= *0/ { gc = 0 }
+        /^repo_gpgcheck *= *1/ { rg = 1 }
+        /^gpgkey *=/ { gk = 1 }
+        function flush() {
+            if (sec != "" && en && file != "kldload-custom.repo" && gc == 0 && !(rg && gk))
+                printf "%s%s ", file, sec
+            sec = ""
+        }
+        END { flush() }
+    ' /etc/yum.repos.d/*.repo)"
+    if [[ -z "$_unsigned" ]]; then
+        _pass "every enabled RPM repo checks signatures"
+    else
+        _fail "unsigned RPM repos" "${_unsigned% }"
+    fi
+else
+    _pass "no RPM repos (apt verifies with the archive keyring)"
+fi
+
 # ── Snapshot Test ────────────────────────────────────────────────────────────
 _section "ZFS Snapshot Test"
 
