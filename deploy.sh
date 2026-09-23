@@ -633,9 +633,19 @@ cmd_build() {
     # matching its own recorded sha256, while kldload-<ver>-<arch>-net.iso
     # simply did not exist. A rollback mechanism that eats the artefact it was
     # meant to protect is worse than none.
+    #
+    # The suffix rules are build-iso.sh's own, in its order (ISO_NAME there).
+    # Knowing only "-net" meant EDITION=core and a single-mirror build computed
+    # the FULL image's name and moved it to .prev: build 57's full ISO vanished
+    # when its core edition was built beside it, and the release check reported
+    # it missing (onyx, 2026-09-23; recovered from .prev by sha256).
     local _suffix=""
+    if [[ "$PAYLOAD" != "net" && $(echo "$DARKSITES" | wc -w) -eq 1 ]]; then
+        _suffix="-${DARKSITES// /}"
+    fi
     [[ "$PAYLOAD" == "net" ]] && _suffix="-net"
-    _prev_iso="$ROOT/live-build/output/kldload-${_ver}-${ARCH}${_suffix}.iso"
+    [[ "$EDITION" == "core" ]] && _suffix="-core"
+    _prev_iso="$ROOT/live-build/output/${ISO_NAME_OVERRIDE:-kldload-${_ver}-${ARCH}${_suffix}.iso}"
     if [[ -n "$_ver" && -f "$_prev_iso" ]]; then
         mv -f "$_prev_iso" "${_prev_iso}.prev" &&
             log "kept previous image as $(basename "${_prev_iso}.prev")"
