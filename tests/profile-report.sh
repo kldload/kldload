@@ -61,6 +61,28 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # errors in the journal"), not a failure. One explained swallow instead of six.
 _count() { grep -cE "$1" || true; }
 
+# iso_build — "<version> <commit> lock <digest>" from the build's own stamp.
+#
+# The build writes /etc/kldload/VERSION into the rootfs (build-iso.sh,
+# "Build provenance") and the installer carries it to the target. This used to
+# grep install-manifest.env for KLDLOAD_ISO_COMMIT / BUILD_COMMIT / ISO_VERSION,
+# keys nothing has ever written: every report in every sweep up to 2026-09-22
+# said "?", and "?" read as "old image" rather than "wrong probe".
+iso_build() {
+    local v="${KLDLOAD_VERSION_FILE:-/etc/kldload/VERSION}" out
+    [[ -r "$v" ]] || {
+        echo "? (no $v)"
+        return 0
+    }
+    out="$(awk -F'[[:space:]]*=[[:space:]]*' '
+        $1 == "kldload_version" { ver = $2 }
+        $1 == "commit" { c = $2 }
+        $1 == "k8s_stack_lock" { l = $2 }
+        END { printf "%s %s lock %s", (ver ? ver : "?"), (c ? c : "?"), (l ? l : "?") }
+    ' "$v" </dev/null)"
+    printf '%s\n' "$out"
+}
+
 # KLDLOAD_MANIFEST overrides the path, so this script can be exercised against
 # a fixture instead of only on a freshly installed machine.
 MANIFEST="${KLDLOAD_MANIFEST:-/etc/kldload/install-manifest.env}"
@@ -98,7 +120,7 @@ printf '%-18s %s\n' \
     "kernel" "$(uname -r)" \
     "zfs module" "$(S modinfo -F version zfs || echo '?')" \
     "zfs userland" "$(zfs --version 2>/dev/null | head -1 || echo '?')" \
-    "ISO build" "$(S grep -hE '^KLDLOAD_(ISO_COMMIT|BUILD_COMMIT|ISO_VERSION)=' "$MANIFEST" | tr '\n' ' ' | tr -d '"' || echo '?')" \
+    "ISO build" "$(iso_build)" \
     "installed at" "$(S stat -c %y "$MANIFEST" | cut -d. -f1 || echo '?')" \
     "uptime" "$(uptime -p)"
 echo '```'
