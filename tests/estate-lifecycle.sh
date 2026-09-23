@@ -118,6 +118,20 @@ except Exception: sys.exit(1)
 sys.exit(0 if sys.argv[1] in d.get("_meta",{}).get("hostvars",{}) else 1)' "$1" 2>/dev/null
 }
 
+# prom_up — 0 when Prometheus itself reports a target labelled vm=<name> with
+# health "up". The target file only says a generator wrote a line; this says
+# a scrape of the guest's node_exporter actually succeeded.
+prom_up() {
+    curl -fsS --max-time 5 'http://localhost:9090/api/v1/targets?state=active' 2>/dev/null |
+        python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(1)
+for t in d.get("data",{}).get("activeTargets",[]):
+    if t.get("labels",{}).get("vm")==sys.argv[1] and t.get("health")=="up":
+        sys.exit(0)
+sys.exit(1)' "$1"
+}
+
 in_prometheus() { grep -rqs "\"vm\"[[:space:]]*:[[:space:]]*\"${1}\"" /etc/prometheus/targets 2>/dev/null; }
 
 # The mesh is keyed by public key, not name, so the question is asked of the
@@ -306,17 +320,20 @@ elif key_on_mesh; then
 else
     _fail "join: WireGuard key" "the recorded key for ${PROBE} is not a peer on wg-mgmt"
 fi
-# klab-prom-targets generates entries for klab-blue-*, klab-green-* and
-# kspawn-* and nothing else, so a probe named anything else is not supposed to
-# appear and asserting that it does is a test bug, not a finding. The REAL gap
-# — that a VM you create by hand is invisible to monitoring — is reported once,
-# as a warning, rather than as a failure on every run.
+# klab-prom-targets writes every enrolled VM into klab-vms.json (since
+# 2026-09-22; before that only klab-blue/green/kspawn names were scraped and a
+# clone of any golden was invisible to monitoring). Two questions, because
+# they fail differently: is it in a target file (the generator), and does
+# Prometheus report it UP (the guest's node_exporter, and the network to it).
 if [[ ! -d /etc/prometheus/targets ]]; then
     _didnotrun "join: Prometheus file_sd" "/etc/prometheus/targets does not exist"
-elif [[ "$PROBE" == klab-blue-* || "$PROBE" == klab-green-* || "$PROBE" == kspawn-* ]]; then
-    _check "Prometheus file_sd" yes in_prometheus
 else
-    _warn "join: Prometheus file_sd" "nothing generates a target for a VM named '${PROBE}' — only klab-blue-*, klab-green-* and kspawn-* are covered, so a hand-made clone is not scraped"
+    _check "Prometheus file_sd" yes in_prometheus 120
+    if curl -fsS --max-time 5 http://localhost:9090/-/ready >/dev/null 2>&1; then
+        _check "Prometheus scrape (target up)" yes prom_up 180
+    else
+        _didnotrun "join: Prometheus scrape" "Prometheus is not answering on localhost:9090"
+    fi
 fi
 
 # In the inventory is not reachable. This is the same distinction smoke-estate
@@ -327,6 +344,60 @@ if have ansible && in_inventory "$PROBE"; then
     else
         _fail "ansible reach" "${PROBE} is in the inventory and does not answer a ping"
     fi
+fi
+
+# A ping proves the transport. The shipped plays prove fact gathering, the
+# become path and the inventory's host vars against THIS clone. Judged by the
+# probe's own recap line, not the exit status: a play can exit 0 having
+# matched no host at all.
+_PLAYS=/usr/local/share/kldload-ansible/playbooks
+if ! have ansible-playbook; then
+    _didnotrun "playbooks" "ansible-playbook is not installed"
+elif ! in_inventory "$PROBE"; then
+    _didnotrun "playbooks" "${PROBE} is not in the inventory, so no play can target it"
+else
+    for _pb in system-info.yml smoke-test.yml; do
+        if [[ ! -r "${_PLAYS}/${_pb}" ]]; then
+            _fail "playbook ${_pb}" "${_PLAYS}/${_pb} is not installed"
+            continue
+        fi
+        _pb_out="$(timeout 300 ansible-playbook -i /usr/local/bin/kldload-inventory \
+            --limit "$PROBE" "${_PLAYS}/${_pb}" </dev/null 2>&1)" || true
+        _recap="$(printf '%s\n' "$_pb_out" | grep -E "^${PROBE} +: +ok=" | tail -n 1)"
+        if [[ -z "$_recap" ]]; then
+            _fail "playbook ${_pb}" "no recap line for ${PROBE} — $(printf '%s' "$_pb_out" | tail -n 1 | cut -c1-120)"
+        elif [[ "$_recap" =~ failed=0 && "$_recap" =~ unreachable=0 && ! "$_recap" =~ ok=0[[:space:]] ]]; then
+            _pass "playbook ${_pb} ran clean on ${PROBE}"
+        else
+            _fail "playbook ${_pb}" "$(printf '%s' "$_recap" | tr -s ' ')"
+        fi
+    done
+fi
+
+# ONE address on the clone's own network. Two means two DHCP clients own the
+# NIC (networkd beside NetworkManager, a golden's lease replayed): WireGuard
+# then follows whichever address the guest sends from, and the estate cannot
+# match the peer to the machine. Found on a k8s-golden clone on onyx,
+# 2026-09-22, with .197 and .200. wg-* interfaces are the mesh, not the NIC.
+if have ansible && in_inventory "$PROBE"; then
+    _addrs="$(timeout 60 ansible "$PROBE" -i /usr/local/bin/kldload-inventory -m command \
+        -a 'ip -4 -o addr show scope global' </dev/null 2>/dev/null |
+        awk '$2 !~ /^wg/ && $3 == "inet" {print $2 "=" $4}' | tr '\n' ' ')"
+    _n="$(printf '%s' "$_addrs" | wc -w)"
+    if ((_n == 1)); then
+        _pass "one address on the NIC: ${_addrs% }"
+    elif ((_n == 0)); then
+        _fail "NIC address" "could not read ${PROBE}'s addresses through Ansible"
+    else
+        _fail "NIC address" "${_n} addresses (${_addrs% }) — two DHCP clients own the interface"
+    fi
+fi
+
+if ((KEEP == 1)); then
+    printf '\n  --keep: leaving %s up; the unjoin half was NOT tested\n' "$PROBE"
+    printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
+    ((FAIL == 0)) || exit 1
+    exit 0
 fi
 
 # ─── 3. Delete and unjoin ───────────────────────────────────────────────────
@@ -349,8 +420,8 @@ if [[ -n "$PROBE_PUB" ]]; then
 else
     _didnotrun "unjoin: WireGuard mesh" "the probe never had a recorded key, so there is nothing to see leave"
 fi
-if [[ -d /etc/prometheus/targets ]] && [[ "$PROBE" == klab-* || "$PROBE" == kspawn-* ]]; then
-    _check "Prometheus file_sd" no in_prometheus
+if [[ -d /etc/prometheus/targets ]]; then
+    _check "Prometheus file_sd" no in_prometheus 120
 fi
 
 if has_zvol "$PROBE"; then
