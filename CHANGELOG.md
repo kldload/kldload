@@ -329,10 +329,54 @@ no `--json` flag, so it read an empty stdout and returned "not on the mesh" ever
 time — including for the machines that were. Two broken things agreeing is not
 evidence, and it cost days.
 
-Fixing both proved the fix on Fedora and left Debian still failing, which is
-recorded under Known issues rather than claimed as solved. The lesson is the
-same one twice: a defect that two broken instruments agreed about needs each
-instrument fixed separately before anything is concluded.
+Fixing both still left every clone off the mesh, and this time the message was
+the lie. With root SSH working, `kldload-enroll` read the guest's mesh id with a
+`cat` that exits 1 when the file is absent — which it is on every fresh clone,
+because goldens are sealed without one and the id is allocated a few lines
+later. That 1 came back through ssh and was reported as "no SSH as root". It was
+not a Debian problem, and it was not cloud-init timing: the enrol sweep retried
+thirteen minutes after the clone booted and got the same answer. Under that sat
+a third layer: the klab goldens carry WireGuard but not `kube-network`, the
+guest half of the mesh, so every clone of them was refused as "not a kldload
+image". The enroller now carries the host's own copy across.
+
+The other half had never worked either. Deleting a VM left it a peer on both
+mesh planes, because nothing on the delete path removed peers — and the check
+meant to catch it asked the estate for the machine by name, which a deleted
+machine no longer has, so it reported "released" every time. Enrolment now
+records each VM's mesh id and key; `kvm-delete` removes the peer while the key
+still matches and exits non-zero if it is still on the interface afterwards.
+
+Goldens ran two DHCP clients. `kube-setup` enabled systemd-networkd beside
+NetworkManager on the Kubernetes golden, and a klab desktop golden runs GNOME's
+NetworkManager beside the networkd that klab chose; the seals also kept
+NetworkManager's lease files, so a clone asked for the golden's last address
+with one client and took a fresh one with the other. Two addresses on one
+interface, WireGuard following whichever the guest sent from, and an estate
+that could not match the peer to the machine. Each golden now has exactly one
+client on its NIC, and every seal forgets its leases.
+
+A clone of any golden was invisible to monitoring: the target generator knew
+three klab name patterns and nothing else, and the Kubernetes golden did not
+ship node_exporter at all. Every enrolled VM is now a Prometheus target, and the
+Kubernetes golden installs the exporter.
+
+The estate test now runs on every golden rather than the first one it found, and
+for each clone proves the shipped playbooks run, that it has exactly one
+address, that Prometheus scrapes it, and that deleting it takes it off the mesh
+and out of monitoring. The lesson is the same one three times: a defect that two
+broken instruments agreed about needs each instrument fixed separately before
+anything is concluded.
+
+The installer stamped every install as version 1.1.0, and the Secure Boot
+re-signer that runs after a kernel update signed nothing. Both came from this
+cycle's own silent-failure cleanup: a comment explaining an error swallow was
+placed inside a multi-line command, which ends the command there, and every
+linter accepted it. A gate now fails the build on a comment inside a command.
+
+Building the core or single-mirror edition beside the full one renamed the full
+ISO to `.prev`, because the keep-the-previous-image step knew only the `-net`
+suffix. It now derives the name exactly as the builder does.
 
 `klab` announced fifteen golden images ready and exited 0 after every one of
 them had failed to build. The exit status is what the orchestrator reads, so it
@@ -510,17 +554,10 @@ session was reverted because it segfaulted on the first keypress.
 - Arch is demoted, not deleted. An encrypted Arch install panics at boot because
   the initcpio ZFS hook exits; the code is still there and the distribution is
   off the netboot list until that is fixed.
-- Mesh enrolment of a freshly cloned VM is **fixed but not fully confirmed in a
-  sweep**. `kvm-clone` now sets `disable_root: false` and writes a
-  `PermitRootLogin` drop-in, and that was verified by cloning real goldens and
-  logging in as root: a Debian 13 klab golden and a Fedora 44 k8s golden both
-  accept it. The Fedora case proves the fix is load-bearing rather than
-  incidental — that clone also carries the installer's own hardening drop-in
-  setting `PermitRootLogin no`, and the clone drop-in sorts ahead of it, so
-  without this change root SSH is refused and enrolment cannot happen at all.
-  One sweep edition still logged "no SSH as root" with the fix present; the
-  remaining candidate is the enrol sweep running before cloud-init finishes on
-  the clone rather than anything in the configuration, and that is unconfirmed.
+- The `k8s-stack/metallb` doctor check failed on two Kubernetes installs, one
+  Debian and one Fedora, with every node Ready. The pods behind it were not
+  recorded, so the cause is not known yet; the install report and bundle now
+  keep the measured value and the cluster's pod state for the next occurrence.
 - The `|| true` baseline is still large even though the ratchet holds, and 45 of
   those swallows are continuation-blind — they cannot distinguish a harmless case
   from a real failure. Only the install path has been cleaned.
