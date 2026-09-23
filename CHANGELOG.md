@@ -314,6 +314,21 @@ wholesale, which only showed up on the second run of the fixed build.
 
 The largest single class of fix this cycle.
 
+A clone made with `kvm-clone` could not be enrolled, because sshd refused root.
+The tool went to some trouble over root's `authorized_keys` — including
+installing it last to beat cloud-init's forced-command banner — and never
+permitted the login that key was for. Four tools that clone had each grown their
+own sshd drop-in for this, and all four call `kvm-clone` to do the cloning; the
+shipped verb they all go through was the only one without it. The estate sweep
+logged "no SSH as root while reading its node id", wrote the database row, and
+left the guest off the mesh.
+
+It stayed hidden because the check that would have caught it could not pass
+either: the lifecycle's mesh probe called `kldload-estate --json`, and there is
+no `--json` flag, so it read an empty stdout and returned "not on the mesh" every
+time — including for the machines that were. Two broken things agreeing is not
+evidence, and it cost days.
+
 `klab` announced fifteen golden images ready and exited 0 after every one of
 them had failed to build. The exit status is what the orchestrator reads, so it
 wrote a ready marker over an empty pool. A golden is now "ready" when ZFS has the
@@ -490,12 +505,9 @@ session was reverted because it segfaulted on the first keypress.
 - Arch is demoted, not deleted. An encrypted Arch install panics at boot because
   the initcpio ZFS hook exits; the code is still there and the distribution is
   off the netboot list until that is fixed.
-- Debian Kubernetes golden clones refuse root SSH, which is why the estate mesh
-  does not come up on that lineage. Fedora is unaffected. The mechanism is
-  identified but not yet fixed.
-- The `|| true` ratchet holds at its baseline but the baseline is still large,
-  and 45 of those swallows are continuation-blind — they cannot distinguish a
-  harmless case from a real failure. Only the install path has been cleaned.
+- The `|| true` baseline is still large even though the ratchet holds, and 45 of
+  those swallows are continuation-blind — they cannot distinguish a harmless case
+  from a real failure. Only the install path has been cleaned.
 
 Two things that were on this list in the 1.5.0 pre-releases are now closed:
 the module-signing **private** key no longer ships in the installation media
