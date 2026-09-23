@@ -155,6 +155,15 @@ for m in d.get("machines",[]) if isinstance(d,dict) else []:
 sys.exit(1)' "$1" 2>/dev/null
 }
 
+# key_on_mesh — 0 while the probe's WireGuard key is a peer on the RUNNING
+# wg-mgmt. This, not on_mesh, is the unjoin question: on_mesh asks the estate
+# by NAME, and a deleted VM has no name in the estate, so it answered "gone"
+# while the peer stayed on both planes (onyx, 2026-09-22, peer 150). The key
+# comes from kldload-enroll's record, read at join time, because the record is
+# what kvm-delete removes.
+PROBE_PUB=""
+key_on_mesh() { [[ -n "$PROBE_PUB" ]] && wg show wg-mgmt peers 2>/dev/null | grep -qxF "$PROBE_PUB"; }
+
 has_zvol() { zfs list -H -o name 2>/dev/null | grep -qx ".*/${1}" || zfs list -H -o name -r rpool/vms 2>/dev/null | grep -q "/${1}\$"; }
 
 # _wait_until <label> <want: yes|no> <fn> — poll until the answer matches, up
@@ -275,9 +284,28 @@ _section "Join"
 _check "libvirt" yes in_libvirt
 _check "state DB" yes in_db
 _check "Ansible inventory" yes in_inventory
-# 900s: the enrol sweep fires every 10 minutes.
-have kldload-estate && _check "WireGuard mesh" yes on_mesh 900 ||
+# The enrol sweep is a 10-minute timer, and waiting for it cost this test up to
+# 900s per clone -- 4-k8s ran out of its edition budget right here (fiend,
+# 2026-09-22). Starting the shipped sweep unit runs the SAME code path the timer
+# would, now. A oneshot `start` blocks until the sweep has finished.
+if systemctl cat kldload-enroll-sweep.service >/dev/null 2>&1; then
+    systemctl start kldload-enroll-sweep.service >/dev/null 2>&1 ||
+        _warn "enrol sweep" "kldload-enroll-sweep.service failed — see journalctl -u kldload-enroll-sweep"
+    _mesh_wait=120
+else
+    _warn "enrol sweep" "kldload-enroll-sweep.service is not installed — waiting on nothing but luck"
+    _mesh_wait=900
+fi
+have kldload-estate && _check "WireGuard mesh" yes on_mesh "$_mesh_wait" ||
     _didnotrun "join: WireGuard mesh" "kldload-estate is not installed"
+PROBE_PUB="$(sed -n 's/^guest_pub=//p' "/var/lib/kldload/mesh/enrolled/${PROBE}" 2>/dev/null || true)"
+if [[ -z "$PROBE_PUB" ]]; then
+    _fail "join: enrolment record" "no /var/lib/kldload/mesh/enrolled/${PROBE} — kvm-delete will have no way to take it off the mesh"
+elif key_on_mesh; then
+    _pass "join: ${PROBE}'s key is a live wg-mgmt peer"
+else
+    _fail "join: WireGuard key" "the recorded key for ${PROBE} is not a peer on wg-mgmt"
+fi
 # klab-prom-targets generates entries for klab-blue-*, klab-green-* and
 # kspawn-* and nothing else, so a probe named anything else is not supposed to
 # appear and asserting that it does is a test bug, not a finding. The REAL gap
@@ -316,7 +344,11 @@ fi
 _check "libvirt" no in_libvirt
 _check "state DB" no in_db
 _check "Ansible inventory" no in_inventory
-if have kldload-estate; then _check "WireGuard mesh" no on_mesh 900; fi
+if [[ -n "$PROBE_PUB" ]]; then
+    _check "WireGuard mesh (running wg-mgmt)" no key_on_mesh 60
+else
+    _didnotrun "unjoin: WireGuard mesh" "the probe never had a recorded key, so there is nothing to see leave"
+fi
 if [[ -d /etc/prometheus/targets ]] && [[ "$PROBE" == klab-* || "$PROBE" == kspawn-* ]]; then
     _check "Prometheus file_sd" no in_prometheus
 fi

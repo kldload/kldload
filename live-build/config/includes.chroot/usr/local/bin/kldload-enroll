@@ -318,7 +318,16 @@ esac
 # HISTORY: fiend, 2026-09-21. Clones of the Debian k8s-golden refuse root ssh
 # ("Please login as the user \"debian\" rather than the user \"root\""), so every
 # clone died here and the sweep reported it as having no address.
-if ! node_id="$(_ssh 'cat /etc/wireguard/.node-id 2>/dev/null')"; then
+#
+# The `|| true` runs IN THE GUEST, and it is the whole point: a fresh clone has
+# no .node-id (goldens are sealed without one; one is allocated below), so the
+# remote cat exits 1 -- and without the swallow that 1 came back through _ssh
+# and was reported as "no SSH as root". Root SSH is already proven by the
+# `_ssh true` above; what reaches this branch now is ssh's own failure (255).
+# HISTORY: fiend deb-4-k8s + 4-k8s, 2026-09-22 -- every clone of every golden
+# failed mesh enrolment here, after the kvm-clone root fix had made SSH work.
+# Reproduced on onyx: `_ssh true` rc=0, this read rc=1, /etc/wireguard empty.
+if ! node_id="$(_ssh 'cat /etc/wireguard/.node-id 2>/dev/null || true')"; then
     warn "${VM}: no SSH as root while reading its node id — cannot enrol on the mesh (DB row was written)"
     exit 2
 fi
@@ -433,6 +442,24 @@ if wg show wg-mgmt allowed-ips 2>/dev/null | grep -q "${MGMT_SUBNET}.${node_id}/
 else
     warn "${VM}: peer did not appear in the running wg-mgmt — check 'wg show'"
     exit 2
+fi
+
+# ── Record the enrolment, so a delete can undo it ───────────────────────────
+# kvm-delete reads this (mesh/enrolled/<vm>) to take the VM back OFF the mesh.
+# Nothing else knows which mesh id belongs to which domain once the domain is
+# gone: the DB row
+# never carried it, and a peer block in wg-mgmt.conf is keyed by id alone.
+# HISTORY: onyx, 2026-09-22 -- an enrolled clone deleted with kvm-delete left
+# peer 150 in wg-mgmt and wg-k8s; nothing on the delete path removed peers at
+# all, and the lifecycle's unjoin check asked the estate by NAME, so it passed.
+# One file per VM, public key only (nothing secret), replaced atomically.
+_mesh_dir=/var/lib/kldload/mesh/enrolled
+if install -d -m 0755 "$_mesh_dir" &&
+    printf 'node_id=%s\nguest_pub=%s\n' "$node_id" "$guest_pub" >"${_mesh_dir}/.${VM}.tmp" &&
+    mv -f "${_mesh_dir}/.${VM}.tmp" "${_mesh_dir}/${VM}"; then
+    :
+else
+    warn "${VM}: could not record the enrolment in ${_mesh_dir} — kvm-delete will not remove peer ${node_id}"
 fi
 
 # swallow: same as above — the inventory timer picks this up within 60s
