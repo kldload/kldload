@@ -388,6 +388,20 @@ one node FRR's zebra never started, so that speaker sat at three of four
 containers ready. kldload announces its address pool in L2 mode and never speaks
 BGP, so FRR is now turned off: each speaker is one container.
 
+**Security:** installed Fedora and EL systems updated without checking package
+signatures. Every upstream repository the installer wrote had signature checking
+off, and it stayed off on the installed machine — including the EL ZFS repository,
+which its host serves only over plain HTTP. Every repository now checks
+signatures with its vendor's key; on EL the EPEL and OpenZFS keys are installed
+for the first time. A repository whose key is missing refuses updates instead of
+installing them unverified. On a Fedora machine installed with an earlier
+release, this switches checking on (it adds Fedora's key, which the machine
+already has):
+
+    sed -i -e 's/^gpgcheck=0/gpgcheck=1/' \
+        -e '/^\[fedora/a gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$releasever-$basearch' \
+        /etc/yum.repos.d/fedora.repo
+
 Building the core or single-mirror edition beside the full one renamed the full
 ISO to `.prev`, because the keep-the-previous-image step knew only the `-net`
 suffix. It now derives the name exactly as the builder does.
