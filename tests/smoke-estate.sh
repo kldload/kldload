@@ -126,6 +126,9 @@ else
         # that are switched off just manufactures the failure this check was
         # measuring.
         _ping_pat="$(printf '%s\n' "$_inv_live" | paste -sd, -)"
+        # swallow: ansible exits non-zero when ANY host is unreachable, which
+        # is the case this check exists to measure. The output is judged below,
+        # host by host, rather than the status.
         _ping_out="$(timeout 180 ansible "$_ping_pat" -i "$INV" -m ping -o 2>/dev/null || true)"
         _ok="$(printf '%s\n' "$_ping_out" | _count 'SUCCESS')"
         _bad="$(printf '%s\n' "$_ping_out" | _count 'UNREACHABLE|FAILED')"

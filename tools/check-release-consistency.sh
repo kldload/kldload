@@ -40,6 +40,8 @@ case "${1:-}" in -h | --help)
 esac
 
 RELEASED=0
+# swallow: the website checkout beside the repo is optional. Absent, WEB is
+# empty and the website checks report SKIP rather than failing.
 WEB="${KLDLOAD_WEB:-$(cd "$(dirname "$(realpath "$0")")/../../kldload-web" 2>/dev/null && pwd || true)}"
 while (($#)); do
     case "$1" in
@@ -154,6 +156,9 @@ elif [[ -z "${R2_ACCESS_KEY_ID:-}" ]]; then
 else
     for key in kldload-free-latest.iso kldload-free-net-latest.iso \
         kldload-free-core-latest.iso kldload-free-fedora-latest.iso; do
+        # swallow: a key with no sidecar is exactly what this loop reports as
+        # BAD two lines down; rclone's own exit status would abort the loop
+        # before the other three keys were ever looked at.
         sum="$(rclone cat "r2:kldload-releases/${key}.sha256" 2>/dev/null || true)"
         if [[ -z "$sum" ]]; then
             bad "R2 $key has no readable .sha256 sidecar"

@@ -2953,6 +2953,8 @@ _section "Man pages"
 # A missing mandoc is reported as DID NOT RUN, never as a pass.
 _mp_files=()
 while IFS= read -r _f; do _mp_files+=("$_f"); done < <(
+    # swallow: grep exits 1 when the tree has no man pages at all, which is a
+    # legitimate state and is reported as DID NOT RUN by the branch below.
     cd "$ROOT" && git ls-files | grep -E '\.[1-8]$' || true
 )
 if ((${#_mp_files[@]} == 0)); then
@@ -2962,6 +2964,9 @@ elif ! command -v mandoc >/dev/null 2>&1; then
 else
     _mp_bad=0
     for _f in "${_mp_files[@]}"; do
+        # swallow: grep -v exits 1 when it filters EVERYTHING out, which is
+        # the passing case here -- a page whose only findings were the
+        # machine-dependent Xr warnings.
         _mp_out="$(mandoc -T lint "$ROOT/$_f" 2>&1 | grep -v 'referenced manual not found' || true)"
         if [[ -n "$_mp_out" ]]; then
             _fail "man page $(basename "$_f")" "$(printf '%s' "$_mp_out" | head -n 2 | tr '\n' ' ')"
