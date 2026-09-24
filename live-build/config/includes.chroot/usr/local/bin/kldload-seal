@@ -96,10 +96,19 @@ when you want to seal an image without converting its format.
 EOF
 }
 
-[[ -n "$DISK" && "$DISK" != "-h" && "$DISK" != "--help" ]] || {
+# Help is an answer (stdout, 0); a missing operand is a usage error (stderr,
+# 2). They shared "usage; exit 1" until 2026-09-23, so a script could not
+# tell `kldload-seal --help` from `kldload-seal` with nothing to seal.
+case "$DISK" in
+-h | --help | help)
     usage
-    exit 1
-}
+    exit 0
+    ;;
+"")
+    usage >&2
+    exit 2
+    ;;
+esac
 [[ -b "$DISK" || -f "$DISK" ]] || die "$DISK is not a block device or file"
 [[ $EUID -eq 0 ]] || die "must run as root"
 

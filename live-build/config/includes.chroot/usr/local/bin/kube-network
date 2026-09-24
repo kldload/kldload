@@ -5,11 +5,15 @@
 #   wg-k8s  (10.251.0.x)  — kubelet, API server, Cilium, pod-to-pod
 #
 # Usage:
-#   kube-network init <node-id>           — generate keys, create configs (node-id: 1-254)
+#   kube-network init <node-id> [--force] — generate keys, create configs (node-id: 1-254);
+#                                           --force re-keys a node that already has an id
 #   kube-network add-peer <peer-ip> <peer-pubkey> <peer-id>  — add a peer to the mesh
+#   kube-network remove-peer <peer-id>    — drop a peer from both planes
+#   kube-network show-keys                — this node's public keys
 #   kube-network status                   — show WireGuard status
 #   kube-network pin-kubelet              — pin kubelet to wg-k8s interface
 #   kube-network nft                      — apply K8s-aware nftables rules
+# Exit: 0 done, 1 a step failed, 2 usage error (-h/--help is 0).
 set -euo pipefail
 
 # Rule 9: -h/--help answers before this re-exec. These tools already had
@@ -33,7 +37,11 @@ usage() {
 Usage: kube-network <command> [args]
 
 Commands:
-  init <node-id>                          Generate keys, create WireGuard configs
+  init <node-id> [--force]                Generate keys, create WireGuard configs.
+                                          A node that already has an id is left
+                                          alone; --force re-keys it (and drops
+                                          every peer it had) or moves it to a
+                                          different id
   add-peer <endpoint> <pubkey> <peer-id>  Add a peer to the mesh
   remove-peer <peer-id>                   Remove a peer from both planes
   show-keys                               Show this node's public keys
@@ -62,8 +70,9 @@ Example — 3-node cluster:
   kube-network pin-kubelet
   kube-network nft
 EOF
-    # asked-for help is 0; a usage error stays 1
-    exit "${1:-1}"
+    # asked-for help is 0; a usage error is 2, distinct from a step that
+    # ran and failed (1).
+    exit "${1:-2}"
 }
 
 # ── init ───────────────────────────────────────────────────────────────────

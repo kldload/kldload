@@ -11,6 +11,29 @@ set -euo pipefail
 
 cmd="${1:-all}"
 
+# usage — the contract. -h/--help prints it on stdout and exits 0 (it used
+# to fall into the catch-all: usage on stdout, exit 1, 2026-09-23); an
+# unknown verb prints it on stderr and exits 2.
+usage() {
+    cat <<'EOF'
+Usage: ksnap [list|rollback <path>|destroy <snap>|<path>]
+
+  ksnap              Snapshot all key datasets
+  ksnap /home/admin  Snapshot a specific path
+  ksnap list         Show all snapshots
+  ksnap rollback /x  Roll back to last snapshot
+  ksnap destroy NAME Destroy a snapshot
+
+Exit: 0 done, 1 a snapshot or rollback failed, 2 usage error.
+EOF
+}
+case "$cmd" in
+-h | --help | help)
+    usage
+    exit 0
+    ;;
+esac
+
 _ts() { date +%Y%m%d-%H%M%S; }
 _log() { printf '\033[0;32m[ksnap]\033[0m %s\n' "$*"; }
 _err() { printf '\033[0;31m[ksnap]\033[0m %s\n' "$*" >&2; }
@@ -96,13 +119,8 @@ all)
     ;;
 
 *)
-    echo "Usage: ksnap [list|rollback <path>|destroy <snap>|<path>]"
-    echo ""
-    echo "  ksnap              Snapshot all key datasets"
-    echo "  ksnap /home/admin  Snapshot a specific path"
-    echo "  ksnap list         Show all snapshots"
-    echo "  ksnap rollback /x  Roll back to last snapshot"
-    echo "  ksnap destroy NAME Destroy a snapshot"
-    exit 1
+    _err "unknown command: $cmd"
+    usage >&2
+    exit 2
     ;;
 esac
