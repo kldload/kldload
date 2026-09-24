@@ -403,16 +403,21 @@ DNS
             -f "${SECRETS}/enrollment_ed25519"
 
     # 8. Tang server — key sealing endpoint for all nodes (binds to wg0/wg1)
-    if [[ -x /usr/local/sbin/kldload-tang-setup ]]; then
-        /usr/local/sbin/kldload-tang-setup --bind-ip 10.77.0.1 --tang-port 7500 &&
-            ok "Tang server started on 10.77.0.1:7500" ||
-            log "WARNING: kldload-tang-setup failed — check /var/log/kldload/tang.log"
-    fi
+    #
+    # Steps 8 and 9 and the zero-trust steps in setup_zero_trust name tools
+    # that are not in this repository: kldload-tang-setup, kldload-dns-api
+    # (a unit, never written), kldload-issue-cert, kldload-salt-ssl-enable,
+    # kldload-nftables-apply, kldload-clevis-seal, kldload-dns-register and
+    # kldload-firstboot-master. Every one sat behind `[[ -x … ]] &&`, which
+    # skipped in silence, except the dns-api enable, which logged a WARNING
+    # about a unit that could not exist. Found 2026-09-23 by grepping each
+    # name across the tree. Same treatment as step 10 below: say plainly that
+    # the feature is unimplemented, and nothing else, so a firstboot log
+    # reads as what happened rather than what was hoped for.
+    log "UNIMPLEMENTED: Tang key-sealing endpoint — kldload-tang-setup is not shipped"
 
     # 9. DNS registration API — accepts POSTs from worker nodes at boot
-    systemctl enable --now kldload-dns-api.service 2>/dev/null &&
-        ok "kldload-dns-api listening on :8081" ||
-        log "WARNING: kldload-dns-api.service failed to start"
+    log "UNIMPLEMENTED: DNS registration API — kldload-dns-api.service is not shipped"
 
     # 10. cluster-autobootstrap timer
     # DO NOT enable this until the binary exists.
@@ -1175,54 +1180,25 @@ setup_zero_trust() {
 
     log "=== Zero-trust setup: cert issuance + mTLS + microsegmentation ==="
 
+    # Steps 1, 2, 3 and 5, and the seal in step 4, name tools that do not
+    # exist in this repository (see the note at setup_master step 8). Each
+    # used to hide behind `[[ -x … ]]`; each now says so. What this node
+    # WOULD have got is recorded so the log is still useful when the tools
+    # are written: SANs 10.77-10.80.${oct3}.${idx} + ${LAN_IP}, master API at
+    # 10.77.${oct3}.1.
     # 1. Issue node cert with all WireGuard IPs as SANs
-    if [[ -x /usr/local/sbin/kldload-issue-cert ]]; then
-        mkdir -p /etc/kldload/certs
-        /usr/local/sbin/kldload-issue-cert \
-            --hostname "${HOSTNAME}" \
-            --ip "10.77.${oct3}.${idx}" \
-            --ip "10.78.${oct3}.${idx}" \
-            --ip "10.79.${oct3}.${idx}" \
-            --ip "10.80.${oct3}.${idx}" \
-            --ip "${LAN_IP}" \
-            --out-dir /etc/kldload/certs &&
-            ok "Node cert issued: /etc/kldload/certs/${HOSTNAME}.crt" ||
-            log "WARNING: kldload-issue-cert failed — continuing without node cert"
-    else
-        log "kldload-issue-cert not found — skipping cert issuance"
-    fi
+    log "UNIMPLEMENTED: node certificate (SANs 10.7{7,8,9}.${oct3}.${idx}, 10.80.${oct3}.${idx}, ${LAN_IP}) — kldload-issue-cert is not shipped"
 
     # 2. Enable Salt mTLS (requires cert from step 1)
-    if [[ -x /usr/local/sbin/kldload-salt-ssl-enable ]]; then
-        /usr/local/sbin/kldload-salt-ssl-enable &&
-            ok "Salt mTLS enabled" ||
-            log "WARNING: Salt SSL enable failed — Salt will use classic PKI"
-    fi
+    log "UNIMPLEMENTED: Salt mTLS — kldload-salt-ssl-enable is not shipped"
 
     # 3. Apply per-plane nftables microsegmentation
-    if [[ -x /usr/local/sbin/kldload-nftables-apply ]]; then
-        /usr/local/sbin/kldload-nftables-apply &&
-            ok "nftables microsegmentation applied" ||
-            log "WARNING: nftables-apply failed — check /var/log/kldload/nftables.log"
-    fi
+    log "UNIMPLEMENTED: per-plane nftables microsegmentation — kldload-nftables-apply is not shipped"
 
     # 4. Seal ZFS passphrase against TPM2 + tang (encrypted pools only)
     local passphrase_file="/etc/kldload/zfs-passphrase"
-    local tang_url_file="/etc/kldload/tang-url"
     if [[ -f "${passphrase_file}" ]]; then
-        if [[ -x /usr/local/sbin/kldload-clevis-seal ]]; then
-            local tang_url="http://10.77.${oct3}.1:7500"
-            [[ -f "${tang_url_file}" ]] && tang_url="$(cat "${tang_url_file}")"
-            log "Sealing ZFS passphrase against TPM2 + tang @ ${tang_url}"
-            /usr/local/sbin/kldload-clevis-seal \
-                --passphrase "$(cat "${passphrase_file}")" \
-                --tang-url "${tang_url}" \
-                --pool rpool &&
-                ok "ZFS passphrase sealed — auto-unlock requires TPM PCR match + tang reachable" ||
-                log "WARNING: clevis-seal failed — ZFS will require manual passphrase at boot"
-        else
-            log "WARNING: kldload-clevis-seal not installed — TPM auto-unlock NOT configured; ZFS will prompt for the passphrase at boot"
-        fi
+        log "UNIMPLEMENTED: TPM2 + tang sealing of the ZFS passphrase — kldload-clevis-seal is not shipped; ZFS will prompt for the passphrase at boot"
         # Shred the plaintext passphrase UNCONDITIONALLY — including when the
         # seal tool is absent. The old gate ([[ -f pass && -x seal ]]) skipped
         # this whole block when the tool was missing, leaving the plaintext
@@ -1232,18 +1208,7 @@ setup_zero_trust() {
     fi
 
     # 5. Register node DNS in cluster.kldload (master must be up and reachable via wg0)
-    if [[ -x /usr/local/sbin/kldload-dns-register ]]; then
-        local master_ip="10.77.${oct3}.1"
-        /usr/local/sbin/kldload-dns-register \
-            --hostname "${HOSTNAME}" \
-            --wg0-ip "10.77.${oct3}.${idx}" \
-            --wg1-ip "10.78.${oct3}.${idx}" \
-            --wg2-ip "10.79.${oct3}.${idx}" \
-            --wg3-ip "10.80.${oct3}.${idx}" \
-            --master-api "http://${master_ip}:8081" &&
-            ok "DNS registered: ${HOSTNAME}.node.cluster.kldload" ||
-            log "WARNING: DNS registration failed — node won't appear in cluster.kldload until master is reachable"
-    fi
+    log "UNIMPLEMENTED: DNS registration of ${HOSTNAME}.node.cluster.kldload with the master API at http://10.77.${oct3}.1:8081 — kldload-dns-register is not shipped"
 
     # 6. Mark as permanently installed (disables live-mode poof, enables Avahi installed-mode)
     grep -q 'KLDLOAD_INSTALLED' "${MANIFEST}" 2>/dev/null ||
@@ -5154,10 +5119,10 @@ CHROMEPOL
     local _infra_mode="${KLDLOAD_INFRA_MODE:-standalone}"
     case "${_infra_mode}" in
     cluster-manager)
-        if [[ -x /usr/local/sbin/kldload-firstboot-master ]]; then
-            log "Delegating to kldload-firstboot-master"
-            exec /usr/local/sbin/kldload-firstboot-master "$@"
-        fi
+        # The delegate was `[[ -x … ]] && exec`, and the program has never
+        # been in the tree, so cluster-manager installs silently took the
+        # plain role dispatch below. They still do; now the log says why.
+        log "UNIMPLEMENTED: cluster-manager first boot — kldload-firstboot-master is not shipped; falling through to role dispatch (role=${ROLE})"
         ;;
     join)
         log "Join mode — role=${ROLE}"
