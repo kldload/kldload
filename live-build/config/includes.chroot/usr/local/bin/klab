@@ -57,13 +57,21 @@ test | golden | golden-ztest | deploy | destroy | promote | rollback | build | d
     ;;
 esac
 
+# usage [exit-code] — the contract. 0 (asked for) prints on stdout; anything
+# else is a usage error and prints on stderr. A typo'd verb used to print this
+# on stdout and exit 0, so `klab tset` in a script read as success (2026-09-23).
 usage() {
+    local rc="${1:-0}"
+    if ((rc != 0)); then exec >&2; fi
     cat <<'USAGE'
 klab — Multi-Distro Test Platform
 
 Usage:
   klab                                    Interactive menu
+  klab menu                               The same menu, explicitly
   klab golden [distro...|all]             Build golden images
+  klab golden-ztest [distro...]           ZFS-test goldens (the OpenZFS suite
+                                          preinstalled, vdev images staged)
   klab golden-desktop [distro...]         GNOME desktop goldens for instant clones
   klab golden-xfce [distro...]            Xfce desktop goldens
   klab golden-kde [distro...]             KDE Plasma desktop goldens
@@ -74,8 +82,12 @@ Usage:
   klab deploy blue|green                  Deploy site from goldens
   klab promote green                      Promote green to blue
   klab rollback                           Revert blue to previous snapshot
+  klab build-all                          All goldens, then the blue and green
+                                          sites, in one run (single-flight)
   klab test [--quick|--full] [--distro d] Run OpenZFS test suite
-  klab kubernetes [--workers N]           Deploy K8s cluster
+  klab kubernetes [--workers N] [distro]  Deploy a K8s cluster via kube-cluster
+                                          (default 3 workers; a distro names the
+                                          cached cloud image to build from)
   klab run-playbook /path/to/script.sh    Run custom payload on site VMs
   klab verify [distro|all]                Smoke test goldens
   klab status                             Show everything
@@ -101,7 +113,7 @@ Examples:
   klab promote green                      Swap green to blue
   klab destroy all                        Tear down sites, keep goldens
 USAGE
-    exit 0
+    exit "$rc"
 }
 
 # --help answers BEFORE the sudo re-exec below. Asking for the usage of a tool
@@ -452,6 +464,14 @@ warn() {
     _ensure_log_dir
     echo -e "${Y}[klab]${N} $*" >&2
     echo "[${$}] $(_ts) [WARN] $*" >>"$MASTER_LOG" 2>/dev/null
+}
+# _usage_error MESSAGE — a malformed command line: message on stderr, exit 2,
+# nothing attempted. Distinct from die (1), which is a build or verb that ran
+# and failed, so a caller can tell the two apart.
+_usage_error() {
+    echo -e "${R}[klab]${N} $*" >&2
+    echo "  (klab --help shows the forms)" >&2
+    exit 2
 }
 die() {
     _ensure_log_dir
@@ -1385,16 +1405,20 @@ _rhel_creds_shred() {
     # (defence against fs-level recovery on the secrets ZFS dataset).
     # Errors are logged but never fatal -- if a file's already gone
     # because the operator already cleaned up, that's fine.
-    local sec=/var/lib/kldload/secrets
-    for f in rhel-username rhel-password rhel-activation-key rhel-organization; do
-        if [[ -f "${sec}/${f}" ]]; then
-            shred -u "${sec}/${f}" 2>/dev/null || rm -f "${sec}/${f}"
+    local sec=/var/lib/kldload/secrets f n=0 left=0
+    for f in "${sec}/rhel-username" "${sec}/rhel-password" "${sec}/rhel-activation-key" \
+        "${sec}/rhel-organization" /root/.klab-rhel-creds; do
+        [[ -f "$f" ]] || continue
+        shred -u "$f" 2>/dev/null || rm -f "$f"
+        # Outcome, not exit code: the file must be gone.
+        if [[ -e "$f" ]]; then
+            warn "  could not remove ${f} — RHEL credential still on disk"
+            left=$((left + 1))
+        else
+            n=$((n + 1))
         fi
     done
-    if [[ -f /root/.klab-rhel-creds ]]; then
-        shred -u /root/.klab-rhel-creds 2>/dev/null || rm -f /root/.klab-rhel-creds
-    fi
-    log "  RHEL creds shredded (pass-through model: needed only for golden build)"
+    log "  RHEL creds shredded: ${n} file(s) removed, ${left} left (pass-through model: needed only for the golden build)"
 }
 
 _rhel_prompt_creds() {
@@ -1845,7 +1869,7 @@ echo "zfs module: $(lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || e
 echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
 echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
 echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
-echo "network:    $(ip -4 addr show | grep -c 'inet.*scope global' || echo 0) interfaces"
+echo "network:    $(ip -4 addr show | grep -c 'inet.*scope global' || true) interfaces" # grep -c prints 0 itself on no match (and exits 1)
 echo "DNF setup complete"
 DNFSETUP
         ;;
@@ -2714,7 +2738,18 @@ build_golden_single() {
         _v_kernel="$(_ssh_cmd "$golden_ip" "uname -r" || echo "unknown")"
         _v_redhat="$(_ssh_cmd "$golden_ip" "cat /etc/redhat-release 2>/dev/null || echo unknown")"
         _v_rhel_id="$(_ssh_cmd "$golden_ip" "subscription-manager identity 2>/dev/null | head -1" || echo "not registered")"
-        _v_dnf_repos="$(_ssh_cmd "$golden_ip" "dnf -q repolist 2>/dev/null | grep -c '^rhel-10-' || echo 0")"
+        # grep -c prints 0 AND exits 1 on no match: `|| echo 0` made this "0\n0".
+        _v_dnf_repos="$(_ssh_cmd "$golden_ip" "dnf -q repolist 2>/dev/null | grep -c '^rhel-10-' || true")"
+        _v_dnf_repos="${_v_dnf_repos:-0}"
+
+        # The verdict is computed OUTSIDE the report's brace group: that group
+        # feeds `tee`, so it runs in a subshell and a variable set inside it is
+        # gone afterwards -- the same trap the non-RHEL path hit on fiend
+        # 2026-08-31 and 2026-09-06. It has to survive: whether the creds are
+        # shredded below depends on it.
+        local _result="PASS"
+        [[ "${_v_redhat}" != *"Red Hat"* ]] && _result="FAIL (not RHEL?)"
+        [[ "${_v_rhel_id}" == *"not registered"* ]] && _result="FAIL (no subscription)"
 
         {
             echo ""
@@ -2726,9 +2761,6 @@ build_golden_single() {
             echo "  RHEL sub:       ${_v_rhel_id}"
             echo "  RHEL 10 repos:  ${_v_dnf_repos} enabled"
             echo "  ZFS:            not installed (RHEL 10 golden — bring-your-own DKMS)"
-            local _result="PASS"
-            [[ "${_v_redhat}" != *"Red Hat"* ]] && _result="FAIL (not RHEL?)"
-            [[ "${_v_rhel_id}" == *"not registered"* ]] && _result="FAIL (no subscription)"
             echo "  Result:         ${_result}"
             echo "═══════════════════════════════════════════════════════════"
             echo ""
@@ -2770,6 +2802,17 @@ build_golden_single() {
         ln -sfn "$golden_log" "${golden_log_dir}/${distro}-latest.log"
         log "Golden ready: ${C}${name}${N} ($((elapsed / 1000))s) — log: ${golden_log}"
         _register_golden "$name"
+        # Pass-through model: the credentials exist to build THIS golden and
+        # nothing else. _rhel_creds_shred was written for exactly this spot and
+        # had zero callers, so the username, password and activation key sat in
+        # /var/lib/kldload/secrets and /root/.klab-rhel-creds on every host
+        # that ever built a RHEL golden (2026-09-23). Kept only when the build
+        # failed validation, because the retry needs them.
+        if [[ "$_result" == PASS ]]; then
+            _rhel_creds_shred
+        else
+            warn "RHEL golden validation said '${_result}' — credentials KEPT for the retry (shred by hand: klab's _rhel_creds_shred paths)"
+        fi
         return 0
     fi
 
@@ -4518,9 +4561,15 @@ cmd_test() {
         for _d in "${selected_distros[@]}"; do
             [[ -f "${run_dir}/${_d}.log" ]] || continue
             local _dp _df _ds
-            _dp="$(grep -c '\[PASS\]' "${run_dir}/${_d}.log" 2>/dev/null || echo 0)"
-            _df="$(grep -c '\[FAIL\]' "${run_dir}/${_d}.log" 2>/dev/null || echo 0)"
-            _ds="$(grep -c '\[SKIP\]' "${run_dir}/${_d}.log" 2>/dev/null || echo 0)"
+            # `grep -c` PRINTS 0 and exits 1 when nothing matches, so
+            # `|| echo 0` produced "0\n0", and $(( )) below aborted the whole
+            # script on the first log with no [FAIL] — `klab test` exited 1
+            # silently and skipped its VM cleanup (2026-09-23). `|| true`
+            # keeps the printed 0; ${x:-0} covers a missing or empty log.
+            _dp="$(grep -c '\[PASS\]' "${run_dir}/${_d}.log" 2>/dev/null || true)"
+            _df="$(grep -c '\[FAIL\]' "${run_dir}/${_d}.log" 2>/dev/null || true)"
+            _ds="$(grep -c '\[SKIP\]' "${run_dir}/${_d}.log" 2>/dev/null || true)"
+            _dp="${_dp:-0}" _df="${_df:-0}" _ds="${_ds:-0}"
             echo "  <testsuite name=\"${_d}\" tests=\"$((_dp + _df + _ds))\" failures=\"${_df}\" skipped=\"${_ds}\">"
             grep -aE 'Test(\(Linux\))?: .+\[(PASS|FAIL|SKIP|KILLED)\]' "${run_dir}/${_d}.log" 2>/dev/null | while IFS= read -r line; do
                 local _tname _tstatus
@@ -4609,14 +4658,47 @@ cmd_run_playbook() {
 }
 
 # Payload: Kubernetes (calls existing kube-cluster tools)
+#
+# klab kubernetes [--workers N] [distro]. The usage text always said
+# --workers; the function read $1 as the count, so `klab kubernetes --workers 5`
+# logged "1 CP + --workers workers" and handed "$@" verbatim to kube-cluster
+# on top of its own --workers (2026-09-23). kube-cluster builds its golden from
+# the HOST's distribution and has no distro switch, only --image; a distro
+# named here is therefore mapped to the cloud image klab has cached for it,
+# and refused when there is none rather than silently ignored.
 cmd_kubernetes() {
-    local workers="${1:-3}" distro="${2:-centos}"
-    log "Deploying K8s cluster from ${distro} golden (1 CP + ${workers} workers)..."
-    if command -v kube-cluster >/dev/null 2>&1; then
-        kube-cluster bootstrap --workers "$workers" "$@"
-    else
+    local workers=3 distro=""
+    while (($#)); do
+        case "$1" in
+        --workers)
+            [[ -n "${2:-}" ]] || _usage_error "--workers needs a number"
+            workers="$2"
+            shift 2
+            ;;
+        --workers=*)
+            workers="${1#*=}"
+            shift
+            ;;
+        -*) _usage_error "kubernetes: unknown option $1" ;;
+        *)
+            [[ -z "$distro" ]] || _usage_error "kubernetes: one distro only (got '${distro}' and '$1')"
+            distro="$1"
+            shift
+            ;;
+        esac
+    done
+    [[ "$workers" =~ ^[0-9]+$ ]] || _usage_error "--workers must be a whole number (got '${workers}')"
+    command -v kube-cluster >/dev/null 2>&1 ||
         die "kube-cluster not found — K8s payload requires KVM profile install"
+    local -a extra=()
+    if [[ -n "$distro" ]]; then
+        validate_distro "$distro"
+        local img="${ISO_DIR}/${distro}-cloud.qcow2"
+        [[ -s "$img" ]] || die "no cached cloud image for ${distro} at ${img} — run 'klab golden ${distro}' first, or omit the distro to build from the host's own"
+        extra=(--image "$img")
     fi
+    log "Deploying K8s cluster (1 CP + ${workers} workers${distro:+, image: ${distro}})..."
+    kube-cluster bootstrap --workers "$workers" ${extra[@]+"${extra[@]}"}
 }
 
 # ── Section 9: Results Display ───────────────────────────────────────────
@@ -5189,6 +5271,9 @@ status) cmd_status ;;
 results) cmd_results "${1:-}" ;;
 destroy) cmd_destroy "${1:-}" ;;
 menu) interactive_menu ;;
-help | -h | --help) usage ;;
-*) usage ;;
+help | -h | --help) usage 0 ;;
+*)
+    echo -e "${R}[klab]${N} unknown command: ${CMD}" >&2
+    usage 2
+    ;;
 esac
