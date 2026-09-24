@@ -1,12 +1,58 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# kupgrade — snapshot the boot environment, then upgrade every package
+#
+# What it does, in order:
+#   1. Takes a ZFS snapshot of the running boot environment
+#      (<be>@pre-upgrade-<stamp>) so the upgrade has a way back.
+#   2. Runs the distribution's full upgrade: dnf upgrade, apt-get
+#      dist-upgrade + autoremove, or pacman -Syu (holding the kernel back
+#      when archzfs has not caught up with it).
+#   3. On DKMS systems, checks that ZFS modules exist for EVERY installed
+#      kernel and rebuilds (and re-signs) the ones that are missing.
+#
+# WHY: a plain upgrade can bring in a kernel that ZFS has no module for, and
+#   the machine then boots to a root it cannot mount. The snapshot is the way
+#   back, the per-kernel check is what tells you BEFORE the reboot.
+#
+# What it does NOT do: roll back by itself. Nothing here is automatic after
+#   the snapshot; if the upgrade or the module build fails, this tool exits
+#   non-zero, names the snapshot, and the operator decides:
+#     kldload-rollback to <snapshot>     (or: apt rollback / dnf rollback)
+#
+# Usage:   kupgrade [-h|--help]          (must run as root; takes no other
+#                                         arguments)
+# Inputs:  /etc/kldload/boot-environment (optional; else the dataset at /)
+# Outputs: the snapshot above, the package manager's own changes, and
+#          /var/log/kldload/upgrade.log with everything that was printed.
+# Exit:    0 upgraded and every kernel has ZFS modules
+#          1 not root, no package manager, the upgrade itself failed, or a
+#            ZFS DKMS build failed for at least one kernel (the summary
+#            names the pre-upgrade snapshot)
+#          2 usage error (unknown argument)
+#
+# Notes:
+#   - --help is answered before the root check and before anything runs.
+#     Until 2026-09-23 there was no argument parsing at all, so
+#     `kupgrade --help` as root performed a full upgrade.
+#   - A failed DKMS build used to print a warning box and exit 0, so an
+#     unattended caller read "success" on a machine whose next kernel had no
+#     ZFS. Non-zero now, same box.
+# ---------------------------------------------------------------------------
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-# ---------------------------------------------------------------------------
-# kupgrade — perform system upgrade with automatic boot environment snapshot
-# Creates a pre-upgrade ZFS snapshot, runs the appropriate package manager
-# upgrade, then verifies that ZFS modules are available for every installed
-# kernel.
-# ---------------------------------------------------------------------------
+# Arguments first: help needs no root and must not start an upgrade.
+case "${1:-}" in
+"") ;;
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+*)
+    printf 'kupgrade: unknown argument: %s (this tool takes none; -h for help)\n' "$1" >&2
+    exit 2
+    ;;
+esac
 
 PROGNAME="$(basename "$0")"
 LOG_DIR=/var/log/kldload
@@ -75,7 +121,9 @@ if zfs list -H "${BE_DATASET}" >/dev/null 2>&1; then
     log "Creating pre-upgrade boot environment: ${SNAP}"
     zfs snapshot "${SNAP}" 2>&1 | tee -a "$LOG"
     SNAPSHOT_CREATED="${SNAP}"
-    log "Roll back with:  kbe rollback ${SNAP}"
+    # kldload-rollback clones the snapshot into a new boot environment and
+    # keeps everything newer; kbe rollback is `zfs rollback` and destroys it.
+    log "Roll back with:  kldload-rollback to ${SNAP}"
 else
     log "WARNING: ${BE_DATASET} not found — skipping boot environment snapshot"
 fi
@@ -119,6 +167,7 @@ fi
 # On DKMS systems, verify and rebuild if needed.
 # ---------------------------------------------------------------------------
 
+DKMS_WARN=0 # 1 once any kernel is left without a ZFS module; decides the exit status
 if [[ "${PKG}" == "dnf" ]] && rpm -q kmod-zfs &>/dev/null; then
     log "kmod-zfs detected — ZFS modules are kABI-tracked, skipping DKMS verification"
 elif [[ "${PKG}" == "pacman" ]] && pacman -Q zfs-linux &>/dev/null; then
@@ -126,7 +175,6 @@ elif [[ "${PKG}" == "pacman" ]] && pacman -Q zfs-linux &>/dev/null; then
 else
     log "Verifying ZFS DKMS modules for all installed kernels..."
 
-    DKMS_WARN=0
     while IFS= read -r kver; do
         [[ -n "${kver}" ]] || continue
 
@@ -165,7 +213,7 @@ else
   │  ZFSBootMenu. Check: /var/log/kldload/upgrade.log              │
   │                                                             │
   │  To fix:  dkms autoinstall -k <kver>                        │
-  │  To roll back: kbe rollback <snapshot>                         │
+  │  To roll back: kldload-rollback to <snapshot>               │
   └─────────────────────────────────────────────────────────────┘
 
 WARN
@@ -173,11 +221,18 @@ WARN
 fi
 
 # ---------------------------------------------------------------------------
-# Summary
+# Summary — and the exit status. A kernel with no ZFS module is a failed
+# upgrade as far as the next boot is concerned, whatever the package manager
+# said, so it is reported as one: exit 1, snapshot named.
 # ---------------------------------------------------------------------------
 
 log "==================================================================="
-log "kldload upgrade complete"
+if [[ "${DKMS_WARN}" -eq 1 ]]; then
+    log "kldload upgrade FINISHED WITH ERRORS: ZFS DKMS build failed for at least one kernel"
+else
+    log "kldload upgrade complete"
+fi
 [[ -n "${SNAPSHOT_CREATED}" ]] && log "Pre-upgrade snapshot: ${SNAPSHOT_CREATED}"
 log "Log: ${LOG}"
 log "==================================================================="
+[[ "${DKMS_WARN}" -eq 0 ]] || exit 1
