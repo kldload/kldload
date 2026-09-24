@@ -346,7 +346,10 @@ enrolled the golden: a WireGuard key and a mesh id, which the seal then kept and
 every clone inherited. A Kubernetes cluster cloned from such a golden came up
 with six nodes sharing one key and one id, overwriting each other on the host,
 and its API unreachable. Goldens are now never enrolled, and every seal forgets
-the mesh identity the way it already forgot SSH host keys.
+the mesh identity the way it already forgot SSH host keys. The same timer also
+raced the cluster build itself: it could reach a node before the cluster had
+meshed it and give it an ordinary VM's id, renumbering the control plane off the
+API address. A cluster node is now left to the cluster until it is meshed.
 
 The other half had never worked either. Deleting a VM left it a peer on both
 mesh planes, because nothing on the delete path removed peers — and the check
