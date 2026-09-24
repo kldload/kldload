@@ -1137,7 +1137,10 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service kldload-firstboot-show.service kldload-firstboot-kiosk.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer kldload-io-scheduler.service; do
+        # klab-hubble-relay.service is listed so the klab block further down
+        # finds it the day it ships; as of 2026-09-23 no such unit is in the
+        # tree, and that block says so rather than skipping in silence.
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service kldload-firstboot-show.service kldload-firstboot-kiosk.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer klab-hubble-relay.service kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer kldload-io-scheduler.service; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -4478,12 +4481,28 @@ KLABTIMER
         k_log "klab will auto-build golden images on first boot (centos/rocky/fedora/debian/ubuntu/rhel — RHEL skipped if creds+image unavailable)"
 
         # Enable klab services: Prometheus exporter + Hubble relay (captures from second zero)
+        #
+        # klab-hubble-relay.service has never existed in this tree: no copy
+        # glob in build-iso.sh or in this file matched it, and until
+        # 2026-09-23 this loop's `if [[ -f ]]` skipped it without a word on
+        # every klab install, so "captures from second zero" was a promise
+        # nothing kept. A unit that is on the live ISO but not yet on the
+        # target is copied here; one that is nowhere is a WARNING that names
+        # it. The day the unit lands in includes.chroot/usr/lib/systemd/system
+        # this starts working with no further change.
         for _svc in klab-exporter klab-hubble-relay; do
+            if [[ ! -f "${target}/usr/lib/systemd/system/${_svc}.service" &&
+                -f "/usr/lib/systemd/system/${_svc}.service" ]]; then
+                install -m 0644 "/usr/lib/systemd/system/${_svc}.service" \
+                    "${target}/usr/lib/systemd/system/${_svc}.service"
+            fi
             if [[ -f "${target}/usr/lib/systemd/system/${_svc}.service" ]]; then
                 ln -sf "/usr/lib/systemd/system/${_svc}.service" \
                     "${target}/etc/systemd/system/multi-user.target.wants/${_svc}.service" 2>/dev/null ||
                     k_log "WARNING: could not enable ${_svc}.service on the target — it will not start at boot"
                 k_log "Enabled ${_svc}.service"
+            else
+                k_log "WARNING: ${_svc}.service is not shipped on this ISO — not enabled on the target, ${_svc} will not run"
             fi
         done
     fi
