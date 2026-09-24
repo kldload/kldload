@@ -75,6 +75,64 @@ fi
 
 log "Node: ${HOSTNAME}  role: ${ROLE}  lan_ip: ${LAN_IP}"
 
+# ── hub.env — parsed, never sourced ──────────────────────────────────────────
+# hub.env arrives over plain HTTP from whichever host answers at 10.77.0.1 (or
+# the LAN address the manifest names). Until 2026-09-23 _try_fetch_hub_env
+# checked that the body contained "WG0_PUB=" and then setup_wg_client and
+# setup_salt_minion `source`d it, as root: anything on that network could hand
+# a joining node `WG0_PUB=x; touch /pwned` and it ran. kldload-netboot-server
+# has read its env file as KEY=VALUE lines since 2026-09-13 (NETBOOT_* only);
+# this is the same idiom with the hub's own key set.
+#
+# Accepted: blank lines, comments, and KEY=VALUE where KEY is one the master
+# writes (HUB_* or WG<0-3>_PUB / WG<0-3>_PORT) and VALUE is drawn from the
+# alphabet those values need -- base64 for the keys, digits and dots for the
+# addresses, hostname characters. The key list is deliberately narrower than
+# "anything uppercase": PATH, HOME, SECRETS, HUB_ENV and LOG are all uppercase
+# too, and a file that could reassign them is a file that could redirect the
+# rest of this script. Anything else rejects the WHOLE file -- no partial
+# load, because a node that joined on half a hub.env is worse to debug than
+# one that refused and said why.
+#
+# _hub_env_check FILE  exit 0 when every line is acceptable and WG0_PUB is set;
+#                      otherwise log each rejected line (first 60 bytes,
+#                      non-printables stripped) and exit 1.
+# _hub_env_load FILE   _hub_env_check, then assign each KEY=VALUE into this
+#                      shell with printf -v. Assigns nothing on reject.
+_HUB_ENV_LINE_RE='^(HUB_[A-Z0-9_]+|WG[0-3]_(PUB|PORT))=([A-Za-z0-9+/=:._-]*)$'
+_hub_env_check() {
+    local file="$1" line shown n=0 bad=0 have_pub=0
+    [[ -r "$file" ]] || {
+        log "hub.env REJECTED: ${file} is not readable"
+        return 1
+    }
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        n=$((n + 1))
+        [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+        if [[ "$line" =~ $_HUB_ENV_LINE_RE ]]; then
+            [[ "${BASH_REMATCH[1]}" == WG0_PUB && -n "${BASH_REMATCH[3]}" ]] && have_pub=1
+            continue
+        fi
+        shown="$(printf '%s' "${line:0:60}" | tr -cd '[:print:]')"
+        log "hub.env REJECTED line ${n} of ${file}: ${shown}"
+        bad=$((bad + 1))
+    done <"$file"
+    if ((have_pub == 0)); then
+        log "hub.env REJECTED: ${file} carries no WG0_PUB"
+        bad=$((bad + 1))
+    fi
+    ((bad == 0))
+}
+_hub_env_load() {
+    local file="$1" line
+    _hub_env_check "$file" || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ $_HUB_ENV_LINE_RE ]] || continue
+        printf -v "${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[3]}"
+    done <"$file"
+    log "hub.env loaded from ${file} (parsed as KEY=VALUE, not sourced)"
+}
+
 # ── Shared: WireGuard client (all 4 planes) ───────────────────────────────────
 # wg0 = enrollment only (unreliable on some hardware — never bind services here)
 # wg1 = management (SSH, Salt)   wg2 = k8s backend   wg3 = storage
@@ -83,8 +141,10 @@ setup_wg_client() {
         log "No hub.env — skipping WireGuard client"
         return 0
     }
-    # shellcheck disable=SC1090
-    source "${HUB_ENV}"
+    # A local hub.env that fails the parser was pre-seeded wrong or edited by
+    # something that should not have: stop here, visibly, rather than bring up
+    # a mesh on whatever half of it looked plausible.
+    _hub_env_load "${HUB_ENV}" || die "${HUB_ENV} rejected by the hub.env parser — WireGuard client not configured"
     local idx="${KLDLOAD_NODE_INDEX:-1}"
 
     log "Configuring WireGuard planes wg0-wg3 (node index ${idx})"
@@ -164,8 +224,7 @@ WG
 # ── Shared: Salt minion — registers on wg1 (management plane) ─────────────────
 setup_salt_minion() {
     [[ -f "${HUB_ENV}" ]] || return 0
-    # shellcheck disable=SC1090
-    source "${HUB_ENV}"
+    _hub_env_load "${HUB_ENV}" || die "${HUB_ENV} rejected by the hub.env parser — Salt minion not configured"
     local idx="${KLDLOAD_NODE_INDEX:-1}"
 
     # Salt master binds to wg1 — 10.78.0.1
@@ -1208,14 +1267,18 @@ _try_fetch_hub_env() {
     for url in "${hub_urls[@]}"; do
         log "Trying hub.env discovery: ${url}"
         if curl -fsS --max-time 5 "${url}" -o "${HUB_ENV}.tmp" 2>/dev/null; then
-            # Sanity check — must contain WG0_PUB
-            if grep -q 'WG0_PUB=' "${HUB_ENV}.tmp"; then
+            # Plain HTTP, nothing signed: the hub cannot serve https, because
+            # its certificate would have to be trusted before the node has
+            # joined anything. So the body is DATA until _hub_env_check says
+            # otherwise, and the log says so every time it happens.
+            log "WARNING: hub.env fetched over unauthenticated HTTP from ${url} — parsed as KEY=VALUE, never executed"
+            if _hub_env_check "${HUB_ENV}.tmp"; then
                 mv "${HUB_ENV}.tmp" "${HUB_ENV}"
                 chmod 0640 "${HUB_ENV}"
                 log "hub.env auto-discovered from ${url}"
                 return 0
             else
-                log "WARNING: hub.env from ${url} looks invalid — skipping"
+                log "WARNING: hub.env from ${url} REJECTED — discarded, trying the next source"
                 rm -f "${HUB_ENV}.tmp"
             fi
         fi
