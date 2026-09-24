@@ -47,7 +47,7 @@ Two substrates in the installer menu — **Fedora and Debian** — and two packa
 managers underneath. Both install with the network unplugged, from complete
 mirrors baked into the ISO.
 
-**Website:** [kldload.com](https://kldload.com) &middot; **Download:** [full ISO](https://dl.kldload.com/kldload-free-latest.iso) / [net installer](https://dl.kldload.com/kldload-free-net-latest.iso) &middot; **Release notes:** [1.4.2](https://kldload.com/releases/1.4.2.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
+**Website:** [kldload.com](https://kldload.com) &middot; **Download:** [full ISO](https://dl.kldload.com/kldload-free-latest.iso) / [net installer](https://dl.kldload.com/kldload-free-net-latest.iso) &middot; **Release notes:** [1.5.0](https://kldload.com/releases/1.5.0.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
 
 **The install, in two screens.** Boot the USB and this opens by itself — no
 terminal, no wiki. It is also reachable at `https://<host>:8443` from another
@@ -164,42 +164,72 @@ KLDLOAD_BUILD_PROCESSORS=$(( $(nproc) - 4 )) PROFILE=desktop ./deploy.sh build
 
 ## Installing with encryption
 
-Full-disk ZFS encryption is on by default and the flow is short:
+Full-disk ZFS encryption is **off unless you ask for it** &mdash; that changed
+in 1.5.0 &mdash; and asking for it is recommended. Three ways to ask:
+
+- **Web UI:** on the install page set *ZFS encryption* to *Encrypted &mdash;
+  AES-256-GCM, passphrase at boot* and enter a passphrase. The selector
+  starts on *None*.
+- **Answers file:** `KLDLOAD_ZFS_ENCRYPT=1` and `KLDLOAD_ZFS_PASSPHRASE=...`.
+  A netbooted or seeded machine whose file sets the flag but not the
+  passphrase is asked for one on its own screen before anything is erased.
+- **Netboot menu:** press any key during the countdown, tick *ZFS encryption*
+  under options, and type the passphrase on the console when asked.
+
+The flow is then short:
 
 1. **Download &amp; burn** the ISO to a USB stick (see [Quickstart](#quickstart) above).
 2. **Boot the USB.** The installer opens automatically in the browser at
    `https://<host>:8443` &mdash; no login prompt.
-3. **Choose** your distribution, profile, and target disk. Encryption is
-   **pre-selected (recommended)** &mdash; set your **disk encryption
-   passphrase** &mdash; and start the install.
+3. **Choose** your distribution, profile, and target disk, turn encryption on
+   as above, set your **disk encryption passphrase**, and start the install.
 4. When it finishes the machine **reboots**. Remove the USB stick.
-5. At the **ZFSBootMenu** prompt, enter your **encryption passphrase**. It is
-   asked **once**: first boot re-asks a second time while the system installs
-   the key that makes the later boots single-prompt, and every boot after that
-   takes one passphrase.
+5. At the **ZFSBootMenu** prompt, enter your **encryption passphrase**. With
+   Secure Boot off the pool key is embedded in the initramfs, so that one
+   prompt is the only one. With Secure Boot on it deliberately is not (the
+   initramfs sits on the unencrypted ESP), so the initramfs asks a second
+   time.
 6. The desktop loads and the console opens at `https://<host>:8443` &mdash; **no
    certificate warning, no login prompt.** Done.
 
-The passphrase is always required. There is no configuration in which
-encryption is silently skipped, and turning Secure Boot on or off does not
-change that. TPM2 auto-unlock is on the roadmap.
+An unencrypted install asks for nothing at boot. Turning Secure Boot on or off
+does not change whether the pool is encrypted. TPM unlock is in 1.5.0 as
+`kldload-tpm-seal` plus a dracut module that unlocks the encrypted root from
+the TPM, bound to Secure Boot through PCR 7; it is **inert until you seal it,
+and has not been tested on real hardware**.
 
-### Secure Boot &mdash; opt in
+### Secure Boot &mdash; opt in, and state it
 
-**Secure Boot is off by default.** With it off the firmware boots ZFSBootMenu
-directly: no shim, no GRUB stage, no MOK enrollment, and nothing to miss at a
-ten-second prompt. That is the right default for a lab machine, and it is the
-path above.
+What "default" means depends on how you install, and the code paths do not
+agree with each other, so say it explicitly every time:
+
+- **Web UI:** the *Secure Boot* card starts **unticked** and the page sends
+  `KLDLOAD_ENABLE_SECURE_BOOT=0`. Off unless you tick it.
+- **Netboot menu, a key pressed:** the *Secure Boot* tick starts from the
+  answers file; an absent key shows unticked and is sent as `0`. Off unless
+  you tick it.
+- **Answers file with the key absent** (a USB seed, `--config`, or a netboot
+  left to its countdown): the boot-chain code treats absent as **on** &mdash;
+  it generates a MOK, signs the modules, installs shim and makes GRUB's
+  `direct` entry the default &mdash; while the install manifest records `0`
+  and the machine reboots instead of powering off for the enrollment. Write
+  `KLDLOAD_ENABLE_SECURE_BOOT=0` or `=1`; never leave it out.
+
+With it off the firmware boots ZFSBootMenu directly: no shim, no GRUB stage,
+no MOK enrollment, and nothing to miss at a ten-second prompt. That is the
+right default for a lab machine, and it is the path above.
 
 Turn it on when the machine's threat model wants a verified boot chain, by
-setting `KLDLOAD_ENABLE_SECURE_BOOT=1` at install time. The install then
-generates a per-install MOK, signs ZFSBootMenu and the out-of-tree modules
-with it, and boots firmware &rarr; shim &rarr; GRUB &rarr; kernel. That path
-needs three extra steps:
+ticking the card or setting `KLDLOAD_ENABLE_SECURE_BOOT=1`. The install then
+generates a per-install MOK, signs the out-of-tree modules with it, and boots
+firmware &rarr; shim &rarr; GRUB &rarr; kernel. ZFSBootMenu stays in GRUB's
+menu but is not the default there: shim 15.8's SBAT rule refuses to chainload
+it. That path needs three extra steps:
 
 1. **When the install finishes it powers the machine off** rather than
    rebooting &mdash; so *you* control the enrollment boot instead of racing an
-   auto-reboot. Remove the USB stick.
+   auto-reboot. (An unattended netboot or seed install reboots regardless.)
+   Remove the USB stick.
 2. **Power on and enter firmware setup** (usually `Del`, `F2`, or `F10`).
    **Enable Secure Boot**, then save and exit.
 3. On the next boot the blue **MokManager** screen appears &mdash; it waits
@@ -225,9 +255,10 @@ needs three extra steps:
 
 ### Secure Boot / MOK &mdash; only if you enabled it
 
-Secure Boot is off by default, and none of the below applies to a default
-install. These are the failure modes of the opt-in path
-(`KLDLOAD_ENABLE_SECURE_BOOT=1`).
+Secure Boot is off in a default web UI or netboot-menu install, and none of
+the below applies unless you turned it on &mdash; or left the key out of an
+answers file, which turns the boot-chain preparation on (see above). These are
+the failure modes of that path (`KLDLOAD_ENABLE_SECURE_BOOT=1`).
 
 | Symptom | Fix |
 |---|---|
@@ -280,9 +311,13 @@ distro.
 
 Which means the reachable set is wider than the tested one. RHEL, CentOS
 Stream, Rocky, Ubuntu and Arch all still work with `KLDLOAD_DISTRO=<name>` —
-the code paths are there and maintained — but they are **not on the menu, not
-mirrored offline, and not tested**, and the menu is the honest statement of
-what is. Adding one back is repository configuration, not new machinery.
+the code paths are there and maintained — but they are **not on the web UI's
+menu and not mirrored offline**. RHEL is the partial exception: added to the
+netboot menu (`NETBOOT_DISTROS`) it is sent the 2.2 GB net image and installs
+from Red Hat's CDN with a subscription, and the 1.5.0 sweep installed a RHEL
+desktop that way — from the net image only, never offline. The rest are not
+tested this release, and the menu is the honest statement of what is. Adding
+one back is repository configuration, not new machinery.
 
 Fedora and Debian are deliberately the widest useful pair rather than a narrow
 one: two package managers, two firmware-splitting conventions, two initramfs
@@ -323,10 +358,10 @@ A GUI-first workstation that looks like stock RHEL 10: expert operations — ZFS
 | **Core** | ZFS on root only. Stock distro. No `k*` tools, no web UI, no darksites. ~200 MB beyond the vendor's base install |
 
 ```bash
-kube-cluster up           # single- or three-node K8s in < 20 minutes
-kube-demo                 # PetClinic + ArgoCD smoke test
-klab golden centos        # build the CentOS golden VM
-klab matrix run script.sh # run a change against every supported distro in parallel
+kube-cluster bootstrap --workers 3   # golden image, then 3 control planes + 3 workers
+kube-demo                            # PetClinic + ArgoCD smoke test
+klab golden centos                   # build the CentOS golden VM
+klab run-playbook ./my-test.sh       # run a script on every VM of the blue site
 ```
 
 ---
@@ -362,7 +397,8 @@ Left alone, it installs exactly the armed answers file. Any key opens the
 manual override: pick a profile (core, server, desktop, kvm, k8s, storage, ai
 -- each the armed file with that profile's settings), a distro (from
 `NETBOOT_DISTROS`, default `fedora`; list only the ones you have verified --
-Fedora, RHEL and Debian are what the matrix proves, and Arch is NOT: an
+Fedora and Debian are the offline, tested pair; RHEL and Arch are sent the
+net image instead (`NETBOOT_NET_DISTROS`), and Arch stays off the list: an
 encrypted Arch install panics at boot, and a rolling release cannot be
 version-locked the way the rest of the substrate is),
 then tick options -- ZFS encryption, Secure Boot, KVM, golden images,
@@ -409,8 +445,8 @@ golden image.
 
 ## What's wired into the image
 
-- **OpenZFS on root** — checksummed, compressed, snapshotted, self-healing on mirrors. lz4 default. Native AES-256-GCM encryption recommended and pre-selected in the installer (TPM2 auto-unlock when the hardware has it, passphrase at boot otherwise); dedup optional.
-- **ZFSBootMenu** — UEFI bootloader that understands ZFS. Boot environments. Seconds-fast rollback. No GRUB.
+- **OpenZFS on root** — checksummed, compressed, snapshotted, self-healing on mirrors. lz4 default. Native AES-256-GCM encryption recommended, off unless selected; passphrase at ZFSBootMenu on every boot. TPM unlock (`kldload-tpm-seal`, bound to PCR 7) ships inert and untested on hardware; dedup optional.
+- **ZFSBootMenu** — UEFI bootloader that understands ZFS. Boot environments. Seconds-fast rollback. It is what the firmware boots with Secure Boot off; with Secure Boot on the chain is shim &rarr; GRUB &rarr; kernel, because shim's SBAT rule refuses to chainload ZFSBootMenu, which then stays as a GRUB menu entry.
 - **WireGuard** — kernel-level encrypted networking. One UDP port at the firewall.
 - **eBPF observability** — BCC tools + bpftrace + an F-key tmux cockpit on the host; Cilium + Hubble + Tetragon inside the K8s profile (no kube-proxy, no iptables, no sidecars).
 - **KVM hypervisor** — libvirt + qemu-kvm with every VM on a ZFS zvol. `~100`&nbsp;ms clones via COW. Atomic snapshots. fs-freeze app-consistency. Incremental `zfs send` replication.
@@ -418,7 +454,7 @@ golden image.
 - **NVIDIA + CUDA** — drivers and CUDA optional at install. Time-sliced GPU sharing across the model and guest VMs. No PCIe passthrough required.
 - **Ollama + Open WebUI** — local model: RAG over the codebase + voice + tmux awareness + ReAct agent loop + eBPF-aware tool registry. No cloud, no telemetry.
 - **Observability** — Prometheus + Grafana + Loki + Alertmanager, Go + bash exporters, pre-wired dashboards, `zed` ZFS events bridged to Loki.
-- **Secure Boot + MOK** — per-machine key generation, automatic module signing, DKMS auto-sign on kernel upgrades. Off by default.
+- **Secure Boot + MOK** — per-machine key generation, automatic module signing, DKMS auto-sign on kernel upgrades. Off in the web UI and the netboot menu unless ticked; an answers file must state it.
 - **Image export** — `kexport` produces qcow2 / VMDK / VHD / OVA / raw, auto-sealed with cloud-init multi-datasource config. Ready for Packer or direct hypervisor import.
 - **Offline + Air-gap** — RPM and APT mirrors baked in. The USB is the deployment, the recovery, and the air gap.
 
@@ -616,7 +652,7 @@ snapshot. Nothing is overwritten.
 ### Kubernetes
 | Command | What it does |
 |---|---|
-| `kube-cluster up` | Bring up a single- or three-node K8s cluster |
+| `kube-cluster bootstrap` | Build the golden image and bring up the cluster: 3 control planes by default, `--workers N` (`--cps 1` only for a host that cannot fit three) |
 | `kube-cluster destroy` | Tear it down (golden preserved) |
 | `kube-demo` | Deploy PetClinic + ArgoCD smoke test |
 | `kube-smoke-test` | Automated cluster verification |
@@ -625,7 +661,7 @@ snapshot. Nothing is overwritten.
 | Command | What it does |
 |---|---|
 | `klab golden <distro>` | Build / refresh a golden VM image |
-| `klab matrix run` | Run a script against every supported distro in parallel |
+| `klab run-playbook <script> [blue\|green]` | Run a script on every VM of a site (blue by default) |
 | `klab-vm-debug-bundle` | Auto-fires on test failure — OpenZFS-ready debug tarball |
 
 ---
@@ -672,15 +708,31 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-Current release: **1.4.2 — Hardware** (August 2026). 195 commits since 1.4.1:
-30 features, 127 fixes, 120 files changed.
+Current release: **1.5.0** (September 2026). 514 commits since 1.4.2:
+88 features, 326 fixes, 359 files changed. In operator terms:
+
+- **One key provisions the rack.** An installed machine can keep the netboot
+  payload it was built from and serve the next one: proxyDHCP beside your
+  existing DHCP, one answers file per MAC, `arm-all` on a directory.
+- **A netboot menu.** An armed machine shows what it is about to do and counts
+  down; any key opens the override — profile, distro, encryption, Secure
+  Boot, components, identity — with secrets typed on the console only.
+- **Rebuild a node from its replica**, restamped for the machine it lands on
+  and proved by a canary boot rather than by the receive finishing.
+- **The first boot explains itself.** The install show holds the screen
+  through the reboot and into first boot, with the real build log beside it.
+- **Firecracker microVMs** on the same zvols, jailed and unprivileged; and
+  **blue/green** for whole clusters, not just workloads.
+- **Two defaults changed.** ZFS encryption is off unless asked for, and the
+  shipped answer templates carry no default password. KVM is on for every
+  profile but core.
 
 - Full changelog: [`CHANGELOG.md`](live-build/config/includes.chroot/usr/local/share/kldload/CHANGELOG.md)
-- Release notes, with screenshots: [kldload.com/releases/1.4.2.html](https://kldload.com/releases/1.4.2.html)
+- Release notes, with screenshots: [kldload.com/releases/1.5.0.html](https://kldload.com/releases/1.5.0.html)
 - History back to 1.0: [kldload.com/release-notes.html](https://kldload.com/release-notes.html)
 
-Every release is tagged, so `git show v1.4.2` is the exact tree an ISO was
-built from. Cutting one: [docs/RELEASING.md](docs/RELEASING.md).
+Every release is tagged (`git tag -l 'v*'`), so checking out the tag gives the
+exact tree an ISO was built from. Cutting one: [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

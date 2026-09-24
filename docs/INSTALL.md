@@ -4,7 +4,7 @@ The complete install guide. The README carries a short version; this is the
 one to read if something goes wrong, or if you want to understand what the
 installer is actually doing to your machine.
 
-**Version this describes:** 1.4.0-rc2 · **Last verified:** 2026-08-10
+**Version this describes:** 1.5.0 · **Last checked against the installer source:** 2026-09-23
 
 ---
 
@@ -29,9 +29,9 @@ installer is actually doing to your machine.
 | | |
 |---|---|
 | A 64-bit x86 machine | **UEFI required. Legacy BIOS boot is not supported and never has been.** |
-| A USB stick, **32 GB or larger** | The image is ~17.7 GB. A 16 GB stick cannot hold it. |
+| A USB stick, **32 GB or larger** | The full image is 15.6 GiB (16.7 GB, measured on the 1.5.0 build). A 16 GB stick cannot hold it. The 2.0 GB net installer fits a 4 GB stick. |
 | A target disk | **It will be erased.** |
-| Network | Optional for most distributions — see below. |
+| Network | Optional for Fedora and Debian — see below. |
 
 **On UEFI.** This is not an untested configuration, it is an absent one. The
 installer writes a GPT layout with an EFI System Partition and a ZFS pool and
@@ -48,12 +48,15 @@ make the machine unbootable. Requiring UEFI removes that entire failure class.
 Practically this excludes pre-2012 hardware, OEM desktops left in CSM-only
 mode, and VMs configured for SeaBIOS instead of OVMF.
 
-**About the network.** Debian, Ubuntu and Fedora installs are fully
-offline: their packages are baked into the image. **Arch installs require
-internet** — it is a rolling release with no fixed package set to pre-stage.
-Enterprise Linux targets (CentOS Stream, Rocky, RHEL) fall back to the
-network for some packages because the image is built on Fedora and cannot
-mirror EL repositories.
+**About the network.** Debian and Fedora installs are fully offline: their
+packages are baked into the full image. Everything else needs a network.
+**Ubuntu**'s offline mirror was retired in 2026-08 (`deploy.sh` builds it only
+with `KLDLOAD_INCLUDE_UBUNTU_DARKSITE=1`). **Arch** is a rolling release with
+no fixed package set to pre-stage. **CentOS Stream and Rocky** fall back to
+the network for some packages because the image is built on Fedora and cannot
+mirror EL repositories, and **RHEL** takes every package from Red Hat's CDN,
+which needs a subscription (`KLDLOAD_RHEL_*` in the answers file). The net
+installer needs a network for every distribution.
 
 **About RAM.** The installer runs from a live environment that holds the
 package mirror in memory. 8 GB is comfortable; 4 GB works but is tight on
@@ -68,8 +71,12 @@ before you write it. A truncated download produces an installer that fails
 in confusing ways much later.
 
 ```bash
-sha256sum -c kldload-1.4.0-rc2-x86_64.iso.sha256
+sha256sum -c kldload-1.5.0-x86_64.iso.sha256
 ```
+
+The download button resolves to `kldload-free-latest.iso` (the full image) or
+`kldload-free-net-latest.iso` (the net installer); the file inside the bucket
+is named `kldload-<version>-x86_64.iso`.
 
 Building from source instead:
 
@@ -80,8 +87,13 @@ PROFILE=desktop ./deploy.sh build      # 30–60 min
 ```
 
 The build runs in a container and needs podman with the ZFS storage driver.
-If it complains that a dataset does not exist, create the chain first —
-the README's build section has the three `zfs create` commands.
+If it complains that a dataset does not exist, create the chain first
+(the same two commands `ci/README.md` uses to bootstrap a CI host):
+
+```bash
+sudo zfs create -p -o mountpoint=/var/lib/containers/storage rpool/var/lib/containers/storage
+sudo zfs create rpool/var/lib/containers/storage/zfs
+```
 
 ---
 
@@ -102,7 +114,7 @@ sudo ./deploy.sh burn /dev/sdX         # asks for confirmation
 or by hand:
 
 ```bash
-sudo dd if=kldload-1.4.0-rc2-x86_64.iso of=/dev/sdX bs=4M \
+sudo dd if=kldload-1.5.0-x86_64.iso of=/dev/sdX bs=4M \
         status=progress oflag=direct conv=fsync
 ```
 
@@ -114,9 +126,9 @@ image that boots far enough to fail strangely.
 exactly like a broken installer:
 
 ```bash
-SIZE=$(stat -c%s kldload-1.4.0-rc2-x86_64.iso)
+SIZE=$(stat -c%s kldload-1.5.0-x86_64.iso)
 sudo dd if=/dev/sdX bs=1M count=$((SIZE/1048576)) iflag=fullblock status=none | sha256sum
-sha256sum kldload-1.4.0-rc2-x86_64.iso
+sha256sum kldload-1.5.0-x86_64.iso
 ```
 
 The two digests must match. **Leave the stick plugged in until this
@@ -145,23 +157,34 @@ shell.
 
 The installer asks for, in order:
 
-**Distribution.** One of Debian, Ubuntu, Fedora, CentOS Stream, Rocky, RHEL,
-Arch, or Alpine. This is the substrate that gets installed — kldload is the
-installer and the assembled system, not a distribution of its own.
+**Distribution.** The web UI offers **Fedora 44** and **Debian 13**, the two
+that install offline. The netboot menu offers whatever `NETBOOT_DISTROS` lists
+(default `fedora`); the installer itself accepts `arch`, `centos`, `debian`,
+`fedora`, `rhel`, `rocky` and `ubuntu` in an answers file, and RHEL and Arch
+are sent the net image. This is the substrate that gets installed — kldload is
+the installer and the assembled system, not a distribution of its own.
 
-**Profile.** `desktop` gives a workstation with the graphical consoles;
-`server`, `kvm`, `klab`, `zfslab` and `core` give progressively narrower
-server-class systems whose only surface is the web console on port 8443.
+**Profile.** The web UI's tiles are `desktop` (a workstation with the
+graphical consoles), `server`, `core`, `kvm` and `k8s`; the netboot menu adds
+`storage` and `ai`. Everything but `desktop` is headless, with the web console
+on port 8443 as its surface (`core` has no console at all).
 
 **Target disk.** Erased completely.
 
-**Encryption.** Pre-selected, and recommended. Set a **disk encryption
-passphrase** here — you will be asked for it at every boot, before the
-system starts. It is not your login password.
+**Encryption.** **Off unless you select it**, and recommended. Set *ZFS
+encryption* to *Encrypted* and enter a **disk encryption passphrase** — you
+will be asked for it at every boot, before the system starts. It is not your
+login password. In an answers file it is `KLDLOAD_ZFS_ENCRYPT=1` with
+`KLDLOAD_ZFS_PASSPHRASE`; on the netboot menu it is a tick, with the passphrase
+typed on the console.
 
-**Secure Boot.** **Off by default** — set `KLDLOAD_ENABLE_SECURE_BOOT=1` to
-turn it on. With it off the firmware boots ZFSBootMenu directly and there is
-no MOK enrollment to perform; sections 6 and 7 do not apply. See
+**Secure Boot.** The web UI's *Secure Boot* card starts **unticked** and the
+netboot menu's tick starts from the answers file, so both are **off unless you
+turn them on**. An answers file that **omits** `KLDLOAD_ENABLE_SECURE_BOOT`
+is different: the installer's boot-chain code reads an absent value as `1`
+and prepares the MOK, shim and signed chain, while the manifest records `0`.
+Always write the key. With it off the firmware boots ZFSBootMenu directly and
+there is no MOK enrollment to perform; sections 6 and 7 do not apply. See
 [section 7](#7-secure-boot-on-or-off) before enabling it.
 
 **Account.** The name you enter here is the admin account. It is a
@@ -171,17 +194,20 @@ on every action.
 
 When the install finishes the machine **reboots**. Remove the USB stick.
 
-A **Secure Boot** install is the exception: it **powers off** instead. That is
-deliberate — it hands you control of the enrollment boot rather than racing an
-automatic restart into a ten-second MokManager prompt.
+An interactive **Secure Boot** install is the exception: it **powers off**
+instead. That is deliberate — it hands you control of the enrollment boot
+rather than racing an automatic restart into a ten-second MokManager prompt.
+An unattended install (netboot or seed stick) reboots either way.
 
 ---
 
 ## 6. First boot: the Secure Boot enrollment
 
-**Skip this section unless you set `KLDLOAD_ENABLE_SECURE_BOOT=1`.** With
-Secure Boot off — the default — there is no MOK, no blue screen, and nothing
-to enroll. Your first boot asks for the encryption passphrase and comes up.
+**Skip this section unless you ticked Secure Boot or set
+`KLDLOAD_ENABLE_SECURE_BOOT=1`** (or left the key out of an answers file —
+see section 5). With Secure Boot off there is no MOK, no blue screen, and
+nothing to enroll. Your first boot asks for the encryption passphrase, if you
+chose encryption, and comes up.
 
 This is the step people get wrong when they DO enable it, so it gets its own
 section.
