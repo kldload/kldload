@@ -193,8 +193,15 @@ ExecStop=${ipbin} addr del ${KUBE_VIP_ADDRESS}/32 dev ${iface}
 [Install]
 WantedBy=multi-user.target
 UNIT
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable kldload-cp-vip.service 2>/dev/null || true
+    # Enable is not optional and is checked as an OUTCOME: a VIP unit that is
+    # written but not enabled comes back from the first reboot with no API
+    # address, and every kubeconfig in the estate points at it. Both lines
+    # were `|| true` until 2026-09-23.
+    systemctl daemon-reload || die "systemctl daemon-reload failed after writing kldload-cp-vip.service"
+    systemctl enable kldload-cp-vip.service ||
+        die "could not enable kldload-cp-vip.service — the VIP ${KUBE_VIP_ADDRESS} would not survive a reboot"
+    systemctl is-enabled kldload-cp-vip.service >/dev/null 2>&1 ||
+        die "kldload-cp-vip.service is NOT enabled after 'systemctl enable' returned 0 — refusing to continue with a VIP that will not come back"
 }
 
 # ── kubeadm init ───────────────────────────────────────────────────────────
