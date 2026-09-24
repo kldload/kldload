@@ -120,6 +120,17 @@ _iso_unmount() {
     rmdir "$MOUNTPOINT" 2>/dev/null || true # a leftover mktemp dir is not a test result
 }
 trap _iso_unmount EXIT
+
+# _rm_extract DIR — unsquashfs keeps the image's directory modes, and the
+# rootfs root is not writable by its owner, so an unprivileged rm -rf stops
+# at "cannot remove root/etc: Permission denied" and errexit ends the run
+# before the summary (build 66, 2026-09-24 — the first CI run in which the
+# ISO actually mounted). Make the tree writable first.
+_rm_extract() {
+    [[ -d "$1" ]] || return 0
+    chmod -R u+rwX "$1" 2>/dev/null || true # a file already gone is not a failure here
+    rm -rf "$1"
+}
 if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)"; then
     _iso_mounted=1
     _pass "ISO mounts successfully (as $(id -un)${_SUDO[0]:+ via ${_SUDO[*]}})"
@@ -357,7 +368,7 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
         fi
         # extracted dirs carry the image's 0555 modes; make them removable
         chmod -R u+w "$TOOLEXTRACT" 2>/dev/null || true
-        rm -rf "$TOOLEXTRACT"
+        _rm_extract "$TOOLEXTRACT"
 
         # ── The shipped kernel pin must not exclude itself ──────────────────
         # This is the invariant that was violated: build-iso.sh derived its
@@ -395,9 +406,9 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
                 _pass "ISO ships a self-consistent kernel pin (${_kp_nvr})"
             fi
         fi
-        rm -rf "$KPEXTRACT"
+        _rm_extract "$KPEXTRACT"
 
-        rm -rf "$WSEXTRACT"
+        _rm_extract "$WSEXTRACT"
     else
         # A gate that cannot run is not a gate. onyx had no squashfs-tools for
         # months and every content gate above -- launchers, shipped tools,
