@@ -35,7 +35,9 @@
 # Outputs: log lines on stdout. The guest gains 10.250.0.<id>/10.251.0.<id>,
 #          the host gains a peer, the state DB gains a row.
 # Exit:    0 enrolled (or already enrolled), 1 could not resolve the VM,
-#          2 mesh enrollment failed but the DB row was still written.
+#          2 mesh enrollment failed but the DB row was still written, or the
+#          VM is a golden (never enrolled), 4 a cluster node kube-cluster has
+#          not meshed yet (left to it on purpose).
 #
 # Notes:
 #   - IDEMPOTENT. A guest that already has /etc/wireguard/.node-id keeps its
@@ -107,6 +109,42 @@ _is_template() {
     zfs list -H -o name "${KLDLOAD_VM_POOL:-rpool/vms}/${vm}@golden" >/dev/null 2>&1
 }
 
+# _is_cluster_node <vm> — 0 when the VM is a node of a kube-cluster cluster.
+#
+# kube-cluster owns a node's FIRST mesh setup: it gives the control plane id 1,
+# which carries the API address 10.251.0.1, and the rest their own ids. The
+# sweep timer used to race it: it reached nodes kube-cluster had not meshed
+# yet, found no .node-id, and initialised them itself with VM-band ids -- and
+# kube-cluster's own init then refused to clobber them. fiend, build 62,
+# deb-4-k8s (2026-09-23): nodes .2 .3 .4 kept, three renumbered .150-.152,
+# node 1 among them, and the API "no route to host". An ALREADY meshed node
+# is still enrolled normally (its id is reused, init is never re-run):
+# kube-bluegreen depends on that to re-peer a cluster after a host re-key.
+#
+# Recognised by the state DB, which registers the cluster at the START of its
+# bootstrap: a registered node, or <cluster>-cp[-N] / <cluster>-w-N for a
+# registered cluster. Without kldload-db, the default cluster's names.
+_is_cluster_node() {
+    local vm="$1"
+    if command -v kldload-db >/dev/null 2>&1; then
+        kldload-db dump 2>/dev/null | python3 -c '
+import json, re, sys
+vm = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if any(n.get("hostname") == vm for n in d.get("nodes", [])):
+    sys.exit(0)
+for c in d.get("clusters", []):
+    n = re.escape(c.get("name") or "")
+    if n and re.fullmatch(n + r"-cp(-[0-9]+)?|" + n + r"-w-[0-9]+", vm):
+        sys.exit(0)
+sys.exit(1)' "$vm" && return 0
+    fi
+    [[ "$vm" =~ ^kldload-cp(-[0-9]+)?$|^kldload-w-[0-9]+$ ]]
+}
+
 if [[ "${1:-}" == "--all" ]]; then
     shift
     _sweep_role="vm"
@@ -141,6 +179,7 @@ if [[ "${1:-}" == "--all" ]]; then
     _noip=0
     _partial=0
     _tmpl=0
+    _left=0
     while read -r _vm; do
         [[ -n "$_vm" ]] || continue
         if _is_template "$_vm"; then
@@ -167,6 +206,10 @@ if [[ "${1:-}" == "--all" ]]; then
         case "$_rc" in
         0) _done=$((_done + 1)) ;;
         1) _noip=$((_noip + 1)) ;;
+        4)
+            _left=$((_left + 1))
+            continue # left to kube-cluster on purpose; not a failure to report
+            ;;
         *) _partial=$((_partial + 1)) ;;
         esac
         if ((_rc != 0)); then
@@ -175,8 +218,8 @@ if [[ "${1:-}" == "--all" ]]; then
                 "$_vm" "$_rc" "$(printf '%s' "$_out" | tail -n1)"
         fi
     done < <(virsh list --state-running --name 2>/dev/null)
-    printf '[enroll] sweep: %d on the mesh, %d without an address, %d incomplete, %d golden(s) left alone\n' \
-        "$_done" "$_noip" "$_partial" "$_tmpl"
+    printf '[enroll] sweep: %d on the mesh, %d without an address, %d incomplete, %d golden(s) left alone, %d cluster node(s) left to kube-cluster\n' \
+        "$_done" "$_noip" "$_partial" "$_tmpl" "$_left"
     exit 0
 fi
 
@@ -392,6 +435,10 @@ if ! node_id="$(_ssh 'cat /etc/wireguard/.node-id 2>/dev/null || true')"; then
     exit 2
 fi
 node_id="$(printf '%s' "$node_id" | tr -cd '0-9')"
+if [[ -z "$node_id" && -z "$FORCE_ID" ]] && _is_cluster_node "$VM"; then
+    log "${VM}: a cluster node kube-cluster has not meshed yet — left to kube-cluster (exit 4)"
+    exit 4
+fi
 if [[ -n "$FORCE_ID" ]]; then
     node_id="$FORCE_ID"
 elif [[ -z "$node_id" ]]; then
