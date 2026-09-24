@@ -91,7 +91,12 @@ die() {
     exit 1
 }
 
-command -v zfs >/dev/null 2>&1 || die "zfs is not installed — nothing to roll back"
+# The zfs check and the pool lookup live in _locate_be, called from the
+# dispatch at the bottom for every verb EXCEPT help. They used to run here at
+# file level, so `rollback --help` on a box with no pool (a live ISO, a
+# container, a laptop with the pool exported) died with "could not find a
+# ZFS pool" instead of printing the text that would have explained what the
+# tool needs (2026-09-23). Help answers first and needs nothing.
 
 # ─── Locating the running environment ──────────────────────────────────────
 # bootfs is the authority: it is what ZFSBootMenu reads to pick a default, so
@@ -145,10 +150,19 @@ _current_be() {
 # names — after a rollback is staged, they differ until the reboot.
 _running_be() { mount | awk '$3=="/" && $5=="zfs" && !f {print $1; f=1}'; }
 
-BE="$(_current_be)" || die "could not find a ZFS pool"
-[[ -n "$BE" ]] || die "could not determine the boot environment"
-POOL="${BE%%/*}"
-BE_PARENT="${BE%/*}"
+# _locate_be — set the globals BE, POOL and BE_PARENT every verb below reads.
+# Args: none. Dies when zfs is absent or no pool answers. Called once, from
+# the dispatch, after help has had its chance.
+BE=""
+POOL=""
+BE_PARENT=""
+_locate_be() {
+    command -v zfs >/dev/null 2>&1 || die "zfs is not installed — nothing to roll back"
+    BE="$(_current_be)" || die "could not find a ZFS pool"
+    [[ -n "$BE" ]] || die "could not determine the boot environment"
+    POOL="${BE%%/*}"
+    BE_PARENT="${BE%/*}"
+}
 
 # ─── Snapshot listing ──────────────────────────────────────────────────────
 # _rule <n> — n box-drawing characters. See the call site for why this is not
@@ -1129,6 +1143,24 @@ for _arg in "$@"; do
 done
 set -- ${_argv[@]+"${_argv[@]}"}
 
+# Help and a typo'd verb are answered BEFORE the pool is looked up: neither
+# needs zfs, and both used to die on a poolless machine with a message about
+# the pool instead of the text that was asked for.
+case "${1:-pick}" in
+help | -h | --help)
+    cmd_help
+    exit 0
+    ;;
+pick | list | ls | last | to | cancel | activate | migrate-pkgdb | status) _locate_be ;;
+*)
+    printf 'rollback: unknown command: %s\n\n' "$1" >&2
+    cmd_help >&2
+    # 2, not 1: a typo'd verb is a usage error and nothing was attempted, so a
+    # caller can tell it apart from a rollback that genuinely failed.
+    exit 2
+    ;;
+esac
+
 case "${1:-pick}" in
 pick) cmd_pick ;;
 list | ls) cmd_list ;;
@@ -1144,12 +1176,6 @@ activate)
     ;;
 migrate-pkgdb) cmd_migrate_pkgdb ;;
 status) cmd_status ;;
-help | -h | --help) cmd_help ;;
-*)
-    printf 'rollback: unknown command: %s\n\n' "$1" >&2
-    cmd_help >&2
-    # 2, not 1: a typo'd verb is a usage error and nothing was attempted, so a
-    # caller can tell it apart from a rollback that genuinely failed.
-    exit 2
-    ;;
+# help and unknown verbs were handled above, before _locate_be.
+*) die "internal: verb '$1' passed the pre-dispatch check but has no handler" ;;
 esac
