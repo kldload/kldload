@@ -279,6 +279,31 @@ if have kubectl && [[ -r /root/.kube/config ]]; then
     mapfile -t _lbs < <(S timeout 20 kubectl get svc -A -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}/{.metadata.name}={.status.loadBalancer.ingress[0].ip}:{.spec.ports[0].port}{"\n"}{end}')
     _wl_n=0
     _wl_bad=()
+    _wl_np=()
+    # _netpol_for <namespace> <service> — the NetworkPolicy (name) that selects
+    # the service's pods, on stdout; empty when none does. A policy applies
+    # when every one of its podSelector matchLabels is in the service selector;
+    # an empty podSelector selects every pod in the namespace.
+    _netpol_for() {
+        S timeout 15 kubectl get networkpolicy,service -n "$1" -o json | python3 -c '
+import json, sys
+svc = sys.argv[1]
+try:
+    items = json.load(sys.stdin).get("items", [])
+except Exception:
+    sys.exit(0)
+sel = next((i.get("spec", {}).get("selector") or {} for i in items
+            if i.get("kind") == "Service" and i["metadata"]["name"] == svc), None)
+if not sel:
+    sys.exit(0)
+for i in items:
+    if i.get("kind") != "NetworkPolicy":
+        continue
+    ml = (i.get("spec", {}).get("podSelector") or {}).get("matchLabels") or {}
+    if all(sel.get(k) == v for k, v in ml.items()):
+        print(i["metadata"]["name"])
+        break' "$2" || true # no kubectl answer means no policy found; the service is then judged on its own
+    }
     for _row in "${_lbs[@]}"; do
         [[ -n "$_row" ]] || continue
         _svc="${_row%%=*}"
@@ -323,14 +348,26 @@ if have kubectl && [[ -r /root/.kube/config ]]; then
             if [[ "$_err" =~ \((NotFound|Forbidden|Unauthorized|BadRequest|MethodNotAllowed)\) ]]; then
                 printf '%-40s %-24s -> %s\n' "$_svc" "proxy :${_port}" "answered (${BASH_REMATCH[1]})"
             else
-                printf '%-40s %-24s -> %s\n' "$_svc" "proxy :${_port}" "NO ANSWER: ${_err:-no error text}"
-                _wl_bad+=("${_svc}")
+                # A NetworkPolicy that selects the service's pods can refuse the
+                # API server by design: Argo CD admits only argocd-server to
+                # dex, and 4-k8s on build 62 reported dex "NO ANSWER" for a
+                # deployment doing exactly what it was told. Name the policy
+                # and warn; fail only what no policy explains.
+                _np="$(_netpol_for "$_ns" "$_name")"
+                if [[ -n "$_np" ]]; then
+                    printf '%-40s %-24s -> %s\n' "$_svc" "proxy :${_port}" "no answer from the API server — NetworkPolicy ${_np} admits only its own peers"
+                    _wl_np+=("${_svc}")
+                else
+                    printf '%-40s %-24s -> %s\n' "$_svc" "proxy :${_port}" "NO ANSWER: ${_err:-no error text}"
+                    _wl_bad+=("${_svc}")
+                fi
             fi
         fi
     done
-    echo "probed ${_wl_n} service(s), ${#_wl_bad[@]} not answering"
+    echo "probed ${_wl_n} service(s), ${#_wl_bad[@]} not answering, ${#_wl_np[@]} closed to the API server by a NetworkPolicy"
     echo '```'
     echo
+    ((${#_wl_np[@]} > 0)) && note_warn "workloads closed to the API server by a NetworkPolicy (by design, not probed further): ${_wl_np[*]}"
     if ((_wl_n == 0)); then
         note_warn "workloads: the cluster serves nothing to probe (no LoadBalancer or app ClusterIP service)"
     elif ((${#_wl_bad[@]} > 0)); then
