@@ -3148,6 +3148,14 @@ else
 fi
 
 # ── Behavioural units (installer/security fixes the ISO checks can't reach) ──
+#
+# NOT run from here: tests/gate-selftest.sh. It proves the gates in THIS file
+# can fail by breaking a tracked file and running the whole of smoke-build
+# per case -- eight cases at roughly a minute each, on a tree it first
+# requires to be clean (the CI checkout is dirty by construction: the darksite
+# lock is resolved every build), and a run from inside smoke-build would
+# recurse. It is an operator gate, run by hand after a gate is added or
+# changed: bash tests/gate-selftest.sh [case].
 _section "Behavioural Units"
 if bash "$ROOT/tests/smoke-unit.sh"; then
     _pass "smoke-unit.sh: all behavioural checks passed"

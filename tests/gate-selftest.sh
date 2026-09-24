@@ -39,6 +39,11 @@
 #     (cases x 46s) for smoke-build. Run one case with: gate-selftest.sh <name>
 #   * A case that fails means the GATE is broken, not the tree. Read it as
 #     "this check would not have caught the thing it exists to catch."
+#   * It has no automated caller, on purpose: smoke-build cannot run it
+#     (each case runs smoke-build, so it would recurse; it needs a clean tree
+#     and the CI checkout is dirty by construction; ~8 minutes). Run it by
+#     hand after adding or changing a gate, and paste the result in the
+#     commit message.
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
