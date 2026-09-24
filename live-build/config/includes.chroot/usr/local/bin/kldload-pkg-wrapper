@@ -15,7 +15,8 @@ set -Eeuo pipefail
 # no snapshot and no way back. This closes that gap without asking anyone to
 # learn a new command, and adds the one command worth learning:
 #
-#     apt rollback        # undo the last transaction, reboot to apply
+#     apt rollback        # stage an undo of the last transaction; reboot to apply
+#     apt rollback last   # the same, and reboot into it right away
 #     dnf rollback list   # see what you could go back to
 #
 # WHY a PATH wrapper and not a plugin: it is the only mechanism that works
@@ -120,8 +121,15 @@ if [[ "${1:-}" == "rollback" ]]; then
         printf 'kldload-pkg-wrapper: kldload-rollback is not installed\n' >&2
         exit 1
     fi
+    # --no-reboot is what makes the comment above true. `kldload-rollback last`
+    # on its own reboots after a two-second countdown (that tool's own default,
+    # chosen for the demo bench), so a bare `apt rollback` typed to see what
+    # it would do restarted the machine. Verified against the source on
+    # 2026-09-23: cmd_last -> _reboot_now with REBOOT=1. The wrapper stages,
+    # prints how to reboot and how to cancel, and stops. Anyone who wants the
+    # reboot in one line types it: `apt rollback last`.
     if (($# == 0)); then
-        exec /usr/sbin/kldload-rollback last
+        exec /usr/sbin/kldload-rollback last --no-reboot
     fi
     exec /usr/sbin/kldload-rollback "$@"
 fi
