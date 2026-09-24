@@ -147,8 +147,12 @@ k_poweroff_after_success() {
     # treated as a Secure Boot install and powered off. Secure Boot is opt-in
     # as of 2026-08-19; without MOK there is no enrollment window to protect
     # and no reason not to reboot straight into the installed system.
+    # Absent key = 1, the same reading bootstrap.sh, bootloader.sh and
+    # TEMPLATE.env use. This line and the manifest writer said :-0 until
+    # 2026-09-23, so an answers file without the key got the Secure Boot
+    # chain built and a manifest recording that it was not.
     local _sb_shutdown=0
-    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]] &&
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] &&
         [[ ! -f /etc/kldload/autoinstall.env ]]; then
         _sb_shutdown=1
     fi
@@ -1599,7 +1603,7 @@ KLDLOAD_EXPORT_FORMAT="${KLDLOAD_EXPORT_FORMAT:-none}"
 # Intent, not firmware state: an SB install is normally performed with SB off
 # in firmware and enabled afterwards, so mokutil would answer the wrong
 # question here.
-KLDLOAD_ENABLE_SECURE_BOOT="${KLDLOAD_ENABLE_SECURE_BOOT:-0}"
+KLDLOAD_ENABLE_SECURE_BOOT="${KLDLOAD_ENABLE_SECURE_BOOT:-1}"
 # ── Runtime requests — kldload-autodeploy reads these to decide which
 # subsystems to stand up on first boot (unattended). Without these, the
 # firstboot orchestrator doesn't know what the user picked in the UI.

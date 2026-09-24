@@ -482,7 +482,7 @@ html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background
                version banner this panel replaced. It is the answer to "what am
                I looking at" and belongs above the change list, not inside it. -->
           <div class="wn-lede">
-            Fedora 44 on the Linux 7.0 kernel, OpenZFS 2.4.3 on root, dnf5. One
+            Fedora 44 on its current kernel, OpenZFS 2.4 on root, dnf5. One
             URL, one cert, every service &mdash; the whole stack runs in the
             kernel.
             <div class="wn-lede-sub">
@@ -494,120 +494,96 @@ html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background
           </div>
 
           <div class="wn-item">
-            <div class="wn-title">An update you can undo</div>
+            <div class="wn-title">One key provisions the rack</div>
             <div class="wn-body">
-              <code>apt</code> and <code>dnf</code> snapshot the root dataset before
-              every transaction that changes the system, and any of them can be
-              reversed — these are the normal commands, not a wrapper you have to
-              remember, so a script or the GUI updater gets the same protection.
-              <div class="wn-code">$ sudo apt upgrade
-kldload: snapshot rpool/ROOT/kldload@apt-pre-20260817-023105
-
-$ sudo apt rollback
-Rollback staged.
-  new environment : rpool/ROOT/rollback-20260817-023340
-  boot path       : direct kernel (Secure Boot compatible)
-
-$ systemctl reboot</div>
-              Rollback <em>clones</em> the snapshot into a new boot environment
-              rather than running <code>zfs rollback</code>, which cannot touch a
-              mounted root and would destroy every newer snapshot. Nothing is
-              overwritten, and <code>apt rollback cancel</code> reverses the whole
-              thing until you reboot. Works under Secure Boot too: the ESP kernel,
-              initrd and <code>grub.cfg</code> are rewritten to match the dataset,
-              backed up first.
+              Install the first machine with <code>KLDLOAD_KEEP_NETBOOT=1</code>
+              and it keeps the kernel, initrd and squashfs it was installed from
+              &mdash; then serves them. <code>kldload-netboot-server</code> lays
+              out the HTTP tree, proxyDHCP and TFTP on the LAN interface; the
+              other machines boot a menu that asks the profile, the distribution
+              and the security options, or take an armed answers file and ask
+              nothing. The payload is the full darksite on purpose: a rack builds
+              with no internet at all.
+              <div class="wn-code">$ kldload-netboot-server arm-install 3c:ec:ef:12:34:56 answers/kvm.env
+$ kldload-netboot-server status</div>
             </div>
           </div>
 
           <div class="wn-item">
-            <div class="wn-title">The kernel is pinned as a matched set</div>
+            <div class="wn-title">Rebuild a node from its replica</div>
             <div class="wn-body">
-              ZFS and NVIDIA are out-of-tree DKMS modules built against one
-              specific kernel, so the kernel, the ZFS packages, the whole NVIDIA
-              driver set and the boot chain are held together — 56 packages on a
-              desktop install (see the <strong>Pinned</strong> card above).
-              <code>nvidia-container-toolkit</code> is deliberately excluded: own
-              version line, not coupled to the kernel module, so holding it would
-              block its security updates for no safety gain.
+              A machine that replicates its root to another kldload host can be
+              rebuilt from that copy: boot the installer, point
+              <code>kldload-restore-machine</code> at the replica, and it
+              partitions, receives, rewrites the boot chain and comes back as the
+              machine it was. Backups are a property of the filesystem, not a
+              product.
             </div>
           </div>
 
           <div class="wn-item">
-            <div class="wn-title">A console per subsystem</div>
+            <div class="wn-title">The first boot explains itself</div>
             <div class="wn-body">
-              <code>zxplore</code> (pools, datasets, snapshots, replication, both
-              permission layers), <code>wgxplore</code> (every WireGuard interface
-              and peer, declared against actual), <code>vmxplore</code> (the VM
-              estate, serial and screen consoles), <code>ztxplore</code> (the
-              OpenZFS test lab), <code>buildmon</code>. Each ships a GUI
-              <em>and</em> a TUI, so a headless hypervisor gets the same tool over
-              SSH. <code>vmxplore(1)</code> and <code>ztxplore(1)</code> carry full
-              man pages embedded in the binary.
+              A first boot that builds golden images, a cluster and an AI stack
+              takes a while. The screen now shows what it is doing and why, one
+              scene per subsystem, with the real commands and their real output
+              &mdash; and keeps you out of the desktop until it is finished, so
+              nothing half-built gets used.
             </div>
           </div>
 
           <div class="wn-item">
-            <div class="wn-title">Kubernetes is HA by default</div>
+            <div class="wn-title">Firecracker microVMs on the same substrate</div>
             <div class="wn-body">
-              Three control planes via kube-vip, VIP float proven by failover, and
-              control planes can be added after install from this console. Adding
-              or removing a node reconciles the WireGuard mesh, etcd membership and
-              firewall rules on every other node. New day-2 verbs: port-forward,
-              editing resources as YAML, Events, StatefulSets, DaemonSets,
-              ConfigMaps, cluster start/stop.
+              <code>kfire</code> clones microVMs from sealed appliance zvols in
+              well under a second each, jailed as an unprivileged user, enrolled
+              on the mesh and scraped by Prometheus like any other guest. Forty-five
+              machines in four minutes was the demo; the substrate is the same ZFS
+              the KVM guests use.
             </div>
           </div>
 
           <div class="wn-item">
-            <div class="wn-title">The AI stack runs offline</div>
+            <div class="wn-title">Blue/green, one layer down</div>
             <div class="wn-body">
-              Ollama and Open WebUI install by default. Built with
-              <code>KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1</code> the ISO carries 5.4 GB
-              — the model, the embedding model, the Open WebUI image and the Ollama
-              runtime — so first boot has a working assistant with the network
-              unplugged.
+              <code>kube-bluegreen</code> stands up a second cluster from the same
+              goldens, deploys the workload, and moves the address. Promotion is a
+              VIP move; rollback is the same move back. The workload tier and the
+              cluster tier both work this way.
             </div>
           </div>
 
           <div class="wn-item">
-            <div class="wn-title">An estate Ansible can target</div>
+            <div class="wn-title">Failures that reported success</div>
             <div class="wn-body">
-              VMs land on a network that says what they are, and a dynamic
-              inventory turns that into groups:
-              <div class="wn-code">$ kldload-networks apply    # kld-klab, kld-zfslab, kld-vms
-$ kldload-networks sync     # DHCP leases → the state DB
-$ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
-              <code>kldload-estate</code> reconciles what libvirt, the state
-              database, DHCP, WireGuard and Kubernetes each believe and reports
-              where they disagree — <code>kubectl</code> reporting six nodes Ready
-              while <code>wg show</code> had four peers is the class of drift it
-              exists for.
+              Most of this release is fixes found by standing the whole estate up
+              on real hardware and using it: fifteen editions installed end to end,
+              every golden cloned, joined to libvirt, the state database, the
+              Ansible inventory, the WireGuard mesh and Prometheus, and deleted
+              again &mdash; and the sweep fails on anything that only <em>looked</em>
+              finished. A count is not a result; a log line is not an outcome.
             </div>
           </div>
 
           <div class="wn-item">
-            <div class="wn-title">Also in 1.4.0</div>
+            <div class="wn-title">Two defaults changed</div>
             <div class="wn-body">
-              The OpenZFS test lab across six distributions on zvols, with guest
-              kernels pinned for the life of the build · Docker with its layers on
-              ZFS · 29 Grafana dashboards, ZFS split between the pool and the test
-              lab · offline install for Debian, Fedora and RHEL (243 packages, 23
-              images, pinned Helm charts) · <code>kexport</code> to qcow2, raw,
-              VMDK or OVA, sealed by default · a five-second boot menu, because a
-              hidden one cannot be used.
+              ZFS encryption is off unless you turn it on (the card above, or
+              <code>KLDLOAD_ZFS_ENCRYPT=1</code>). Shipped answer templates no
+              longer carry a real default password.
             </div>
           </div>
 
           <div class="wn-fixed">
-            <strong>Fixed, and you would have noticed:</strong> nine of eleven
-            systemd units never reached the ISO, so the package-holds unit, the ZFS
-            dbgmsg collector and the apt snapshot hook shipped and did nothing ·
-            darksite AI weights were ignored unless a checkbox was ticked, so first
-            boot pulled a model already on disk · NVIDIA was unheld, letting its
-            userspace advance past the kernel module · bcc tools were installed but
-            never found, because their names and paths differ per distribution ·
-            NetworkManager managed WireGuard, libvirt and Cilium interfaces and
-            raised an activation failure for each during first boot.
+            <strong>Fixed before release, and you would have cared:</strong> the
+            live image accepted root over SSH with a published password on every
+            USB or PXE boot · every install trusted one shared SSH key · the
+            netboot menu put passwords on the kernel command line · the support
+            bundle carried private keys · a failed Red Hat registration was retried
+            without TLS verification · Arch and Alpine installs reported success on
+            a machine that could not boot · the CI smoke gate had never looked
+            inside an ISO. All closed in the build you are running; the CHANGELOG
+            has the detail.
           </div>
 
           <div style="margin-top:0.9rem;color:var(--muted);font-size:0.8rem">
@@ -975,16 +951,14 @@ $ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
                 <div style="font-size:1.5rem;margin-bottom:0.3rem">🎮</div>
                 <div style="font-size:0.8rem;font-weight:600;color:var(--text)">NVIDIA GPU</div>
               </div>
-              <!-- Secure Boot default = ON again as of 2026-07-22.
-                   The 1.1.0 reason for OFF (ZBM SBAT gap: shim 15.8 rejects
-                   ZBM chainload regardless of MOK) is now handled in the
-                   installer instead of by disabling SB: the GRUB default is
-                   FIRMWARE-SB-aware (lib/bootloader.sh) — SB-active firmware
-                   boots the signed direct chain, SB-inactive firmware keeps
-                   ZBM as default while MOK enrollment + module signing still
-                   arm the box for a later SB flip (grub fallback=direct
-                   covers that flip). Uncheck for firmware that can't enroll
-                   MOK or throwaway test installs. -->
+              <!-- Secure Boot is OFF by default in this page: the hidden
+                   install-secure-boot checkbox below has no `checked`, and the
+                   payload sends "0". Tick the card to build the signed chain
+                   (kldload CA -> MOK -> signed zfs.ko + kernel, GRUB default
+                   "direct"). An answers file that leaves the key out gets 1,
+                   which is why TEMPLATE.env says to always write it. The
+                   earlier comment here claimed ON since 2026-07-22; the code
+                   never did that (found 2026-09-23). -->
 
               <div class="opt-card" id="opt-secure-boot" onclick="toggleOpt('secure-boot')" title="kldload CA → MOK → signed ZFS kmod + ZBM" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
                 <div style="font-size:1.5rem;margin-bottom:0.3rem">🔒</div>
