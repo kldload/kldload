@@ -3104,49 +3104,13 @@ SALT
             _status "Starting AI setup..."
             sleep 6 # give dashboard time to load before first status update
 
-            # Desktop progress notifications — let the user know what's happening
-            _notify_desktop() {
-                # Send GNOME desktop notification — must never fail even under set -e
-                local _title="$1" _body="$2"
-                (
-                    set +e
-                    for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
-                        _user=$(id -nu "$_uid" 2>/dev/null) || continue
-                        sudo -u "$_user" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus"
-                        # swallow: there is no desktop session to notify on a headless install
-                        notify-send -i dialog-information "$_title" "$_body" 2>/dev/null || true
-                    done
-                ) 2>/dev/null
-                return 0
-            }
-
-            _hal_terminal() {
-                # Open a terminal, typewriter-effect the message, pause, close
-                local _msg="$1" _delay="${2:-3}"
-                (
-                    set +e
-                    for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
-                        _user=$(id -nu "$_uid" 2>/dev/null) || continue
-                        sudo -u "$_user" \
-                            WAYLAND_DISPLAY=wayland-0 \
-                            XDG_RUNTIME_DIR="/run/user/${_uid}" \
-                            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
-                            gnome-terminal --title="kldload AI" -- bash -c "
-                printf '\e[8;12;80t'
-                printf '\033[1;32m'
-                printf '\n  > '
-                echo '${_msg}' | while IFS= read -r -n1 char; do
-                  printf '%s' \"\$char\"
-                  sleep 0.03
-                done
-                printf '\033[0m\n'
-                sleep ${_delay}
-              " 2>/dev/null &
-                    done
-                ) 2>/dev/null
-                return 0
-            }
-            log "AI setup starting — terminal show + Firefox will open when ready"
+            # _notify_desktop (notify-send) and _hal_terminal (a gnome-terminal
+            # typewriter show) were defined here and called from nowhere in
+            # this file; _notify_desktop's `sudo -u` line had no continuation,
+            # so it would have run sudo with an environment assignment and no
+            # command. Both deleted 2026-09-23. Progress reaches the operator
+            # through _status above, which the dashboard reads.
+            log "AI setup starting"
 
             # Model store — zstd + 1M records suit multi-GB GGUF blobs
             # (sequential reads, cold data, compresses on the margins).

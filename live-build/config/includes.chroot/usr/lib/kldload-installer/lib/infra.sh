@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # infra.sh — control-plane infrastructure mode for the kldload guided installer
 # Sourced by kldload-install-target.
-# Provides: guided_infra_prompt, k_infra_calc_subnets, k_infra_node_table
+# Provides: guided_infra_prompt, k_infra_calc_subnets
+# (k_infra_node_table and _infra_role_menu were defined here with no caller
+# anywhere in the tree; removed 2026-09-23.)
 set -Eeuo pipefail
 
 # k_infra_calc_subnets — parse a /20 CIDR and derive 16 x /24 subnets.
@@ -35,59 +37,6 @@ k_infra_calc_subnets() {
 
     export KLDLOAD_SUBNET_BASE KLDLOAD_SUBNET_LIST \
         KLDLOAD_SUBNET_BLUE KLDLOAD_SUBNET_GREEN KLDLOAD_HUB_IP
-}
-
-# k_infra_node_table — pretty-print the current node role table.
-# Reads KLDLOAD_CLUSTER_CIDR and KLDLOAD_NODE_ROLE_<n> env vars.
-k_infra_node_table() {
-    local cidr="${KLDLOAD_CLUSTER_CIDR:-10.78.0.0/20}"
-    local size="${KLDLOAD_CLUSTER_SIZE:-16}"
-    local base="${cidr%/*}"
-    local o1 o2 o3
-    IFS='.' read -r o1 o2 o3 _ <<<"$base"
-
-    printf '\n\e[1;37m  %-4s %-20s %-16s %-10s %s\e[0m\n' \
-        "NODE" "SUBNET" "WG0 IP" "CLUSTER" "ROLE"
-    printf '\e[1;34m  %-4s %-20s %-16s %-10s %s\e[0m\n' \
-        "────" "──────────────────" "──────────────" "────────" "──────────────────"
-
-    local i
-    for ((i = 0; i < size; i++)); do
-        local subnet="${o1}.${o2}.$((o3 + i)).0/24"
-        local wg_ip="10.77.0.$((i + 1))"
-        local cluster role color reset='\e[0m'
-
-        if ((i < 8)); then
-            cluster="blue"
-            color='\e[1;34m'
-        else
-            cluster="green"
-            color='\e[1;32m'
-        fi
-
-        local rvar="KLDLOAD_NODE_ROLE_${i}"
-        role="${!rvar:-minion}"
-        [[ $i -eq 0 ]] && role="master/hub"
-
-        local role_color='\e[0;37m'
-        [[ $i -eq 0 ]] && role_color='\e[1;33m'
-
-        printf "${color}  %-4s %-20s %-16s %-10s ${role_color}%s${reset}\n" \
-            "$i" "$subnet" "$wg_ip" "$cluster" "$role"
-    done
-    echo
-}
-
-# _infra_role_menu — list available roles
-_infra_role_menu() {
-    _info "  minion        — generic ZFS node (Salt minion, receives config)"
-    _info "  k8s-control   — Kubernetes control plane (etcd + API server)"
-    _info "  k8s-worker    — Kubernetes worker node"
-    _info "  k8s-lb        — Load balancer (HAProxy)"
-    _info "  storage       — Dedicated storage node (ZFS, NFS/iSCSI)"
-    _info "  prometheus    — Metrics collection (Prometheus + node_exporter)"
-    _info "  grafana       — Dashboard (Grafana)"
-    _info "  custom        — Custom role (you define the Salt state)"
 }
 
 # _detect_cm_on_lan — probe the default gateway for a running Cluster Manager.
