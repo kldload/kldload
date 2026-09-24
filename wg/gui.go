@@ -24,6 +24,7 @@ import (
 	"image/color"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -307,6 +308,12 @@ func RunGUI() error {
 		// hosts are opened once, on the first scan that returns anything;
 		// after that the tree stays exactly as the operator left it
 		didOpenHosts bool
+		// one scan at a time. The 30 s tick used to start a fresh
+		// CollectEstate goroutine whether or not the last one had come
+		// back, so a host that accepted ssh and then hung stacked up ssh
+		// children and goroutines, and a slow old scan could land AFTER a
+		// newer one and paint stale state over it.
+		scanning atomic.Bool
 		// which view is on screen — the key handler pages the manual only
 		manualOpen bool
 		// header: brand + build left, summary chips right — rebuilt per load
@@ -572,9 +579,15 @@ func RunGUI() error {
 	}
 
 	reload := func() {
+		if !scanning.CompareAndSwap(false, true) {
+			status.Text = "scan still running — skipped this refresh"
+			status.Refresh()
+			return
+		}
 		status.Text = "scanning estate…"
 		status.Refresh()
 		go func() {
+			defer scanning.Store(false)
 			// Re-read the inventory EVERY scan — hosts added to
 			// ~/.config/wgx/hosts (or ssh config) while the console is
 			// open must appear on the next Refresh, not after an app

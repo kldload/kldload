@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -170,6 +171,16 @@ func cmdDump() error {
 // declaration model is gone, and pointing at what the kernel already has is
 // both simpler and the only version that works on an adopted host.
 func cmdAttach(iface, ctr string) error {
+	// Both names go straight into ip(8) and podman/docker argv. A fixed
+	// argv cannot be shell-injected, but a name starting with "-" is read
+	// as a flag by both, and a name with a slash or a space is a path or
+	// two words. Refuse before touching anything, root or not.
+	if err := checkArgName("interface", iface); err != nil {
+		return err
+	}
+	if err := checkArgName("container", ctr); err != nil {
+		return err
+	}
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("moving %s into a netns needs root — try: sudo wgx attach %s %s", iface, iface, ctr)
 	}
@@ -187,6 +198,29 @@ func cmdAttach(iface, ctr string) error {
 	fmt.Printf("%s  address and routes are the container's to set:%s\n", cD, cN)
 	fmt.Printf("%s  podman exec %s ip addr add <cidr> dev %s && ip link set %s up%s\n",
 		cD, ctr, iface, iface, cN)
+	return nil
+}
+
+// argNameRE is the character set an interface or container name may use
+// when it becomes an argv element for ip, podman or docker. Kernel
+// interface names are at most 15 bytes of anything but "/" and space;
+// podman names are [a-zA-Z0-9][a-zA-Z0-9_.-]*. The intersection below
+// is what the operator ever types.
+var argNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// checkArgName rejects a name that would not survive as one clean argv
+// element: empty, starting with "-" (a flag to every tool that receives
+// it), or outside argNameRE. what names the operand in the error.
+func checkArgName(what, name string) error {
+	if name == "" {
+		return fmt.Errorf("%s name is empty", what)
+	}
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("%s name %q starts with '-' — it would be read as a flag", what, name)
+	}
+	if !argNameRE.MatchString(name) {
+		return fmt.Errorf("%s name %q: only letters, digits, '_', '.' and '-' are allowed", what, name)
+	}
 	return nil
 }
 

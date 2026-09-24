@@ -15,6 +15,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -317,6 +318,12 @@ func parseDump(host, dump string) []Device {
 // identity data.
 const sepMark = "==WGX-SEP=="
 
+// sshDeadline bounds one host's whole ssh exchange in CollectEstate. Longer
+// than the GUI's 30 s refresh would let two scans overlap; the scan guard in
+// gui.go stops that too, but the deadline is what frees a stuck child. A
+// var, not a const, so the test can shorten it against a fake ssh.
+var sshDeadline = 20 * time.Second
+
 // parseAddrs folds `ip -br addr` into iface → its own address(es),
 // link-local noise dropped. Empty on hosts without iproute2 (BSD) — the
 // UIs fall back to inferring subnets from peers' allowed-ips.
@@ -370,15 +377,30 @@ func CollectEstate(hosts []string) []Device {
 			members = localMembers()
 		} else {
 			var out []byte
-			out, err = exec.Command("ssh",
+			// ConnectTimeout bounds only the TCP connect. A host that accepts
+			// the connection and then hangs (a VM mid-reboot, a wedged sshd)
+			// held its goroutine and its ssh child forever, and the GUI's
+			// 30 s tick started another one each time — so the deadline is
+			// on the whole exchange, and ServerAlive gives ssh a reason to
+			// give up on a dead session before the deadline kills it.
+			ctx, cancel := context.WithTimeout(context.Background(), sshDeadline)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "ssh",
 				"-o", "BatchMode=yes",
 				"-o", "StrictHostKeyChecking=accept-new",
 				"-o", "ConnectTimeout=6",
+				"-o", "ServerAliveInterval=5",
+				"-o", "ServerAliveCountMax=2",
 				host,
 				"wg show all dump 2>/dev/null; echo "+sepMark+
 					"; ip -br addr 2>/dev/null; echo "+sepMark+
 					"; hostname -f 2>/dev/null || hostname; echo "+sepMark+
-					"; "+membersCmd).Output()
+					"; "+membersCmd)
+			// Killing ssh is not enough when something it spawned (a
+			// ControlMaster mux, a ProxyCommand) still holds the stdout
+			// pipe: Output() would wait on the pipe, not the process.
+			cmd.WaitDelay = 2 * time.Second
+			out, err = cmd.Output()
 			if parts := strings.SplitN(string(out), sepMark+"\n", 4); len(parts) == 4 {
 				dump, addrOut, fqdn, members = parts[0], parts[1], strings.TrimSpace(parts[2]), parts[3]
 			}
@@ -513,12 +535,18 @@ func localDump() ([]byte, error) {
 		len(bytes.TrimSpace(links)) == 0 {
 		return nil, nil
 	}
-	self, _ := os.Executable()
+	// pkexec re-runs THIS binary as root; a path it cannot resolve is a
+	// prompt for nothing, so the pkexec rung is skipped rather than tried
+	// with an empty argv[1].
+	self, selfErr := os.Executable()
 	for _, try := range [][]string{
 		{"sudo", "-n", "wg", "show", "all", "dump"},
 		{"pkexec", self, "dump"},
 	} {
 		if _, lerr := exec.LookPath(try[0]); lerr != nil {
+			continue
+		}
+		if try[0] == "pkexec" && selfErr != nil {
 			continue
 		}
 		if out, eerr := exec.Command(try[0], try[1:]...).Output(); eerr == nil &&

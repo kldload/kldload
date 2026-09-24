@@ -169,3 +169,40 @@ func TestHostDisplayPrefersFQDN(t *testing.T) {
 }
 
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
+// wgx attach hands both names to ip and podman as argv. The names must be
+// clean operands: a leading "-" is a flag to both tools, and anything with
+// a slash or a space is a path or two words.
+func TestCheckArgName(t *testing.T) {
+	cases := []struct {
+		name string
+		ok   bool
+	}{
+		{"wg-k8s", true},
+		{"wgx_lab.1", true},
+		{"app-adguard-ho", true},
+		{"", false},
+		{"-f", false},
+		{"--help", false},
+		{"wg k8s", false},
+		{"../wg0", false},
+		{"wg0;rm", false},
+		{"wg0$(id)", false},
+	}
+	for _, c := range cases {
+		err := checkArgName("interface", c.name)
+		if (err == nil) != c.ok {
+			t.Errorf("checkArgName(%q): err=%v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+	// cmdAttach must refuse a bad name before any privilege check, so the
+	// error is about the name, not about root.
+	err := cmdAttach("--help", "ctr")
+	if err == nil || !strings.Contains(err.Error(), "starts with '-'") {
+		t.Fatalf("cmdAttach(--help): %v", err)
+	}
+	err = cmdAttach("wg0", "a b")
+	if err == nil || !strings.Contains(err.Error(), "container name") {
+		t.Fatalf("cmdAttach(wg0, 'a b'): %v", err)
+	}
+}
