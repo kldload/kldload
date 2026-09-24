@@ -76,11 +76,11 @@ _psql() {
 # ── 1: Deploy ────────────────────────────────────────────────────────
 _section "Full-stack deploy via kube-demo"
 if ! kube-demo --list 2>/dev/null | grep -qx javaapi; then
-    _fail "kube-demo javaapi subcommand missing — old build?"
+    _fail "smoke-javaapi" "kube-demo javaapi subcommand missing — old build?"
     exit 1
 fi
 if ! kube-demo javaapi >/tmp/javaapi-deploy.log 2>&1; then
-    _fail "kube-demo javaapi exited non-zero"
+    _fail "smoke-javaapi" "kube-demo javaapi exited non-zero"
     tail -20 /tmp/javaapi-deploy.log
     exit 1
 fi
@@ -103,7 +103,7 @@ test_eq "${_pg:-0}" 1 "postgres: ${_pg:-0}/1 Ready"
 _section "Public VIP serves the application"
 VIP="${VIP:-$(kubectl -n "$NS" get svc web -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)}"
 if [[ -z "$VIP" ]]; then
-    _fail "the web Service has no LoadBalancer IP — MetalLB pool exhausted or speaker down"
+    _fail "smoke-javaapi" "the web Service has no LoadBalancer IP — MetalLB pool exhausted or speaker down"
     exit 1
 fi
 _pass "MetalLB assigned $VIP"
@@ -111,7 +111,7 @@ _pass "MetalLB assigned $VIP"
 if curl -sf --max-time 10 "http://$VIP/" >/dev/null 2>&1; then
     _pass "http://$VIP/ serves the storefront page"
 else
-    _fail "http://$VIP/ unreachable"
+    _fail "smoke-javaapi" "http://$VIP/ unreachable"
 fi
 
 # Assert real ROWS, not merely a 2xx: an empty database behind a healthy API
@@ -120,7 +120,7 @@ _products=$(curl -sf --max-time 10 "http://$VIP/api/products" 2>/dev/null | grep
 if [[ "${_products:-0}" -gt 0 ]]; then
     _pass "/api/products returns ${_products} rows from Postgres"
 else
-    _fail "/api/products returned no rows — schema not seeded?"
+    _fail "smoke-javaapi" "/api/products returned no rows — schema not seeded?"
 fi
 
 # ── 3: The write path ────────────────────────────────────────────────
@@ -133,7 +133,7 @@ _after=$(_psql -tAc "SELECT count(*) FROM shop.orders;" 2>/dev/null | tr -d '[:s
 if [[ -n "$_resp" && "${_after:-0}" -eq $((${_before:-0} + 1)) ]]; then
     _pass "order written and visible in Postgres (${_before} -> ${_after})"
 else
-    _fail "write path broken: response='${_resp:-none}' rows ${_before:-?} -> ${_after:-?}"
+    _fail "smoke-javaapi" "write path broken: response='${_resp:-none}' rows ${_before:-?} -> ${_after:-?}"
 fi
 
 # ── 4: Blue/green ────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ else
             _pass "rolled back to $_live" ||
             _warn "smoke-javaapi" "rollback to $_live failed"
     else
-        _fail "kube-bluegreen cutover $_target failed"
+        _fail "smoke-javaapi" "kube-bluegreen cutover $_target failed"
         tail -10 /tmp/javaapi-cutover.log
     fi
 fi
@@ -170,7 +170,7 @@ BASELINE=$(_psql -tAc "SELECT count(*) FROM shop.orders;" 2>/dev/null | tr -d '[
 if [[ -n "$BASELINE" && "$BASELINE" -gt 0 ]]; then
     _pass "orders table has $BASELINE rows (baseline)"
 else
-    _fail "orders table empty or unreachable (baseline=${BASELINE:-error})"
+    _fail "smoke-javaapi" "orders table empty or unreachable (baseline=${BASELINE:-error})"
     exit 1
 fi
 
@@ -191,14 +191,14 @@ if ! zfs list "$_ds" >/dev/null 2>&1; then
             _pass "demo destroyed" ||
             _warn "smoke-javaapi" "destroy returned non-zero"
     fi
-    _summary
+    summary
     exit 0
 fi
 _pass "rollback dataset $_ds present — recovery is possible"
 
 _section "Trigger disaster: $DISASTER_MODE"
 if ! kube-demo javaapi_disaster "$DISASTER_MODE" >/tmp/javaapi-disaster.log 2>&1; then
-    _fail "disaster fired but kube-demo exited non-zero"
+    _fail "smoke-javaapi" "disaster fired but kube-demo exited non-zero"
     tail -10 /tmp/javaapi-disaster.log
 fi
 _pass "disaster $DISASTER_MODE fired"
@@ -222,10 +222,10 @@ if kube-demo javaapi_recover >/tmp/javaapi-recover.log 2>&1; then
     if [[ "$TTR" -lt "$TTR_LIMIT_SECONDS" ]]; then
         _pass "recovered in ${TTR}s (under ${TTR_LIMIT_SECONDS}s gate)"
     else
-        _fail "TTR=${TTR}s exceeds ${TTR_LIMIT_SECONDS}s gate — regression"
+        _fail "smoke-javaapi" "TTR=${TTR}s exceeds ${TTR_LIMIT_SECONDS}s gate — regression"
     fi
 else
-    _fail "kube-demo javaapi_recover exited non-zero"
+    _fail "smoke-javaapi" "kube-demo javaapi_recover exited non-zero"
     tail -20 /tmp/javaapi-recover.log
     exit 1
 fi
@@ -235,7 +235,7 @@ _section "Post-recover verification"
 if curl -sf --retry 5 --retry-delay 2 --max-time 10 "http://$VIP/api/orders" >/dev/null 2>&1; then
     _pass "/api/orders 2xx after recover"
 else
-    _fail "/api/orders still broken after recover"
+    _fail "smoke-javaapi" "/api/orders still broken after recover"
 fi
 POST=$(_psql -tAc "SELECT count(*) FROM shop.orders;" 2>/dev/null | tr -d '[:space:]')
 test_eq "$POST" "$BASELINE" "orders.count() after recover ($POST) == baseline ($BASELINE)"
@@ -248,4 +248,4 @@ if [[ "$KEEP_DEMO" != "1" ]]; then
         _warn "smoke-javaapi" "destroy returned non-zero — check /tmp/javaapi-destroy.log"
 fi
 
-_summary
+summary

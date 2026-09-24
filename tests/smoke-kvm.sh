@@ -298,11 +298,23 @@ if virsh list --name 2>/dev/null | grep -q kldload-cp; then
     CP_IP=$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$CP_MAC" '$3 == m {print $5}' | cut -d/ -f1 | head -1)
     if [[ -n "$CP_IP" ]]; then
         _pass "CP IP: $CP_IP"
-        if sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${CP_IP} "kubectl get nodes --no-headers" 2>/dev/null; then
+        # Bounded twice: ConnectTimeout for a control plane that does not
+        # answer, `timeout` for one that answers and then hangs kubectl.
+        _cp_ssh=(timeout 60 sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${CP_IP}")
+        if "${_cp_ssh[@]}" "kubectl get nodes --no-headers" 2>/dev/null; then
             _pass "kubectl get nodes works"
-            NODES=$(sshpass -p kldload ssh -o StrictHostKeyChecking=no root@${CP_IP} "kubectl get nodes --no-headers 2>/dev/null | wc -l")
-            READY=$(sshpass -p kldload ssh -o StrictHostKeyChecking=no root@${CP_IP} "kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready'")
-            _pass "Nodes: ${READY}/${NODES} Ready"
+            # swallow: `grep -c` prints its count and exits 1 at zero matches,
+            # and so does ssh carrying it -- zero Ready nodes is the answer
+            # this check exists to show, not a reason to abort the suite under
+            # set -e (it did, on every cluster with no Ready node).
+            NODES=$("${_cp_ssh[@]}" "kubectl get nodes --no-headers 2>/dev/null | wc -l" 2>/dev/null || true)
+            READY=$("${_cp_ssh[@]}" "kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready'" 2>/dev/null || true)
+            NODES="${NODES:-0}" READY="${READY:-0}"
+            if ((NODES > 0 && READY == NODES)); then
+                _pass "Nodes: ${READY}/${NODES} Ready"
+            else
+                _fail "Nodes Ready" "${READY}/${NODES} Ready"
+            fi
         else
             _warn "kubectl" "cannot reach API server"
         fi
@@ -310,8 +322,9 @@ if virsh list --name 2>/dev/null | grep -q kldload-cp; then
         _warn "CP IP" "could not determine"
     fi
 
-    WORKER_COUNT=$(virsh list --name 2>/dev/null | grep -c 'kldload-w-')
-    _pass "Worker VMs: $WORKER_COUNT"
+    # swallow: grep -c exits 1 when it counts zero workers; the count is the report
+    WORKER_COUNT=$(virsh list --name 2>/dev/null | grep -c 'kldload-w-' || true)
+    _pass "Worker VMs: ${WORKER_COUNT:-0}"
 else
     _pass "No cluster deployed (expected — run kube-cluster bootstrap)"
 fi

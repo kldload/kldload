@@ -14,12 +14,15 @@ _pass() {
     echo -e "  \033[1;32mPASS\033[0m  $*"
     ((++PASS))
 }
+# The reason ($2) is optional in all three: this file runs under set -u, and a
+# one-argument call used to die with "$2: unbound variable" -- taking the whole
+# gate down instead of recording one failure (the install-slides check, 2026-09-23).
 _fail() {
-    echo -e "  \033[1;31mFAIL\033[0m  $1 — $2"
+    echo -e "  \033[1;31mFAIL\033[0m  $1 — ${2:-}"
     ((++FAIL))
 }
 _warn() {
-    echo -e "  \033[1;33mWARN\033[0m  $1 — $2"
+    echo -e "  \033[1;33mWARN\033[0m  $1 — ${2:-}"
     ((++WARN))
 }
 # A gate that cannot run is not a gate. It used to call _warn, and _warn does not
@@ -28,7 +31,7 @@ _warn() {
 # file exists to prevent. A missing tool is now a failure; install the tool or
 # state why the check is gone.
 _didnotrun() {
-    echo -e "  \033[1;31mDID NOT RUN\033[0m  $1 — $2"
+    echo -e "  \033[1;31mDID NOT RUN\033[0m  $1 — ${2:-}"
     ((++FAIL))
 }
 _section() {
@@ -1060,7 +1063,7 @@ PYSLIDES
         _fail "install slides" "$_sl_out"
     fi
 else
-    _didnotrun "install slides: python3 missing — this check DID NOT RUN"
+    _didnotrun "install slides" "python3 missing — this check DID NOT RUN"
 fi
 
 _section "Answers files"

@@ -84,7 +84,7 @@ for _d in /usr/share/applications/*.desktop; do
     if [[ -x "$_exec" ]]; then
         _pass "$(basename "$_d") → $(basename "$_exec")"
     else
-        _fail "$(basename "$_d") points at $_exec which is NOT installed"
+        _fail "$(basename "$_d")" "points at $_exec which is NOT installed"
         _broken_launchers=$((_broken_launchers + 1))
     fi
 done

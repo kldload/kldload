@@ -153,8 +153,24 @@ run_suite() {
     timeout -k 10 "${SUITE_TIMEOUT:-900}" bash "$script" </dev/null >"$_suite_out" 2>&1 || _src=$?
     output="$(cat "$_suite_out")"
     rm -f "$_suite_out"
+    # A suite is a result only when it FINISHED: it exited 0 (clean) or 1
+    # (had failures) AND printed its own closing line. Anything else is a
+    # suite that died -- 124/137 from the timeout, or the status of whichever
+    # probe tripped errexit -- and its partial passes with zero failures used
+    # to be added to the totals as if it were complete (confirmed 2026-09-23:
+    # a suite killed mid-way contributed its passes and nothing else). The
+    # optional third argument is the closing-line pattern for a suite that
+    # does not use lib-test's `summary`.
+    local _closing="${3:-^[[:space:]]*Results:[[:space:]]+[0-9]+ passed}"
+    local _plain _last
+    _plain="$(printf '%s\n' "$output" | sed 's/\x1b\[[0-9;]*m//g')"
+    _last="$(printf '%s\n' "$_plain" | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-120)"
     if ((_src == 124 || _src == 137)); then
-        output+=$'\n'"  ✗ FAIL  ${name} — did not finish within ${SUITE_TIMEOUT:-900}s; last line: $(printf '%s\n' "$output" | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-120)"
+        output+=$'\n'"  ✗ FAIL  ${name} — did not finish within ${SUITE_TIMEOUT:-900}s; last line: ${_last}"
+    elif ((_src != 0 && _src != 1)); then
+        output+=$'\n'"  ✗ FAIL  ${name} — the suite died (exit ${_src} is not a verdict); its counts are partial; last line: ${_last}"
+    elif ! grep -qE "$_closing" <<<"$_plain"; then
+        output+=$'\n'"  ✗ FAIL  ${name} — exited ${_src} without its closing line (${_closing}); its counts are partial; last line: ${_last}"
     fi
     echo "$output" | tee_report
 
@@ -200,7 +216,8 @@ run_suite "Feature Ledger (apps, rollback, estate, goldens, audio, mesh)" "$SCRI
 # "is this VM in the inventory", this one asks "does Ansible reach it, does a
 # play run, is it up in Prometheus, has it handshaken" -- the questions a
 # listing cannot answer (operator, 2026-09-19).
-run_suite "Estate (ansible reach, playbook, monitoring, mesh)" "$SCRIPT_DIR/smoke-estate.sh"
+run_suite "Estate (ansible reach, playbook, monitoring, mesh)" "$SCRIPT_DIR/smoke-estate.sh" \
+    '^[[:space:]]*estate: [0-9]+ passed'
 
 # Server tests for server, kvm, desktop, ai profiles
 case "$PROFILE" in

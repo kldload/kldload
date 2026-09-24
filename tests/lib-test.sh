@@ -4,8 +4,18 @@
 # Ensure /usr/local/bin and /usr/local/sbin are in PATH
 # (CentOS/RHEL sudo strips them from secure_path)
 
-set -Eeuo pipefail
-trap 'echo "lib-test.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+# This file is SOURCED, and it takes the caller's shell options: it sets none
+# of its own. The `set -Eeuo pipefail` that used to sit here re-enabled errexit
+# for every suite that had just turned it off -- smoke-features.sh and
+# smoke-javaapi-rollback.sh both do `set +e +E` on purpose two lines before
+# sourcing this -- so they ran under -e regardless and died on the first probe
+# that answered "no", with partial passes and no failures (confirmed
+# 2026-09-23). The ERR trap is installed only where errexit is already on, so
+# a suite that dies still says where, and a suite that runs failing probes on
+# purpose is not spammed with a line per probe.
+if [[ $- == *e* ]]; then
+    trap 'echo "lib-test.sh: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+fi
 
 export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
 
@@ -19,15 +29,20 @@ _pass() {
     TESTS+=("PASS|$1")
     printf "\e[1;32m  ✓ PASS\e[0m  %s\n" "$1"
 }
+# _fail <name> [reason] / _warn <name> [reason] — the reason is optional. Every
+# suite runs under `set -u`, and a bare `$2` on a one-argument call killed the
+# whole suite with "$2: unbound variable" instead of recording the failure
+# (smoke-desktop.sh's launcher check, 2026-09-23; smoke-javaapi-rollback.sh had
+# ten of them). The record is made before anything else can go wrong.
 _fail() {
     FAIL=$((FAIL + 1))
-    TESTS+=("FAIL|$1|$2")
-    printf "\e[1;31m  ✗ FAIL\e[0m  %s — %s\n" "$1" "$2"
+    TESTS+=("FAIL|$1|${2:-}")
+    printf "\e[1;31m  ✗ FAIL\e[0m  %s%s\n" "$1" "${2:+ — $2}"
 }
 _warn() {
     WARN=$((WARN + 1))
-    TESTS+=("WARN|$1|$2")
-    printf "\e[1;33m  ⚠ WARN\e[0m  %s — %s\n" "$1" "$2"
+    TESTS+=("WARN|$1|${2:-}")
+    printf "\e[1;33m  ⚠ WARN\e[0m  %s%s\n" "$1" "${2:+ — $2}"
 }
 _section() { printf "\n\e[1;36m  ── %s ──────────────────────────────────────────\e[0m\n" "$1"; }
 
