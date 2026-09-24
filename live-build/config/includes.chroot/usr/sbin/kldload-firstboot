@@ -3240,11 +3240,20 @@ SALT
                 # loaded"). KEEP_ALIVE=-1 pins models in VRAM indefinitely, trading
                 # ~9 GB of VRAM for instant Bob responses. For RAM-constrained boxes
                 # the operator can override to a duration like '30m' or '60m'.
+                #
+                # OLLAMA_HOST is loopback on purpose. The engine has no auth of
+                # its own; nginx fronts it at https://<host>:8443/ai/ with the
+                # console's certificate (etc/nginx/conf.d/kldload.conf, upstream
+                # 127.0.0.1:11434), and every local consumer -- Open WebUI on
+                # host networking, bobctl, kldload-webui, kldload-doctor -- talks
+                # to 127.0.0.1. This line said 0.0.0.0 until 2026-09-23, which
+                # put an unauthenticated model API on every interface while the
+                # nginx config next to it said the opposite.
                 mkdir -p /etc/systemd/system/ollama.service.d
                 cat >/etc/systemd/system/ollama.service.d/override.conf <<OLLAMA
 [Service]
 Environment="OLLAMA_MODELS=/srv/ollama/models"
-Environment="OLLAMA_HOST=0.0.0.0:11434"
+Environment="OLLAMA_HOST=127.0.0.1:11434"
 Environment="OLLAMA_KEEP_ALIVE=-1"
 OLLAMA
                 # Fix ownership — Ollama installer creates 'ollama' user
@@ -3876,12 +3885,23 @@ KAIREMOTE
                             "$_crt" rm -f open-webui >>"${LOG}" 2>&1 || true
                             # swallow: only fails when no such container exists, which is
                             # the normal first-boot case.
+                            #
+                            # Host networking stays: Ollama binds 127.0.0.1 only
+                            # (override.conf above), and a bridged container
+                            # cannot reach the host's loopback. HOST=127.0.0.1 is
+                            # what keeps Open WebUI itself off the LAN -- it is
+                            # the env the image's start.sh reads for its bind
+                            # address, defaulting to 0.0.0.0, and the same line
+                            # kldload-ai-webui has carried since 2026-08-15 when
+                            # this was the one plaintext session on the box.
+                            # https://<host>:8443/ai/ is the front door.
                             "$_crt" run -d \
                                 --name open-webui \
                                 --network host \
                                 -v /srv/open-webui/data:/app/backend/data:z \
                                 -v /srv/open-webui/whisper:/whisper:z,ro \
                                 -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+                                -e HOST=127.0.0.1 \
                                 -e OFFLINE_MODE=true \
                                 -e WHISPER_MODEL=/whisper/base \
                                 -e RAG_EMBEDDING_ENGINE=ollama \
@@ -3920,7 +3940,7 @@ KAIREMOTE
                         fi
                     else
                         log "No container runtime (podman/docker) — skipping Open WebUI"
-                        log "Install later: dnf install podman && podman run -d --name open-webui --network host -e OLLAMA_BASE_URL=http://127.0.0.1:11434 --restart always ghcr.io/open-webui/open-webui:main"
+                        log "Install later: dnf install podman && podman run -d --name open-webui --network host -e OLLAMA_BASE_URL=http://127.0.0.1:11434 -e HOST=127.0.0.1 --restart always ghcr.io/open-webui/open-webui:main"
                     fi
 
                     ok "AI profile ready — commands: kai, kai-voice, kai-do, kai-remote"
@@ -4598,7 +4618,7 @@ Description=Prometheus
 After=network-online.target
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --web.listen-address=0.0.0.0:9090
+ExecStart=/usr/local/bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --web.listen-address=127.0.0.1:9090
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -4948,7 +4968,7 @@ KLABEXP
                     systemctl start "$_svc" 2>/dev/null ||
                         log "WARNING: ${_svc} did not start"
                 done
-                ok "klab observability: Prometheus :9090, Grafana :3000, klab-exporter :9101"
+                ok "klab observability: Prometheus 127.0.0.1:9090 (loopback — Grafana is the front door), Grafana :3000, klab-exporter :9101"
 
                 # ── Chrome homepage → Grafana (Task #47: Chrome, not Firefox) ──
                 mkdir -p /etc/opt/chrome/policies/managed
