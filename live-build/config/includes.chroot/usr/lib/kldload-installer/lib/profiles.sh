@@ -1429,6 +1429,21 @@ k_install_system_files() {
             "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" ||
             k_log "WARNING: could not enable kldload-webui.service on the target — it will not start at boot"
 
+        # zexplore-api: the guest ZFS-transaction daemon ("instant rollback as
+        # a function"). Copied to the target by the unit list above since
+        # 2026-08-05, enabled on the LIVE ISO by build-iso.sh -- and on the
+        # target by nothing, so every install came up with the unit file
+        # present and `is-enabled` answering disabled (found 2026-09-23 by
+        # grepping for the caller). Copying a unit is not enabling it, again.
+        # Same audience as the webui, so the same block. The symlink is
+        # asserted right here; that its unit file is really on the target is
+        # k_assert_enabled_units_exist's job at manifest time.
+        ln -sf "/usr/lib/systemd/system/zexplore-api.service" \
+            "${target}/etc/systemd/system/multi-user.target.wants/zexplore-api.service" ||
+            k_log "WARNING: could not enable zexplore-api.service on the target — guests will not be able to snapshot their own zvols"
+        [[ -L "${target}/etc/systemd/system/multi-user.target.wants/zexplore-api.service" ]] ||
+            k_log "WARNING: zexplore-api.service enable symlink did not land on the target — it will not start at boot"
+
         # I/O scheduler policy, as a unit as well as the udev rule.
         #
         # 60-kldload-scheduler.rules writes queue/scheduler at device-add
