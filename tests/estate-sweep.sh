@@ -68,7 +68,9 @@ Editions are directory names under live-build/pxe/matrix/.
 Default order (kvm first — it is the only one that exercises the estate):
   ${DEFAULT_EDITIONS[*]}
 
-Environment: MAC, NETDEV, BENCH_USER, BENCH_PASS, SUBNET, INSTALL_WAIT, FETCH_WAIT
+Environment: MAC, NETDEV, BENCH_USER, BENCH_PASS, SUBNET, INSTALL_WAIT, FETCH_WAIT,
+             STAGED_COMMIT (the build every machine must report; default: the
+             commit in the served payload's VERSION, via kldload-netboot-server status)
 EXIT: 0 all passed, 1 some did not, 2 could not start.
 EOF
     exit "${1:-1}"
@@ -113,6 +115,32 @@ ssh_bench() { # ssh_bench <ip> <command...>
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=error \
         -o ConnectTimeout=6 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
         "${BENCH_USER}@${ip}" "$@" 2>/dev/null
+}
+
+# _distro_family <name> — the name the comparison is made on.
+#
+# The answers files spell the EL target "rhel"; the installer's own detection
+# (bootstrap.sh) folds centos/rocky/rhel/almalinux into one target, and the
+# manifest carries whichever spelling reached it. Everything else compares as
+# written: debian and ubuntu are different installs and must not be folded.
+_distro_family() {
+    case "${1,,}" in
+    rhel | centos | rocky | almalinux) echo el ;;
+    *) echo "${1,,}" ;;
+    esac
+}
+
+# bench_identity <ip> — "<distro> <profile> <commit>" from the machine ITSELF:
+# its install manifest and the build stamp the installer copied to
+# /etc/kldload/VERSION. Empty fields print as "?". A machine that does not
+# answer prints nothing, and that is the caller's finding.
+bench_identity() {
+    local raw d p c
+    raw="$(SSH_T=60 ssh_bench "$1" 'sudo -n grep -hE "^KLDLOAD_(DISTRO|PROFILE)=" /etc/kldload/install-manifest.env 2>/dev/null; echo "commit=$(sudo -n sed -n "s/^commit *= *//p" /etc/kldload/VERSION 2>/dev/null | head -n 1)"')" || return 1
+    d="$(sed -n 's/^KLDLOAD_DISTRO=//p' <<<"$raw" | tail -n 1 | tr -d '"')"
+    p="$(sed -n 's/^KLDLOAD_PROFILE=//p' <<<"$raw" | tail -n 1 | tr -d '"')"
+    c="$(sed -n 's/^commit=//p' <<<"$raw" | tail -n 1)"
+    printf '%s %s %s\n' "${d:-?}" "${p:-?}" "${c:-?}"
 }
 
 scp_from() { # scp_from <ip> <remote> <local>
@@ -166,10 +194,21 @@ command -v sshpass >/dev/null || {
     exit 2
 }
 
+# The commit every installed machine must carry. Read from the served
+# payload's own stamp (`kldload-netboot-server status` prints the payload's
+# VERSION file, whose `commit = …` line the build wrote), or given as
+# STAGED_COMMIT. An edition whose machine reports a different commit did not
+# install from this image: a failed install that falls back to the previous
+# local boot answers ssh with the right profile and the OLD commit, and the
+# sweep used to file that as the requested edition (fiend, build 62,
+# 2026-09-23 -- the bench came back as the last install and "passed").
+STAGED_COMMIT="${STAGED_COMMIT:-$(sudo -n "$SERVER" status 2>/dev/null | sed -n 's/^commit *= *//p' | head -n 1 || true)}"
+STAGED_COMMIT="${STAGED_COMMIT%-dirty}"
+
 {
     echo "# Estate sweep ${RUN_ID}"
     echo
-    echo "Image: \`$(sudo -n "$SERVER" status 2>/dev/null | sed -n 's/.*commit *= *//p' | head -1 || echo unknown)\`"
+    echo "Image: \`${STAGED_COMMIT:-unknown}\`"
     echo
     echo '| edition | distro/profile | install | verdict | pass | fail | warn | lifecycle | report |'
     echo '|---|---|---|---|---|---|---|---|---|'
@@ -324,6 +363,34 @@ for ed in "${EDITIONS[@]}"; do
         continue
     fi
     say "${ed}: up at ${ip} after ${t}s"
+
+    # 4a. Is it the edition that was asked for? The manifest's profile alone
+    #     found the machine; now the machine has to say the same distro AND
+    #     carry this image's commit. Both values are printed either way, and
+    #     the row shows what the MACHINE said, never the answers file.
+    got_distro="?" got_profile="?" got_commit="?"
+    if _idn="$(bench_identity "$ip")"; then
+        read -r got_distro got_profile got_commit <<<"$_idn"
+    fi
+    _idbad=()
+    [[ "$(_distro_family "$got_distro")" == "$(_distro_family "$want_distro")" ]] ||
+        _idbad+=("distro: machine says ${got_distro}, answers asked ${want_distro}")
+    [[ "$got_profile" == "$want_profile" ]] ||
+        _idbad+=("profile: machine says ${got_profile}, answers asked ${want_profile}")
+    if [[ -z "$STAGED_COMMIT" ]]; then
+        _idbad+=("build: the staged commit is unknown (set STAGED_COMMIT, or ${SERVER} status printed no commit) — cannot tell this install from the previous one")
+    elif [[ "$got_commit" == "?" || "$got_commit" == "" ]]; then
+        _idbad+=("build: the machine has no /etc/kldload/VERSION commit, staged image is ${STAGED_COMMIT}")
+    elif [[ "${got_commit%-dirty}" != "$STAGED_COMMIT"* && "$STAGED_COMMIT" != "${got_commit%-dirty}"* ]]; then
+        _idbad+=("build: machine carries ${got_commit}, staged image is ${STAGED_COMMIT} — this is not an install from this image")
+    fi
+    if ((${#_idbad[@]})); then
+        say "${ed}: WRONG MACHINE — $(printf '%s; ' "${_idbad[@]}" | sed 's/; $//')"
+        printf '| %s | %s/%s | wrong machine: %s | FAIL | | | |  |\n' "$ed" "$got_distro" "$got_profile" "$(printf '%s; ' "${_idbad[@]}" | sed 's/; $//')" >>"$SUMMARY"
+        RC=1
+        continue
+    fi
+    say "${ed}: identity confirmed — ${got_distro}/${got_profile}, commit ${got_commit}"
 
     # 4b. Let first boot FINISH before measuring the machine.
     #
@@ -543,8 +610,9 @@ for ed in "${EDITIONS[@]}"; do
     fi
 
     # 7. the row
+    # The machine's own distro/profile, confirmed above -- not the answers file's.
     printf '| %s | %s/%s | ok | %s | %s | %s | %s | %s | [report](%s/report.md) |\n' \
-        "$ed" "$want_distro" "$want_profile" "${verdict:-?}" "$sp" "$sf" "$sw" \
+        "$ed" "$got_distro" "$got_profile" "${verdict:-?}" "$sp" "$sf" "$sw" \
         "${_lifecycle:-not run}" "$ed" >>"$SUMMARY"
     say "${ed}: ${verdict:-no verdict}"
     [[ "$verdict" == PASS* ]] || RC=1
