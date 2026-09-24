@@ -45,8 +45,12 @@
 #   Sock: newline-delimited JSON request  -> newline-delimited JSON reply
 #
 # NOTES / INVARIANTS
-#   - Scope is a hard boundary: a resolved zvol MUST equal <base>/<vm> or start
-#     with <base>/<vm>- (a data disk) or <base>/<vm>/ . No exceptions.
+#   - Scope is a hard boundary: a resolved zvol MUST equal <base>/<vm> or be
+#     <base>/<vm>-<disk> — and <base>/<vm>-<disk> must not be another libvirt
+#     domain's primary disk or sit under another domain's prefix, since the
+#     layout is flat and "web-2" is both a data-disk name and a VM name. When
+#     libvirt cannot be asked, a data disk is refused. No exceptions.
+#   - `zexplore-api --selftest` exercises that rule with fake domain lists.
 #   - Snapshots created here are named zexplore-txn-<epoch>-<rand>; sanoid's
 #     autosnap_* are never touched.
 #   - This is control-plane Python by design (robust socket + JSON handling);
@@ -173,26 +177,112 @@ def _peer_uid(conn: socket.socket) -> int | None:
 
 
 # ─── scope + transaction state ────────────────────────────────────────────────
-def _resolve_zvol(vm: str, zvol: str | None) -> str:
-    """Map (vm, optional data-disk name) -> a fully-qualified zvol, scoped.
+def _all_domains() -> list[str] | None:
+    """Every libvirt domain name, running or not; None when libvirt cannot answer."""
+    try:
+        out = subprocess.run(
+            ["virsh", "-q", "list", "--all", "--name"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return out.split()
 
-    Default (zvol falsy) = the VM's primary disk <base>/<vm>. A named data disk
-    'data' -> <base>/<vm>-data. The result is validated to live inside the VM's
-    own subtree and to actually be a `volume`, or ApiError.
+
+def _scope_target(vm: str, zvol: str | None, domains: list[str] | None) -> str:
+    """Map (vm, optional data-disk name) -> the dataset it may touch, or ApiError.
+
+    The layout (kvm-create, kvm-clone) is flat: VM X's primary disk is
+    <base>/X and its data disk D is <base>/X-D. Nothing separates "X's disk
+    D" from "the VM called X-D" except the domain list, and with domains
+    web and web-2 both present, web-2-scratch is web-2's disk "scratch",
+    not web's disk "2-scratch": the LONGEST domain name that prefixes the
+    target owns it. A data-disk target is refused unless that owner is the
+    caller. The first cut only tested startswith(base+"-"), which let VM
+    `web` open `web-2`'s root disk by asking for zvol "2".
+
+    domains is every libvirt domain, running or not. None means libvirt
+    could not be asked; a data disk is then refused (fail closed) — the
+    primary disk needs no list, its name IS the VM.
     """
-    if zvol in (None, "", "root", "os"):
-        target = f"{VM_BASE}/{vm}"
-    else:
-        if not _NAME_RE.match(zvol):
-            raise ApiError(f"illegal zvol name: {zvol!r}")
-        target = f"{VM_BASE}/{vm}-{zvol}"
+    if not _NAME_RE.match(vm):
+        raise ApiError(f"illegal vm name: {vm!r}")
     base = f"{VM_BASE}/{vm}"
-    if not (target == base or target.startswith(base + "-") or target.startswith(base + "/")):
-        raise ApiError(f"scope violation: {target} is outside {base}")
+    if zvol in (None, "", "root", "os"):
+        return base
+    if not _NAME_RE.match(zvol):
+        raise ApiError(f"illegal zvol name: {zvol!r}")
+    target = f"{base}-{zvol}"
+    if domains is None:
+        raise ApiError(f"scope of {target} cannot be verified: libvirt did not answer")
+    owner = vm
+    for other in domains:
+        other_base = f"{VM_BASE}/{other}"
+        claims = target == other_base or target.startswith(other_base + "-")
+        if claims and len(other) > len(owner):
+            owner = other
+    if owner != vm:
+        raise ApiError(f"scope violation: {target} belongs to domain {owner!r}, not {vm!r}")
+    return target
+
+
+def _resolve_zvol(vm: str, zvol: str | None) -> str:
+    """_scope_target against the live domain list, plus the `volume` type check."""
+    target = _scope_target(vm, zvol, _all_domains())
     typ = _zfs("get", "-H", "-o", "value", "type", target).strip()
     if typ != "volume":
         raise ApiError(f"{target} is not a zvol (type={typ or 'missing'})")
     return target
+
+
+def _selftest() -> int:
+    """Exercise _scope_target with fake domain lists. Exit 0 when every case holds.
+
+    Run by `zexplore-api --selftest`; it touches no socket, no ZFS and no
+    libvirt, so it is safe anywhere and is the guard on the scope rule above.
+    """
+    doms = ["web", "web-2", "web-2-data", "db"]
+    ok: list[tuple[str, str | None, str]] = [
+        ("web", None, f"{VM_BASE}/web"),
+        ("web", "root", f"{VM_BASE}/web"),
+        ("web-2", None, f"{VM_BASE}/web-2"),
+        ("web", "data", f"{VM_BASE}/web-data"),
+        ("web-2", "scratch", f"{VM_BASE}/web-2-scratch"),
+        ("db", "data", f"{VM_BASE}/db-data"),
+    ]
+    bad: list[tuple[str, str | None, list[str] | None]] = [
+        ("web", "2", doms),  # web-2 is a domain: its primary disk
+        ("web", "2-data", doms),  # web-2-data is a domain
+        ("web", "2-scratch", doms),  # web-2's data disk
+        ("web-2", "data", doms),  # web-2-data is a domain: its primary disk
+        ("web", "data", None),  # libvirt unreachable: refuse, do not guess
+        ("web", "../db", doms),  # illegal name
+        ("web", "-x", doms),  # illegal name
+        ("../db", None, doms),  # illegal vm name
+    ]
+    failures = 0
+    for vm, zvol, want in ok:
+        try:
+            got = _scope_target(vm, zvol, doms)
+        except ApiError as exc:
+            print(f"FAIL: ({vm!r}, {zvol!r}) refused: {exc}")
+            failures += 1
+            continue
+        if got != want:
+            print(f"FAIL: ({vm!r}, {zvol!r}) -> {got}, want {want}")
+            failures += 1
+    for vm, zvol, dl in bad:
+        try:
+            got = _scope_target(vm, zvol, dl)
+        except ApiError:
+            continue
+        print(f"FAIL: ({vm!r}, {zvol!r}) allowed -> {got}")
+        failures += 1
+    total = len(ok) + len(bad)
+    print(f"selftest: {total - failures}/{total} cases hold")
+    return 1 if failures else 0
 
 
 def _txn_dir(vm: str) -> Path:
@@ -406,7 +496,12 @@ def main() -> int:
     ap.add_argument("--unix", metavar="PATH", help="listen on an AF_UNIX socket")
     ap.add_argument("--vsock", type=int, metavar="PORT", help="listen on AF_VSOCK PORT")
     ap.add_argument("--tcp", metavar="HOST:PORT", help="listen on TCP (token-only)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="check the zvol scope rule against fake domain lists and exit")
     args = ap.parse_args()
+
+    if args.selftest:
+        return _selftest()
 
     listeners: list[tuple[socket.socket, int, str]] = []
     if args.unix:
