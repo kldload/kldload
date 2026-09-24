@@ -143,6 +143,22 @@ die() {
     exit 1
 }
 
+# enable_live_unit UNIT... — `systemctl enable` inside the rootfs, then the
+# outcome: the wants symlink must exist. Six live units used to be enabled with
+# `2>/dev/null || true` and nothing looked afterwards; an enable that failed
+# shipped an ISO with no installer UI, or with offline installs quietly
+# falling back to the internet (review 2026-09-23).
+enable_live_unit() {
+    local _u _wants
+    for _u in "$@"; do
+        chroot "$ROOTFS" systemctl enable "$_u" >/dev/null 2>&1 ||
+            die "FATAL: systemctl enable ${_u} failed in the live rootfs"
+        _wants="$(find "${ROOTFS}/etc/systemd/system" -maxdepth 2 -path '*.wants/*' -name "${_u%.service}*" 2>/dev/null | head -1)"
+        [[ -n "$_wants" ]] || die "FATAL: ${_u} enabled but no wants symlink under ${ROOTFS}/etc/systemd/system"
+        log "  enabled ${_u} -> ${_wants#"${ROOTFS}"}"
+    done
+}
+
 # fetch_cached <url> <dest> — put a download at <dest>, from the build cache when
 # it is there, otherwise fetched with retries into the cache first.
 #
@@ -1505,10 +1521,14 @@ grep -q '^PermitRootLogin prohibit-password$' "${ROOTFS}/etc/ssh/sshd_config.d/5
     die "FATAL: live sshd drop-in did not land"
 
 # Enable services
-chroot "$ROOTFS" systemctl enable NetworkManager sshd 2>/dev/null || true
+enable_live_unit NetworkManager.service sshd.service
+# qemu-guest-agent is installed (PKGS above) and was never enabled: a
+# hypervisor could not read a live guest's address. Its only enabler was a
+# live-build hook the lorax build never ran (deleted 2026-09-23).
+enable_live_unit qemu-guest-agent.service
 # Live environment always boots to GNOME desktop — the web UI installer is
 # browser-based, so even "server" and "kvm" profile ISOs need a graphical session
-chroot "$ROOTFS" systemctl enable gdm 2>/dev/null || true
+enable_live_unit gdm.service
 chroot "$ROOTFS" systemctl set-default graphical.target 2>/dev/null || true
 
 # GDM autologin for live session — boots straight to desktop with no login prompt
@@ -2671,10 +2691,10 @@ if [[ "$EDITION" != "core" ]]; then
         log "environment.d shipped: $(ls "${ROOTFS}/usr/lib/environment.d" | grep -c .) file(s)"
     fi
 
-    # Wholesale-copy /usr/local/lib/kldload-rag/ (RAG service code +
-    # indexer + unit-file sources). Same root-cause fix as the unit-file
-    # glob above: previous hardcoded approach missed the lib dir entirely,
-    # so RAG silently shipped without its python code. Catch-all glob.
+    # Wholesale-copy every dir under includes.chroot/usr/local/lib (a
+    # hand-maintained list missed the RAG lib dir once; RAG itself is gone
+    # since 2026-09-23 and the dir is empty today — the glob stays so the
+    # next library lands without editing this file).
     if [[ -d /build/live-build/config/includes.chroot/usr/local/lib ]]; then
         mkdir -p "${ROOTFS}/usr/local/lib"
         for _libdir in /build/live-build/config/includes.chroot/usr/local/lib/*/; do
@@ -3200,7 +3220,7 @@ RestartSec=5
 WantedBy=multi-user.target
 SVCEOF
 
-    chroot "$ROOTFS" systemctl enable kldload-webui 2>/dev/null || true
+    enable_live_unit kldload-webui.service
 
     # ttyd-k9s enable moved down to AFTER the unit file is copied into the
     # rootfs (the `for _svc in ... ttyd-k9s.service ...` loop ~100 lines
@@ -3228,7 +3248,7 @@ RestartSec=3
 WantedBy=multi-user.target
 APTEOF
 
-    chroot "$ROOTFS" systemctl enable kldload-apt-mirror 2>/dev/null || true
+    enable_live_unit kldload-apt-mirror.service
 
     # Ubuntu darksite APT mirror service (serves on port 3143)
     cat >"${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror-ubuntu.service" <<'UAPTEOF'
@@ -3247,7 +3267,7 @@ RestartSec=3
 WantedBy=multi-user.target
 UAPTEOF
 
-    chroot "$ROOTFS" systemctl enable kldload-apt-mirror-ubuntu 2>/dev/null || true
+    enable_live_unit kldload-apt-mirror-ubuntu.service
 
     # Arch Linux darksite — note: Arch is a rolling release so the darksite
     # goes stale quickly. Arch installs actually require internet; this mirror
@@ -3268,7 +3288,7 @@ RestartSec=3
 WantedBy=multi-user.target
 PACEOF
 
-    chroot "$ROOTFS" systemctl enable kldload-pacman-mirror 2>/dev/null || true
+    enable_live_unit kldload-pacman-mirror.service
 
     # Fedora darksite RPM mirror service (serves on port 3145)
     cat >"${ROOTFS}/usr/lib/systemd/system/kldload-fedora-mirror.service" <<'FEDEOF'
@@ -3287,7 +3307,7 @@ RestartSec=3
 WantedBy=multi-user.target
 FEDEOF
 
-    chroot "$ROOTFS" systemctl enable kldload-fedora-mirror 2>/dev/null || true
+    enable_live_unit kldload-fedora-mirror.service
 
     # Alpine Linux darksite apk mirror service (serves on port 3146)
     cat >"${ROOTFS}/usr/lib/systemd/system/kldload-apk-mirror.service" <<'ALPEOF'
@@ -3306,14 +3326,14 @@ RestartSec=3
 WantedBy=multi-user.target
 ALPEOF
 
-    chroot "$ROOTFS" systemctl enable kldload-apk-mirror 2>/dev/null || true
+    enable_live_unit kldload-apk-mirror.service
 
     # Copy systemd service units from includes.chroot. Every unit the
     # installer's profiles.sh tries to symlink needs to live here first
     # (otherwise the `[[ -f ... ]] && cp` in profiles.sh silently skips).
     for _svc in kldload-firstboot.service kldload-autodeploy.service kldload-webui.service \
         kldload-srv-snapshot.service kldload-srv-snapshot.timer \
-        kldload-snapshot.service kldload-snapshot.timer kldload-export.service \
+        kldload-snapshot.service kldload-snapshot.timer \
         ttyd-k9s.service zexplore-api.service \
         klab-prom-targets.service klab-prom-targets.timer \
         kldload-netboot.service; do
@@ -3327,15 +3347,16 @@ ALPEOF
     # The earlier attempt at line ~1472 ran before this copy and silently
     # no-op'd, leaving the live ISO booting with the embedded console
     # disabled. See the comment block where that earlier enable used to be.
-    chroot "$ROOTFS" systemctl enable ttyd-k9s.service 2>/dev/null || true
+    enable_live_unit ttyd-k9s.service
     # zexplore-api: the guest ZFS-transaction daemon ("instant rollback as a
     # function"). Harmless where unused — it only listens (unix socket + vsock
     # 9455); on a KVM host it lets guest VMs snapshot/roll back their own zvols,
     # scoped per-VM. Not a boot dependency, so a bind failure never blocks boot.
-    chroot "$ROOTFS" systemctl enable zexplore-api.service 2>/dev/null || true
+    enable_live_unit zexplore-api.service
 
-    # Copy kldload-firstboot and kldload-export-deferred to sbin
-    for _sb in kldload-firstboot kldload-export-deferred; do
+    # kldload-firstboot to sbin (kldload-export-deferred used to ride along;
+    # the deferred export path was dead end to end and is gone, 2026-09-23)
+    for _sb in kldload-firstboot; do
         _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_sb}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/local/sbin/${_sb}" && chmod +x "${ROOTFS}/usr/local/sbin/${_sb}"
     done
@@ -3491,10 +3512,6 @@ cp "${_ic}/usr/local/sbin/kldload-autoinstall" "${ROOTFS}/usr/local/sbin/" 2>/de
 # Baked-in answers file (AI appliance builds only)
 cp "${_ic}/etc/kldload/autoinstall.env" "${ROOTFS}/etc/kldload/autoinstall.env" 2>/dev/null &&
     log "Baked-in autoinstall.env — this ISO will auto-install on boot" || true
-# debz compatibility tree. NOT the answers templates -- this comment said
-# "Answers templates" over this line for two years while the actual templates
-# shipped nowhere, which is most of why nobody spotted they were missing.
-cp -r "${_ic}/etc/kldload/debz" "${ROOTFS}/etc/kldload/" 2>/dev/null || true
 
 # Answers templates. This is what an operator on the live ISO feeds to
 # `deploy.sh seed-disk --answers ...`, and BOTH kldload-autoinstall's header
