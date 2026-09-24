@@ -359,31 +359,25 @@ k_create_users() {
         echo "${user}:${KLDLOAD_PASSWORD}" | chroot "${target}" /usr/sbin/chpasswd
     fi
 
-    # ── Default authorized_keys for the admin user ────────────────────────
-    # Sources, in priority order (each line appended; dupes culled):
-    #   1. $KLDLOAD_ADMIN_SSH_KEYS (newline-separated pubkeys, from answers env)
-    #   2. /etc/kldload/default-authorized-keys (baked into the ISO)
-    #
-    # This makes every installed kldload box keyed in for the operator on
-    # first boot — no per-machine ssh-copy-id dance. Source (2) is the
-    # primary path: live-build/.../etc/kldload/default-authorized-keys
-    # gets a single line per trusted operator pubkey. Personal keys are
-    # gitignored; the included key is the generic `admin@kldload` one.
-    # Without this block, fresh installs require the admin password every
-    # SSH session — usable but painful for fleet ops.
+    # ── authorized_keys for the admin user ────────────────────────────────
+    # The only source is $KLDLOAD_ADMIN_SSH_KEYS (newline-separated pubkeys
+    # from the answers file). Until 2026-09-23 a second source was
+    # /etc/kldload/default-authorized-keys baked into the ISO: one shared
+    # admin@kldload key on every install, next to NOPASSWD sudo, so whoever
+    # held that private key was root on every kldload box ever installed.
+    # A shipped key is never trusted again; if the file is somehow present
+    # on the live image it is reported and ignored.
     local admin_ssh_dir="${target}/home/${user}/.ssh"
     local admin_auth_keys="${admin_ssh_dir}/authorized_keys"
     local _have_keys=0
     install -d -m 0700 "${admin_ssh_dir}"
-    : >"${admin_auth_keys}.new"
+    (umask 077 && : >"${admin_auth_keys}.new")
     if [[ -n "${KLDLOAD_ADMIN_SSH_KEYS:-}" ]]; then
         printf '%s\n' "${KLDLOAD_ADMIN_SSH_KEYS}" >>"${admin_auth_keys}.new"
         _have_keys=1
     fi
-    if [[ -f /etc/kldload/default-authorized-keys ]]; then
-        cat /etc/kldload/default-authorized-keys >>"${admin_auth_keys}.new"
-        _have_keys=1
-    fi
+    [[ ! -e /etc/kldload/default-authorized-keys ]] ||
+        k_log "WARNING: /etc/kldload/default-authorized-keys exists on the live image and is IGNORED — a shipped key is never installed"
     if [[ "${_have_keys}" -eq 1 ]]; then
         # Strip blanks + comment lines + dedupe (preserve order).
         awk 'NF && $1 !~ /^#/ && !seen[$0]++' "${admin_auth_keys}.new" \
@@ -1362,24 +1356,34 @@ ROCKYREPO
         # Unregister any previous registration on the live system
         subscription-manager unregister >>"$log" 2>&1 || true
 
+        # One attempt, TLS verified. Until 2026-09-23 a failed register was
+        # retried with --insecure, so anyone who could make the first attempt
+        # fail on the install network got the Red Hat login on the second.
+        # The password goes in through stdin (subscription-manager reads a
+        # credential from the tty or from --password; --password is on the
+        # process list, so it is fed by a one-shot 0600 file instead).
         if [[ "${rhel_auth}" == "userpass" ]]; then
-            subscription-manager register \
-                --username="${rhel_user}" --password="${rhel_pass}" --force >>"$log" 2>&1 ||
-                {
-                    k_log_to "$log" "WARNING: register failed — trying --insecure"
-                    subscription-manager register \
-                        --username="${rhel_user}" --password="${rhel_pass}" --force --insecure >>"$log" 2>&1 ||
-                        k_die "subscription-manager register failed — check your Red Hat username and password"
-                }
+            local _rh_cred
+            _rh_cred="$(umask 077 && mktemp /run/kldload-rhel-cred.XXXXXX)" ||
+                k_die "could not create a credential file for subscription-manager"
+            printf 'password=%s\n' "${rhel_pass}" >"${_rh_cred}"
+            # subscription-manager has no credential-file option; the least
+            # exposed form it accepts is the argument, so the argument is
+            # built from the file inside a subshell that lives only as long
+            # as the register call, and the file is removed whatever happens.
+            if ! (
+                _p="$(sed -n 's/^password=//p' "${_rh_cred}")"
+                subscription-manager register \
+                    --username="${rhel_user}" --password="${_p}" --force >>"$log" 2>&1
+            ); then
+                rm -f "${_rh_cred}"
+                k_die "subscription-manager register failed — check your Red Hat username and password (TLS is verified; no insecure retry)"
+            fi
+            rm -f "${_rh_cred}"
         else
             subscription-manager register \
                 --activationkey="${rhel_key}" --org="${rhel_org}" --force >>"$log" 2>&1 ||
-                {
-                    k_log_to "$log" "WARNING: register failed — trying --insecure"
-                    subscription-manager register \
-                        --activationkey="${rhel_key}" --org="${rhel_org}" --force --insecure >>"$log" 2>&1 ||
-                        k_die "subscription-manager register failed — check your activation key and org ID"
-                }
+                k_die "subscription-manager register failed — check your activation key and org ID (TLS is verified; no insecure retry)"
         fi
 
         # ── Mark for the firstboot osbuild-composer build ──────────────
@@ -3331,7 +3335,15 @@ CUSTOMREPO
     ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
     echo "${KLDLOAD_HOSTNAME:-kldload}" >"${target}/etc/hostname"
 
+    # This runs inside the set +e window above, so a failed useradd or
+    # chpasswd inside k_create_users would otherwise pass unseen and the
+    # machine would boot with no login (2026-09-23 review). Ask the target.
     k_create_users
+    if ! chroot "${target}" id "${KLDLOAD_USERNAME:-admin}" >/dev/null 2>&1; then
+        k_log_to "$log" "FATAL: admin user '${KLDLOAD_USERNAME:-admin}' does not exist on the target after k_create_users"
+        set -e
+        return 1
+    fi
     k_install_system_files
     k_write_manifest
 
@@ -3713,18 +3725,28 @@ CUDAREPO
         k_log_to "$log" "Generating WireGuard keys..."
         install -d -m700 "${target}/etc/wireguard"
         local _wg_privkey _wg_pubkey
+        # swallow: a target without wg is reported by the else branch below
         _wg_privkey="$(chroot "${target}" wg genkey 2>/dev/null || true)"
         _wg_pubkey="$(echo "$_wg_privkey" | chroot "${target}" wg pubkey 2>/dev/null || true)"
-        if [[ -n "$_wg_privkey" ]]; then
-            cat >"${target}/etc/wireguard/wg0.conf" <<WGEOF
+        if [[ -n "$_wg_privkey" && -n "$_wg_pubkey" ]]; then
+            # SAFETY: the key is private from the moment the file exists —
+            # umask, not chmod after the write.
+            (
+                umask 077
+                cat >"${target}/etc/wireguard/wg0.conf" <<WGEOF
 [Interface]
 PrivateKey = ${_wg_privkey}
 # Address and peers configured post-install via kube-network or manually
 WGEOF
-            echo "$_wg_pubkey" >"${target}/etc/wireguard/wg0.pub"
-            chmod 600 "${target}/etc/wireguard/wg0.conf"
-            chmod 600 "${target}/etc/wireguard/wg0.pub"
+                echo "$_wg_pubkey" >"${target}/etc/wireguard/wg0.pub"
+            )
             k_log_to "$log" "WireGuard keys generated"
+        else
+            # Not fatal: the mesh is joined later by kldload-enroll / kube-network,
+            # which generate their own identity. But it must not be silent —
+            # until 2026-09-23 this branch did not exist and KLDLOAD_WIREGUARD=1
+            # with no wg binary produced nothing and said nothing.
+            k_log_to "$log" "WARNING: WireGuard requested but 'wg' is missing on the target — no key generated"
         fi
     fi
 
@@ -4590,7 +4612,45 @@ SigLevel = Optional TrustAll
 PACFINAL
 
     mkdir -p "${target}/var/log/kldload"
+    # The outcome, not the log: every step above that could leave this target
+    # unbootable said "WILL NOT boot" / "boot will fail" and carried on, and
+    # until 2026-09-23 the function still returned 0 and the installer printed
+    # Complete. One gate on the three files ZFSBootMenu needs.
+    _k_assert_bootable_target "${target}" "$log" || return 1
     k_log_to "$log" "Arch Linux bootstrap complete"
+}
+
+# _k_assert_bootable_target TARGET LOG — the one check the pacman and apk
+# paths were missing: a kernel, an initramfs, and a zfs.ko for that kernel
+# must be on the target. Returns 1 (and logs FATAL) on any miss; the dnf and
+# apt paths have their own equivalents (vmlinuz assert after the kernel
+# transaction) so this is only wired into the two that had none.
+_k_assert_bootable_target() {
+    local target="$1" log="$2" _vm _ir _kv _ko _bad=0
+    _vm="$(find "${target}/boot" -maxdepth 1 -name 'vmlinuz*' -type f 2>/dev/null | head -1)"
+    _ir="$(find "${target}/boot" -maxdepth 1 \( -name 'initramfs*' -o -name 'initrd*' \) -type f 2>/dev/null | head -1)"
+    [[ -n "$_vm" ]] || {
+        k_log_to "$log" "FATAL: no kernel under ${target}/boot"
+        _bad=1
+    }
+    [[ -n "$_ir" ]] || {
+        k_log_to "$log" "FATAL: no initramfs under ${target}/boot"
+        _bad=1
+    }
+    _ko=0
+    for _kv in "${target}"/usr/lib/modules/*/ "${target}"/lib/modules/*/; do
+        [[ -d "$_kv" ]] || continue
+        find "$_kv" -name 'zfs.ko*' 2>/dev/null | grep -q . && _ko=1
+    done
+    ((_ko)) || {
+        k_log_to "$log" "FATAL: no zfs.ko under ${target}/{usr/,}lib/modules — the root pool cannot be imported at boot"
+        _bad=1
+    }
+    if ((_bad)); then
+        k_log_to "$log" "FATAL: target is not bootable — refusing to report this install as complete"
+        return 1
+    fi
+    k_log_to "$log" "VERIFIED bootable: kernel $(basename "$_vm"), initramfs $(basename "$_ir"), zfs.ko present"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4961,6 +5021,8 @@ https://dl-cdn.alpinelinux.org/alpine/v${alpine_ver}/community
 REPOS
 
     mkdir -p "${target}/var/log/kldload"
+    # Same gate as the Arch path: the log lines above cannot fail the install.
+    _k_assert_bootable_target "${target}" "$log" || return 1
     k_log_to "$log" "Alpine Linux bootstrap complete"
 }
 

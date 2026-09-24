@@ -69,7 +69,12 @@ k_configure_mok() {
     local mok_pass="${KLDLOAD_MOK_PASSWORD:-kldload}"
 
     local enrolled=0
-    if chroot "${target}" command -v mokutil >/dev/null 2>&1; then
+    # A file test, not `chroot target command -v`: `command` is a shell builtin
+    # and only Fedora ships a /usr/bin/command wrapper, so on Debian, Ubuntu
+    # and Arch targets that form exits 127 and this whole block was skipped
+    # (found 2026-09-23 — the operator was then shown a MOK password from
+    # install-target's fallback, which had its own hardcoded value).
+    if [[ -x "${target}/usr/bin/mokutil" ]]; then
         if [[ -d /sys/firmware/efi/efivars ]]; then
             # --ignore-keyring: don't skip when a prior cert with the same CA is
             #   already trusted (we generate a new key+subject per install; mokutil

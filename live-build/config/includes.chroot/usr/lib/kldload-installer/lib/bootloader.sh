@@ -65,7 +65,7 @@ k_zfs_bootloader_write_hostid() {
         # If it doesn't, we're in trouble — pool stamp is unknown. Fall
         # back to zgenhostid in target chroot, but warn loudly.
         k_log "WARNING: live /etc/hostid is empty — falling back to zgenhostid in target"
-        if chroot "${target}" command -v zgenhostid >/dev/null 2>&1; then
+        if [[ -x "${target}/usr/bin/zgenhostid" || -x "${target}/usr/sbin/zgenhostid" ]] && chroot "${target}" zgenhostid --help >/dev/null 2>&1; then
             # swallow: the urandom fallback below covers a failed zgenhostid, and the result is checked
             chroot "${target}" zgenhostid -f >&"${log_fd}" 2>&1 || true
         fi
@@ -1146,6 +1146,16 @@ EOFSTAB
     # boot-environment picker; ZBM also stays reachable from the 5s menu.
     local _grub_default="zbm"
     [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] && _grub_default="direct"
+    # A `direct` default with nothing behind it is a GRUB "file not found" on
+    # the unattended path, and with Secure Boot on in the firmware ZBM is not
+    # a fallback either. Until 2026-09-23 the only signal was the WARNING
+    # above and k_bootloader_assert_esp only looked at the two BOOTX64.EFI
+    # files. The install is refused instead — a failed install tells you, an
+    # unbootable one does not.
+    if [[ "$_grub_default" == "direct" ]]; then
+        [[ -s "${target}/boot/efi/EFI/BOOT/vmlinuz" && -s "${target}/boot/efi/EFI/BOOT/initrd.img" ]] ||
+            k_die "Secure Boot is intended (default entry = direct) but no kernel + matching initramfs was staged on the ESP — see the initramfs build log above; refusing to write a GRUB default that cannot boot"
+    fi
     k_log "GRUB default entry: ${_grub_default} (Secure Boot intent: ${KLDLOAD_ENABLE_SECURE_BOOT:-1})"
 
     # Kernel args for the `direct` entry differ for ENCRYPTED installs: the

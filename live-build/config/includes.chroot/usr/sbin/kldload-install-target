@@ -2955,7 +2955,10 @@ main() {
                 elif [[ -n "${_scp_pass}" ]]; then
                     # Password auth via sshpass
                     if command -v sshpass >/dev/null 2>&1; then
-                        _scp_cmd=(sshpass -p "${_scp_pass}" scp)
+                        # -e reads SSHPASS from the environment: -p puts the
+                        # password on the process list for every user to read.
+                        export SSHPASS="${_scp_pass}"
+                        _scp_cmd=(sshpass -e scp)
                     else
                         _warn "sshpass not available — trying key-based auth"
                     fi
@@ -2966,6 +2969,7 @@ main() {
                 else
                     _warn "SCP failed — image saved locally at ${_export_path}"
                 fi
+                unset SSHPASS
             else
                 _info "    Image saved to: ${_export_path}"
                 _info "    Retrieve via: scp root@<this-machine>:${_export_path} ."
@@ -3005,11 +3009,14 @@ main() {
     # MOK generation was skipped above, so mok.der won't exist anyway).
     if _secure_boot_enabled && [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
         if [[ -d /sys/firmware/efi/efivars ]] && command -v mokutil >/dev/null 2>&1; then
-            # Use a fixed password "kldload" — consistent, memorable, documented.
-            # Random passwords caused confusion and required out-of-band password
-            # delivery. The MOK password is only used once at MokManager and the
-            # private key (mok.key) is the real secret, not the enrollment password.
-            local _mok_pass="kldload"
+            # The default is "kldload" — consistent, memorable, documented; the
+            # private key (mok.key) is the real secret, not the enrollment
+            # password. It MUST be the same value security.sh and the final
+            # screen use: until 2026-09-23 this line hardcoded "kldload" while
+            # everything the operator was shown said ${KLDLOAD_MOK_PASSWORD},
+            # so an operator who set the override typed a password MokManager
+            # rejected and zfs.ko was refused under Secure Boot.
+            local _mok_pass="${KLDLOAD_MOK_PASSWORD:-kldload}"
 
             # Check if this exact key is already enrolled (re-installs with same ISO)
             if mokutil --test-key "${target}/var/lib/dkms/mok.der" 2>/dev/null | grep -qi 'already enrolled'; then
