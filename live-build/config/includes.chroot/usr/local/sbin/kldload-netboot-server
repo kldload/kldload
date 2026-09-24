@@ -1137,8 +1137,6 @@ _write_armed_install() {
         printf 'item v_user user${s3:string}${user}\n'
         printf 'item v_tz time zone${s3:string}${tz}\n'
         printf 'item v_kb keyboard${s3:string}${kb}\n'
-        printf 'isset ${pw} && set xcred set || set xcred ${ask:string}\n'
-        printf 'item v_cred credentials${s3:string}${xcred}\n'
         printf 'item go Install ${pf} on ${dist} now\n'
         printf 'item top Back\n'
         # --default ${osel}: the item just toggled stays selected. It was "go",
@@ -1157,35 +1155,15 @@ _write_armed_install() {
         # read edits the current value in place; an empty answer keeps it.
         printf '\n:v_host\necho -n Hostname:${s2:string}\nread host\ngoto opts\n'
         printf '\n:v_user\necho -n User:${s2:string}\nread user\ngoto opts\n'
-        # ── credentials: a masked iPXE form, never echoed ────────────────────
-        # Operator, 2026-09-18: asked during the install menu, not after. The
-        # values ride the LIVE kernel cmdline URI-encoded (${x:uristring}); the
-        # live system is RAM, and kldload-autoinstall decodes them into its 0600
-        # answers and never logs them. Anything left empty is still asked on the
-        # machine's screen before anything is erased. The Red Hat fields appear
-        # for rhel only: registration uses them once, the effective config the
-        # installed system keeps has them redacted.
-        printf '\n:v_cred\n'
-        printf 'form credentials\n'
-        printf 'item --secret pw Login password\n'
-        printf 'item --secret pw2 Login password again\n'
-        printf 'item --secret pp ZFS passphrase, 8 or more\n'
-        printf 'item --secret pp2 ZFS passphrase again\n'
-        # Two forms, not one: iPXE refuses a form that needs more than LINES - 6
-        # rows (a label, an edit box and an error line per field), and all six
-        # fields in one returned -ERANGE, so Enter on "credentials" did nothing
-        # (qemu, 2026-09-18). Four fields fit; the Red Hat pair is its own form.
-        printf 'present || goto opts\n'
-        printf 'iseq ${pw} ${pw2} || goto v_cred_bad\n'
-        printf 'iseq ${pp} ${pp2} || goto v_cred_bad\n'
-        printf 'iseq ${dist} rhel || goto v_cred_done\n'
-        printf 'form Red Hat login, used once to register\n'
-        printf 'item rhu Red Hat username\nitem --secret rhp Red Hat password\n'
-        printf 'present || goto opts\n'
-        printf ':v_cred_done\nset osel v_cred\ngoto opts\n'
-        printf ':v_cred_bad\nclear pw\nclear pw2\nclear pp\nclear pp2\n'
-        printf 'echo\necho${s3:string}The two entries did not match. Nothing was kept.\n'
-        printf 'prompt${s3:string}Press any key to type them again.\ngoto v_cred\n'
+        # No credentials form. One existed from 2026-09-18 to 2026-09-23: it
+        # put the login password, the ZFS passphrase and the Red Hat login on
+        # the LIVE kernel cmdline URI-encoded, and /proc/cmdline, dmesg and the
+        # journal are readable by every live user on a system that runs sshd
+        # with a published login. iPXE has no channel for a secret that is not
+        # the cmdline or a URL, so the machine's own screen asks for whatever
+        # the answers file does not carry (kldload-autoinstall, install-needs),
+        # before anything is erased — and the autoinstaller now REFUSES any
+        # kldload.password= / passphrase= / rhel_pass= it finds on the cmdline.
 
         printf '\n:v_tz\n'
         _nb_title_pad 9 tz_
@@ -1209,11 +1187,7 @@ _write_armed_install() {
         printf 'iseq ${kvm} 1 && set tpl kvm || clear _nb\n'
         printf 'iseq ${zfs} 1 && set tpl zfslab || clear _nb\n'
         printf 'iseq ${k8s} 1 && set tpl k8s || clear _nb\n'
-        printf 'isset ${pw} && set sec kldload.password=${pw:uristring} || clear sec\n'
-        printf 'isset ${pp} && set sec ${sec} kldload.passphrase=${pp:uristring} || clear _nb\n'
-        printf 'isset ${rhu} && set sec ${sec} kldload.rhel_user=${rhu:uristring} || clear _nb\n'
-        printf 'isset ${rhp} && set sec ${sec} kldload.rhel_pass=${rhp:uristring} || clear _nb\n'
-        printf 'set margs kldload.distro=${dist} kldload.encrypt=${enc} kldload.secureboot=${sb} kldload.kvm=${kvm} kldload.buildimages=${img} kldload.k8s=${k8s} kldload.k8sbootstrap=${k8s} kldload.zfsdev=${zfs} kldload.ai=${ai} kldload.template=${tpl} kldload.hostname=${host} kldload.username=${user} kldload.timezone=${tz} kldload.keyboard=${kb} ${sec}\n'
+        printf 'set margs kldload.distro=${dist} kldload.encrypt=${enc} kldload.secureboot=${sb} kldload.kvm=${kvm} kldload.buildimages=${img} kldload.k8s=${k8s} kldload.k8sbootstrap=${k8s} kldload.zfsdev=${zfs} kldload.ai=${ai} kldload.template=${tpl} kldload.hostname=${host} kldload.username=${user} kldload.timezone=${tz} kldload.keyboard=${kb}\n'
         printf 'goto install\n'
 
         # The armed path: the armed file, nothing else. dist is set so the

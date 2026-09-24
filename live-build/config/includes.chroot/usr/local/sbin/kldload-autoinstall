@@ -195,25 +195,18 @@ fi
 # as root during a disk wipe.
 _cmdline_raw="$(cat "$_CMDLINE_FILE" 2>/dev/null || true)"
 
-# Secrets from the menu, decoded; written below, after the seed is in place.
-_urldecode() { printf '%b' "${1//%/\\x}"; }
-declare -A _menu_secret=()
+# Secrets on the kernel cmdline are REFUSED, never consumed. Until 2026-09-23
+# the netboot menu's credentials form put kldload.password=, kldload.passphrase=
+# and the Red Hat login on the live cmdline and this block decoded them. The
+# live system is RAM, but /proc/cmdline, dmesg and the journal's "Command line:"
+# line are readable by every live user — and the live image runs sshd with a
+# published login. A secret that arrives this way is named (not printed) and
+# dropped; the machine's own screen asks for it further down.
 for _spec in password:KLDLOAD_PASSWORD passphrase:KLDLOAD_ZFS_PASSPHRASE \
     rhel_user:KLDLOAD_RHEL_USERNAME rhel_pass:KLDLOAD_RHEL_PASSWORD; do
     _k="${_spec%%:*}"
-    _raw="$(sed -nE "s/(^|.*[[:space:]])kldload\.${_k}=([^[:space:]]*).*/\2/p" <<<"$_cmdline_raw")"
-    [[ -n "$_raw" ]] || continue
-    _val="$(_urldecode "$_raw")"
-    if [[ "$_val" == *$'\n'* || "$_val" == *$'\r'* || ${#_val} -gt 256 ]]; then
-        log "IGNORING kldload.${_k}= from the menu: a line break or over 256 characters (asked on screen instead)"
-        continue
-    fi
-    if [[ "$_k" == passphrase && ${#_val} -lt 8 ]]; then
-        log "IGNORING kldload.passphrase= from the menu: ZFS needs 8 or more characters (asked on screen instead)"
-        continue
-    fi
-    _menu_secret["${_spec#*:}"]="$_val"
-    log "  cmdline: ${_spec#*:}=(from the menu, not logged)"
+    grep -qE "(^|[[:space:]])kldload\.${_k}=" <<<"$_cmdline_raw" || continue
+    log "REFUSED kldload.${_k}= from the kernel cmdline: /proc/cmdline is world-readable; it will be asked on screen"
 done
 
 # ── Action dispatch: install (default), deploy, rollback ─────────────────────
@@ -690,12 +683,6 @@ _answers_put() {
     mv -f "${ANSWERS_TMP}.new" "$ANSWERS_TMP"
 }
 
-# The menu's secrets first: single-quoted for the loader, replacing any line the
-# seed had (the menu is this boot's intent).
-for _k in "${!_menu_secret[@]}"; do
-    _answers_put "$_k" "${_k}='${_menu_secret[$_k]}'"
-done
-unset _menu_secret
 _ans() { sed -n "s/^${1}=//p" "$ANSWERS_TMP" | tail -n 1 | sed -E "s/^([\"'])(.*)\1\$/\2/"; }
 _need=()
 [[ -n "$(_ans KLDLOAD_PASSWORD)" ]] || _need+=(password)

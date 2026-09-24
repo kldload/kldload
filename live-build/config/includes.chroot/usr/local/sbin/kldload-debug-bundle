@@ -116,9 +116,23 @@ cap() {
 # ── system identity / kldload metadata ───────────────────────────────────────
 step "kldload + system identity"
 mkdir -p "$WORK/etc"
-[[ -d /etc/kldload ]] && cp -a /etc/kldload "$WORK/etc/kldload" || true
+# An ALLOWLIST, never `cp -a /etc/kldload`: that directory holds the root SSH
+# private key (secrets/admin-ssh), the WireGuard keys (secrets/wg*.key), the
+# web UI root token, the CA private key (ca/root/ca.key) and, until first boot
+# finishes, the ZFS passphrase. Until 2026-09-23 this bundle — the thing an
+# operator sends to support — carried all of them.
+mkdir -p "$WORK/etc/kldload"
+for _f in install-manifest.env edition profile VERSION webui.conf collect.conf \
+    netboot.env backup.conf; do
+    # swallow: not every profile writes every file; absence is not a defect here
+    [[ -f "/etc/kldload/${_f}" ]] && cp "/etc/kldload/${_f}" "$WORK/etc/kldload/" || true
+done
+# The tree listing (names and modes only) still shows what exists.
+[[ -d /etc/kldload ]] && find /etc/kldload -printf '%M %u %g %8s %p\n' >"$WORK/etc/kldload-tree.txt" 2>/dev/null || true
 [[ -f /etc/hostid ]] && xxd /etc/hostid >"$WORK/etc/hostid.hex" || true
-[[ -f /proc/cmdline ]] && cp /proc/cmdline "$WORK/proc-cmdline.txt"
+# The kernel cmdline may carry kldload.password= / kldload.passphrase= /
+# kldload.rhel_pass= from a netboot menu: strip the values, keep the keys.
+[[ -f /proc/cmdline ]] && sed -E 's/(kldload\.(password|passphrase|rhel_pass|rhel_user)=)[^ ]*/\1<redacted>/g' /proc/cmdline >"$WORK/proc-cmdline.txt"
 [[ -f /etc/kldload-build-id ]] && cp /etc/kldload-build-id "$WORK/" || true
 [[ -f /etc/kldload-build-sha ]] && cp /etc/kldload-build-sha "$WORK/" || true
 
@@ -205,7 +219,10 @@ for f in /etc/kldload/install-manifest.env \
     /var/log/installer/effective-config.env \
     /tmp/answers.env; do
     [[ -f "$f" ]] || continue
-    sed -E 's/(KLDLOAD_PASSWORD)=.*/\1=<redacted>/; s/(KLDLOAD_LUKS_PASSPHRASE)=.*/\1=<redacted>/' \
+    # Redact by NAME PATTERN, not by a list of two keys: the ZFS passphrase,
+    # RHEL password, activation key, cloud credentials and tokens all live in
+    # the same files and were passed through until 2026-09-23.
+    sed -E 's/^([A-Z0-9_]*(PASS|PASSWORD|PASSPHRASE|SECRET|TOKEN|KEY|CREDENTIAL)[A-Z0-9_]*)=.*/\1=<redacted>/' \
         "$f" >"$WORK/answers-$(basename "$f")"
 done
 
