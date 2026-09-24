@@ -36,11 +36,15 @@ import sys
 from pathlib import Path
 
 
-def _run(cmd, timeout=5):
+def _run(cmd: list[str], timeout: float = 5,
+         stdin: int | None = None) -> tuple[int, str, str]:
     """Return (rc, stdout, stderr). Never raises — subprocess failures
-    surface as rc != 0 with empty stdout; that's what checks expect."""
+    surface as rc != 0 with empty stdout; that's what checks expect.
+    stdin is passed through: ssh must get DEVNULL or it reads the
+    doctor's own stdin."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           stdin=stdin)
         return p.returncode, p.stdout.strip(), p.stderr.strip()
     except Exception as e:
         return -1, "", str(e)
@@ -978,33 +982,78 @@ def check_wg_mesh_coherence():
     if host_on_mesh:
         expect += 1
 
+    # A node that cannot be probed is NOT a node with the right count. The
+    # first cut skipped it with `continue`, so with every node unreachable
+    # `bad` stayed empty and the doctor said "every node holds N peers" —
+    # a probe that could not fail. Unprobed nodes are counted and reported.
     bad = []
+    unprobed = []
     for n in nodes:
-        rc, ip, _ = _run(["bash", "-c",
-                          "virsh domifaddr %s --source lease 2>/dev/null | "
-                          "awk '/ipv4/{split($4,a,\"/\");print a[1];exit}'" % n], timeout=15)
-        ip = (ip or "").strip()
+        ip = _domain_ipv4(n)
         if not ip:
+            unprobed.append(f"{n}=no lease")
             continue
-        rc, cnt, _ = _run(["bash", "-c",
-                           "timeout 12 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "
-                           "-o BatchMode=yes -i /root/.ssh/id_ed25519 root@%s "
-                           "'wg show wg-k8s peers | wc -l' </dev/null" % ip], timeout=20)
+        rc, cnt, err = _run(["ssh",
+                             "-o", "ConnectTimeout=5",
+                             # Cluster VMs are rebuilt from goldens and every
+                             # rebuild mints a fresh host key behind the same
+                             # lease, so a pinned key would fail every node
+                             # after the first kube-cluster rebuild. The
+                             # session runs one read-only wg command and
+                             # nothing secret crosses it; the churned keys
+                             # stay out of root's known_hosts.
+                             "-o", "StrictHostKeyChecking=no",
+                             "-o", "UserKnownHostsFile=/dev/null",
+                             "-o", "LogLevel=ERROR",
+                             "-o", "BatchMode=yes",
+                             "-i", "/root/.ssh/id_ed25519",
+                             f"root@{ip}",
+                             "wg show wg-k8s peers | wc -l"],
+                            timeout=20, stdin=subprocess.DEVNULL)
         cnt = (cnt or "").strip()
-        if not cnt.isdigit():
+        if rc != 0 or not cnt.isdigit():
+            unprobed.append(f"{n}=ssh failed ({(err or 'no count').splitlines()[-1][:60]})")
             continue
         if int(cnt) != expect:
             bad.append(f"{n}={cnt}")
 
-    if not bad:
+    if not bad and not unprobed:
         return _result("kubernetes", "cluster mesh peers", "ok",
                        f"every node holds {expect} peers",
                        f"{len(nodes)} nodes, full mesh")
+    actual = []
+    if bad:
+        actual.append("peer-count drift: " + ", ".join(bad))
+    if unprobed:
+        actual.append(f"{len(unprobed)} of {len(nodes)} nodes could not be probed: "
+                      + ", ".join(unprobed))
     return _result("kubernetes", "cluster mesh peers", "fail",
                    f"every node holds {expect} peers",
-                   "peer-count drift: " + ", ".join(bad),
+                   "; ".join(actual),
                    severity="high",
-                   remediation="kube-cluster mesh-repair")
+                   remediation=("kube-cluster mesh-repair" if bad else
+                                "virsh domifaddr <node> --source lease, then "
+                                "ssh -i /root/.ssh/id_ed25519 root@<ip> from the hypervisor"))
+
+
+def _parse_domifaddr(out: str) -> str:
+    """First IPv4 address in `virsh domifaddr` output, without its prefix
+    length, or ''. Columns: Name, MAC, Protocol, Address; a second address
+    on the same NIC comes as a '-' continuation row with the same shape."""
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[2] == "ipv4":
+            return f[3].split("/")[0]
+    return ""
+
+
+def _domain_ipv4(dom: str) -> str:
+    """The DHCP lease address of a running domain, or '' when it has none
+    or virsh fails. Fixed argv: the domain name never meets a shell."""
+    rc, out, _ = _run(["virsh", "domifaddr", dom, "--source", "lease"], timeout=15)
+    if rc != 0:
+        return ""
+    return _parse_domifaddr(out)
 
 
 def check_darksite_charts():
