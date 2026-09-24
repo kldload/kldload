@@ -491,7 +491,7 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
             elif ((_missing == 0)); then
                 _pass "all ${_checked} kldload unit ExecStart paths exist in the rootfs"
             fi
-            rm -rf "$UUNITS"
+            _rm_extract "$UUNITS"
 
             # ── The install kiosk ────────────────────────────────────────
             # Five files have to be in the image together or the unattended
@@ -2993,7 +2993,7 @@ else
         # swallow: grep -v exits 1 when it filters EVERYTHING out, which is
         # the passing case here -- a page whose only findings were the
         # machine-dependent Xr warnings.
-        _mp_out="$(mandoc -T lint "$ROOT/$_f" 2>&1 | grep -v 'referenced manual not found' || true)"
+        _mp_out="$(mandoc -T lint "$ROOT/$_f" 2>&1 | grep -vE 'referenced manual not found|outdated mandoc.db' || true)"
         if [[ -n "$_mp_out" ]]; then
             _fail "man page $(basename "$_f")" "$(printf '%s' "$_mp_out" | head -n 2 | tr '\n' ' ')"
             _mp_bad=$((_mp_bad + 1))

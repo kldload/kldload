@@ -622,14 +622,29 @@ grep -qx "KLDLOAD_PASSWORD=' p w '" "${_at}/out" || _abad+=" password-not-merged
 grep -qx "KLDLOAD_ZFS_PASSPHRASE='eight chars'" "${_at}/out" || _abad+=" passphrase-not-merged"
 grep -q '^KLDLOAD_EVIL' "${_at}/out" && _abad+=" extra-key-merged"
 [[ -z "$(ls -A "${_at}/run")" ]] || _abad+=" rundir-not-cleaned"
-# Secrets from the menu: URI-decoded exactly, and never in the log.
-_ar "kldload.distro=fedora kldload.disk=/dev/vdz kldload.encrypt=1 kldload.password=SeCrEt%20p%24w%27%23 kldload.passphrase=SeCrEtpp12" KLDLOAD_AUTOINSTALL_STOP_BEFORE_EXEC=1
-[[ "$_arc" == 0 ]] || _abad+=" menu-secrets-rc-${_arc}"
-grep -qxF "KLDLOAD_PASSWORD='SeCrEt p\$w'#'" "${_at}/out" || _abad+=" menu-password-not-decoded"
+# Secrets on the cmdline are REFUSED (2026-09-23): named in the log, never
+# decoded, never merged, and the machine's screen is asked instead — so the
+# same on-screen responder as above must be what supplies them.
+rm -rf "${_at}/run" && mkdir -p "${_at}/run"
+(
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -s "${_at}/run/install-needs" ]] && break
+        sleep 0.5
+    done
+    printf "KLDLOAD_PASSWORD='from screen'\nKLDLOAD_ZFS_PASSPHRASE='screen phrase'\n" >"${_at}/run/.s"
+    mv "${_at}/run/.s" "${_at}/run/install-secrets"
+) &
+_ar "kldload.distro=fedora kldload.disk=/dev/vdz kldload.encrypt=1 kldload.password=SeCrEt%20p%24w%27%23 kldload.passphrase=SeCrEtpp12" KLDLOAD_AUTOINSTALL_STOP_BEFORE_EXEC=1 KLDLOAD_SECRETS_TIMEOUT=20
+wait
+[[ "$_arc" == 0 ]] || _abad+=" cmdline-secrets-rc-${_arc}"
+grep -q 'REFUSED kldload.password=' "${_at}/log" || _abad+=" cmdline-password-not-refused"
+grep -q 'REFUSED kldload.passphrase=' "${_at}/log" || _abad+=" cmdline-passphrase-not-refused"
+grep -q 'SeCrEt' "${_at}/out" && _abad+=" CMDLINE-SECRET-MERGED"
 grep -q 'SeCrEt' "${_at}/log" && _abad+=" SECRET-IN-LOG"
+grep -qx "KLDLOAD_PASSWORD='from screen'" "${_at}/out" || _abad+=" screen-password-not-merged"
 rm -rf "${_at}"
 if [[ -z "${_abad}" ]]; then
-    _pass "autoinstall: menu keys land, template=none clears, one seed only, secrets wait and merge only what was asked"
+    _pass "autoinstall: menu keys land, template=none clears, one seed only, screen secrets merge only what was asked, cmdline secrets refused"
 else
     _fail "autoinstall netboot override" "${_abad}"
 fi
@@ -652,10 +667,11 @@ if env NETBOOT_ROOT="${_nt}/root" NETBOOT_MENU_TIMEOUT=10 KLDLOAD_ANSWERS_LIB="$
     # 15: iPXE shows LINES - 5 item rows, and the panel is 20 rows.
     [[ "$(sed -n '/^menu options/,/^choose /p' "${_tok}" | grep -c '^item ')" -le 15 ]] || _nbad+=" options-too-long"
     grep -q '^:img_on$' "${_tok}" && sed -n '/^:img_on$/,/^goto opts$/p' "${_tok}" | grep -q '^set kvm 1$' || _nbad+=" goldens-without-kvm"
-    # Secrets typed in the credentials form ride the live cmdline, but ONLY as
-    # the expansion of what was typed, URI-encoded -- never a value from a file.
-    grep -qE 'kldload\.(password|passphrase|rhel_user|rhel_pass)=[^$]' "${_tok}" && _nbad+=" literal-secret-on-cmdline"
-    grep -q '^item --secret pw ' "${_tok}" || _nbad+=" no-masked-password-field"
+    # No secret rides the cmdline at all (2026-09-23): the credentials form
+    # is gone, and nothing in the menu may name a secret key or a value from
+    # the answers file. The machine's screen asks.
+    grep -qE 'kldload\.(password|passphrase|rhel_user|rhel_pass)=' "${_tok}" && _nbad+=" secret-key-on-cmdline"
+    grep -q '^item --secret ' "${_tok}" && _nbad+=" secret-field-in-menu"
     # Every seed the menu can boot must be a file the server actually serves.
     # The armed profile once pointed at the NAME of the file given to arm-install.
     for _sf in $(sed -n 's/^set sf //p' "${_tok}" | sort -u); do
