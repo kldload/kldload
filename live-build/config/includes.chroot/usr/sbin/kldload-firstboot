@@ -420,30 +420,18 @@ DNS
     log "UNIMPLEMENTED: DNS registration API — kldload-dns-api.service is not shipped"
 
     # 10. cluster-autobootstrap timer
-    # DO NOT enable this until the binary exists.
     #
-    # kldload-autobootstrap.service declares
-    # ExecStart=/usr/local/sbin/kldload-autobootstrap, and that program is not
-    # in this repository -- not in includes.chroot, not in any build-iso.sh or
-    # profiles.sh copy list, nowhere. The unit and its timer have shipped and
-    # been enabled on every install regardless, so the timer has been firing and
-    # the service failing 203/EXEC every time, invisibly: the `2>/dev/null ||
-    # true` here swallowed the enable's own complaint, and a failing oneshot
-    # blocks nothing an operator would notice.
-    #
-    # Found 2026-08-25 by the ExecStart gate added to smoke-build, which reads
-    # every shipped unit and asserts its binary is in the rootfs. "kldload
-    # cluster autobootstrap and WireGuard reflector" has therefore never run.
-    #
-    # The units stay so the feature can be implemented against them. Enabling is
-    # gated on the program actually being there, so the day it lands this starts
-    # working with no further change -- and until then nothing pretends it works.
-    if [[ -x /usr/local/sbin/kldload-autobootstrap ]]; then
-        systemctl enable --now kldload-autobootstrap.timer 2>/dev/null ||
-            log "WARNING: kldload-autobootstrap.timer would not enable"
-    else
-        log "SKIP: kldload-autobootstrap.timer — /usr/local/sbin/kldload-autobootstrap does not exist (unimplemented; see the note in kldload-firstboot)"
-    fi
+    # kldload-autobootstrap.service declared
+    # ExecStart=/usr/local/sbin/kldload-autobootstrap, a program that has never
+    # been in this repository. The unit and its timer shipped and were enabled
+    # on every install until 2026-08-25, when smoke-build's ExecStart gate found
+    # the timer firing a 203/EXEC every 30 s, invisibly; from then until
+    # 2026-09-23 the units stayed in the tree behind an `[[ -x … ]]` here, in
+    # case the program arrived. It did not, and a unit with no program is not
+    # a placeholder, it is a lie the next reader has to disprove -- so the
+    # units are gone too. Write the program, the units and this enable
+    # together when the feature is real.
+    log "UNIMPLEMENTED: cluster autobootstrap / WireGuard reflector — kldload-autobootstrap is not shipped"
 
     # 11. Snapshot timer (inherited from base)
     systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
@@ -3359,13 +3347,18 @@ OLLAMA
                         fi
                         _pull_model "$_bob_base" "Bob base model"
 
-                        # Embedding model — required by kldload-rag-index. Tiny (~270MB),
-                        # always safe to pull regardless of hardware. Without this, the
-                        # RAG indexer fires off embed requests, Ollama 404s on every one
-                        # ("model not found"), chromadb stays empty, and Bob's RAG
-                        # bridge returns no kldload-specific context. Caught on .101
-                        # during build #47 audit -- firstboot pulled the chat model
-                        # only, RAG quietly indexed 0 chunks.
+                        # Embedding model. Open WebUI's document RAG is pointed at it
+                        # (RAG_EMBEDDING_ENGINE=ollama, RAG_EMBEDDING_MODEL=nomic-embed-text
+                        # on the container below and in kldload-ai-webui); without it
+                        # every embed request 404s ("model not found") and uploads to
+                        # the chat index nothing. Tiny (~270 MB), safe on any hardware,
+                        # and in the Ollama darksite so this is a local no-op offline.
+                        # HISTORY: this comment said "required by kldload-rag-index"
+                        # until 2026-09-23; that tool wrapped
+                        # /usr/local/lib/kldload-rag/, which was removed long before,
+                        # and it has been deleted. The pull stays for the consumer that
+                        # is real. (.101, build #47: firstboot pulled the chat model
+                        # only and RAG quietly indexed 0 chunks.)
                         _pull_model "nomic-embed-text" "RAG embedding model"
 
                         # Persist what firstboot actually picked so kldload-rag.service
