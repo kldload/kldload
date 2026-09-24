@@ -66,7 +66,7 @@ k_write_sources_list() {
 
     if [[ "$distro" == "ubuntu" ]]; then
         suite="${KLDLOAD_SUITE:-noble}"
-        mirror="${KLDLOAD_MIRROR:-http://archive.ubuntu.com/ubuntu}"
+        mirror="${KLDLOAD_MIRROR:-https://archive.ubuntu.com/ubuntu}"
     else
         suite="${KLDLOAD_SUITE:-trixie}"
         mirror="${KLDLOAD_MIRROR:-https://mirror.it.ubc.ca/debian}"
@@ -78,6 +78,13 @@ k_write_sources_list() {
 deb [trusted=yes] ${mirror} ${suite} main
 EOS
     elif [[ "$distro" == "ubuntu" ]]; then
+        # trusted=yes ONLY for this install-time file: the Fedora live image has
+        # no ubuntu-keyring, so apt on the fresh target cannot verify Release
+        # until the keyring package is in place. The mirror is https so the
+        # path is at least authenticated to archive.ubuntu.com; the finalized
+        # sources.list below is verified normally. (2026-09-23: this used to be
+        # plain http with trusted=yes, i.e. anyone on the path chose the root
+        # filesystem. Ubuntu is outside the tested matrix; see README.)
         cat >"${target}/etc/apt/sources.list" <<EOS
 deb [trusted=yes] ${mirror} ${suite} main restricted universe multiverse
 deb [trusted=yes] ${mirror} ${suite}-updates main restricted universe multiverse
@@ -130,9 +137,9 @@ EOS
         k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
             "Finalizing sources.list: standard Ubuntu internet repos"
         cat >"${target}/etc/apt/sources.list" <<EOS
-deb http://archive.ubuntu.com/ubuntu ${suite} main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu ${suite}-updates main restricted universe multiverse
-deb http://archive.ubuntu.com/ubuntu ${suite}-security main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu ${suite} main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu ${suite}-updates main restricted universe multiverse
+deb https://archive.ubuntu.com/ubuntu ${suite}-security main restricted universe multiverse
 EOS
     else
         k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
@@ -4608,8 +4615,24 @@ Include = /etc/pacman.d/mirrorlist
 
 [archzfs]
 Server = https://archzfs.com/$repo/$arch
-SigLevel = Optional TrustAll
+SigLevel = Required DatabaseOptional
 PACFINAL
+    # archzfs signs its packages with one key; the installed system must
+    # hold and locally sign it or every later zfs update fails on
+    # verification. Until 2026-09-23 the shipped pacman.conf said
+    # "Optional TrustAll" for that repo forever, so any compromised mirror
+    # chose the ZFS kernel modules. Fetching the key needs the network,
+    # which the Arch path already requires; a failure is logged loudly and
+    # the repo stays Required, so an update fails closed instead of open.
+    local _archzfs_key="DDF7DB817396A49B2A2723F7403BD972F75D9D76"
+    if chroot "${target}" pacman-key --init >>"$log" 2>&1 &&
+        chroot "${target}" pacman-key --populate archlinux >>"$log" 2>&1 &&
+        chroot "${target}" pacman-key --recv-keys "${_archzfs_key}" --keyserver hkps://keyserver.ubuntu.com >>"$log" 2>&1 &&
+        chroot "${target}" pacman-key --lsign-key "${_archzfs_key}" >>"$log" 2>&1; then
+        k_log_to "$log" "archzfs signing key ${_archzfs_key} imported and locally signed"
+    else
+        k_log_to "$log" "WARNING: could not import the archzfs signing key — [archzfs] stays SigLevel Required, so zfs updates will refuse until 'pacman-key --recv-keys ${_archzfs_key}' succeeds"
+    fi
 
     mkdir -p "${target}/var/log/kldload"
     # The outcome, not the log: every step above that could leave this target
