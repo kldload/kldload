@@ -33,10 +33,13 @@
 #          wireguard-tools (optional)
 #
 # Usage:
-#   kube-cluster bootstrap [--workers N] [--ram MB] [--cpus N] [--disk GB]
-#   kube-cluster destroy
-#   kube-cluster status
+#   kube-cluster bootstrap [--workers N] [--cps N] [--ram MB] [--cpus N] [--disk GB] [--image PATH]
+#   kube-cluster destroy [--all] [--yes|-y]   (--all also removes the golden)
+#   kube-cluster status | start [N] | stop | scale N
 #   kube-cluster golden   (build golden image only, skip cluster deploy)
+#   kube-cluster mesh     (alias: mesh-repair — reconcile the WireGuard mesh)
+#   kube-cluster vip-float  (leader-elected kube-vip on a multi-CP cluster)
+#   kube-cluster --help   prints the full text below; a usage error exits 2
 # ══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -556,8 +559,19 @@ Commands:
               differences, so it is safe to run on a healthy cluster. Runs
               automatically after every scale; run it by hand after a manual
               virsh removal, or if metrics targets for one node go dark.
+  mesh        Alias for mesh-repair.
+  vip-float   Convert a multi-CP cluster from the static single-CP VIP to a
+              leader-elected kube-vip that follows whichever CP holds the
+              lease. No-op on a single CP; safe to re-run.
 
 Options:
+  --all            With destroy: remove the golden image too, not only the
+                   cluster VMs and zvols. Without it the golden is kept so
+                   the next bootstrap takes seconds.
+  --yes, -y        With destroy: skip the confirmation (needed from a script,
+                   the webui or ssh -c, where there is no terminal to type
+                   'destroy' into). KUBE_CLUSTER_YES=1 in the environment is
+                   the same thing.
   --control-planes N, --cps N
                    Control planes to build (default: 3 = real HA, tolerates
                    losing one). Clamped to an ODD number that fits this host's
@@ -600,8 +614,9 @@ Examples:
   kube-cluster start 1                    # ...but only the CP + 1 worker
   kube-cluster stop                       # power it off, keep the VMs
 EOF
-    # asked-for help is 0; a usage error stays 1
-    exit "${1:-1}"
+    # asked-for help is 0; a usage error is 2, distinct from a bootstrap or
+    # destroy that ran and failed (1).
+    exit "${1:-2}"
 }
 
 # ── Parse args ─────────────────────────────────────────────────────────────
@@ -710,25 +725,51 @@ get_vm_ip() {
 # any case where the key isn't yet deployed. BatchMode=yes on the first attempt
 # prevents interactive password prompts — it either works with the key or fails
 # fast, letting sshpass handle the password path.
+#
+# Returns the REMOTE command's exit status, with its stderr passed through to
+# the caller's stderr. Only ssh's own failure (exit 255: no route, refused,
+# auth) is retried, three times with a pause. Until 2026-09-23 every non-zero
+# exit was retried, so a kube-init that failed deterministically was run up to
+# four times on the control plane, and stderr went to /dev/null, so the
+# caller's `2>&1` kept nothing and the log named for the failure was empty.
+# The key attempt's stderr is deliberately not shown when it merely falls
+# through to the password path: "Permission denied (publickey)" there is the
+# normal first boot of a golden, not a diagnostic.
 _ssh_cmd() {
     local ip="$1"
     shift
-    local attempt
+    local attempt rc err
+    err="$(mktemp)"
     for attempt in 1 2 3; do
         # Try key auth on first attempt only — if it fails, don't waste auth tries
         if [[ $attempt -eq 1 && -f "$SSH_KEY" ]]; then
+            rc=0
             ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
                 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
-                -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null && return 0
+                -i "$SSH_KEY" "root@${ip}" "$@" 2>"$err" || rc=$?
+            if ((rc != 255)); then
+                cat "$err" >&2
+                rm -f "$err"
+                return "$rc"
+            fi
         fi
         # Password auth — no pubkey negotiation, goes straight to password
+        rc=0
         sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
             -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-            "root@${ip}" "$@" 2>/dev/null && return 0
+            "root@${ip}" "$@" 2>"$err" || rc=$?
+        if ((rc != 255)); then
+            cat "$err" >&2
+            rm -f "$err"
+            return "$rc"
+        fi
         [[ $attempt -lt 3 ]] && sleep 3
     done
-    return 1
+    # Three connection failures: say so once, with ssh's last words.
+    cat "$err" >&2
+    rm -f "$err"
+    return 255
 }
 
 # _ssh_cmd_logged — like _ssh_cmd but writes stderr/stdout to a per-node log
@@ -2200,27 +2241,49 @@ cmd_bootstrap() {
         cp_pub="$(_ssh_cmd "$cp_ip" 'cat /etc/wireguard/wg-mgmt.pub')" || true
 
         if [[ -n "$cp_pub" ]]; then
-            # Collect all pubkeys
+            # Collect all pubkeys. The arrays are INDEXED BY WORKER POSITION,
+            # with an empty placeholder for a worker that has no address: they
+            # used to be appended only for workers with an IP and read back by
+            # position i, so one worker without an address shifted every later
+            # worker's key and id onto the wrong machine (2026-09-23). The
+            # node id itself still skips the addressless worker, matching the
+            # init loop above.
             declare -a w_pubs=()
             declare -a w_ids=()
             node_id=2
+            local _mesh_expected=0
             for i in $(seq 0 $((WORKERS - 1))); do
                 local wip="${worker_ips[$i]}"
-                [[ -n "$wip" ]] || continue
+                if [[ -z "$wip" ]]; then
+                    w_pubs+=("")
+                    w_ids+=("")
+                    continue
+                fi
                 local wpub
-                wpub="$(_ssh_cmd "$wip" 'cat /etc/wireguard/wg-mgmt.pub')" || true
+                wpub="$(_ssh_cmd "$wip" 'cat /etc/wireguard/wg-mgmt.pub')" || wpub=""
+                [[ -n "$wpub" ]] || warn "no wg-mgmt.pub on ${wip} — it will not be peered"
                 w_pubs+=("$wpub")
                 w_ids+=("$node_id")
                 ((node_id++))
+                # x=$((x + 1)), never ((x++)) on a counter that starts at 0:
+                # the post-increment evaluates to the old value, 0 is "false",
+                # and set -e ends the bootstrap on the first worker.
+                _mesh_expected=$((_mesh_expected + 1))
             done
 
             # CP ↔ Worker peering: each worker needs to reach the API server,
-            # and the CP needs to reach each worker for kubectl exec/logs/port-forward
+            # and the CP needs to reach each worker for kubectl exec/logs/port-forward.
+            # Counted: a peering is only complete when BOTH directions landed.
+            local _mesh_peered=0 _mesh_ww_failed=0
             for i in $(seq 0 $((WORKERS - 1))); do
                 local wip="${worker_ips[$i]:-}"
                 [[ -n "$wip" && -n "${w_pubs[$i]:-}" ]] || continue
-                _ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${w_pubs[$i]} ${w_ids[$i]}" || true
-                _ssh_cmd "$wip" "kube-network add-peer ${cp_ip} ${cp_pub} 1" || true
+                if _ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${w_pubs[$i]} ${w_ids[$i]}" &&
+                    _ssh_cmd "$wip" "kube-network add-peer ${cp_ip} ${cp_pub} 1"; then
+                    _mesh_peered=$((_mesh_peered + 1))
+                else
+                    warn "CP <-> ${wip} (node ${w_ids[$i]}) peering incomplete"
+                fi
             done
 
             # Worker ↔ Worker full mesh: pods on W1 must reach pods on W2 directly
@@ -2231,7 +2294,11 @@ cmd_bootstrap() {
                     local wip_i="${worker_ips[$i]:-}"
                     local wip_j="${worker_ips[$j]:-}"
                     [[ -n "$wip_i" && -n "$wip_j" && -n "${w_pubs[$j]:-}" ]] || continue
-                    _ssh_cmd "$wip_i" "kube-network add-peer ${wip_j} ${w_pubs[$j]} ${w_ids[$j]}" || true
+                    _ssh_cmd "$wip_i" "kube-network add-peer ${wip_j} ${w_pubs[$j]} ${w_ids[$j]}" ||
+                        {
+                            warn "worker ${wip_i} -> ${wip_j} peering failed"
+                            _mesh_ww_failed=$((_mesh_ww_failed + 1))
+                        }
                 done
             done
 
@@ -2245,7 +2312,15 @@ cmd_bootstrap() {
             for i in $(seq 0 $((WORKERS - 1))); do
                 [[ -n "${worker_ips[$i]}" ]] && _ssh_cmd "${worker_ips[$i]}" "kube-network pin-kubelet" || true
             done
-            log "WireGuard full mesh configured (${WORKERS} workers + CP)"
+            # "full mesh" is claimed only when every worker that has an address
+            # was peered with the CP in both directions and no worker-to-worker
+            # peering failed. The line used to print unconditionally after a
+            # row of `|| true`, so a half-meshed cluster read as complete.
+            if ((_mesh_peered == _mesh_expected && _mesh_ww_failed == 0)); then
+                log "WireGuard full mesh configured (${_mesh_peered}/${_mesh_expected} workers + CP)"
+            else
+                warn "WireGuard mesh INCOMPLETE: ${_mesh_peered}/${_mesh_expected} workers peered with the CP, ${_mesh_ww_failed} worker-to-worker peerings failed — see the warnings above; kube-cluster mesh re-peers"
+            fi
 
             # wgx estate inventory — the console scans ~/.config/wgx/hosts
             # (or ~/.ssh/config) to show remote hosts; without this file the
@@ -2308,12 +2383,16 @@ cmd_bootstrap() {
     fi
     [[ -n "$_cil" ]] && log "Cilium ${_cil} (from this host's stack lock)" ||
         warn "no Cilium version in the stack lock — kube-init will say 'unknown'"
-    # The output is KEPT. This used to be discarded, so a kube-init that died
-    # before printing anything produced exactly one line — "had errors" — and
-    # no way to find out which. The log is named in the warning.
+    # The output is KEPT — stdout and stderr both, now that _ssh_cmd passes
+    # the remote stderr through instead of dropping it (the `2>&1` here kept
+    # nothing before, so the log named in the message was empty). A failed
+    # kube-init is FATAL: it is not retried (_ssh_cmd retries only a dropped
+    # connection) and the bootstrap stops here rather than printing "Control
+    # plane initialized" over a control plane that does not exist and then
+    # joining workers to it.
     _ssh_cmd "$cp_ip" "KUBE_VIP_ADDRESS='${KUBE_VIP_ADDRESS}' METALLB_POOL='${METALLB_POOL:-}' METALLB_POOL_NAME='${METALLB_POOL_NAME:-}' CILIUM_VERSION='${_cil}' kube-init" \
-        >/var/log/kldload/kube-init-${CLUSTER_NAME}.log 2>&1 ||
-        warn "kube-init had errors — see /var/log/kldload/kube-init-${CLUSTER_NAME}.log"
+        >"/var/log/kldload/kube-init-${CLUSTER_NAME}.log" 2>&1 ||
+        die "kube-init failed on ${cp_ip} (exit $?) — see /var/log/kldload/kube-init-${CLUSTER_NAME}.log; the VMs are left as they are"
 
     # Step 5: Join workers. The join token is a short-lived bootstrap credential
     # that lets workers authenticate to the API server.
