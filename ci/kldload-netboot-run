@@ -339,10 +339,45 @@ if should_run smoke && ((DO_SMOKE)); then
     # read it as one.
     grep -q 'Build Smoke Test Results' "$OUT/smoke.txt" ||
         fail_run smoke "smoke-build stopped before its summary — see smoke.out (last line: $(tail -n 1 "$OUT/smoke.txt"))"
-    # swallow: grep -v exits 1 when every FAIL line is a known ratchet, which is the passing case
-    fails="$(grep -E '^\s*(✗ )?FAIL ' "$OUT/smoke.txt" | grep -vE 'silent-failure ratchet|strict-mode ratchet' || true)"
-    [[ -z "$fails" ]] || fail_run smoke "smoke-build failures beyond the known ratchets: $(sed -n 1,3p <<<"$fails" | tr '\n' ' ')"
-    phase_ok smoke "$(basename "$ISO")"
+    # The verdict is smoke-build's own summary count, not a regex over result
+    # lines. The old `grep '^\s*(✗ )?FAIL '` never matched a "DID NOT RUN  name
+    # — …" line, so a gate that could not run did not fail the phase: on
+    # 20260923T232832Z the ISO never mounted (no root), every ISO-content gate
+    # DID NOT RUN, and the phase was ok. smoke-build counts DID NOT RUN into its
+    # FAIL: total, so FAIL: 0 is the only clean summary.
+    #
+    # SMOKE_MAY_FAIL names the sections allowed to FAIL without failing the
+    # phase: the two repository ratchets, which carry historical debt the tree
+    # pays down. Every exemption used is logged, an exemption covers only a
+    # printed line that names its section, and a FAIL the summary counts that
+    # no printed line accounts for is a failure -- nothing is dropped by label.
+    SMOKE_MAY_FAIL=("silent-failure ratchet" "strict-mode ratchet")
+    sm_fail="$(sed -n '/Build Smoke Test Results/,$p' "$OUT/smoke.txt" | sed -n 's/^[[:space:]]*FAIL: \([0-9][0-9]*\)$/\1/p' | head -n 1)"
+    [[ "$sm_fail" =~ ^[0-9]+$ ]] || fail_run smoke "smoke-build's summary carries no 'FAIL: N' line — see smoke.txt"
+    # swallow: grep exits 1 on a run with no FAIL or DID NOT RUN line, which is the passing case
+    mapfile -t sm_lines < <(grep -E '^[[:space:]]*(✗ )?(FAIL|DID NOT RUN)[[:space:]]' "$OUT/smoke.txt" || true)
+    sm_exempt=0
+    sm_bad=()
+    for l in "${sm_lines[@]}"; do
+        ex=""
+        for s in "${SMOKE_MAY_FAIL[@]}"; do
+            if [[ "$l" == *"$s"* ]]; then
+                ex="$s"
+                break
+            fi
+        done
+        if [[ -n "$ex" ]]; then
+            sm_exempt=$((sm_exempt + 1))
+            log "smoke: exempt (${ex} may FAIL): $(cut -c1-140 <<<"$l")"
+        else
+            sm_bad+=("$l")
+        fi
+    done
+    ((${#sm_bad[@]} == 0)) ||
+        fail_run smoke "smoke-build: ${#sm_bad[@]} failure(s) beyond the exempt sections (${SMOKE_MAY_FAIL[*]}): $(printf '%s\n' "${sm_bad[@]}" | sed -n 1,3p | cut -c1-160 | tr '\n' ' ')"
+    ((sm_fail <= sm_exempt)) ||
+        fail_run smoke "smoke-build counts FAIL: ${sm_fail} but only ${sm_exempt} exempt FAIL line(s) were printed — a failure with no line to explain it"
+    phase_ok smoke "$(basename "$ISO") — summary FAIL: ${sm_fail}, ${sm_exempt} exempt (${SMOKE_MAY_FAIL[*]})"
 else
     phase_skip smoke
 fi

@@ -97,8 +97,29 @@ fi
 _section "ISO Content"
 
 MOUNTPOINT=$(mktemp -d)
-if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
-    _pass "ISO mounts successfully"
+# Mount as root whether or not this process is. The CI driver runs smoke-build
+# as the checkout's owner (ci/kldload-netboot-run does `runuser -u <owner>`),
+# and an unprivileged `mount -o loop` fails. That used to be a WARN -- so every
+# ISO-content gate below (NFO, squashfs, shipped tools, unit ExecStart, drop-ins)
+# was silently skipped and the run went green: 20260923T232832Z printed
+# "WARN ISO mount — could not mount ISO (may need root)" and PASS 136, FAIL 1.
+# A gate that cannot run is _didnotrun, which counts as a failure.
+_SUDO=()
+((EUID == 0)) || _SUDO=(sudo -n)
+_iso_mounted=0
+# _iso_unmount — undo the mount on every exit path, including a crash between
+# mount and umount; a root-held loop mount on a mktemp dir otherwise outlives
+# the run and the next mktemp lands beside a stale one.
+_iso_unmount() {
+    if ((_iso_mounted)) && mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
+        "${_SUDO[@]}" umount "$MOUNTPOINT" 2>/dev/null || true # best effort at exit; the in-line umount below already reported
+    fi
+    rmdir "$MOUNTPOINT" 2>/dev/null || true # a leftover mktemp dir is not a test result
+}
+trap _iso_unmount EXIT
+if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)"; then
+    _iso_mounted=1
+    _pass "ISO mounts successfully (as $(id -un)${_SUDO[0]:+ via ${_SUDO[*]}})"
 
     # The NFO: at the ISO root (the first thing on the USB) and in the image, with its
     # placeholders filled. A release with no NFO, or one still claiming to be @VERSION@,
@@ -532,12 +553,16 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
         _didnotrun "systemd drop-in gate" "unsquashfs missing — gate DID NOT RUN (dnf install squashfs-tools)"
     fi
 
-    umount "$MOUNTPOINT" 2>/dev/null
-    _pass "ISO unmounted cleanly"
+    if _iso_umount_err="$("${_SUDO[@]}" umount "$MOUNTPOINT" 2>&1)"; then
+        _iso_mounted=0
+        _pass "ISO unmounted cleanly"
+    else
+        _fail "ISO unmount" "umount $MOUNTPOINT: ${_iso_umount_err:-no error text}"
+    fi
 else
-    _warn "ISO mount" "could not mount ISO (may need root)"
+    _didnotrun "ISO mount" "could not mount $ISO at $MOUNTPOINT as $(id -un)${_SUDO[0]:+ via ${_SUDO[*]}}: ${_iso_mount_err:-no error text} — every ISO-content gate (NFO, squashfs, shipped tools, unit ExecStart, drop-ins) DID NOT RUN"
 fi
-rmdir "$MOUNTPOINT" 2>/dev/null
+rmdir "$MOUNTPOINT" 2>/dev/null || true # gone already when the trap ran first; nothing to report
 
 # ── Git state ────────────────────────────────────────────────────────────────
 _section "Observability binaries the installer can actually copy"
