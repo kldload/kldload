@@ -73,9 +73,9 @@ usage() {
 Usage: r2-publish.sh [--prune] [--prune-dry-run] [--versioned] [--latest-key KEY] <path-to-iso>
 
 Publishes a release ISO and its .sha256 sidecar to the kldload R2 bucket,
-under both its versioned key and the kldload-free-latest.iso key that the
-website's download button resolves to, then verifies the published objects
-by re-reading them.
+under the kldload-free-latest.iso key that the website's download button
+resolves to -- and, only with --versioned, under its versioned key as well --
+then verifies the published objects by re-reading them.
 
 Arguments:
   <path-to-iso>   The ISO to publish. A sidecar named <path-to-iso>.sha256

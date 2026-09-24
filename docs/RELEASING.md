@@ -11,14 +11,20 @@ website advertises one release and hands the visitor another. After tagging:
 ```bash
 export R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
 tools/r2-publish.sh --prune live-build/output/kldload-<version>-x86_64.iso
+tools/r2-publish.sh --latest-key kldload-free-net-latest.iso \
+    live-build/output/kldload-<version>-x86_64-net.iso
 ```
 
 It verifies the ISO against its `.sha256` sidecar before uploading, publishes
-under both the versioned key and `kldload-free-latest.iso` (server-side copy,
-so the image is sent once), then re-reads the published objects over HTTPS and
-asserts size and checksum. `--prune` clears older releases out of the bucket
-afterwards; `--prune-dry-run` shows what it would remove first. Requires
-`rclone`.
+under `kldload-free-latest.iso` (the key the website's download button
+resolves to), then re-reads the published objects over HTTPS and asserts size
+and checksum. **The versioned key `kldload-<version>-x86_64.iso` is not
+published by default**: pass `--versioned` to add it (a server-side copy, so
+the image is sent once) when a release should keep a permanent URL. The net
+installer is published the same way under its own `--latest-key`. `--prune`
+clears older releases out of the bucket afterwards and never touches a
+`-latest.iso` key; `--prune-dry-run` shows what it would remove first.
+Requires `rclone`.
 
 ## Cloudflare: two different tokens
 
