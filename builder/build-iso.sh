@@ -1479,18 +1479,30 @@ echo "kldload" >"${ROOTFS}/etc/hostname"
 # Live user
 chroot "$ROOTFS" useradd -m -G wheel -s /bin/bash live 2>/dev/null || true
 echo "live:live" | chroot "$ROOTFS" chpasswd
-echo "root:kldload" | chroot "$ROOTFS" chpasswd
+# root gets NO password on the live image. Until 2026-09-23 it was
+# root:kldload with PermitRootLogin yes below, which made every USB or PXE
+# boot — a whole rack mid-provisioning — root-over-SSH with a published
+# password while the disks and the install secrets were present. The
+# operator logs in as live (documented, wheel NOPASSWD) and sudo from there.
+chroot "$ROOTFS" passwd -l root >/dev/null
+chroot "$ROOTFS" passwd -S root | grep -q '^root L' ||
+    die "FATAL: root's password is not locked on the live image"
 
 # Passwordless sudo for wheel
 echo "%wheel ALL=(ALL) NOPASSWD: ALL" >"${ROOTFS}/etc/sudoers.d/wheel-nopasswd"
 chmod 440 "${ROOTFS}/etc/sudoers.d/wheel-nopasswd"
 
-# Enable SSH password auth on the live ISO (CentOS 9 disables it by default)
+# SSH on the live ISO: password auth for the live user (the harness and the
+# operator both use live/live), root only by key — and no key is shipped.
+# sshd takes the FIRST value it reads for a keyword, and 50- sorts before the
+# distro's own drop-ins, so this file is the one that decides.
 mkdir -p "${ROOTFS}/etc/ssh/sshd_config.d"
 cat >"${ROOTFS}/etc/ssh/sshd_config.d/50-kldload-live.conf" <<'SSHEOF'
 PasswordAuthentication yes
-PermitRootLogin yes
+PermitRootLogin prohibit-password
 SSHEOF
+grep -q '^PermitRootLogin prohibit-password$' "${ROOTFS}/etc/ssh/sshd_config.d/50-kldload-live.conf" ||
+    die "FATAL: live sshd drop-in did not land"
 
 # Enable services
 chroot "$ROOTFS" systemctl enable NetworkManager sshd 2>/dev/null || true
@@ -2512,17 +2524,14 @@ if [[ "$EDITION" != "core" ]]; then
         cp /build/live-build/config/includes.chroot/etc/kldload/process-exporter.yml \
             "${ROOTFS}/etc/kldload/process-exporter.yml"
     fi
-    # Default authorized_keys for the installer's k_create_users. Read on
-    # the LIVE env during install, copied to ~admin/.ssh/authorized_keys
-    # on the target. Without this on the live env the SSH key bake
-    # silently no-ops (the file-check in bootstrap.sh sees no file and
-    # falls through). Caught in build #48 verification.
-    if [[ -f /build/live-build/config/includes.chroot/etc/kldload/default-authorized-keys ]]; then
-        mkdir -p "${ROOTFS}/etc/kldload"
-        cp /build/live-build/config/includes.chroot/etc/kldload/default-authorized-keys \
-            "${ROOTFS}/etc/kldload/default-authorized-keys"
-        chmod 0644 "${ROOTFS}/etc/kldload/default-authorized-keys"
-    fi
+    # No default authorized_keys. Until 2026-09-23 the image carried one
+    # shared admin@kldload public key that the installer appended to every
+    # install's ~admin/.ssh/authorized_keys, next to NOPASSWD sudo — whoever
+    # held that private key was root on every kldload box. Keys reach a
+    # target only from KLDLOAD_ADMIN_SSH_KEYS in the answers file now, and
+    # the build refuses to ship the old file.
+    [[ ! -e /build/live-build/config/includes.chroot/etc/kldload/default-authorized-keys ]] ||
+        die "FATAL: etc/kldload/default-authorized-keys is back in the tree — a shared key must not ship"
     if [[ -d /build/live-build/config/includes.chroot/etc/loki ]]; then
         mkdir -p "${ROOTFS}/etc/loki"
         cp /build/live-build/config/includes.chroot/etc/loki/*.yaml "${ROOTFS}/etc/loki/" 2>/dev/null || true
