@@ -230,6 +230,15 @@ server | kvm | desktop | ai | zfslab)
     ;;
 esac
 
+# Storage: does the machine SERVE. This list omitted the profile entirely, so
+# a storage edition ran core, features and estate and nothing ever mounted
+# its export or listed its share (2026-09-23).
+case "$PROFILE" in
+storage)
+    run_suite "Storage Tests (share dataset, NFS mount, SMB listing, iSCSI)" "$SCRIPT_DIR/smoke-storage.sh"
+    ;;
+esac
+
 # KVM tests wherever the machine is ACTUALLY a KVM host.
 #
 # This used to be `case $PROFILE in kvm|zfslab)`, which misses every desktop or

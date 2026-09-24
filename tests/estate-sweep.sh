@@ -452,8 +452,14 @@ for ed in "${EDITIONS[@]}"; do
         sleep 60
         conv=$((conv + 60))
     done
+    # The row carries the outcome, not only the log: an edition measured
+    # before first boot finished is not a verified edition, whatever the
+    # report then says, and a log line nobody re-reads let it pass as one.
+    _install_col="ok"
     if ((_conv_max > 0 && conv >= _conv_max)); then
-        say "${ed}: first boot had NOT finished after ${conv}s (budget ${_conv_max}s, BUILD_IMAGES=${want_images:-0}) — reporting anyway; treat golden counts with suspicion"
+        say "${ed}: first boot had NOT finished after ${conv}s (budget ${_conv_max}s, BUILD_IMAGES=${want_images:-0}) — reporting anyway; the row is marked and the edition is not a pass"
+        _install_col="ok, but first boot UNFINISHED after ${conv}s (budget ${_conv_max}s)"
+        RC=1
     else
         say "${ed}: first boot settled after ${conv}s"
     fi
@@ -613,8 +619,8 @@ for ed in "${EDITIONS[@]}"; do
 
     # 7. the row
     # The machine's own distro/profile, confirmed above -- not the answers file's.
-    printf '| %s | %s/%s | ok | %s | %s | %s | %s | %s | [report](%s/report.md) |\n' \
-        "$ed" "$got_distro" "$got_profile" "${verdict:-?}" "$sp" "$sf" "$sw" \
+    printf '| %s | %s/%s | %s | %s | %s | %s | %s | %s | [report](%s/report.md) |\n' \
+        "$ed" "$got_distro" "$got_profile" "$_install_col" "${verdict:-?}" "$sp" "$sf" "$sw" \
         "${_lifecycle:-not run}" "$ed" >>"$SUMMARY"
     say "${ed}: ${verdict:-no verdict}"
     [[ "$verdict" == PASS* ]] || RC=1

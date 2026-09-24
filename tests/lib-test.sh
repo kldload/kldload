@@ -94,9 +94,14 @@ test_service_enabled() {
     # swallow: same as test_service_active above -- a disabled or absent unit
     # exits non-zero, and that is the finding, not an error.
     state=$(systemctl is-enabled "$svc" 2>/dev/null || true)
+    # A FAIL, not a warning. Every caller names a unit the install is supposed
+    # to have enabled (sshd, the webui, the snapshot timers, the display
+    # manager), and "installed but never enabled" is the exact silent failure
+    # five services shipped with on 2026-08-22 -- a warning here did not reach
+    # the exit code, so nothing ever went red for it.
     if [[ "$state" == "enabled" ]]; then
         _pass "$name"
-    else _warn "$name" "$svc is $state"; fi
+    else _fail "$name" "$svc is ${state:-not found} — not enabled, so it will not come back after a reboot"; fi
 }
 
 # Test: ZFS dataset exists

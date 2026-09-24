@@ -178,6 +178,35 @@ if [[ -s /tmp/.pr_missing.$$ ]]; then
 fi
 rm -f /tmp/.pr_missing.$$
 
+# Every golden the plan asked for, not "some golden exists". The row above
+# passes on ONE @golden snapshot; ci/kldload-netboot-run's "requested goldens
+# sealed" check exists because 3-kvm (fiend, 2026-09-14) had the fedora lean
+# golden powered off mid-build and never sealed while the nine others passed
+# it. Same rule here: expected = each golden phase autodeploy declared under
+# /var/lib/kldload/phases, times klab's own DISTROS list.
+if [[ "$(mval KLDLOAD_BUILD_IMAGES)" == 1 ]]; then
+    _sealed="$(S zfs list -H -t snapshot -o name -r rpool/vms | grep -E '@golden$' | sed 's/@golden$//; s#.*/##' | sort | tr '\n' ' ' || true)"
+    _ds="$(sed -n 's/^DISTROS=(\(.*\))$/\1/p' /usr/local/bin/klab 2>/dev/null | head -n 1)"
+    _gmiss="" _gwant=0
+    for _ph in klab-goldens:golden klab-desktop-goldens:desktop klab-ztest-goldens:ztest; do
+        compgen -G "/var/lib/kldload/phases/[0-9][0-9]-${_ph%%:*}" >/dev/null || continue
+        for _d in $_ds; do
+            _gwant=$((_gwant + 1))
+            grep -qw -- "klab-${_ph##*:}-${_d}" <<<"$_sealed" || _gmiss+=" klab-${_ph##*:}-${_d}"
+        done
+    done
+    if [[ -z "$_ds" ]]; then
+        note_fail "requested goldens: could not read DISTROS from /usr/local/bin/klab — the requested set is unknown"
+    elif ((_gwant == 0)); then
+        note_fail "requested goldens: BUILD_IMAGES=1 but no golden phase is declared under /var/lib/kldload/phases — first boot never planned them"
+    elif [[ -n "$_gmiss" ]]; then
+        note_fail "requested goldens: ${_gwant} planned, not sealed:${_gmiss}"
+    else
+        echo "- all ${_gwant} requested golden(s) sealed: ${_sealed}"
+    fi
+    echo
+fi
+
 # ─── 3. Boot posture ────────────────────────────────────────────────────────
 echo "## Boot posture"
 echo
@@ -198,8 +227,11 @@ echo
 # The two that matter: asked for and not got.
 [[ "$(mval KLDLOAD_ZFS_ENCRYPT)" == 1 && "$_enc" == off ]] &&
     note_fail "encryption was requested and rpool is NOT encrypted"
+# Requested and not got is the section's definition of a defect, and Secure
+# Boot is the one that decides whether the signed ZFS module is enforced at
+# all; a warning here let an edition with SB off pass as "with warnings".
 [[ "$(mval KLDLOAD_ENABLE_SECURE_BOOT)" == 1 && "$_sb" != *enabled* ]] &&
-    note_warn "Secure Boot was requested and firmware reports: ${_sb}"
+    note_fail "Secure Boot was requested and firmware reports: ${_sb}"
 [[ "$_signer" == "" || "$_signer" == unsigned ]] &&
     note_warn "the ZFS module is not signed — Secure Boot cannot be turned on later"
 echo
@@ -415,8 +447,16 @@ if have kldload-test; then
     elif ! grep -q 'Report saved:' <<<"$_smoke"; then
         note_fail "smoke suite did not finish (no 'Report saved:' line, exit ${_src}) — the counts above are partial"
     fi
+elif [[ "$PROFILE" == core ]]; then
+    # core ships no kldload tools at all (/usr/local/bin is empty by design;
+    # estate-sweep's converge comment records it), so no suite is the expected
+    # state there and nothing was skipped.
+    note_warn "core ships no smoke suite by design — kldload-test is not installed, nothing was checked here"
 else
-    note_warn "kldload-test is not installed — the smoke suite DID NOT RUN"
+    # A suite that did not run is a failure, not a note: the sweep reads the
+    # verdict line, and "PASS (with warnings)" over a machine where nothing
+    # ran is the "verified on zero checks" defect again (2026-09-19).
+    note_fail "kldload-test is not installed — the smoke suite DID NOT RUN, and this profile ships it"
 fi
 echo
 
@@ -502,10 +542,15 @@ if have kldload-doctor; then
             fi
         fi
     else
-        note_warn "kldload-doctor output carried no machine-readable summary — health NOT assessed"
+        # Not assessed is not healthy. A doctor whose summary cannot be read
+        # has told this report nothing, and the verdict must not read as if
+        # it had.
+        note_fail "kldload-doctor output carried no machine-readable summary — health NOT assessed"
     fi
+elif [[ "$PROFILE" == core ]]; then
+    note_warn "core ships no doctor by design — kldload-doctor is not installed, health not assessed here"
 else
-    note_warn "kldload-doctor is not installed — DID NOT RUN"
+    note_fail "kldload-doctor is not installed — DID NOT RUN, and this profile ships it"
 fi
 echo
 
