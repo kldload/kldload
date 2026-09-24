@@ -152,21 +152,59 @@ func (h health) dot() string {
 	return stDim.Render("○")
 }
 
-// runOut executes one command with a hard timeout, returning combined
-// output — a diagnostic console must show stderr ("permission denied" IS
-// the diagnosis), which is why this is not Output().
-func runOut(cmd string, timeout time.Duration) string {
+// runCmd executes one command with a hard timeout and returns its combined
+// output plus the exec error — a diagnostic console must show stderr
+// ("permission denied" IS the diagnosis), which is why this is not Output().
+// The error is returned rather than dropped because a probe that cannot
+// tell "zpool said nothing" from "zpool is not installed" from "zpool
+// failed" colours its dot from noise.
+func runCmd(cmd string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	out, _ := exec.CommandContext(ctx, "bash", "-c", cmd).CombinedOutput()
-	s := strings.TrimRight(string(out), "\n")
+	out, err := exec.CommandContext(ctx, "bash", "-c", cmd).CombinedOutput()
 	if ctx.Err() != nil {
-		s += stDim.Render("\n(timed out)")
+		err = fmt.Errorf("timed out after %s", timeout)
+	}
+	return strings.TrimRight(string(out), "\n"), err
+}
+
+// runOut is runCmd for display: the output, or the error when the command
+// produced none, so a failing command never renders as "(no output)".
+func runOut(cmd string, timeout time.Duration) string {
+	s, err := runCmd(cmd, timeout)
+	if err != nil {
+		if s == "" {
+			return stDim.Render("(" + err.Error() + ")")
+		}
+		return s + stDim.Render("\n("+err.Error()+")")
 	}
 	if s == "" {
 		s = stDim.Render("(no output)")
 	}
 	return s
+}
+
+// zfsHealth turns the output of `zpool list -H -o health` into a dot.
+//
+// One line per pool, and EVERY line must read ONLINE for green. The first
+// cut tested Contains("ONLINE") && !ContainsAny("D") — meant as "no
+// DEGRADED" — so one ONLINE pool beside an UNAVAIL or OFFLINE pool (neither
+// spells a D) showed green. A failed command is red, not grey: grey means
+// "nothing to report" and a probe that fails must never wear it.
+func zfsHealth(out string, err error) health {
+	if err != nil {
+		return hBad
+	}
+	lines := strings.Fields(out)
+	if len(lines) == 0 {
+		return hNone // no pools imported
+	}
+	for _, l := range lines {
+		if l != "ONLINE" {
+			return hBad
+		}
+	}
+	return hOK
 }
 
 // probe colours the section dots from cheap read-only checks.
@@ -179,15 +217,12 @@ func probe() map[string]health {
 	} else {
 		m["services"] = hBad
 	}
-	// zfs: pool health string
-	zh := runOut("zpool list -H -o health 2>/dev/null", 2*time.Second)
-	switch {
-	case strings.Contains(zh, "ONLINE") && !strings.ContainsAny(zh, "D"): // no DEGRADED
-		m["zfs"] = hOK
-	case strings.TrimSpace(zh) == "" || strings.Contains(zh, "no output"):
+	// zfs: one health word per pool. A box with no zpool binary has nothing
+	// to report (grey), which is a different thing from zpool failing (red).
+	if _, err := exec.LookPath("zpool"); err != nil {
 		m["zfs"] = hNone
-	default:
-		m["zfs"] = hBad
+	} else {
+		m["zfs"] = zfsHealth(runCmd("zpool list -H -o health", 2*time.Second))
 	}
 	// disks: fullest real filesystem
 	pc := strings.TrimSpace(runOut(
