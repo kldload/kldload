@@ -905,6 +905,33 @@ k_install_substrate_safety() {
     return "$bad"
 }
 
+# k_unit_execstart_bin UNIT-FILE [DROP-IN.conf ...] — print the program a
+# unit's ExecStart runs, or nothing when it has none.
+#
+# The LAST ExecStart= seen wins, across the unit and then its drop-ins in
+# the order given, because "ExecStart=" followed by "ExecStart=/x" is how a
+# drop-in resets and replaces (node_exporter.service.d/textfile.conf does
+# exactly that). systemd's prefix characters (- @ : + !) are stripped and
+# only the first word is the program; a trailing backslash continuation on
+# the first line is irrelevant because the program is always on it.
+#
+# stdout: the program path. Exit 0 always -- absence is an empty line, and
+# the caller decides what that means.
+k_unit_execstart_bin() {
+    local f line bin=""
+    for f in "$@"; do
+        [[ -f "$f" ]] || continue
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*ExecStart=(.*)$ ]] || continue
+            bin="${BASH_REMATCH[1]}"
+            bin="${bin#"${bin%%[![:space:]]*}"}"
+            while [[ "$bin" == [-@:+!]* ]]; do bin="${bin:1}"; done
+            bin="${bin%%[[:space:]]*}"
+        done <"$f"
+    done
+    printf '%s\n' "$bin"
+}
+
 k_install_system_files() {
     local target="${KLDLOAD_TARGET:?}"
     local root_ds
@@ -3732,6 +3759,34 @@ REPL
         done
         # textfile collector dir
         mkdir -p "${target}/var/lib/node_exporter/textfile_collector"
+
+        # ── Every exporter enabled above, checked against its program ──────
+        # The unit loop enables by NAME PATTERN and never asks whether the
+        # ExecStart binary is on the target; until 2026-09-23 a unit whose
+        # program had not been copied was enabled anyway and failed 203/EXEC
+        # on every boot, which is exactly how kldload-autobootstrap sat broken
+        # for months. This runs AFTER the last binary copy in this block
+        # (arcstats, libvirt-exporter, process-exporter land just above), reads
+        # the unit plus any drop-in already on the target, and un-enables --
+        # with a WARNING that names the unit -- anything whose program is not
+        # executable there. A timer is judged by the service it fires.
+        shopt -s nullglob
+        for _l in "${target}"/etc/systemd/system/multi-user.target.wants/*[-_]exporter.service \
+            "${target}"/etc/systemd/system/timers.target.wants/*[-_]exporter.timer; do
+            [[ -L "$_l" ]] || continue
+            _u="$(basename "$_l")"
+            _svcname="${_u%.timer}"
+            _svcname="${_svcname%.service}.service"
+            _svc="${target}/usr/lib/systemd/system/${_svcname}"
+            [[ -f "$_svc" ]] || continue # a dangling link is k_assert_enabled_units_exist's finding
+            _bin="$(k_unit_execstart_bin "$_svc" "${target}/etc/systemd/system/${_svcname}.d/"*.conf)"
+            [[ -n "$_bin" ]] || continue
+            if [[ ! -x "${target}${_bin}" ]]; then
+                rm -f "$_l"
+                k_log "WARNING: ${_u} NOT enabled — its ExecStart ${_bin} is not executable on the target (would fail 203/EXEC on every boot)"
+            fi
+        done
+        shopt -u nullglob
         # configs
         mkdir -p "${target}/etc/loki" "${target}/etc/promtail" \
             "${target}/etc/systemd/journald.conf.d" \
