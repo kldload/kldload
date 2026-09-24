@@ -70,6 +70,18 @@ func main() {
 	switch {
 	case len(a) == 0:
 		// Default: native window in the GUI build, TUI in the static one.
+		//
+		// No display to open a window on: the TUI, not a GLFW panic. The
+		// fallback below never fired there, because Fyne does not RETURN an
+		// error when GLFW cannot initialise -- it panics, and `wgx` at fiend's
+		// console printed "NotInitialized: The GLFW library is not
+		// initialized" and a Go stack trace (2026-09-23). zxplore hit and
+		// fixed the same thing on 2026-09-18; this is its check.
+		if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+			fmt.Fprintln(os.Stderr, "wgx: no DISPLAY or WAYLAND_DISPLAY -- starting the TUI")
+			err = RunTUI()
+			break
+		}
 		if err = RunGUI(); err != nil {
 			err = RunTUI()
 		}
