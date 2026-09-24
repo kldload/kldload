@@ -1380,10 +1380,12 @@ k_install_system_files() {
 
         # (ChromaDB data dir created below alongside the symlink block.)
 
-        # webui service already ships with --port 8443 baked into its unit file
-        # (see builder/build-iso.sh). No post-install sed needed — removed the
-        # empty if/fi block that used to flip the port, which was an install-
-        # time syntax error ("bash: line 428: syntax error near unexpected token `fi`").
+        # kldload-webui.service listens on a unix socket; nginx owns :8443 and
+        # proxies to it (etc/nginx/conf.d/kldload.conf), so there is no port to
+        # flip on the target. This comment said "--port 8443 baked into its unit
+        # file" until 2026-09-23, which was true of an older unit and false of
+        # the one that ships. The empty if/fi that used to flip the port was an
+        # install-time syntax error and is long gone.
 
         # Enable services in the installed system via symlinks — we can't run
         # "systemctl enable" because systemd is not running inside the chroot.
