@@ -1443,7 +1443,17 @@ def _ws_client_ip(websocket):
         return ""
 
 
+# Set once at startup from --unix-socket. Loopback auto-auth is only sound when
+# nginx is the sole writer of X-Real-IP, i.e. when this process listens on the
+# proxy-only unix socket. In any TCP mode the header comes straight from the
+# client, so a remote peer sending "X-Real-IP: 127.0.0.1" would have been root
+# (2026-09-23 review). TCP mode therefore never auto-authenticates.
+_LOOPBACK_AUTH_OK = False
+
+
 def _ws_is_local(websocket):
+    if not _LOOPBACK_AUTH_OK:
+        return False
     return _ws_client_ip(websocket) in ("127.0.0.1", "::1")
 
 
@@ -3252,10 +3262,25 @@ async def _stream_proc_detached(websocket, cmd, env=None, target="log"):
         f"echo \"$rc\" > {shlex.quote(done_path)}"
     )
 
+    # Environment goes through a 0600 file, never `--setenv K=V`: that put
+    # every value — including PROXMOX_TOKEN_SECRET and the per-node
+    # credentials of a cluster deploy — on the systemd-run command line and in
+    # `systemctl show -p Environment`, readable by any local user for the
+    # life of the unit (2026-09-23 review).
     setenv_args = []
     if env:
-        for k, v in env.items():
-            setenv_args.extend(["--setenv", f"{k}={v}"])
+        _envdir = Path("/run/kldload/env")
+        _envdir.mkdir(parents=True, exist_ok=True)
+        os.chmod(_envdir, 0o700)
+        _envfile = _envdir / f"{unit}.env"
+        _efd = os.open(str(_envfile), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(_efd, "w") as _ef:
+            for k, v in env.items():
+                if "\n" in str(v):
+                    raise ValueError(f"environment value for {k} contains a line break")
+                _ef.write(f"{k}={v}\n")
+        setenv_args = ["-p", f"EnvironmentFile={_envfile}"]
+        inner = f"trap 'rm -f {shlex.quote(str(_envfile))}' EXIT; " + inner
 
     await websocket.send(json.dumps({
         "type": "exec_start", "cmd": str(cmd), "target": target,
@@ -3609,7 +3634,8 @@ async def _klab_cancel(websocket, msg):
 async def _run_wipe_disk(websocket, msg):
     disk = msg.get("disk", "")
     mode = msg.get("mode", "quick")
-    if not re.match(r'^/dev/[a-z]{2,8}[0-9]{0,3}$', disk):
+    # sdX, vdX, nvmeXnY, mmcblkX — whole disks only, no partition suffix.
+    if not re.match(r'^/dev/(sd[a-z]{1,3}|vd[a-z]{1,3}|nvme[0-9]{1,2}n[0-9]{1,2}|mmcblk[0-9]{1,2})$', disk):
         await websocket.send(json.dumps({"type": "error", "msg": f"Invalid disk: {disk}"}))
         return
 
@@ -3648,9 +3674,20 @@ echo ""
 echo "Step 1/4: Unmounting and exporting ZFS pools..."
 umount -R /target/boot/efi 2>/dev/null || true
 umount -R /target 2>/dev/null || true
+# Exact member match on real paths (-P -L resolves by-id links), never a
+# substring: "sda" matched sdaa/sdab. And never `zpool destroy` as a fallback
+# — a pool with one leg on this disk and its data on others was destroyed
+# whole when the export failed (2026-09-23 review). A pool that will not
+# export stops the wipe; the operator can see why.
 for pool in $(zpool list -H -o name 2>/dev/null); do
-    zpool status "$pool" 2>/dev/null | grep -q "${{DISK##*/}}" && \
-        {{ zpool export -f "$pool" 2>/dev/null || zpool destroy -f "$pool" 2>/dev/null || true; echo "  Exported: $pool"; }}
+    if zpool status -P -L "$pool" 2>/dev/null | awk '$1 ~ "^/dev/"{{print $1}}' | grep -qxE "$DISK([0-9]+|p[0-9]+)?"; then
+        if zpool export -f "$pool"; then
+            echo "  Exported: $pool"
+        else
+            echo "  ERROR: pool $pool holds $DISK and would not export — not wiping" >&2
+            exit 1
+        fi
+    fi
 done
 
 echo "Step 2/4: Zero-filling entire disk..."
@@ -3693,9 +3730,20 @@ echo ""
 echo "Step 1/6: Unmounting and exporting ZFS pools..."
 umount -R /target/boot/efi 2>/dev/null || true
 umount -R /target 2>/dev/null || true
+# Exact member match on real paths (-P -L resolves by-id links), never a
+# substring: "sda" matched sdaa/sdab. And never `zpool destroy` as a fallback
+# — a pool with one leg on this disk and its data on others was destroyed
+# whole when the export failed (2026-09-23 review). A pool that will not
+# export stops the wipe; the operator can see why.
 for pool in $(zpool list -H -o name 2>/dev/null); do
-    zpool status "$pool" 2>/dev/null | grep -q "${{DISK##*/}}" && \
-        {{ zpool export -f "$pool" 2>/dev/null || zpool destroy -f "$pool" 2>/dev/null || true; echo "  Exported: $pool"; }}
+    if zpool status -P -L "$pool" 2>/dev/null | awk '$1 ~ "^/dev/"{{print $1}}' | grep -qxE "$DISK([0-9]+|p[0-9]+)?"; then
+        if zpool export -f "$pool"; then
+            echo "  Exported: $pool"
+        else
+            echo "  ERROR: pool $pool holds $DISK and would not export — not wiping" >&2
+            exit 1
+        fi
+    fi
 done
 echo "  Done"
 
@@ -3845,15 +3893,20 @@ async def _wifi_connect(websocket, msg):
         pass
     # Connect with a reasonable timeout. nmcli connect blocks until the
     # connection is up OR fails, so we bound it ourselves.
+    # The PSK goes in on stdin via --ask, never as an argument: `password X`
+    # was on the process list for every local user (2026-09-23 review).
     cmd = ["nmcli", "device", "wifi", "connect", ssid]
+    _stdin = None
     if psk:
-        cmd += ["password", psk]
+        cmd = ["nmcli", "--ask", "device", "wifi", "connect", ssid]
+        _stdin = (psk + "\n").encode()
     try:
         _p = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE if _stdin else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        _out, _err = await asyncio.wait_for(_p.communicate(), timeout=45)
+        _out, _err = await asyncio.wait_for(_p.communicate(_stdin), timeout=45)
         rc = _p.returncode
         out_msg = (_out or b"").decode(errors="replace").strip()
         err_msg = (_err or b"").decode(errors="replace").strip()
@@ -3939,12 +3992,36 @@ async def _run_install(websocket, msg):
         key = k.upper()
         if not key.startswith("KLDLOAD_"):
             key = f"KLDLOAD_{key}"
-        answers.append(f"{key}={shlex.quote(str(v))}")
+        val = str(v)
+        # The loader (lib/answers.sh) strips ONE pair of surrounding quotes and
+        # never un-escapes, so shlex.quote's 'it'"'"'s' form used to land as the
+        # literal password. Quote with whichever quote the value does not
+        # contain; a value with both, or a line break, cannot be carried.
+        if "\n" in val or "\r" in val or ("'" in val and '"' in val):
+            await websocket.send(json.dumps({
+                "type": "log_line", "target": "install",
+                "line": f"[answers] {key}: a value may not contain a line break or both quote characters",
+            }))
+            await websocket.send(json.dumps({"type": "exec_done", "target": "install", "rc": 2}))
+            INSTALL_STATE_PATH.write_text(json.dumps({"running": False, "rc": 2}))
+            return
+        q = '"' if "'" in val else "'"
+        answers.append(f"{key}={q}{val}{q}")
 
-    answers_path = "/tmp/kldload-webui-answers.env"
-    with open(answers_path, "w") as f:
+    # 0600 from creation (O_EXCL, never a chmod after the fact), under /run
+    # which is root-only tmpfs — not a predictable name in world-writable /tmp
+    # (2026-09-23 review).
+    _run_dir = Path("/run/kldload")
+    _run_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(_run_dir, 0o700)
+    answers_path = str(_run_dir / "webui-answers.env")
+    try:
+        os.unlink(answers_path)
+    except FileNotFoundError:
+        pass
+    _fd = os.open(answers_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(_fd, "w") as f:
         f.write("\n".join(answers) + "\n")
-    os.chmod(answers_path, 0o600)
 
     # Persist install state so reconnecting clients can restore UI
     INSTALL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -4031,74 +4108,53 @@ async def _run_install(websocket, msg):
     await websocket.send(json.dumps({"type": "exec_done", "rc": rc, "target": target}))
 
 async def _run_spawn(websocket, msg):
-    params = msg.get("params", {})
-    cmd = ["/usr/local/sbin/kldload-spawn"]
-    for k, v in params.items():
-        cmd += [f"--{k.replace('_','-')}", str(v)]
+    """Blank-disk VM from the UI's New VM form. This used to exec
+    /usr/local/sbin/kldload-spawn, which was never shipped, so the button
+    failed on every install (2026-09-23 review). kvm-create is the tool that
+    does this job: kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]."""
+    params = msg.get("params", {}) or {}
+    name = str(params.get("name", "")).strip()
+    if not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$', name):
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid VM name: {name!r}"}))
+        return
+    cmd = ["/usr/local/bin/kvm-create", name]
+    for key in ("ram", "cpus", "disk"):
+        v = params.get(key)
+        if v in (None, ""):
+            continue
+        if not re.match(r'^[0-9]{1,7}$', str(v)):
+            await websocket.send(json.dumps({"type": "error", "msg": f"invalid {key}: {v!r}"}))
+            return
+        cmd += [f"--{key}", str(v)]
+    iso = str(params.get("iso", "") or "").strip()
+    if iso:
+        if not re.match(r'^/[A-Za-z0-9_./-]+\.iso$', iso) or ".." in iso:
+            await websocket.send(json.dumps({"type": "error", "msg": f"invalid iso path: {iso!r}"}))
+            return
+        cmd += ["--iso", iso]
     target = msg.get("_target", "spawn")
-    # Spawn boots a fresh VM from a golden template — 2-5 min minimum, often
-    # longer for stamp + first-boot + cloud-init. Detached so a webui restart
-    # mid-spawn doesn't leave a half-stamped clone with no driver.
+    # kvm-create carves a zvol and defines the domain — seconds, but the
+    # first boot from the ISO is the operator's; detached so a webui restart
+    # never orphans a half-created domain.
     await _stream_proc_detached(websocket, cmd, target=target)
+
+
+async def _unshipped(websocket, what):
+    """A handler for a tool the image does not ship. Say so instead of
+    exec'ing a path that does not exist and reporting rc=-1."""
+    await websocket.send(json.dumps({
+        "type": "error",
+        "msg": f"{what} is not shipped in this release — the action is not available",
+    }))
 
 async def _run_golden(websocket, msg):
-    template = msg.get("template", "kvm")
-    if not re.match(r'^(master|kvm|storage|vdi)$', template):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid template"}))
-        return
-    target = msg.get("_target", "golden")
-    cmd = ["/usr/local/sbin/kldload-golden", "--template", template]
-    # Golden template build runs an install end-to-end — 20-40 min easy.
-    await _stream_proc_detached(websocket, cmd, target=target)
+    await _unshipped(websocket, "kldload-golden")
 
 async def _run_stamp(websocket, msg):
-    template   = msg.get("template", "kvm")
-    count      = int(msg.get("count", 1))
-    base_index = int(msg.get("base_index", 1))
-    color      = msg.get("color", "blue")
-    if not re.match(r'^(master|kvm|storage|vdi|firewall|proxmox|monitoring|storage|worker|etcd|lb|landing)$', template):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid template"}))
-        return
-    if color not in ("blue", "green"):
-        color = "blue"
-    target     = msg.get("_target", "golden")
-    golden_dir = Path("/var/lib/kldload/golden")
-    image_path = golden_dir / f"golden-{template}.qcow2"
-    if not image_path.exists():
-        await websocket.send(json.dumps({"type": "error", "msg": f"Golden image not found: {image_path}"}))
-        return
-    for i in range(count):
-        idx      = base_index + i
-        hostname = f"{template}-{idx:02d}"
-        clone    = golden_dir / f"{hostname}.qcow2"
-        # Create CoW clone — quick (CoW is metadata-only) so stays in-process.
-        rc = await _stream_proc(websocket,
-            ["qemu-img", "create", "-f", "qcow2", "-b", str(image_path), "-F", "qcow2", str(clone)],
-            target=target)
-        if rc != 0:
-            break
-        # Stamp identity — boots the clone, edits hostname/network, snaps.
-        # 1-3 min per clone; detached so a multi-clone loop survives.
-        rc = await _stream_proc_detached(websocket,
-            ["/usr/local/sbin/kldload-stamp-identity",
-             "--image",    str(clone),
-             "--hostname", hostname,
-             "--template", template,
-             "--index",    str(idx),
-             "--color",    color],
-            target=target)
-        if rc != 0:
-            break
+    await _unshipped(websocket, "kldload-stamp-identity")
 
 async def _run_k8s_join(websocket, msg):
-    role   = msg.get("role", "worker")
-    target = msg.get("_target", "log")
-    if role not in ("worker", "etcd"):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid role"}))
-        return
-    cmd = ["/usr/local/sbin/kldload-k8s-join", "--role", role]
-    # kubeadm join is 3-10 min depending on image-pull bandwidth.
-    await _stream_proc_detached(websocket, cmd, target=target)
+    await _unshipped(websocket, "kldload-k8s-join")
 
 async def _run_salt_highstate(websocket, msg):
     salt_target = msg.get("target", "*")
@@ -4940,7 +4996,10 @@ async def _vm_clone(websocket, msg):
         except Exception as e:
             await websocket.send(json.dumps({"type": "error", "msg": f"qemu-img clone failed: {e}"}))
             return
-        cmd = ["kldload-stamp-identity", "--hostname", new_name, "--image", str(clone_path), "--start"]
+        # kldload-stamp-identity was never shipped; this qcow2-golden branch
+        # cannot complete. Say so rather than exec a missing tool.
+        await _unshipped(websocket, "kldload-stamp-identity")
+        return
     # virt-clone copies a full disk; stamp-identity boots + edits + reseals.
     # 2-5 min minimum, often longer on slow disks.
     await _stream_proc_detached(websocket, cmd, target="vm-log")
@@ -9723,18 +9782,24 @@ BOB_EXECUTE_TOOLS = {"run_playbook", "bpftrace_oneliner", "bpftrace_script",
 # `bob_confirm_response` action resolves them. Only used when BOB_AUTONOMOUS=0.
 PENDING_CONFIRMS: "dict[str, asyncio.Future]" = {}
 
-# Autonomy: when True (default), Bob runs every tool call immediately with no
-# modal. When False, the old per-call approval flow kicks in. Persisted so the
-# choice survives a webui restart. Rollback via ZFS covers the "oops" case —
-# the user has been clear they don't want safety theatre.
+# Autonomy: when True, Bob runs every tool call immediately with no modal.
+# When False (the default), each call needs approval. Persisted so the choice
+# survives a webui restart. The operator can flip it on for a session where
+# ZFS rollback covers the "oops" case — but the default, and the answer when
+# the file is unreadable, is OFF: the model reads logs, pod names and events
+# that anyone on the cluster can write, and until 2026-09-23 a missing or
+# corrupt file meant "run everything as root without asking".
 BOB_AUTONOMY_FILE = "/var/lib/kldload/bob-autonomy.json"
 
 def _bob_autonomy_get():
     try:
         with open(BOB_AUTONOMY_FILE) as f:
-            return bool(json.load(f).get("autonomous", True))
-    except Exception:
-        return True   # default on
+            return bool(json.load(f).get("autonomous", False))
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        LOG.warning("bob autonomy file unreadable (%s) — treating as OFF", e)
+        return False
 
 def _bob_autonomy_set(on: bool):
     try:
@@ -12131,6 +12196,8 @@ async def main_async(args):
         # which is what makes ws_handler's loopback auto-auth genuinely secure
         # rather than merely convenient. No TCP port = no local process can hit
         # the backend directly to fake being local.
+        global _LOOPBACK_AUTH_OK
+        _LOOPBACK_AUTH_OK = True
         import grp as _grp
         _sp = args.unix_socket
         try:
