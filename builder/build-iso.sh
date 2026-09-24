@@ -153,8 +153,12 @@ enable_live_unit() {
     for _u in "$@"; do
         chroot "$ROOTFS" systemctl enable "$_u" >/dev/null 2>&1 ||
             die "FATAL: systemctl enable ${_u} failed in the live rootfs"
-        _wants="$(find "${ROOTFS}/etc/systemd/system" -maxdepth 2 -path '*.wants/*' -name "${_u%.service}*" 2>/dev/null | head -1)"
-        [[ -n "$_wants" ]] || die "FATAL: ${_u} enabled but no wants symlink under ${ROOTFS}/etc/systemd/system"
+        # Any symlink that points at the unit counts: a WantedBy= gives
+        # <target>.wants/<unit>, an Alias= (gdm: display-manager.service)
+        # gives a plain link. Build 66's first run died on gdm because this
+        # looked for a .wants link only (2026-09-24).
+        _wants="$(find "${ROOTFS}/etc/systemd/system" -maxdepth 2 -type l -lname "*/${_u}" 2>/dev/null | head -1)"
+        [[ -n "$_wants" ]] || die "FATAL: ${_u} enabled but no symlink to it under ${ROOTFS}/etc/systemd/system"
         log "  enabled ${_u} -> ${_wants#"${ROOTFS}"}"
     done
 }
