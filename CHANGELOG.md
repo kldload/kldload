@@ -349,7 +349,10 @@ and its API unreachable. Goldens are now never enrolled, and every seal forgets
 the mesh identity the way it already forgot SSH host keys. The same timer also
 raced the cluster build itself: it could reach a node before the cluster had
 meshed it and give it an ordinary VM's id, renumbering the control plane off the
-API address. A cluster node is now left to the cluster until it is meshed.
+API address. A cluster node is now left to the cluster until it is meshed. And
+on a hypervisor with no cluster, nothing had ever put the host itself on the
+mesh, so no VM could join it; the host now joins with its first VM when
+WireGuard was chosen at install.
 
 The other half had never worked either. Deleting a VM left it a peer on both
 mesh planes, because nothing on the delete path removed peers — and the check
