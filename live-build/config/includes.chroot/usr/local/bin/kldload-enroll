@@ -34,10 +34,18 @@
 #          --no-wg         register in the DB only, skip the mesh
 # Outputs: log lines on stdout. The guest gains 10.250.0.<id>/10.251.0.<id>,
 #          the host gains a peer, the state DB gains a row.
-# Exit:    0 enrolled (or already enrolled), 1 could not resolve the VM,
-#          2 mesh enrollment failed but the DB row was still written, or the
-#          VM is a golden (never enrolled), 4 a cluster node kube-cluster has
-#          not meshed yet (left to it on purpose).
+# Exit:    0 enrolled (or already enrolled)
+#          1 could not resolve the VM's address
+#          2 usage error (no VM named, unknown option) — nothing attempted
+#          3 mesh enrollment failed but the DB row was still written, or the
+#            VM is a golden (never enrolled). Was 2 until 2026-09-23; moved so
+#            a usage error and a failed enrollment cannot share a code.
+#          4 a cluster node kube-cluster has not meshed yet (left to it on
+#            purpose)
+#          --all: 0 when every VM it tried is on the mesh; 1 when at least one
+#            ended incomplete (the summary line carries the counts). A VM with
+#            no address, a golden, or a cluster node is not a failure of the
+#            sweep. Used to exit 0 unconditionally.
 #
 # Notes:
 #   - IDEMPOTENT. A guest that already has /etc/wireguard/.node-id keeps its
@@ -67,9 +75,11 @@ die() {
 }
 
 usage() {
+    # asked-for help is 0 on stdout; a usage error is 2 on stderr.
+    local rc="${1:-2}"
+    if ((rc != 0)); then exec >&2; fi
     sed -n '2,/^# ---/p' "$0" | sed 's/^# \{0,1\}//'
-    # asked-for help is 0; a usage error stays 1
-    exit "${1:-1}"
+    exit "$rc"
 }
 
 # ── Sweep mode ──────────────────────────────────────────────────────────────
@@ -160,8 +170,8 @@ if [[ "${1:-}" == "--all" ]]; then
             shift 2
             ;;
         *)
-            echo "unknown option for --all: $1" >&2
-            exit 1
+            echo "unknown option for --all: $1 (try --help)" >&2
+            exit 2 # usage error; nothing was attempted
             ;;
         esac
     done
@@ -220,6 +230,13 @@ if [[ "${1:-}" == "--all" ]]; then
     done < <(virsh list --state-running --name 2>/dev/null)
     printf '[enroll] sweep: %d on the mesh, %d without an address, %d incomplete, %d golden(s) left alone, %d cluster node(s) left to kube-cluster\n' \
         "$_done" "$_noip" "$_partial" "$_tmpl" "$_left"
+    # The count is the result: a sweep that left a VM half-enrolled is not a
+    # success, whatever it printed. It exited 0 unconditionally until
+    # 2026-09-23, so the timer and estate-lifecycle never saw a failed sweep.
+    if ((_partial > 0)); then
+        printf '[enroll] sweep: %d VM(s) ended incomplete — exit 1\n' "$_partial" >&2
+        exit 1
+    fi
     exit 0
 fi
 
@@ -235,7 +252,7 @@ declare -a _ORIG_ARGV=("$@")
 VM="$1"
 if _is_template "$VM"; then
     echo "[enroll] ${VM} is a golden (by name or its @golden snapshot) -- not enrolling it: a golden's mesh identity would be copied into every clone" >&2
-    exit 2
+    exit 3
 fi
 shift
 IP=""
@@ -265,7 +282,10 @@ while [[ $# -gt 0 ]]; do
         DO_WG=0
         shift
         ;;
-    *) die "unknown option: $1 (try --help)" ;;
+    *)
+        echo "unknown option: $1 (try --help)" >&2
+        exit 2 # usage error; nothing was attempted
+        ;;
     esac
 done
 
@@ -347,7 +367,7 @@ fi
 # ── Mesh enrollment ─────────────────────────────────────────────────────────
 if ! _ssh true; then
     warn "${VM}: no SSH as root — cannot enrol on the mesh (DB row was written)"
-    exit 2
+    exit 3
 fi
 # kube-network is the guest half of the mesh. The k8s golden ships it; the klab
 # goldens (klab-golden-*, klab-desktop-*) ship wireguard-tools but not the
@@ -358,19 +378,19 @@ fi
 if ! _ssh 'command -v kube-network >/dev/null 2>&1'; then
     if ! _ssh 'command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1'; then
         warn "${VM}: neither kube-network nor wireguard-tools in the guest — cannot enrol on the mesh (DB row was written)"
-        exit 2
+        exit 3
     fi
     _kn_src="$(command -v kube-network || true)"
     if [[ -z "$_kn_src" ]]; then
         warn "${VM}: kube-network is not installed on this host either — nothing to carry across (DB row was written)"
-        exit 2
+        exit 3
     fi
     if _ssh_stdin 'install -d -m 0755 /usr/local/bin && install -m 0755 /dev/stdin /usr/local/bin/kube-network' <"$_kn_src" &&
         _ssh 'command -v kube-network >/dev/null 2>&1'; then
         log "${VM}: kube-network carried into the guest from ${_kn_src}"
     else
         warn "${VM}: could not install kube-network in the guest — cannot enrol on the mesh (DB row was written)"
-        exit 2
+        exit 3
     fi
 fi
 
@@ -432,7 +452,7 @@ esac
 # Reproduced on onyx: `_ssh true` rc=0, this read rc=1, /etc/wireguard empty.
 if ! node_id="$(_ssh 'cat /etc/wireguard/.node-id 2>/dev/null || true')"; then
     warn "${VM}: no SSH as root while reading its node id — cannot enrol on the mesh (DB row was written)"
-    exit 2
+    exit 3
 fi
 node_id="$(printf '%s' "$node_id" | tr -cd '0-9')"
 if [[ -z "$node_id" && -z "$FORCE_ID" ]] && _is_cluster_node "$VM"; then
@@ -476,7 +496,7 @@ if [[ ! -s /etc/wireguard/wg-mgmt.pub ]]; then
     _wg_wanted="$(sed -n 's/^KLDLOAD_WIREGUARD="\{0,1\}\([01]\).*/\1/p' /etc/kldload/install-manifest.env 2>/dev/null | tail -1 || true)"
     if [[ "$_wg_wanted" != 1 ]]; then
         warn "hypervisor is not on the mesh and WireGuard was not requested at install (KLDLOAD_WIREGUARD=${_wg_wanted:-unset}) — run 'kube-network init ${HOST_ID}' to opt in; ${VM} left off the mesh (DB row was written)"
-        exit 2
+        exit 3
     fi
     log "hypervisor is not on the mesh yet — initialising it as node ${HOST_ID} (KLDLOAD_WIREGUARD=1)"
     kube-network init "$HOST_ID" >/dev/null 2>&1 ||
@@ -484,7 +504,7 @@ if [[ ! -s /etc/wireguard/wg-mgmt.pub ]]; then
     # Outcome, not exit code: a key AND a running interface.
     if [[ ! -s /etc/wireguard/wg-mgmt.pub ]] || ! ip link show wg-mgmt >/dev/null 2>&1; then
         warn "hypervisor mesh did not come up (no wg-mgmt) — ${VM} left off the mesh (DB row was written)"
-        exit 2
+        exit 3
     fi
     log "hypervisor on the mesh as ${MGMT_SUBNET}.${HOST_ID}"
 fi
@@ -516,12 +536,12 @@ fi
 guest_pub="$(_ssh 'cat /etc/wireguard/wg-mgmt.pub' | tr -d '[:space:]')"
 [[ -n "$guest_pub" ]] || {
     warn "${VM}: guest produced no public key — mesh enrollment incomplete"
-    exit 2
+    exit 3
 }
 host_pub="$(cat /etc/wireguard/wg-mgmt.pub 2>/dev/null || true)"
 [[ -n "$host_pub" ]] || {
     warn "hypervisor is not on the mesh (run 'kube-network init ${HOST_ID}') — enrollment incomplete"
-    exit 2
+    exit 3
 }
 
 # Peer both directions. add-peer is append-and-reload, so only call it where
@@ -584,7 +604,7 @@ if wg show wg-mgmt allowed-ips 2>/dev/null | grep -q "${MGMT_SUBNET}.${node_id}/
     log "${VM}: on the mesh at ${MGMT_SUBNET}.${node_id}"
 else
     warn "${VM}: peer did not appear in the running wg-mgmt — check 'wg show'"
-    exit 2
+    exit 3
 fi
 
 # ── Record the enrolment, so a delete can undo it ───────────────────────────

@@ -34,9 +34,23 @@ Examples:
 
 The VM disk is a ZFS zvol at rpool/vms/<name> — thin provisioned,
 compressed, snapshotable. Clone with kvm-clone, snapshot with kvm-snap.
+
+Exit: 0 created, 1 zvol or virt-install failed, 2 usage error (a flag with
+no value, an unknown flag, no name).
 EOF
-    # asked-for help is 0; a usage error stays 1
-    exit "${1:-1}"
+    # asked-for help is 0; a usage error is 2, distinct from a create that
+    # ran and failed (1).
+    exit "${1:-2}"
+}
+
+# _need_value FLAG VALUE — a flag given as the last word, or followed by
+# another flag, is a usage error with the flag's name in it. Under set -u the
+# bare "$2" used to die with "unbound variable" instead (2026-09-23).
+_need_value() {
+    [[ -n "${2:-}" && "${2:-}" != -* ]] || {
+        echo "kvm-create: $1 needs a value" >&2
+        usage
+    }
 }
 
 [[ $# -lt 1 ]] && usage
@@ -60,35 +74,42 @@ VOLBLOCK="64K"
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --ram)
+        _need_value "$1" "${2:-}"
         RAM="$2"
         shift 2
         ;;
     --cpus)
+        _need_value "$1" "${2:-}"
         CPUS="$2"
         shift 2
         ;;
     --disk)
+        _need_value "$1" "${2:-}"
         DISK="$2"
         shift 2
         ;;
     --iso)
+        _need_value "$1" "${2:-}"
         ISO="$2"
         shift 2
         ;;
     --bridge)
+        _need_value "$1" "${2:-}"
         BRIDGE="$2"
         shift 2
         ;;
     --os)
+        _need_value "$1" "${2:-}"
         OS_VARIANT="$2"
         shift 2
         ;;
     --volblocksize)
+        _need_value "$1" "${2:-}"
         VOLBLOCK="$2"
         shift 2
         ;;
     *)
-        echo "Unknown option: $1"
+        echo "kvm-create: unknown option: $1" >&2
         usage
         ;;
     esac

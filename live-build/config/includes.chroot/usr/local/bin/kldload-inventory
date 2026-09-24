@@ -7,18 +7,24 @@
 # cluster member, and registered host ends up in the right group automatically
 # as the fleet grows or shrinks. No hand-edited hosts file, no stale IPs.
 #
-# Groups produced:
+# Groups produced (underscores, never colons: Ansible reads "role:worker" as
+# two patterns and matches nothing — see _group below):
 #   all                — every node with a usable IP
-#   cluster:<name>     — all members of a cluster (e.g. cluster:k8s-lab)
-#   role:<role>        — by role column (control_plane, worker, site_blue, ...)
-#   status:<status>    — online, booting, draining, offline
-#   kube               — alias for role:control_plane + role:worker
-#   kube_control_plane — role:control_plane
-#   kube_workers       — role:worker
+#   cluster_<name>     — all members of a cluster (e.g. cluster_k8s_lab)
+#   role_<role>        — by role column (role_control_plane, role_worker,
+#                        role_site_blue, role_clone, ...)
+#   status_<status>    — status_online, status_booting, status_draining
+#   kube               — alias for role_control_plane + role_worker
+#   kube_control_plane — role_control_plane
+#   kube_workers       — role_worker
 #   ungrouped          — nodes without a cluster
+#   Any '-', '.' or space in a name becomes '_' as well.
 #
 # Host vars (under _meta.hostvars):
-#   ansible_host       — ip_mgmt if set, else ip_wg0, else hostname
+#   ansible_host       — ip_wg0 (the mgmt WireGuard plane) if set, else
+#                        ip_wg1, else ip_mgmt (the libvirt bridge), else
+#                        hostname — the encrypted path wins whenever it
+#                        exists
 #   ansible_user       — "root"
 #   ansible_ssh_private_key_file — /root/.ssh/id_ed25519 if present
 #   kldload_role, kldload_cluster, kldload_wg_ips, kldload_facts

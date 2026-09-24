@@ -1,8 +1,52 @@
-#!/bin/bash
-# kldload-test — run smoke tests on this kldloadOS system
-# Usage: sudo kldload-test [core|server|desktop|auto]
-
+#!/usr/bin/env bash
+# kldload-test — run a smoke suite against this kldloadOS system
+#
+# Usage:  sudo kldload-test [SUITE]      (default: auto)
+#         kldload-test -h | --help       lists the suites installed here
+#
+# SUITE names a file /usr/local/share/kldload/tests/smoke-<SUITE>.sh, copied
+# from the repo's tests/ at build time: auto picks by the installed profile;
+# core, server, desktop, kvm test one profile; all runs everything; features,
+# estate, unit and show are the narrower ones. The suite's own output and
+# exit status are what this tool returns.
+#
+# Exit: the suite's status; 2 when SUITE names no installed file (it used to
+#       exec a missing path, so `kldload-test dekstop` said "No such file"
+#       and returned 127, 2026-09-23).
 set -Eeuo pipefail
 trap 'echo "kldload-test: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-exec bash /usr/local/share/kldload/tests/smoke-${1:-auto}.sh
+SUITE_DIR=/usr/local/share/kldload/tests
+
+# _suites — the SUITE names installed here, one per line, or nothing.
+_suites() {
+    local f
+    for f in "$SUITE_DIR"/smoke-*.sh; do
+        [[ -f "$f" ]] || continue
+        f="${f##*/smoke-}"
+        printf '%s\n' "${f%.sh}"
+    done
+}
+
+case "${1:-}" in
+-h | --help | help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    echo
+    if [[ -n "$(_suites)" ]]; then
+        echo "Suites installed in ${SUITE_DIR}:"
+        _suites | sed 's/^/  /'
+    else
+        echo "No suites installed under ${SUITE_DIR} — this is not an installed kldload system, or the tests were not shipped."
+    fi
+    exit 0
+    ;;
+esac
+
+SUITE="${1:-auto}"
+FILE="${SUITE_DIR}/smoke-${SUITE}.sh"
+[[ -f "$FILE" ]] || {
+    printf 'kldload-test: no suite named %s (looked for %s)\n' "$SUITE" "$FILE" >&2
+    printf 'kldload-test: installed: %s\n' "$(_suites | tr '\n' ' ')" >&2
+    exit 2
+}
+exec bash "$FILE"

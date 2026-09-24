@@ -17,14 +17,34 @@ unless --force is specified.
 Examples:
   kvm-delete myvm
   kvm-delete myvm --force    # force-stop if running
+
+Exit status:
+  0  the VM, its zvol and its mesh peer are gone
+  1  refused before changing anything (clones depend on it, or it is
+     running without --force), OR the domain was removed but the zvol is
+     still on disk or the VM is still a WireGuard peer — the warnings say
+     which, and the state-DB row is cleared either way
+  2  usage error: no name, or a second argument other than --force
 EOF
-    # asked-for help is 0; a usage error stays 1
-    exit "${1:-1}"
+    # asked-for help is 0; a usage error is 2, distinct from a delete that
+    # ran and left something behind (1).
+    exit "${1:-2}"
 }
 
 [[ "${1:-}" == -h || "${1:-}" == --help ]] && usage 0
 [[ $# -lt 1 ]] && usage
 NAME="$1"
+# The only second argument is --force. Anything else used to be accepted and
+# silently ignored: `kvm-delete myvm --froce` ran as a plain delete and the
+# operator who typed it had no way to know the flag was dropped (found in
+# the 2026-09-23 interface review; not a field incident).
+case "$#:${2:-}" in
+1: | 2:--force) ;;
+*)
+    echo "kvm-delete: unexpected argument(s): ${*:2}" >&2
+    usage
+    ;;
+esac
 FORCE="${2:-}"
 
 ZVOL="rpool/vms/${NAME}"

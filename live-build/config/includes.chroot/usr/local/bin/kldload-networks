@@ -54,7 +54,13 @@ die() {
     exit 1
 }
 
-command -v virsh >/dev/null 2>&1 || die "virsh not installed — libvirt is required"
+# Help needs no libvirt. Until 2026-09-23 this check ran before the dispatch,
+# so `kldload-networks --help` on a box without virsh died with "libvirt is
+# required" instead of saying what the tool is for.
+case "${1:-apply}" in
+help | -h | --help) ;;
+*) command -v virsh >/dev/null 2>&1 || die "virsh not installed — libvirt is required" ;;
+esac
 
 # _wait_libvirt — libvirtd may still be coming up when this runs at boot.
 # Returns 0 once virsh answers, 1 after ~30s. Callers must treat failure as
@@ -518,10 +524,12 @@ NOTES
 EXAMPLES
   kldload-networks apply
   virsh net-dhcp-leases kld-zfslab        # what is on the lab network
-  ansible -i /usr/local/bin/kldload-inventory 'role:clone' -m ping
+  ansible -i /usr/local/bin/kldload-inventory role_clone -m ping
+      (underscore: the inventory emits role_<x>, cluster_<x>, status_<x>;
+       Ansible reads 'role:clone' as two patterns and matches nothing)
 
 EXIT STATUS
-  0 on success, 1 if libvirt is absent or unreachable.
+  0 on success, 1 if libvirt is absent or unreachable, 2 on an unknown verb.
 
 FILES
   /usr/local/share/kldload-networks/*.xml   the definitions
@@ -537,6 +545,6 @@ help | -h | --help) cmd_help ;;
 *)
     printf 'kldload-networks: unknown command: %s\n\n' "$1" >&2
     cmd_help >&2
-    exit 1
+    exit 2 # usage error; 1 is libvirt absent or unreachable
     ;;
 esac
