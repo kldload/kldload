@@ -29,8 +29,10 @@
 //   contents never are), and everything collected is scrubbed on the way in.
 //
 // Inputs:  the live system, read-only. Nothing here mutates anything.
-// Outputs: /var/log/kldload/support-bundle-<host>-<stamp>.tar.gz, or $TMPDIR
-//          when that is not writable.
+// Outputs: /var/log/kldload/support-bundle-<host>-<stamp>-<rand>.tar.gz, or
+//          the same name under $TMPDIR when that is not writable. The
+//          random suffix is O_EXCL's doing (see WriteBundle); -o names
+//          an exact path instead.
 //
 // Notes:
 //   - A collector that fails records the failure INTO the bundle and carries
@@ -261,22 +263,36 @@ func WriteBundle(opt GatherOpts, dest string) (string, error) {
 	host, _ := os.Hostname()
 	stamp := time.Now().UTC().Format("20060102-150405")
 
+	var f *os.File
 	if dest == "" {
 		dir := "/var/log/kldload"
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			dir = os.TempDir()
-		} else if f, err := os.CreateTemp(dir, ".wtest"); err == nil {
-			_ = f.Close()
-			_ = os.Remove(f.Name())
+		} else if t, err := os.CreateTemp(dir, ".wtest"); err == nil {
+			_ = t.Close()
+			_ = os.Remove(t.Name())
 		} else {
 			dir = os.TempDir()
 		}
-		dest = filepath.Join(dir, fmt.Sprintf("support-bundle-%s-%s.tar.gz", host, stamp))
-	}
-
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return "", err
+		// The fallback is a shared, world-writable directory and the name
+		// was predictable to the second: anyone could pre-place a symlink
+		// at support-bundle-<host>-<stamp>.tar.gz and have root truncate
+		// whatever it pointed at. CreateTemp is O_EXCL and 0600, and the
+		// random suffix keeps the name the operator sees recognisable.
+		var err error
+		f, err = os.CreateTemp(dir, fmt.Sprintf("support-bundle-%s-%s-*.tar.gz", host, stamp))
+		if err != nil {
+			return "", err
+		}
+		dest = f.Name()
+	} else {
+		// An explicit path is the operator's to overwrite: re-running
+		// `buildmon bundle -o X` must replace X, not refuse.
+		var err error
+		f, err = os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			return "", err
+		}
 	}
 	defer f.Close()
 
