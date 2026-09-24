@@ -9,7 +9,7 @@ set -euo pipefail
 # all heavy work inside containers.
 #
 # The build pipeline has 5 stages (all containerized):
-#   1. Builder image   — CentOS 9 container with lorax, squashfs, xorriso
+#   1. Builder image   — Fedora 44 container with lorax, squashfs, xorriso
 #   2. Debian darksite — APT mirror for offline Debian installs (cached)
 #   3. Ubuntu darksite — APT mirror for offline Ubuntu installs (cached)
 #   4. RPM darksite    — built inside the builder container (CentOS/Rocky/RHEL)
@@ -34,7 +34,7 @@ PROFILE="${PROFILE:-desktop}" # Install profile: desktop, server, kvm, ai, core
 EDITION="${EDITION:-free}"    # Edition: free (full) or core (ZFS-only, no tools)
 # PAYLOAD decides what the ISO CARRIES, EDITION what the installed system IS.
 # full: the offline mirrors, k8s images and Ollama baked in (~15 GB, installs
-# with no network). net: the same tools and installer, no payload (~3 GB,
+# with no network). net: the same tools and installer, no payload (~2.2 GB,
 # installs from the distribution's own mirrors). EDITION=net is shorthand
 # for EDITION=free PAYLOAD=net, since that is the one people will type.
 PAYLOAD="${PAYLOAD:-full}" # Payload: full (offline mirrors baked in) or net (fetch at install)
@@ -101,7 +101,13 @@ VM_BRIDGE="${VM_BRIDGE:-vmbr0}"    # Network bridge
 KVM_VMS="${KVM_VMS:-1}"            # Number of KVM test VMs to create
 
 # ── USB burn ─────────────────────────────────────────────────────────────────
-USB_DEVICE="${USB_DEVICE:-/dev/sda}"           # Target USB block device
+# Empty on purpose. A default of /dev/sda made the documented auto-detect in
+# cmd_burn unreachable (it is guarded by [[ -z "$USB_DEVICE" ]]), and 'ship'
+# runs 'burn --yes': on a box whose first disk is not the stick, that was an
+# unattended 15 GB write to /dev/sda with no prompt (2026-09-23). Set it, name
+# the device on the command line, or let auto-detect find exactly one
+# removable disk that nothing is using.
+USB_DEVICE="${USB_DEVICE:-}"                   # Target USB block device (empty = auto-detect)
 USB_BURN_ON_DEPLOY="${USB_BURN_ON_DEPLOY:-no}" # Auto-burn after full build (yes/no)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -142,7 +148,7 @@ latest_iso() {
 # Build commands
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Build the CentOS 9 builder container image.
+# Build the Fedora 44 builder container image (builder/Dockerfile: fedora:44).
 # This container has all the tools needed to assemble the ISO: lorax,
 # squashfs-tools, xorriso, dracut, mtools, dnf, etc.
 # Only needs to be rebuilt when builder/Dockerfile changes.
@@ -1008,7 +1014,7 @@ cmd_build() {
 
     # ── Stage 4: ISO assembly (runs inside builder container) ────────────
     # The builder container runs build-iso.sh which:
-    #   - Bootstraps a CentOS 9 rootfs via dnf --installroot
+    #   - Bootstraps the Fedora live rootfs via dnf --installroot
     #   - Builds ZFS kernel modules via DKMS
     #   - Embeds all darksites (RPM, APT, K8s images, Helm charts)
     #   - Creates squashfs, EFI boot image, and final ISO via xorriso
@@ -1212,7 +1218,7 @@ RC
     payload=$("$ui" --title "kldload — what the ISO carries" --radiolist \
         "Full installs with no network at all. Net is the same tools and installer,\npackages fetched from the distributions' mirrors at install time." 14 74 3 \
         full "everything baked in — about 15 GB" ON \
-        net "tools only — about 3 GB, needs a network to install" OFF \
+        net "tools only — about 2.2 GB, needs a network to install" OFF \
         custom "pick the pieces" OFF \
         3>&1 1>&2 2>&3) || return 1
     local darksites="debian fedora el" k8s=yes ollama=yes weights=0
@@ -2057,6 +2063,21 @@ cmd_seed_disk() {
     log "  distro=$(sed -n 's/^KLDLOAD_DISTRO=//p' "$answers") profile=$(sed -n 's/^KLDLOAD_PROFILE=//p' "$answers")"
 }
 
+# _burn_disk_in_use <dev> — 0 when the disk or any partition on it carries a
+# mounted filesystem or a ZFS pool label (imported or exported). lsblk is the
+# instrument because it sees partitions the caller does not know about and
+# reports zfs_member from the on-disk label, so an exported pool on a stick is
+# still refused. A disk lsblk cannot describe is treated as in use: "cannot
+# tell" must never read as "free" when the next step is dd over it.
+_burn_disk_in_use() {
+    local rows
+    # -P (key="value" pairs), not -r: with -r an EMPTY mountpoint is dropped
+    # from the line and the fstype slides into its place, so an unmounted
+    # vfat stick — the normal state of the target — read as "mounted".
+    rows="$(lsblk -nP -o MOUNTPOINT,FSTYPE "$1" 2>/dev/null)" || return 0
+    grep -qE 'MOUNTPOINT="[^"]|FSTYPE="zfs_member"' <<<"$rows"
+}
+
 cmd_burn() {
     local iso requested="" assume_yes="${BURN_ASSUME_YES:-no}"
     # --yes travels as an ARGUMENT, not an environment variable, because
@@ -2084,7 +2105,7 @@ cmd_burn() {
     fi
 
     if [[ -z "$USB_DEVICE" ]]; then
-        local candidates=()
+        local candidates=() busy=()
         # -type b filters to block devices only — without it, a stale regular
         # file at /dev/sda (left by a prior dd when the stick was unplugged)
         # gets picked as a "candidate" and the next burn silently writes 9 GB
@@ -2092,10 +2113,23 @@ cmd_burn() {
         while IFS= read -r dev; do
             local rm_flag
             rm_flag="$(cat "/sys/block/$(basename "$dev")/removable" 2>/dev/null || echo 0)"
-            [[ "$rm_flag" == "1" ]] && candidates+=("$dev")
+            [[ "$rm_flag" == "1" ]] || continue
+            # Removable is not the same as unused: a USB backup drive with a
+            # mounted filesystem, or a stick that is a vdev of an imported or
+            # exported pool, is also "removable". Anything with a mountpoint
+            # or a zfs_member label anywhere on it is refused, not chosen.
+            if _burn_disk_in_use "$dev"; then
+                busy+=("$dev")
+                continue
+            fi
+            candidates+=("$dev")
         done < <(find /dev -maxdepth 1 -type b -name 'sd[a-z]' | sort)
-        [[ "${#candidates[@]}" -eq 1 ]] || die "Set USB_DEVICE explicitly"
-        USB_DEVICE="${candidates[0]}"
+        case "${#candidates[@]}" in
+        1) USB_DEVICE="${candidates[0]}" ;;
+        0) die "no unused removable disk found${busy[*]:+ (in use, refused: ${busy[*]})} — plug the stick in, or set USB_DEVICE explicitly" ;;
+        *) die "more than one unused removable disk (${candidates[*]}) — refusing to guess; set USB_DEVICE or name the device: ./deploy.sh burn /dev/sdX" ;;
+        esac
+        log "auto-detected USB target: $USB_DEVICE"
     fi
 
     # HARD GUARD: refuse to write unless the target is a real block device.
@@ -2158,7 +2192,7 @@ cmd_burn() {
 #   gives an operator-visible signal when the USB is actually ready.
 #
 # USAGE:
-#   ./deploy.sh ship                  # uses USB_DEVICE (defaults to /dev/sda)
+#   ./deploy.sh ship                  # uses USB_DEVICE, else auto-detects one unused stick
 #   USB_DEVICE=/dev/sdb ./deploy.sh ship
 #   PROFILE=server ./deploy.sh ship   # ships a server-profile ISO
 #
@@ -2427,6 +2461,112 @@ cmd_deploy_all() {
 # Command dispatch
 # ─────────────────────────────────────────────────────────────────────────────
 
+# usage — the contract. Printed on stdout for help (exit 0) and on stderr
+# for an unknown subcommand (exit 2). One text, one place.
+usage() {
+    cat <<EOF
+kldload deploy.sh — build + deploy pipeline for kldloadOS
+
+Usage: ./deploy.sh <command>
+
+Build:
+  build                  Build ISO (incremental — uses cached darksites)
+  full                   Clean + rebuild builder image + build ISO from scratch
+  menu                   Pick what the ISO carries from a checklist; writes kldload.env
+  builder-image          Rebuild the Fedora 44 builder container image
+  zfs-pin [report|check] Derive the live-ISO kernel pin from the newest OpenZFS
+                         release (tools/zfs-kernel-pin); check reports drift
+  build-debian-darksite  Rebuild the Debian APT offline mirror cache
+  build-ubuntu-darksite  Rebuild the Ubuntu APT offline mirror cache
+  build-fedora-darksite  Rebuild the Fedora RPM offline mirror cache
+  build-ollama-darksite  Pre-pull the Ollama models (llama3.2:3b + nomic-embed-text, ~2.2GB) for offline AI
+                         OPT-IN: build with KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1 to bake them into
+                         the ISO for an air-gapped install. By default no weights ship — Ollama
+                         and Open WebUI are still installed and running, with an empty model list.
+  build-k8s-darksite     Pre-pull Kubernetes + Cilium container images
+  build-ai-docs          Scrape website + OCR PDF for AI knowledge base
+  build-ai-appliance     Build self-contained Bob AI appliance ISO
+  clean                  Remove build artifacts (preserves darksite caches)
+
+Deploy:
+  kvm-deploy             Deploy ISO to local KVM (virt-install, UEFI, VNC)
+  kvm-deploy-bob         Deploy Bob AI appliance to KVM (created off)
+  proxmox-deploy         Deploy ISO to remote Proxmox (SSH + qm API)
+  deploy-all             Deploy to KVM + Proxmox + print USB command
+  burn [/dev/sdX] [--yes]
+                         Write ISO to USB drive. Names the target device;
+                         falls back to USB_DEVICE, then to auto-detect of a
+                         single removable drive. Asks for confirmation when
+                         interactive; --yes skips the prompt.
+  ship                   build → burn → notify in one shot. The default
+                         iteration loop. Honours PROFILE/EDITION/USB_DEVICE
+                         same as their individual subcommands. Per-run log
+                         at /var/log/kldload-ship/ship-<utc>.log; notify-send
+                         fires on completion (falls back to wall, then
+                         stderr). Exit 1 = build failed, 2 = burn failed.
+  seed-disk --answers FILE (--device /dev/sdX | --image out.img) [--yes]
+                         Write the FAT32 answers volume kldload-autoinstall
+                         looks for by label; --image needs no root.
+  pxe-serve [--iso ISO] [--root DIR] [--url BASE] [--sanboot] [--menu] [--golden DS]
+                         Lay out a netboot tree (iPXE script, nginx and
+                         dnsmasq configs) under live-build/pxe.
+  pxe-arm <mac> --answers FILE [--root DIR]
+                         Arm one machine: its next netboot installs
+                         unattended from that answers file.
+
+Test:
+  smoke-build            Validate the just-built ISO (size, freshness, structure)
+  smoke-show             Drive every scene of the first-boot show (part 2) through
+                         headless Chrome and fail on any console error
+  smoke-test <distro> <profile>
+                         End-to-end install smoke in KVM: boot ISO →
+                         headless install → reboot → run smoke-auto.sh on
+                         the installed system. Distros: centos|debian|
+                         ubuntu|fedora|rocky|rhel|arch|alpine. Profiles:
+                         core|server|desktop|kvm. Set KEEP_VM=1 to leave
+                         the VM around on success for inspection.
+
+Environment (override via env vars or kldload.env):
+  PROFILE         Install profile: desktop, server, kvm, ai, core (default: desktop)
+  EDITION         Edition: free (full) or core (ZFS-only) (default: free);
+                  net = shorthand for EDITION=free PAYLOAD=net
+  PAYLOAD         full = offline mirrors, k8s images and Ollama baked in
+                  (~15 GB, installs with no network); net = the same tools and
+                  installer with no payload (~2.2 GB, installs from the distro's
+                  own mirrors). The ISO name carries -net. (default: full)
+  DARKSITES       which offline mirrors to carry, any of: debian fedora el
+                  (default: all three; one alone names the ISO, e.g. -fedora)
+  K8S_IMAGES      yes/no — bake the Kubernetes container images (~1.5 GB)
+  OLLAMA          yes/no — bake the Ollama engine + Open WebUI (~3.4 GB)
+                  ./deploy.sh menu picks all of these from a checklist.
+  ARCH            Target architecture (default: x86_64)
+  RELEASE         EL release version for CentOS/Rocky/RHEL targets (default: 10)
+  KLDLOAD_ZFS_GIT Build OpenZFS from git instead of the release repo
+                  (1 = master, else a branch/tag) and UNPIN the live-ISO
+                  kernel to newest F44. Unsupported — test builds only.
+  VMID            Proxmox VM ID (default: 902)
+  VM_MEMORY       VM RAM in MB (default: 16384)
+  VM_CORES        VM CPU cores (default: 4)
+  VM_DISK_GB      VM disk size in GB (default: 80)
+  KVM_VMS         Number of KVM test VMs (default: 1)
+  USB_DEVICE      USB block device for burn (default: empty = auto-detect
+                  exactly one removable disk that is not mounted and holds
+                  no ZFS pool; zero or several candidates refuse)
+  PROXMOX_HOST    Proxmox host IP (default: 10.100.10.225)
+  CILIUM_VERSION  Cilium Helm chart version (default: whatever k8s-stack.lock resolved)
+
+Examples:
+  ./deploy.sh build                          # Build with defaults
+  PROFILE=server ./deploy.sh build           # Server profile
+  PROFILE=kvm ./deploy.sh build              # KVM hypervisor + K8s
+  ./deploy.sh clean && ./deploy.sh build     # Full rebuild
+  ./deploy.sh kvm-deploy                     # Test in local KVM
+  ./deploy.sh burn                           # Write to USB
+  ./deploy.sh ship                           # build + burn + notify (default loop)
+  USB_DEVICE=/dev/sdb ./deploy.sh ship       # Ship to a specific USB
+EOF
+}
+
 case "${1:-help}" in
 build) cmd_build ;;
 menu) cmd_menu ;;
@@ -2495,93 +2635,11 @@ smoke-build)
     # Static checks on the just-built ISO (file exists, fresh, sane size).
     bash "$ROOT/tests/smoke-build.sh"
     ;;
-help | *)
-    cat <<EOF
-kldload deploy.sh — build + deploy pipeline for kldloadOS
-
-Usage: ./deploy.sh <command>
-
-Build:
-  build                  Build ISO (incremental — uses cached darksites)
-  full                   Clean + rebuild builder image + build ISO from scratch
-  builder-image          Rebuild the CentOS 9 builder container image
-  build-debian-darksite  Rebuild the Debian APT offline mirror cache
-  build-ubuntu-darksite  Rebuild the Ubuntu APT offline mirror cache
-  build-fedora-darksite  Rebuild the Fedora RPM offline mirror cache
-  build-ollama-darksite  Pre-pull the Ollama models (llama3.2:3b + nomic-embed-text, ~2.2GB) for offline AI
-                         OPT-IN: build with KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1 to bake them into
-                         the ISO for an air-gapped install. By default no weights ship — Ollama
-                         and Open WebUI are still installed and running, with an empty model list.
-  build-k8s-darksite     Pre-pull Kubernetes + Cilium container images
-  build-ai-docs          Scrape website + OCR PDF for AI knowledge base
-  build-ai-appliance     Build self-contained Bob AI appliance ISO
-  clean                  Remove build artifacts (preserves darksite caches)
-
-Deploy:
-  kvm-deploy             Deploy ISO to local KVM (virt-install, UEFI, VNC)
-  kvm-deploy-bob         Deploy Bob AI appliance to KVM (created off)
-  proxmox-deploy         Deploy ISO to remote Proxmox (SSH + qm API)
-  deploy-all             Deploy to KVM + Proxmox + print USB command
-  burn [/dev/sdX] [--yes]
-                         Write ISO to USB drive. Names the target device;
-                         falls back to USB_DEVICE, then to auto-detect of a
-                         single removable drive. Asks for confirmation when
-                         interactive; --yes skips the prompt.
-  ship                   build → burn → notify in one shot. The default
-                         iteration loop. Honours PROFILE/EDITION/USB_DEVICE
-                         same as their individual subcommands. Per-run log
-                         at /var/log/kldload-ship/ship-<utc>.log; notify-send
-                         fires on completion (falls back to wall, then
-                         stderr). Exit 1 = build failed, 2 = burn failed.
-
-Test:
-  smoke-build            Validate the just-built ISO (size, freshness, structure)
-  smoke-show             Drive every scene of the first-boot show (part 2) through
-                         headless Chrome and fail on any console error
-  smoke-test <distro> <profile>
-                         End-to-end install smoke in KVM: boot ISO →
-                         headless install → reboot → run smoke-auto.sh on
-                         the installed system. Distros: centos|debian|
-                         ubuntu|fedora|rocky|rhel|arch|alpine. Profiles:
-                         core|server|desktop|kvm. Set KEEP_VM=1 to leave
-                         the VM around on success for inspection.
-
-Environment (override via env vars or kldload.env):
-  PROFILE         Install profile: desktop, server, kvm, ai, core (default: desktop)
-  EDITION         Edition: free (full) or core (ZFS-only) (default: free);
-                  net = shorthand for EDITION=free PAYLOAD=net
-  PAYLOAD         full = offline mirrors, k8s images and Ollama baked in
-                  (~15 GB, installs with no network); net = the same tools and
-                  installer with no payload (~3 GB, installs from the distro's
-                  own mirrors). The ISO name carries -net. (default: full)
-  DARKSITES       which offline mirrors to carry, any of: debian fedora el
-                  (default: all three; one alone names the ISO, e.g. -fedora)
-  K8S_IMAGES      yes/no — bake the Kubernetes container images (~1.5 GB)
-  OLLAMA          yes/no — bake the Ollama engine + Open WebUI (~3.4 GB)
-                  ./deploy.sh menu picks all of these from a checklist.
-  ARCH            Target architecture (default: x86_64)
-  RELEASE         EL release version for CentOS/Rocky/RHEL targets (default: 10)
-  KLDLOAD_ZFS_GIT Build OpenZFS from git instead of the release repo
-                  (1 = master, else a branch/tag) and UNPIN the live-ISO
-                  kernel to newest F44. Unsupported — test builds only.
-  VMID            Proxmox VM ID (default: 902)
-  VM_MEMORY       VM RAM in MB (default: 16384)
-  VM_CORES        VM CPU cores (default: 4)
-  VM_DISK_GB      VM disk size in GB (default: 80)
-  KVM_VMS         Number of KVM test VMs (default: 1)
-  USB_DEVICE      USB block device for burn (default: /dev/sda)
-  PROXMOX_HOST    Proxmox host IP (default: 10.100.10.225)
-  CILIUM_VERSION  Cilium Helm chart version (default: whatever k8s-stack.lock resolved)
-
-Examples:
-  ./deploy.sh build                          # Build with defaults
-  PROFILE=server ./deploy.sh build           # Server profile
-  PROFILE=kvm ./deploy.sh build              # KVM hypervisor + K8s
-  ./deploy.sh clean && ./deploy.sh build     # Full rebuild
-  ./deploy.sh kvm-deploy                     # Test in local KVM
-  ./deploy.sh burn                           # Write to USB
-  ./deploy.sh ship                           # build + burn + notify (default loop)
-  USB_DEVICE=/dev/sdb ./deploy.sh ship       # Ship to a specific USB
-EOF
+help | -h | --help) usage ;;
+*)
+    printf 'deploy.sh: unknown subcommand: %s\n\n' "$1" >&2
+    usage >&2
+    # 2: a usage error, distinct from a build or burn that failed (1).
+    exit 2
     ;;
 esac
