@@ -32,9 +32,10 @@ as the airbag and hardware install as the seatbelt.
 
 | Path | What |
 |---|---|
-| `/root/kldload-free/` | The kldload-free git repo. Edit + commit here. |
-| `/root/kldload-free/ci/kldload-ci-run` | Source-of-truth for the CI runner. |
-| `/root/kldload-free/tests/` | Smoke tests (`lifecycle.sh`, `smoke-*.sh`, `lib-test.sh`). |
+| `/home/anthony/kldload/` | The kldload git checkout. Edit + commit here. |
+| `/home/anthony/kldload/ci/kldload-ci-run` | Source-of-truth for the matrix runner. |
+| `/home/anthony/kldload/ci/kldload-netboot-run` | The 1.5.0 release sweep: one unattended netboot install, end to end, with a report. Finds the checkout from its own location; `KLDLOAD_REPO` overrides. |
+| `/home/anthony/kldload/tests/` | Smoke tests (`lifecycle.sh`, `smoke-*.sh`, `lib-test.sh`). |
 
 **CI host (`fiend.unixbox.net`, 10.100.10.225):**
 
@@ -65,9 +66,17 @@ as the airbag and hardware install as the seatbelt.
 | debian | ✅ | ✅ | ✅ |
 | ubuntu | ✅ | ✅ | ✅ |
 
-15 combos. Workload templates (`kvm`/`k8s`/`klab`/`zfslab`) are NOT in
-the matrix yet — they need their own `tests/smoke-{kvm,klab,zfslab}.sh`
-wrappers. Phase-2 work.
+15 combos, from `MATRIX_DISTROS` / `MATRIX_PROFILES` in `kldload-ci-run`.
+That list is wider than what the release claims: the web UI offers Fedora and
+Debian, the netboot menu offers `NETBOOT_DISTROS` (default `fedora`), and
+RHEL and Arch are sent the net image. A green centos, rocky or ubuntu cell is
+a network install, not the offline product.
+
+Workload templates (`kvm`/`k8s`/`klab`/`zfslab`) are NOT in the matrix.
+`tests/smoke-kvm.sh` exists; `smoke-klab.sh` and `smoke-zfslab.sh` do not,
+and `smoke-auto.sh` falls back to `smoke-core.sh` for a profile with no
+wrapper — so a klab or zfslab install run through this matrix would be graded
+by the core suite and read as a pass.
 
 Profile semantics (per project rules):
 
@@ -119,8 +128,9 @@ Baseline that every install must pass:
 
 ### `tests/smoke-auto.sh` (dispatcher)
 Reads `/etc/kldload/profile` on the running system and dispatches to the
-matching `smoke-{core,server,desktop,kvm}.sh`. Called by `lifecycle.sh`
-on the freshly-installed VM.
+matching `smoke-{core,server,desktop,kvm}.sh`; a profile with no wrapper
+falls back to `smoke-core.sh` (and says so on stderr). Called by
+`lifecycle.sh` on the freshly-installed VM.
 
 ### `tests/lifecycle.sh` (the per-combo driver)
 This is what `deploy.sh smoke-test <distro> <profile>` invokes. Per
@@ -227,14 +237,14 @@ sshpass -p live ssh live@${ip}      # if VM is still in live env (install aborte
 This is the cycle every matrix-found bug should follow:
 
 ```
-edit source on onyx (in /root/kldload-free/...)
+edit source on onyx (in /home/anthony/kldload/...)
    ↓
 git commit -m "fix(...): explanation of bug + commit-id of CI run that caught it"
    ↓
 rsync source to fiend:
    sshpass -p "${CI_PW}" rsync -av \
      -e 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' \
-     /root/kldload-free/<changed-file> \
+     /home/anthony/kldload/<changed-file> \
      admin@fiend.unixbox.net:/opt/kldload-ci/kldload-free/<same-path>
    ↓
 trigger a matrix run on fiend (next ISO build will include the fix):
@@ -251,44 +261,43 @@ the fix. Always rsync **before** kicking off the run.
 
 ---
 
-## 7. Current state (as of 2026-05-06)
+## 7. Current state (2026-09-23, 1.5.0)
 
-### Source fixes landed this session
+The KVM matrix above is `kldload-ci-run`'s and still runs as described. The
+1.5.0 release sweep — every edition installed on the same real machine —
+goes through **`ci/kldload-netboot-run`** instead: one unattended netboot
+install, end to end, with a report. Its phases run in this order; each checks
+its own outcome and stops the run with a reason, and `--from PHASE` resumes:
 
-| Commit | What |
+| Phase | What it does |
 |---|---|
-| `eafeecf` | 4-template architecture (kvm/k8s/klab/zfslab) + F44 K8s paths |
-| `39e762f` | autodeploy: ERR trap exempts GPU probes |
-| `37f1e02` | kube-setup: disable F44 zram-generator (kubelet refuses swap) |
-| `5f211cb` | profiles.sh: core profile early-return (kldload-webui leak) |
-| `307e7f7` | k_install_tools core gate + 3 universal markers + better debug capture |
-| `442625a` | kldload-debug-bundle + kldload-recovery on core |
-| `3f375ca` | smoke-test wait 5min→15min, runner printf with leading dash |
-| `05d7937` | smoke-test get_vm_ip filters loopback (qemu-guest-agent bug) |
-| `9021c55` | smoke-test scp wraps with sshpass (was falling back to pubkey) |
-| `fb881b2`/`9b33acf` | smoke-test pgrep bracket-trick to avoid self-match |
-| `bf1f3c4` | smoke-core: rpool/ROOT/* glob → -r flag (zfs rejects '*') |
+| `build` | `./deploy.sh build` (only with `--build`) |
+| `smoke` | `./deploy.sh smoke-build`; any failure other than the two known repository ratchets stops the run |
+| `stage` | copy kernel, initrd, root image and VERSION out of the new ISO into the netboot payload, verify them, restart `kldload-netboot` |
+| `arm` | `kldload-netboot-server arm-install <mac> <answers file>` |
+| `boot` | on a reachable target: one-time network boot, reboot; otherwise wait for someone to power the machine on |
+| `watch` | follow the netboot log — armed snippet, root image, answers file — and **disarm** the moment the answers file has been fetched |
+| `installed` | wait for ssh from the freshly installed system |
+| `ready` | wait for first-boot convergence to finish |
+| `verify` | check the installed machine against what the answers file asked for, and write `report.md` |
 
-### Matrix runs
+Run it as a transient unit so it outlives the terminal:
 
-- **#1: 2026-05-06-044342** — 0/15 PASS. Surfaced 4 distinct bugs:
-  3 missing markers, kldload-webui-leak-into-core, ubuntu-installer-abort,
-  fedora-core post-install no-boot.
-- **#2: 2026-05-06-155717** — in flight at time of writing. First 6
-  combos: `49/51 PASS` (was `47/51`) — 4 fixes worked, new surface is
-  `kldload-debug-bundle` missing on core. Fixed in `442625a`.
+```bash
+sudo systemd-run --unit kldload-netboot-run --collect \
+    /home/anthony/kldload/ci/kldload-netboot-run \
+    --answers live-build/pxe/matrix/<edition>/<mac>.env --build
+journalctl -fu kldload-netboot-run          # or tail -f <report dir>/run.log
+```
 
-### Still open (need investigation)
-
-- **Ubuntu installer aborts** in ~50s on all 3 profiles — actual
-  installer error not yet captured. The `307e7f7` debug-capture fix
-  should surface it on matrix #3.
-- **Fedora-core post-install no-boot** — install completes successfully,
-  VM reboots, but never reaches ssh-able state. Likely ZBM/shim chain
-  issue specific to F44 target. Needs serial console capture during
-  the failing boot.
-- **`kldload-ci-run --status` hits the flock** — minor wart, --status
-  should short-circuit before flock acquisition. Easy fix.
+Output lands in `/var/log/kldload-netboot-run/<run id>/{run.log,phase,report.md,smoke.out}`.
+Exit 0 is verified, 1 a phase failed (see `report.md`), 2 usage. `--iso PATH`
+stages a specific ISO instead of the newest full one; `--net-iso PATH` also
+stages the net image the menu serves to `NETBOOT_NET_DISTROS` (rhel, arch),
+refused unless its VERSION records the same clean commit as the full ISO's.
+An encrypted target stops at the ZFSBootMenu passphrase prompt on every boot
+and a Secure Boot target stops at MokManager once; the run waits and says so
+in the log.
 
 ---
 
@@ -329,7 +338,7 @@ sshpass -p "${CI_PW}" rsync -av --delete \
   --exclude='.claude' \
   --exclude='design-mockups' \
   -e 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' \
-  /root/kldload-free/ \
+  /home/anthony/kldload/ \
   admin@fiend.unixbox.net:/opt/kldload-ci/kldload-free/
 
 # 7. Install runner + sudoers:
@@ -361,7 +370,7 @@ IOSchedulingPriority=4
 UNIT
 sudo tee /etc/systemd/system/kldload-ci.timer > /dev/null <<TIMER
 [Unit]
-Description=Run kldload CI nightly at 03:00 UTC
+Description=Run kldload CI nightly at 03:00 local time (OnCalendar carries no zone)
 
 [Timer]
 OnCalendar=*-*-* 03:00:00
@@ -487,8 +496,8 @@ When picking this up:
 - [ ] If a new failure surfaces, treat it as the next layer (this is the
       design — CI surfaces bugs in cascading layers).
 - [ ] Phase-2 work (when basic matrix is fully green): write
-      `tests/smoke-{kvm,klab,zfslab}.sh` to extend the matrix to cover
-      workload templates.
+      `tests/smoke-{klab,zfslab}.sh` to extend the matrix to cover the
+      remaining workload templates (`smoke-kvm.sh` exists).
 
 ---
 
@@ -499,9 +508,10 @@ When picking this up:
   quirks, NOT installer bugs). For release validation, burn USB and
   install on real metal.
 - **Not a workload-template tester.** The current matrix only covers
-  `core`/`server`/`desktop` (the generic profiles). The four workload
-  templates (`kvm`/`k8s`/`klab`/`zfslab`) need their own
-  `tests/smoke-{kvm,klab,zfslab}.sh` wrappers — phase-2.
+  `core`/`server`/`desktop` (the generic profiles). Of the workload
+  templates only `kvm` has a wrapper (`tests/smoke-kvm.sh`); `klab` and
+  `zfslab` still need theirs — phase-2. The 1.5.0 editions were verified
+  by `kldload-netboot-run` on real hardware instead (section 7).
 - **Not multi-host.** Fiend is the only CI runner. If you bring up a
   second box, share the source via git or per-host rsync; the SQLite
   history is per-host.
