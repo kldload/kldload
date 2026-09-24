@@ -42,29 +42,47 @@ var iconSVG []byte
 // renderManual returns the manual as plain text, best-effort formatted.
 func renderManual() string {
 	tmp, err := os.CreateTemp("", "wgx-man-*.1")
-	if err == nil {
-		_, _ = tmp.Write(manPage)
+	if err != nil {
+		return string(manPage)
+	}
+	defer os.Remove(tmp.Name())
+	// A short write or a failed close leaves a truncated page on disk; the
+	// renderer would format half a manual and the length guard below
+	// would wave it through. Fall back to the source instead.
+	if _, err := tmp.Write(manPage); err != nil {
 		tmp.Close()
-		defer os.Remove(tmp.Name())
-		for _, c := range []string{
-			"mandoc -Tutf8 -O width=100 " + tmp.Name() + " 2>/dev/null",
-			"MANWIDTH=100 man -l " + tmp.Name() + " 2>/dev/null",
-			// groff and nroff, because a kldload install has neither of the
-			// two above and the pane filled with raw ".Sh NAME / .Nm / .Xr"
-			// source instead of a manual (fiend, 2026-08-15). groff renders
-			// mdoc natively via the -mandoc macro set, and it is already on
-			// every one of these boxes.
-			//
-			// -P -c makes grotty emit classic overstrike pairs rather than
-			// ANSI SGR, which is what stripOverstrike below already knows how
-			// to remove; without it the pane trades roff source for escape
-			// soup.
-			"groff -mandoc -Tutf8 -rLL=100n -P -c " + tmp.Name() + " 2>/dev/null",
-			"nroff -mandoc " + tmp.Name() + " 2>/dev/null",
-		} {
-			if out, err := exec.Command("sh", "-c", c).Output(); err == nil && len(out) > 200 {
-				return stripOverstrike(string(out))
-			}
+		return string(manPage)
+	}
+	if err := tmp.Close(); err != nil {
+		return string(manPage)
+	}
+	// Each renderer is a fixed argv, never a shell string: the temp path
+	// is TMPDIR's to choose, and a TMPDIR with a space in it split the old
+	// `sh -c "mandoc ... " + path` into two operands. Output() captures
+	// stderr into the error, so a missing renderer says nothing on the
+	// terminal.
+	for _, argv := range [][]string{
+		{"mandoc", "-Tutf8", "-O", "width=100", tmp.Name()},
+		{"man", "-l", tmp.Name()},
+		// groff and nroff, because a kldload install has neither of the
+		// two above and the pane filled with raw ".Sh NAME / .Nm / .Xr"
+		// source instead of a manual (fiend, 2026-08-15). groff renders
+		// mdoc natively via the -mandoc macro set, and it is already on
+		// every one of these boxes.
+		//
+		// -P -c makes grotty emit classic overstrike pairs rather than
+		// ANSI SGR, which is what stripOverstrike below already knows how
+		// to remove; without it the pane trades roff source for escape
+		// soup.
+		{"groff", "-mandoc", "-Tutf8", "-rLL=100n", "-P", "-c", tmp.Name()},
+		{"nroff", "-mandoc", tmp.Name()},
+	} {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		if argv[0] == "man" {
+			cmd.Env = append(os.Environ(), "MANWIDTH=100")
+		}
+		if out, err := cmd.Output(); err == nil && len(out) > 200 {
+			return stripOverstrike(string(out))
 		}
 	}
 	return string(manPage)
