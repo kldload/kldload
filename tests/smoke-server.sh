@@ -263,28 +263,16 @@ _section "NVIDIA (optional)"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
     _pass "nvidia-smi found"
-    # Bounded WITHOUT waiting on it: a wedged driver leaves nvidia-smi in
-    # uninterruptible sleep, where SIGKILL does nothing and `timeout` waits
-    # for ever for a child that will not die. fiend, Fedora AI, 2026-09-23:
-    # "NVRM: nvAssertFailed ... GPPut < WATCHDOG_GPFIFO_ENTRIES" at module
-    # load, then every nvidia-smi hung, and this line held the whole smoke run
-    # for thirty minutes. So it runs in the background, is polled, and is left
-    # behind if it never returns -- which is itself the finding.
+    # Bounded WITHOUT waiting on it -- see probe_bounded in lib-test.sh for
+    # the wedged-driver incident (fiend, Fedora AI, 2026-09-23) that makes a
+    # plain `timeout` useless here.
     _nv_out="$(mktemp)"
-    nvidia-smi >"$_nv_out" 2>&1 </dev/null &
-    _nv_pid=$!
-    for _ in $(seq 1 20); do
-        kill -0 "$_nv_pid" 2>/dev/null || break
-        sleep 1
-    done
-    if kill -0 "$_nv_pid" 2>/dev/null; then
-        _fail "nvidia-smi" "still running after 20s — the NVIDIA driver is wedged (dmesg | grep NVRM)"
-        disown "$_nv_pid" 2>/dev/null || true # left behind on purpose; it cannot be reaped
-    elif wait "$_nv_pid"; then
-        _pass "nvidia-smi executes (GPU detected)"
-    else
-        _warn "nvidia-smi" "no GPU detected (expected in VM)"
-    fi
+    probe_bounded 20 "$_nv_out" nvidia-smi && _nv_rc=0 || _nv_rc=$?
+    case "$_nv_rc" in
+    0) _pass "nvidia-smi executes (GPU detected)" ;;
+    2) _fail "nvidia-smi" "still running after 20s — the NVIDIA driver is wedged (dmesg | grep NVRM)" ;;
+    *) _warn "nvidia-smi" "no GPU detected (expected in VM)" ;;
+    esac
     rm -f "$_nv_out"
 else
     _pass "NVIDIA not installed (expected if checkbox not selected)"

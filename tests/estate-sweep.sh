@@ -310,7 +310,9 @@ for ed in "${EDITIONS[@]}"; do
     # boot (23:09:38, 2026-09-19). An offset in bytes cannot re-read anything.
     _mark="$(stat -c %s "$NGINX_LOG" 2>/dev/null || echo 0)"
     if ((_adopt == 0)); then
-        sudo -n "$SERVER" arm-install "$MAC" "$ANS" --netdev "$NETDEV" >>"$LOG" 2>&1 || {
+        # Bounded: arming writes a menu and restarts nothing, so five minutes
+        # is only ever reached by a server that has hung.
+        timeout 300 sudo -n "$SERVER" arm-install "$MAC" "$ANS" --netdev "$NETDEV" >>"$LOG" 2>&1 || {
             say "${ed}: arm FAILED"
             printf '| %s | %s/%s | arm failed | FAIL | | | |  |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
             RC=1

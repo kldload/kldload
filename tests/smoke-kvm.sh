@@ -183,10 +183,12 @@ test_cmd "sanoid" "sanoid"
 test_file "sanoid config" "/etc/sanoid/sanoid.conf"
 test_file "sanoid defaults" "/etc/sanoid/sanoid.defaults.conf"
 test_service_enabled "sanoid.timer" "sanoid.timer"
-if sanoid --cron >/dev/null 2>&1; then
+# Bounded: a sanoid run walks every dataset and prunes; on a pool with a
+# stuck txg it never returns, and nothing here should wait on it for ever.
+if timeout 300 sanoid --cron >/dev/null 2>&1; then
     _pass "sanoid --cron runs clean"
 else
-    _fail "sanoid --cron" "exits with error"
+    _fail "sanoid --cron" "exits with error, or did not finish within 300s"
 fi
 
 # ── sshpass ──────────────────────────────────────────────────────────────────
@@ -281,7 +283,16 @@ fi
 _section "NVIDIA (optional)"
 if command -v nvidia-smi >/dev/null 2>&1; then
     _pass "nvidia-smi found"
-    nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null && _pass "GPU detected" || _warn "GPU" "driver loaded but no GPU"
+    # Bounded without waiting on it: see probe_bounded in lib-test.sh for the
+    # wedged driver that held a smoke run for thirty minutes (2026-09-23).
+    _nv_out="$(mktemp)"
+    probe_bounded 20 "$_nv_out" nvidia-smi --query-gpu=name --format=csv,noheader && _nv_rc=0 || _nv_rc=$?
+    case "$_nv_rc" in
+    0) _pass "GPU detected: $(head -n 1 "$_nv_out")" ;;
+    2) _fail "nvidia-smi" "still running after 20s — the NVIDIA driver is wedged (dmesg | grep NVRM)" ;;
+    *) _warn "GPU" "driver loaded but no GPU" ;;
+    esac
+    rm -f "$_nv_out"
 else
     _pass "NVIDIA not installed (expected if not selected)"
 fi
@@ -339,7 +350,7 @@ _section "VM Snapshots"
 if zfs list rpool/vms >/dev/null 2>&1; then
     test_cmd "kldload-vm-snapshot present" "kldload-vm-snapshot"
     _snapmark="smoketest-$$-"
-    if kldload-vm-snapshot --root rpool/vms --prefix "$_snapmark" --keep 1 >/dev/null 2>&1; then
+    if timeout 600 kldload-vm-snapshot --root rpool/vms --prefix "$_snapmark" --keep 1 >/dev/null 2>&1; then
         # grep -c exits 1 when it counts zero, and zero is precisely the
         # answer this check exists to catch -- the old ExecStart took no
         # snapshots at all and still reported success. So the failing status is

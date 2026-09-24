@@ -204,7 +204,8 @@ fi
 _section "Estate registration"
 
 if have virsh && have kldload-inventory; then
-    have kldload-networks && kldload-networks sync >/dev/null 2>&1
+    # Bounded: the sync talks to libvirt and the state DB, either of which can hang.
+    have kldload-networks && timeout 120 kldload-networks sync >/dev/null 2>&1
     _missing="" _n=0
     while read -r _vm; do
         [[ -n "$_vm" ]] || continue

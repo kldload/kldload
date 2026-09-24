@@ -128,6 +128,35 @@ test_succeeds() {
     else _fail "$name" "command failed: $cmd"; fi
 }
 
+# probe_bounded <seconds> <outfile> <cmd...> — run a probe that may never
+# return, without waiting on it.
+#
+# `timeout` is not enough for this class of command: a wedged NVIDIA driver
+# leaves nvidia-smi in uninterruptible sleep, where SIGKILL does nothing and
+# timeout waits for ever for a child that will not die. fiend, Fedora AI,
+# 2026-09-23: "NVRM: nvAssertFailed ... GPPut < WATCHDOG_GPFIFO_ENTRIES" at
+# module load, then every nvidia-smi hung, and one line held the whole smoke
+# run for thirty minutes. So the command runs in the background, is polled
+# once a second, and is left behind if it never returns -- which is itself
+# the finding. Output goes to <outfile>.
+# Returns: the command's own status when it finished; 2 when it was still
+#          running after <seconds> (disowned, and the caller reports it).
+probe_bounded() {
+    local secs="$1" out="$2" pid i
+    shift 2
+    "$@" >"$out" 2>&1 </dev/null &
+    pid=$!
+    for ((i = 0; i < secs; i++)); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        disown "$pid" 2>/dev/null || true # left behind on purpose; a D-state process cannot be reaped
+        return 2
+    fi
+    wait "$pid"
+}
+
 # Detect distro family
 detect_distro() {
     if command -v dnf >/dev/null 2>&1; then

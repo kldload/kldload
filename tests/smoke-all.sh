@@ -48,6 +48,10 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 # PASSED — this system is verified and ready for production use".
 _SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd "$(dirname "$_SELF")" && pwd)"
+# For probe_bounded only: this file keeps its own counters and emitters, and
+# the library sets no shell options of its own.
+# shellcheck source=lib-test.sh
+source "${SCRIPT_DIR}/lib-test.sh"
 REPORT="/tmp/kldload-smoke-report-$(date -u +%Y%m%d-%H%M%S).txt"
 # _count_results — how many result lines of one kind a suite emitted.
 #
@@ -282,7 +286,9 @@ if virsh list --name 2>/dev/null | grep -q kldload-cp; then
 
     if [[ -n "$CP_IP" ]]; then
         echo "  Control plane: $CP_IP" | tee_report
-        output=$(sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        # Bounded: ConnectTimeout covers a control plane that does not
+        # answer; `timeout` covers one that answers and then hangs the test.
+        output=$(timeout -k 10 600 sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
             "root@${CP_IP}" "kube-smoke-test" 2>&1) || true
         echo "$output" | tee_report
 
@@ -298,6 +304,27 @@ if virsh list --name 2>/dev/null | grep -q kldload-cp; then
 fi
 
 # ── Hardware inventory ───────────────────────────────────────────────────────
+# _gpu_name — the GPU's name for the inventory, or why there is none.
+#
+# This line sits OUTSIDE run_suite and its timeout, and it called nvidia-smi
+# bare: on the wedged driver that held the server suite for thirty minutes
+# (fiend, Fedora AI, 2026-09-23) it would have hung the report a second time,
+# after every suite had finished. Same bounded probe as the suites use.
+_gpu_name() {
+    local out rc=0
+    command -v nvidia-smi >/dev/null 2>&1 || {
+        echo "none (no nvidia-smi)"
+        return 0
+    }
+    out="$(mktemp)"
+    probe_bounded 20 "$out" nvidia-smi --query-gpu=name --format=csv,noheader || rc=$?
+    case "$rc" in
+    0) head -n 1 "$out" ;;
+    2) echo "UNKNOWN — nvidia-smi still running after 20s; the driver is wedged (dmesg | grep NVRM)" ;;
+    *) echo "none (nvidia-smi exit $rc)" ;;
+    esac
+    rm -f "$out"
+}
 {
     echo ""
     header "Hardware Inventory"
@@ -305,7 +332,7 @@ fi
     echo "  CPU:     $(nproc) cores — $(lscpu 2>/dev/null | grep 'Model name' | sed 's/.*: *//')"
     echo "  RAM:     $(free -h 2>/dev/null | awk '/Mem:/ {print $2}')"
     echo "  Disk:    $(lsblk -d -o NAME,SIZE,MODEL 2>/dev/null | grep -v "^NAME" | head -3 | sed 's/^/           /')"
-    echo "  GPU:     $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'none')"
+    echo "  GPU:     $(_gpu_name)"
     echo "  ZFS:     $(zpool list -H -o name,size,health 2>/dev/null | head -3 | sed 's/^/           /')"
     echo ""
 

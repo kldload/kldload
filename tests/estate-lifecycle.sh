@@ -241,8 +241,8 @@ cleanup() {
     ((KEEP == 1)) && return 0
     if virsh dominfo "$PROBE" >/dev/null 2>&1 || has_zvol "$PROBE"; then
         echo "  cleanup: removing ${PROBE}"
-        kvm-delete "$PROBE" --force >/dev/null 2>&1 ||
-            echo "  cleanup: kvm-delete ${PROBE} failed — remove it by hand" >&2
+        timeout 300 kvm-delete "$PROBE" --force >/dev/null 2>&1 ||
+            echo "  cleanup: kvm-delete ${PROBE} failed or did not finish in 300s — remove it by hand" >&2
     fi
 }
 trap cleanup EXIT
@@ -274,7 +274,9 @@ echo "  probe name: ${PROBE}  (created and destroyed by this script, by exact na
 # ─── 1. Create ──────────────────────────────────────────────────────────────
 _section "Clone (kvm-clone)"
 
-if kvm-clone "$SOURCE_VM" "$PROBE" >/dev/null 2>&1; then
+# Bounded: a clone is a ZFS clone plus a domain define and a seed, seconds
+# normally; ten minutes is the ceiling before "it hung" is the finding.
+if timeout 600 kvm-clone "$SOURCE_VM" "$PROBE" >/dev/null 2>&1; then
     # Outcome, not exit code: the domain must actually exist.
     if in_libvirt "$PROBE"; then
         _pass "kvm-clone created ${PROBE}"
@@ -284,7 +286,7 @@ if kvm-clone "$SOURCE_VM" "$PROBE" >/dev/null 2>&1; then
         exit 1
     fi
 else
-    _fail "kvm-clone" "could not clone ${SOURCE_VM} into ${PROBE}"
+    _fail "kvm-clone" "could not clone ${SOURCE_VM} into ${PROBE} (failed, or did not finish within 600s)"
     printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
     exit 1
 fi
@@ -303,8 +305,10 @@ _check "Ansible inventory" yes in_inventory
 # 2026-09-22). Starting the shipped sweep unit runs the SAME code path the timer
 # would, now. A oneshot `start` blocks until the sweep has finished.
 if systemctl cat kldload-enroll-sweep.service >/dev/null 2>&1; then
-    systemctl start kldload-enroll-sweep.service >/dev/null 2>&1 ||
-        _warn "enrol sweep" "kldload-enroll-sweep.service failed — see journalctl -u kldload-enroll-sweep"
+    # Bounded: `start` on a oneshot blocks until the sweep finishes, and a
+    # sweep stuck on one unreachable guest would otherwise hold this test.
+    timeout 600 systemctl start kldload-enroll-sweep.service >/dev/null 2>&1 ||
+        _warn "enrol sweep" "kldload-enroll-sweep.service failed or did not finish within 600s — see journalctl -u kldload-enroll-sweep"
     _mesh_wait=120
 else
     _warn "enrol sweep" "kldload-enroll-sweep.service is not installed — waiting on nothing but luck"
@@ -403,7 +407,7 @@ fi
 # ─── 3. Delete and unjoin ───────────────────────────────────────────────────
 _section "Unjoin (kvm-delete)"
 
-if kvm-delete "$PROBE" --force >/dev/null 2>&1; then
+if timeout 300 kvm-delete "$PROBE" --force >/dev/null 2>&1; then
     _pass "kvm-delete returned 0"
 else
     # kvm-delete has returned 1 after a successful destroy before (a pipeline
