@@ -312,6 +312,17 @@ if systemctl cat kldload-enroll-sweep.service >/dev/null 2>&1; then
     # sweep stuck on one unreachable guest would otherwise hold this test.
     timeout 600 systemctl start kldload-enroll-sweep.service >/dev/null 2>&1 ||
         _warn "enrol sweep" "kldload-enroll-sweep.service failed or did not finish within 600s — see journalctl -u kldload-enroll-sweep"
+    # A clone whose sshd was not up yet when that sweep ran (Rocky's desktop
+    # golden takes longer to boot than the others — 3-kvm, build 66,
+    # 2026-09-24: 9 of 10 joined at 0s, rocky never in 120s) is left for the
+    # 10-minute timer, which this test does not wait for. Run the sweep
+    # again after a minute and once more after two; a clone that is still not
+    # enrolled after three sweeps has a real problem.
+    for _t in 60 60; do
+        on_mesh && break
+        sleep "$_t"
+        timeout 600 systemctl start kldload-enroll-sweep.service >/dev/null 2>&1 || true # the warning above already covers a failing sweep
+    done
     _mesh_wait=120
 else
     _warn "enrol sweep" "kldload-enroll-sweep.service is not installed — waiting on nothing but luck"

@@ -94,6 +94,16 @@ test_service_enabled() {
     # swallow: same as test_service_active above -- a disabled or absent unit
     # exits non-zero, and that is the finding, not an error.
     state=$(systemctl is-enabled "$svc" 2>/dev/null || true)
+    # "alias" is not a state: on Debian sshd.service is an alias of
+    # ssh.service, and is-enabled answers "alias" for the name asked. Ask
+    # about the unit it resolves to (build 66, 2026-09-24: every Debian
+    # edition went red on "sshd is alias" while sshd was up and enabled).
+    if [[ "$state" == "alias" ]]; then
+        local _real
+        _real=$(systemctl show -p Id --value "$svc" 2>/dev/null || true)
+        [[ -n "$_real" && "$_real" != "$svc" ]] &&
+            state=$(systemctl is-enabled "$_real" 2>/dev/null || true)
+    fi
     # A FAIL, not a warning. Every caller names a unit the install is supposed
     # to have enabled (sshd, the webui, the snapshot timers, the display
     # manager), and "installed but never enabled" is the exact silent failure

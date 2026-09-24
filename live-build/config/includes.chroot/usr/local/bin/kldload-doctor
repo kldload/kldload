@@ -991,7 +991,7 @@ def check_wg_mesh_coherence():
     for n in nodes:
         ip = _domain_ipv4(n)
         if not ip:
-            unprobed.append(f"{n}=no lease")
+            unprobed.append(f"{n}=no address (lease, arp, inventory)")
             continue
         rc, cnt, err = _run(["ssh",
                              "-o", "ConnectTimeout=5",
@@ -1048,12 +1048,27 @@ def _parse_domifaddr(out: str) -> str:
 
 
 def _domain_ipv4(dom: str) -> str:
-    """The DHCP lease address of a running domain, or '' when it has none
-    or virsh fails. Fixed argv: the domain name never meets a shell."""
-    rc, out, _ = _run(["virsh", "domifaddr", dom, "--source", "lease"], timeout=15)
-    if rc != 0:
-        return ""
-    return _parse_domifaddr(out)
+    """A running domain's IPv4 address, or '' when none can be found.
+    Three sources, in order: libvirt's own DHCP lease, the ARP table (a guest
+    on a bridge served by an external DHCP has no libvirt lease — every k8s
+    node on 4-k8s answered "no lease" on build 66, 2026-09-24, while the
+    cluster was Ready), then the state DB through kldload-inventory --host.
+    Fixed argv throughout: the domain name never meets a shell."""
+    for src in ("lease", "arp"):
+        rc, out, _ = _run(["virsh", "domifaddr", dom, "--source", src], timeout=15)
+        if rc == 0:
+            ip = _parse_domifaddr(out)
+            if ip:
+                return ip
+    rc, out, _ = _run(["kldload-inventory", "--host", dom], timeout=15)
+    if rc == 0 and out.strip():
+        try:
+            host = json.loads(out).get("ansible_host", "")
+            if isinstance(host, str) and host:
+                return host
+        except (ValueError, AttributeError):
+            pass
+    return ""
 
 
 def check_darksite_charts():
