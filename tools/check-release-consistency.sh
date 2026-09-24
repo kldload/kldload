@@ -115,6 +115,39 @@ for f in live-build/output/kldload-*.iso; do
 done
 shopt -u nullglob
 
+# The NAME is not the build. build-iso.sh writes /VERSION at the ISO root (the
+# same file it seals into the rootfs as /etc/kldload/VERSION), with
+# `kldload_version` and `commit`; each ISO present has to say this version
+# and HEAD's commit, or a file from an earlier build of the same version
+# number -- or a dirty tree -- ships under a correct name.
+HEAD_SHA="$(git rev-parse HEAD)"
+if ! command -v xorriso >/dev/null 2>&1; then
+    skip "embedded /VERSION of each ISO — xorriso is not installed"
+else
+    _vtmp="$(mktemp -d)"
+    for ed in full net core fedora; do
+        f="live-build/output/${WANT[$ed]}"
+        [[ -f "$f" ]] || continue # reported as missing above
+        rm -f "${_vtmp}/VERSION"
+        # swallow: an ISO with no /VERSION is exactly what the BAD below reports
+        timeout 120 xorriso -indev "$f" -osirrox on -extract /VERSION "${_vtmp}/VERSION" >/dev/null 2>&1 || true
+        iv="$(sed -n 's/^kldload_version *= *//p' "${_vtmp}/VERSION" 2>/dev/null | head -1)"
+        ic="$(sed -n 's/^commit *= *//p' "${_vtmp}/VERSION" 2>/dev/null | head -1)"
+        if [[ ! -s "${_vtmp}/VERSION" ]]; then
+            bad "$ed ISO carries no /VERSION — built before the provenance stamp, or not a kldload ISO"
+        elif [[ "$iv" != "$VERSION" ]]; then
+            bad "$ed ISO's /VERSION says kldload_version = '${iv:-?}', build-iso says $VERSION"
+        elif [[ "$ic" == *-dirty ]]; then
+            bad "$ed ISO was built from a dirty tree (commit = $ic)"
+        elif [[ -z "$ic" || "$HEAD_SHA" != "$ic"* ]]; then
+            bad "$ed ISO was built from commit ${ic:-unknown}; HEAD is ${HEAD_SHA:0:12}"
+        else
+            ok "$ed ISO carries $iv from commit $ic (HEAD)"
+        fi
+    done
+    rm -rf "$_vtmp"
+fi
+
 # ── 5. the website ───────────────────────────────────────────────────────
 if [[ -z "$WEB" || ! -d "$WEB" ]]; then
     skip "website (set --web PATH or KLDLOAD_WEB)"
@@ -154,18 +187,24 @@ elif ! command -v rclone >/dev/null 2>&1; then
 elif [[ -z "${R2_ACCESS_KEY_ID:-}" ]]; then
     skip "R2 -latest keys — R2 credentials are not in the environment"
 else
+    # The sidecar is sha256sum output, "<hash>  <iso name>", and the name it
+    # must carry is this key's edition at exactly this version: a substring
+    # match on the version accepted a 1.5.0-rc sidecar for 1.5.0 (2026-09-23).
+    declare -A R2NAME=(["kldload-free-latest.iso"]="${WANT[full]}" ["kldload-free-net-latest.iso"]="${WANT[net]}"
+        ["kldload-free-core-latest.iso"]="${WANT[core]}" ["kldload-free-fedora-latest.iso"]="${WANT[fedora]}")
     for key in kldload-free-latest.iso kldload-free-net-latest.iso \
         kldload-free-core-latest.iso kldload-free-fedora-latest.iso; do
         # swallow: a key with no sidecar is exactly what this loop reports as
         # BAD two lines down; rclone's own exit status would abort the loop
         # before the other three keys were ever looked at.
         sum="$(rclone cat "r2:kldload-releases/${key}.sha256" 2>/dev/null || true)"
+        _want_re="[[:space:]]\\*?${R2NAME[$key]//./\\.}[[:space:]]*$"
         if [[ -z "$sum" ]]; then
             bad "R2 $key has no readable .sha256 sidecar"
-        elif [[ "$sum" == *"$VERSION"* ]]; then
-            ok "R2 $key names $VERSION"
+        elif grep -qE "$_want_re" <<<"$sum"; then
+            ok "R2 $key names ${R2NAME[$key]}"
         else
-            bad "R2 $key is STALE — its sidecar names $(printf '%s' "$sum" | grep -oE 'kldload-[0-9][^ ]*' | head -1)"
+            bad "R2 $key is STALE — its sidecar names $(printf '%s' "$sum" | grep -oE 'kldload-[0-9][^ ]*' | head -1), not ${R2NAME[$key]}"
         fi
     done
 fi

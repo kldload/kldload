@@ -643,8 +643,14 @@ if [[ "$SB" == 1 ]]; then
     [[ "$e" == *"already enrolled"* ]] && r PASS "this install's MOK enrolled" "$e; $v" || r FAIL "this install's MOK enrolled" "${e:-no /var/lib/dkms/mok.der} ($v)"
     [[ "$v" == *enabled* ]] && r PASS "secure boot on" "$v" || r FAIL "secure boot on" "$v"
 else r INFO "secure boot" "$v"; fi
+# Held packages, by the family's own tool: `dnf versionlock` on RPM, `apt-mark
+# showhold` on Debian (kldload-apply-platform-holds writes both). The dnf form
+# alone FAILed every Debian install for holding "0 packages" (2026-09-23).
 # swallow: grep -c prints 0 and exits 1 when nothing is held; the count is judged next
-v="$(dnf versionlock list 2>/dev/null | grep -c 'Package name' || true)"; ((v > 0)) && r PASS "kernel/ZFS held" "$v packages" || r FAIL "kernel/ZFS held" "0 packages held"
+if command -v dnf >/dev/null 2>&1; then v="$(dnf versionlock list 2>/dev/null | grep -c 'Package name' || true)"; t=versionlock
+elif command -v apt-mark >/dev/null 2>&1; then v="$(apt-mark showhold 2>/dev/null | grep -c . || true)"; t="apt-mark showhold"
+else v=0; t="no hold tool (neither dnf nor apt-mark)"; fi
+((v > 0)) && r PASS "kernel/ZFS held" "$v packages ($t)" || r FAIL "kernel/ZFS held" "0 packages held ($t)"
 logger -t kldload-verify "probe-$$"; sleep 2
 journalctl -t kldload-verify --no-pager 2>/dev/null | grep -q "probe-$$" && r PASS "journal records" "" || r FAIL "journal records" "probe not returned"
 v="$(systemctl --failed --no-legend 2>/dev/null | awk '{print $2}' | tr '\n' ' ')"; [[ -z "${v// /}" ]] && r PASS "no failed units" "" || r FAIL "no failed units" "$v"
@@ -730,7 +736,10 @@ if [[ "$AI" == 1 ]]; then v="$(systemctl is-active ollama 2>&1)"; [[ "$v" == act
 # The metrics plane is installed by first boot's KVM-host section, gated on KVM or K8s:
 # a server edition gets none, whatever DEVOPS says (7-net, 2026-09-13: DEVOPS=1, no
 # KVM, no Grafana). Checked where the installer actually puts it.
-if [[ "$KVM" == 1 || "$K8SE" == 1 ]]; then v="$(systemctl is-active grafana-server prometheus 2>/dev/null | tr '\n' ' ')"; [[ "$v" == *active* && "$v" != *inactive*inactive* ]] && r PASS "metrics stack" "$v" || r FAIL "metrics stack" "grafana-server/prometheus: $v"; fi
+# Both units, each exactly "active": `*active*` also matched "inactive", so
+# one dead daemon beside a live one still passed (2026-09-23).
+# swallow: grep -c exits 1 when neither unit is active, which is the FAIL reported next
+if [[ "$KVM" == 1 || "$K8SE" == 1 ]]; then v="$(systemctl is-active grafana-server prometheus 2>/dev/null | tr '\n' ' ')"; n="$(systemctl is-active grafana-server prometheus 2>/dev/null | grep -cx active || true)"; ((n == 2)) && r PASS "metrics stack" "$v" || r FAIL "metrics stack" "grafana-server/prometheus: ${v:-no answer}"; fi
 # The report carries a summary per sub-suite and one FINAL REPORT; only the last
 # PASS:/FAIL: pair is the verdict (the first match read "39 passed" of 225, 2026-09-13).
 if [[ -r /root/kldload-smoke-report.txt ]]; then

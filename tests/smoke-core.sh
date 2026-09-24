@@ -67,7 +67,15 @@ test_dataset "rpool/ROOT exists" "rpool/ROOT"
 # failure inside test_output_contains cascaded through set -e and
 # halted smoke-core.sh after the rpool/ROOT exists check, with no
 # FAIL line printed (silent abort).
-test_output_contains "Root dataset mounted at /" "zfs get -rH -o value mountpoint rpool/ROOT" "/"
+# Ask the kernel what is mounted at /, and require it to be a boot
+# environment. The old form grepped `zfs get mountpoint` output for "/", which
+# every mountpoint contains -- a probe that could not fail (2026-09-23).
+_rootsrc="$(findmnt -no SOURCE / 2>/dev/null || true)"
+if [[ "$_rootsrc" =~ ^[a-z0-9_-]+/ROOT/ ]]; then
+    _pass "Root dataset mounted at / (${_rootsrc})"
+else
+    _fail "Root dataset mounted at /" "findmnt -no SOURCE / says '${_rootsrc:-nothing}', expected <pool>/ROOT/<be>"
+fi
 test_dataset "rpool/home exists" "rpool/home"
 test_dataset "rpool/var exists" "rpool/var"
 test_dataset "rpool/var/log exists" "rpool/var/log"

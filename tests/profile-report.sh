@@ -558,8 +558,15 @@ echo
 echo "## Logs"
 echo
 _fb=/var/log/kldload/firstboot.log
-_fbw="$(S grep -ciE 'warning|fatal|error' "$_fb" || echo 0)"
-_jerr="$(S journalctl -p err -b --no-pager -q | grep -c . || echo 0)"
+# `|| true` and a default, NOT `|| echo 0`: grep -c prints its "0" and then
+# exits 1, so the echo appended a second line and the substitution held
+# "0\n0" -- and the `(( ))` tests below aborted the report on every CLEAN
+# machine (confirmed 2026-09-23). Only a missing file or an empty pipeline
+# yields nothing at all, which the default covers.
+_fbw="$(S grep -ciE 'warning|fatal|error' "$_fb" || true)"
+_fbw="${_fbw:-0}"
+_jerr="$(S journalctl -p err -b --no-pager -q | grep -c . || true)"
+_jerr="${_jerr:-0}"
 echo '```'
 printf '%-24s %s\n' \
     "firstboot warn/error" "${_fbw}" \

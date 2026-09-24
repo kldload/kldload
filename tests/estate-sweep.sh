@@ -569,9 +569,12 @@ for ed in "${EDITIONS[@]}"; do
             # 1800s per golden: a clone, then bounded waits on every registry
             # to notice it and to release it. At 120s it was killed mid-run
             # (deb-4-k8s, 2026-09-20).
+            # Its verdict is in the file and its status is kept: a failed
+            # lifecycle is a result, not a reason to stop, and exit 2 is
+            # "could not run", which is neither.
+            _lrc=0
             SSH_T=1800 ssh_bench "$ip" "sudo -n bash /usr/local/share/kldload/tests/estate-lifecycle.sh --source '${_g}'" \
-                >"$_gf" 2>&1 ||
-                true # its verdict is in the file; a failed lifecycle is a result, not a reason to stop
+                >"$_gf" 2>&1 || _lrc=$?
             {
                 printf '\n===== %s =====\n' "$_g"
                 cat "$_gf"
@@ -580,8 +583,12 @@ for ed in "${EDITIONS[@]}"; do
             _lc="$(grep -cE '✗ FAIL' "$_gf" 2>/dev/null || true)"
             _lp="$(grep -cE '✓ PASS' "$_gf" 2>/dev/null || true)"
             # No summary line means the run did not finish; counting only its
-            # passes would report a killed test as a clean one.
-            if ! grep -q 'estate lifecycle:' "$_gf" 2>/dev/null; then
+            # passes would report a killed test as a clean one. Exit 2 means
+            # it never started: not a pass, and not a golden that was tested.
+            if ((_lrc == 2)); then
+                say "${ed}: ${_g}: lifecycle DID NOT RUN — $(grep -m1 'DID NOT RUN' "$_gf" 2>/dev/null | sed 's/.*DID NOT RUN — //' | cut -c1-120)"
+                _g_bad+=("${_g}(did-not-run)")
+            elif ! grep -q 'estate lifecycle:' "$_gf" 2>/dev/null; then
                 say "${ed}: ${_g}: lifecycle did NOT finish — truncated after ${_lp} passes"
                 _g_bad+=("${_g}(truncated)")
             elif [[ "${_lc:-0}" != 0 ]]; then

@@ -250,11 +250,14 @@ trap cleanup EXIT
 # ─── Preconditions ──────────────────────────────────────────────────────────
 _section "Estate lifecycle — preconditions"
 
+# Exit 2, as the header promises: "could not run" is neither a pass nor a
+# failure, and it exited 0 here -- so the sweep counted a golden the test
+# never touched as a passed lifecycle (2026-09-23).
 for _t in virsh kvm-clone kvm-delete kldload-inventory; do
     have "$_t" || {
         _didnotrun "estate lifecycle" "${_t} is not installed — this is not a hypervisor"
-        printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
-        exit 0
+        printf '\n  estate lifecycle: %d passed, %d failed, %d warned (DID NOT RUN)\n' "$PASS" "$FAIL" "$WARN"
+        exit 2
     }
 done
 
@@ -265,8 +268,8 @@ if [[ -z "$SOURCE_VM" ]]; then
 fi
 if [[ -z "$SOURCE_VM" ]]; then
     _didnotrun "estate lifecycle" "no golden to clone — build one first (klab golden) or pass --source"
-    printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
-    exit 0
+    printf '\n  estate lifecycle: %d passed, %d failed, %d warned (DID NOT RUN)\n' "$PASS" "$FAIL" "$WARN"
+    exit 2
 fi
 _pass "source VM: ${SOURCE_VM}"
 echo "  probe name: ${PROBE}  (created and destroyed by this script, by exact name)"
@@ -367,7 +370,11 @@ else
         fi
         _pb_out="$(timeout 300 ansible-playbook -i /usr/local/bin/kldload-inventory \
             --limit "$PROBE" "${_PLAYS}/${_pb}" </dev/null 2>&1)" || true
-        _recap="$(printf '%s\n' "$_pb_out" | grep -E "^${PROBE} +: +ok=" | tail -n 1)"
+        # `|| true`: grep exits 1 when there is no recap line, and under
+        # pipefail that tripped errexit HERE, so the "no recap line" branch
+        # below was never reached -- the suite died instead of failing the
+        # play (2026-09-23).
+        _recap="$(printf '%s\n' "$_pb_out" | grep -E "^${PROBE} +: +ok=" | tail -n 1 || true)"
         if [[ -z "$_recap" ]]; then
             _fail "playbook ${_pb}" "no recap line for ${PROBE} — $(printf '%s' "$_pb_out" | tail -n 1 | cut -c1-120)"
         elif [[ "$_recap" =~ failed=0 && "$_recap" =~ unreachable=0 && ! "$_recap" =~ ok=0[[:space:]] ]]; then
@@ -384,9 +391,12 @@ fi
 # match the peer to the machine. Found on a k8s-golden clone on onyx,
 # 2026-09-22, with .197 and .200. wg-* interfaces are the mesh, not the NIC.
 if have ansible && in_inventory "$PROBE"; then
+    # `|| true`: ansible exits non-zero for an unreachable host and pipefail
+    # would end the suite here; an empty result is the "could not read
+    # addresses" FAIL below, which was unreachable before (2026-09-23).
     _addrs="$(timeout 60 ansible "$PROBE" -i /usr/local/bin/kldload-inventory -m command \
         -a 'ip -4 -o addr show scope global' </dev/null 2>/dev/null |
-        awk '$2 !~ /^wg/ && $3 == "inet" {print $2 "=" $4}' | tr '\n' ' ')"
+        awk '$2 !~ /^wg/ && $3 == "inet" {print $2 "=" $4}' | tr '\n' ' ' || true)"
     _n="$(printf '%s' "$_addrs" | wc -w)"
     if ((_n == 1)); then
         _pass "one address on the NIC: ${_addrs% }"
