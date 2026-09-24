@@ -467,21 +467,9 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
                     _checked=$((_checked + 1))
                     if ! grep -qxF "$_bin" "$ULIST" && ! grep -qxF "$_alt" "$ULIST"; then
                         # KNOWN-UNIMPLEMENTED, named explicitly rather than
-                        # skipped silently. kldload-autobootstrap's program has
-                        # never existed in this repository -- the unit and timer
-                        # ship, and until 2026-08-25 firstboot enabled the timer,
-                        # so it failed 203/EXEC on every install unnoticed.
-                        # firstboot now refuses to enable it while the binary is
-                        # absent, which makes it inert rather than broken. It
-                        # stays on this list, and stays reported every build, so
-                        # it is not forgotten again. Delete the entry the day the
-                        # program lands -- or delete the units if it never will.
-                        case "$(basename "$_unit")" in
-                        kldload-autobootstrap.service)
-                            _warn "unit ExecStart missing (known, unimplemented)" "$(basename "$_unit") -> ${_bin} — the program was never written; firstboot does not enable it"
-                            continue
-                            ;;
-                        esac
+                        # (kldload-autobootstrap's units, which shipped with no
+                        # program since 2026-08-25, were deleted 2026-09-23; no
+                        # exemption remains here on purpose.)
                         _fail "unit ExecStart exists" "$(basename "$_unit") -> ${_bin} is NOT in the rootfs (would fail 203/EXEC)"
                         _missing=$((_missing + 1))
                     fi
@@ -1074,8 +1062,7 @@ _section "Answers files"
 # LOADED here with the real loader, and every value it produces is checked.
 _an_lib="${ROOT}/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/answers.sh"
 _an_bad=0 _an_n=0
-for _af in "${ROOT}"/live-build/config/includes.chroot/etc/kldload/answers/*.env \
-    "${ROOT}"/live-build/config/includes.chroot/etc/kldload/debz/answers/*.env; do
+for _af in "${ROOT}"/live-build/config/includes.chroot/etc/kldload/answers/*.env; do
     [[ -f "$_af" ]] || continue
     _an_n=$((_an_n + 1))
     _an_out="$(bash -c 'set -uo pipefail

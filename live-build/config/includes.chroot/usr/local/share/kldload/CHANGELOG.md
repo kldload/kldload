@@ -15,7 +15,8 @@
 8. [Why the shape is what it is](#why-the-shape-is-what-it-is)
 9. [Two defaults changed](#two-defaults-changed)
 10. [Also](#also)
-11. [Known issues](#known-issues)
+11. [The release review](#the-release-review)
+12. [Known issues](#known-issues)
 
 ---
 
@@ -581,6 +582,85 @@ the proxmox profile were reverted — they were half-built and shipping them wou
 have meant four more editions to verify for no one who had asked. The arcade
 session was reverted because it segfaulted on the first keypress.
 
+### The release review
+
+Before tagging, the whole tree was read against the question "would I put this
+in front of an enterprise security team". Six passes — security, silent failure
+on the install path, things written but never wired, operator interface against
+its own documentation, the Go and Python, and what the tests actually prove —
+each with file and line for every claim, and each claim re-read before it was
+acted on. Build 66 is the first build with the results in it. What was found,
+in the order it would have hurt:
+
+- **The live image accepted root over SSH with a published password.** Every
+  USB or PXE boot — a whole rack mid-provisioning — ran sshd with
+  `PermitRootLogin yes` and `root:kldload`, while the disks and the install
+  secrets were present. root is locked on the live image now and sshd allows
+  it by key only. A script that hard-coded the build host's root key into
+  live's and root's `authorized_keys` — under a comment saying the release
+  process stripped it — is deleted; it had never run, because the unit that
+  called it was enabled by a live-build hook the lorax build never executes.
+- **Every install trusted one shared key.** The image carried a single
+  `admin@kldload` public key that the installer appended to every install's
+  `~admin/.ssh/authorized_keys`, next to NOPASSWD sudo. Whoever held that
+  private key was root on every kldload box. The file is gone, the build
+  refuses to ship it, and keys reach a target only from `KLDLOAD_ADMIN_SSH_KEYS`.
+- **The netboot menu put passwords on the kernel command line.** The
+  credentials form added on 18 September carried the login password, the ZFS
+  passphrase and the Red Hat login on the live cmdline, URI-encoded.
+  `/proc/cmdline`, dmesg and the journal are readable by every live user. The
+  form is gone; the machine's own screen asks for what the answers file does
+  not carry, and `kldload-autoinstall` refuses any secret it finds there.
+- **The support bundle carried the keys.** `kldload-debug-bundle` copied all of
+  `/etc/kldload`: the root SSH private key, the WireGuard keys, the web UI root
+  token, the CA private key and, until first boot finished, the ZFS passphrase.
+  It now copies an allowlist and redacts by name pattern.
+- **A failed Red Hat registration was retried with `--insecure`.** One verified
+  attempt now; the password no longer sits on the process list.
+- **`hub.env` was fetched over HTTP and sourced as root** at first boot. It is
+  parsed as `KEY=VALUE` and nothing else.
+- **Arch and Alpine reported success on a machine that could not boot.** The
+  bootstrap logged "system WILL NOT boot with ZFS" and returned 0. Both paths
+  now end in one outcome check — kernel, initramfs, `zfs.ko` — and fail
+  without them. The GRUB `direct` default, which Secure Boot intent selects,
+  is refused when nothing was staged behind it; the admin account is checked
+  after it is created, on the dnf path where a failure was previously invisible.
+- **Two MOK passwords.** The installer hard-coded `kldload` for the enrolment
+  while every screen said `KLDLOAD_MOK_PASSWORD`; and its `chroot target
+  command -v mokutil` exits 127 on Debian, Ubuntu and Arch (`command` is a
+  builtin, only Fedora ships the wrapper), so the enrolment in `security.sh`
+  never ran there. One variable, a file test.
+- **The web UI trusted an IP address as identity.** Loopback auto-auth is
+  now bound to the proxy-only unix socket; in any TCP run mode nothing is
+  trusted. Bob's autonomy defaults to off, and to off again when its settings
+  file cannot be read — it used to default to running root commands unasked.
+  `wipe_disk` matched pools by substring (`sda` matched `sdaa`) and destroyed a
+  pool when it could not export it; it matches real paths and stops instead.
+  The install answers were quoted in a form the loader does not un-escape (a
+  password with a quote landed altered) and written to a predictable name in
+  `/tmp`; the New VM button called a tool that was never shipped.
+- **`apt rollback` rebooted in two seconds.** The README, and the wrapper's own
+  comment, said it only staged. It stages. `deploy.sh burn` defaulted to
+  `/dev/sda` so its documented auto-detect could never run; `kupgrade --help`
+  ran the upgrade.
+- **The CI smoke gate never looked inside the ISO.** `smoke-build` mounts the
+  image with `mount -o loop`, which fails for the unprivileged user CI runs it
+  as; the failure was a warning, and every ISO-content check has been skipped on
+  every CI run since the gate was written. The mount is now `sudo -n` and a
+  mount failure is a failed gate. The estate sweep judged the bench by profile
+  and uptime alone — a failed install that fell back to the previous local
+  boot would have passed as the requested edition; it now reads the distro and
+  the build commit off the machine.
+- **46 live-build hooks that nothing ran.** The `live-build/config/hooks` tree
+  predates the lorax build and was never executed; the units and files it
+  would have wired (`zexplore-api` on installed targets, `klab-hubble-relay`,
+  the qemu guest agent on the live image) are wired explicitly now, and the
+  dead tree, three dead units, two dead tools and a JavaScript file no page
+  loaded are gone. `kube-setup` pinned Cilium CLI and Helm versions under a
+  comment saying versions are never pinned; they come from the stack lock.
+
+What the review did not change, and why, is under Known issues.
+
 ### Known issues
 
 - `builder/build-iso.sh` is the last script not running under strict mode, held
@@ -600,6 +680,16 @@ the module-signing **private** key no longer ships in the installation media
 (the build fails on any private key found in the rootfs, and installs use BYOK
 or a per-install key), and every shipped tool now answers `-h`/`--help` without
 root and without side effects — that baseline is empty and gated.
+
+Left for 1.5.1, found by the release review and not changed here: the web UI
+treats a loopback client behind nginx as the operator (any local process is
+root through it — a design decision that predates the review, now bounded to
+the unix-socket mode); `kldload-webui` and `kldload-doctor` are far from
+`mypy --strict`; 23 of the 25 main tools have no man page and none reach an
+installed system; the `--help` contract still drifts on a handful of tools;
+no automated install covers Ubuntu, CentOS, Rocky or Arch, or Secure Boot
+with encryption; the `|| true` ratchet stands at 432 uncommented swallows in
+the install and cluster scope.
 
 ## 1.4.2 — 28 August 2026
 
