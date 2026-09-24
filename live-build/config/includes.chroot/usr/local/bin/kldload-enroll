@@ -459,6 +459,36 @@ elif [[ -z "$node_id" ]]; then
 fi
 log "${VM}: mesh id ${node_id} (${MGMT_SUBNET}.${node_id})"
 
+# ── The hypervisor's own side of the mesh, BEFORE touching the guest ───────
+# On a KVM install with no cluster, nothing ever put the HOST on the mesh:
+# kube-cluster does that for a Kubernetes edition, and nothing else did. Every
+# enrolment then initialised the guest, found no host key, and stopped with
+# "hypervisor is not on the mesh" -- leaving guests half-enrolled. fiend, build
+# 62, deb-3-kvm (2026-09-23): no wg-mgmt at all, every klab golden's clone
+# failed the lifecycle there. Hidden until 5923203c, behind the crash it fixed.
+#
+# So the host is brought up here when the operator asked for WireGuard at
+# install time (KLDLOAD_WIREGUARD=1 in the manifest), with the hypervisor's
+# conventional id, and checked to be up. Not asked for: no mesh is invented.
+if [[ ! -s /etc/wireguard/wg-mgmt.pub ]]; then
+    # No manifest (a host kldload did not install) reads as unset, and unset
+    # declines below; the swallow keeps that case from ending the script.
+    _wg_wanted="$(sed -n 's/^KLDLOAD_WIREGUARD="\{0,1\}\([01]\).*/\1/p' /etc/kldload/install-manifest.env 2>/dev/null | tail -1 || true)"
+    if [[ "$_wg_wanted" != 1 ]]; then
+        warn "hypervisor is not on the mesh and WireGuard was not requested at install (KLDLOAD_WIREGUARD=${_wg_wanted:-unset}) — run 'kube-network init ${HOST_ID}' to opt in; ${VM} left off the mesh (DB row was written)"
+        exit 2
+    fi
+    log "hypervisor is not on the mesh yet — initialising it as node ${HOST_ID} (KLDLOAD_WIREGUARD=1)"
+    kube-network init "$HOST_ID" >/dev/null 2>&1 ||
+        warn "kube-network init ${HOST_ID} reported a problem on the hypervisor"
+    # Outcome, not exit code: a key AND a running interface.
+    if [[ ! -s /etc/wireguard/wg-mgmt.pub ]] || ! ip link show wg-mgmt >/dev/null 2>&1; then
+        warn "hypervisor mesh did not come up (no wg-mgmt) — ${VM} left off the mesh (DB row was written)"
+        exit 2
+    fi
+    log "hypervisor on the mesh as ${MGMT_SUBNET}.${HOST_ID}"
+fi
+
 # INIT ONLY ONCE. `kube-network init` is not idempotent: it does
 # `cat >/etc/wireguard/wg-k8s.conf` and the same for wg-mgmt, so it TRUNCATES
 # both configs and every peer in them, then bounces the interfaces. Calling it
