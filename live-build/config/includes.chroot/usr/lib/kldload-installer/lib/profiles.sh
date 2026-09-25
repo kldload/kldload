@@ -467,14 +467,19 @@ k_profile_packages() {
             _iscsi="targetcli"
             _nodeexp="node-exporter"
         fi
+        # smbclient: the storage smoke suite lists the share the way a client
+        # would, and an operator wants it for the same reason. salt-minion is
+        # gone from this list (2026-09-24): Debian dropped Salt after
+        # bookworm, the package never installed on trixie, and every storage
+        # sweep reported "1 did not install" for a service nothing tests.
         echo "openssh-server sudo curl ca-certificates vim less iproute2 \
         ${_nfs} \
         ${_iscsi} \
-        samba \
+        samba smbclient \
         ${_nodeexp} \
         nftables chrony \
         podman \
-        salt-minion wireguard-tools"
+        wireguard-tools"
         ;;
 
     vdi)

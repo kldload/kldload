@@ -2251,7 +2251,7 @@ CUSTOMREPO
             tcpdump socat sysstat net-tools
             nfs-utils
             targetcli python3-rtslib
-            samba samba-common
+            samba samba-common samba-client
             node-exporter
         )
         ;;
