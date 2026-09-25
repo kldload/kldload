@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# kldload-firewall — the host firewall: one nftables table, rendered from what
+# this machine is and what it serves, loaded by kldload-firewall.service.
+#
+# Usage:
+#   kldload-firewall apply       render /etc/nftables.d/00-kldload-host.nft and
+#                                load every /etc/nftables.d/*.nft (idempotent)
+#   kldload-firewall rules       print what apply would load, load nothing
+#   kldload-firewall status      is the table loaded, and what it allows
+#   kldload-firewall -h | --help
+#
+# What apply allows on INPUT (everything else is dropped and counted):
+#   - loopback; established/related; ICMP and ICMPv6 (path MTU, neighbour
+#     discovery — dropping these breaks IPv6 and every fragmented stream)
+#   - DHCP client replies (udp sport 67) — a host that firewalls its lease
+#     away loses its address at renewal
+#   - SSH (22) from anywhere: the way in for the operator and for Ansible
+#   - the web UI and its redirect (443, 8443, 80): nginx in front of the
+#     console, the show and the netboot menu's images
+#   - WireGuard (udp 51820-51823), and everything arriving on a wg-* interface:
+#     the mesh planes are trusted networks by design (kube-network,
+#     kldload-enroll, Prometheus over the mesh)
+#   - everything arriving on a libvirt bridge (virbr*, kld-*): the guests are
+#     this host's own, and dnsmasq/NFS/the API they talk to live here
+#   - the netboot server's ports when this host keeps the payload
+#     (KLDLOAD_KEEP_NETBOOT=1: udp 67/69/4011 for proxyDHCP+TFTP, tcp 8080)
+#   - whatever a profile fragment under /etc/nftables.d/ adds (the storage
+#     profile writes kldload-storage.nft: nfs, smb, iscsi, node-exporter)
+# FORWARD is accept: libvirt NAT and the bridges need it; OUTPUT is accept.
+#
+# Inputs : /etc/kldload/install-manifest.env (KLDLOAD_KEEP_NETBOOT),
+#          /etc/nftables.d/*.nft
+# Outputs: /etc/nftables.d/00-kldload-host.nft, the live ruleset
+# Exit   : 0 · 1 nft refused the ruleset or is missing · 2 usage
+#
+# Why a table of its own (inet kldload_host) and never `flush ruleset`: the
+# master role's firstboot and kube-network write their own tables; flushing
+# the ruleset would take theirs down and theirs would take this one down.
+# Each table is flushed and re-added by name.
+#
+# Why opt-in (KLDLOAD_FIREWALL=1 in the answers): the release matrix has
+# never run with a host firewall, and a rule that drops what a sweep needs
+# would read as a broken install. It is enabled by profiles.sh only when
+# asked for, and the doctor warns while it is off. 2026-09-24.
+
+set -Eeuo pipefail
+trap 'echo "kldload-firewall: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"; }
+case "${1:-}" in
+-h | --help)
+    usage
+    exit 0
+    ;;
+esac
+
+# Overridable for the gate that renders and parse-checks the rules without
+# touching this host (tests/smoke-unit.sh); the defaults are the real paths.
+FRAG_DIR="${KLDLOAD_FIREWALL_FRAG_DIR:-/etc/nftables.d}"
+HOST_FRAG="$FRAG_DIR/00-kldload-host.nft"
+MANIFEST="${KLDLOAD_FIREWALL_MANIFEST:-/etc/kldload/install-manifest.env}"
+TABLE=kldload_host
+
+# manifest_flag KEY — the value of KEY in the install manifest, or "" (never
+# sourced: the manifest is data).
+manifest_flag() {
+    [[ -r "$MANIFEST" ]] || return 0
+    sed -n "s/^${1}=\"\{0,1\}\([^\"]*\).*/\1/p" "$MANIFEST" | tail -1
+}
+
+render() {
+    local netboot
+    netboot="$(manifest_flag KLDLOAD_KEEP_NETBOOT)"
+    cat <<NFT
+# Rendered by kldload-firewall apply — edit the tool, not this file.
+table inet ${TABLE}
+flush table inet ${TABLE}
+table inet ${TABLE} {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        iif lo accept
+        ct state established,related accept
+        ct state invalid drop
+        ip protocol icmp accept
+        ip6 nexthdr icmpv6 accept
+        udp sport 67 udp dport 68 accept comment "DHCP client"
+        tcp dport 22 accept comment "ssh: operator, Ansible"
+        tcp dport { 80, 443, 8443 } accept comment "nginx: web UI, show, images"
+        udp dport { 51820, 51821, 51822, 51823 } accept comment "WireGuard planes"
+        iifname "wg*" accept comment "the mesh is a trusted network"
+        iifname { "virbr*", "kld-*" } accept comment "this host's own guests"
+NFT
+    if [[ "$netboot" == 1 ]]; then
+        cat <<NFT
+        udp dport { 67, 69, 4011 } accept comment "netboot: proxyDHCP, TFTP, PXE"
+        tcp dport 8080 accept comment "netboot: payload over HTTP"
+NFT
+    fi
+    cat <<NFT
+        counter drop
+    }
+    chain forward { type filter hook forward priority 0; policy accept; }
+    chain output { type filter hook output priority 0; policy accept; }
+}
+NFT
+}
+
+cmd_rules() {
+    render
+    local f
+    for f in "$FRAG_DIR"/*.nft; do
+        [[ -f "$f" && "$f" != "$HOST_FRAG" ]] || continue
+        printf '\n# %s\n' "$f"
+        cat "$f"
+    done
+}
+
+cmd_apply() {
+    command -v nft >/dev/null 2>&1 || {
+        echo "kldload-firewall: nft is not installed" >&2
+        exit 1
+    }
+    install -d -m 0755 "$FRAG_DIR"
+    local tmp
+    tmp="$(mktemp)"
+    render >"$tmp"
+    # Check before touching the live ruleset: a fragment with a syntax error
+    # must not leave the host with half a firewall.
+    local all
+    all="$(mktemp)"
+    {
+        cat "$tmp"
+        local f
+        for f in "$FRAG_DIR"/*.nft; do
+            [[ -f "$f" && "$f" != "$HOST_FRAG" ]] || continue
+            cat "$f"
+        done
+    } >"$all"
+    if ! nft -c -f "$all"; then
+        rm -f "$tmp" "$all"
+        echo "kldload-firewall: the ruleset does not parse — nothing was loaded (see the errors above)" >&2
+        exit 1
+    fi
+    install -m 0644 "$tmp" "$HOST_FRAG"
+    nft -f "$all" || {
+        rm -f "$tmp" "$all"
+        echo "kldload-firewall: nft refused the ruleset" >&2
+        exit 1
+    }
+    rm -f "$tmp" "$all"
+    # Outcome: the table is in the kernel.
+    nft list table inet "$TABLE" >/dev/null 2>&1 ||
+        {
+            echo "kldload-firewall: nft returned 0 and the table is not loaded" >&2
+            exit 1
+        }
+    echo "kldload-firewall: table inet ${TABLE} loaded ($(nft list table inet "$TABLE" | grep -c accept) allow rules)"
+}
+
+cmd_status() {
+    if nft list table inet "$TABLE" >/dev/null 2>&1; then
+        echo "loaded: table inet ${TABLE}"
+        nft list table inet "$TABLE" | grep -E 'accept|policy|counter' | sed 's/^/  /'
+    else
+        echo "not loaded: table inet ${TABLE} (kldload-firewall apply, or KLDLOAD_FIREWALL=1 at install)"
+        exit 1
+    fi
+}
+
+case "${1:-}" in
+apply)
+    [[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+    cmd_apply
+    ;;
+rules) cmd_rules ;;
+status)
+    [[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+    cmd_status
+    ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac

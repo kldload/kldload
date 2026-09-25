@@ -251,7 +251,8 @@ it. That path needs three extra steps:
 |---|---|
 | `sudo kldload-support` | Runs the doctor, collects the redacted bundle (no keys, passwords or passphrases), prints the one file to attach and the doctor's failures with their fixes |
 | `kldload-answers check FILE` | Checks an answers file the way the installer will read it — distro/profile the image offers, disk, 0/1 keys, placeholders, encryption/RHEL/Kubernetes cross-key rules, undocumented keys, file mode — before a machine is armed with it |
-| `kldload-doctor` | Every check as JSON; exit 0 clean, 1 failures, 2 a check crashed |
+| `kldload-doctor` | Every check as JSON with a stable id per check; exit 0 clean, 1 failures, 2 a check crashed |
+| `kldload-firewall apply` | The host firewall (opt-in: `KLDLOAD_FIREWALL=1` in the answers, or enable `kldload-firewall.service` later): one nftables table — ssh, the web UI, WireGuard, the guests' bridges, DHCP, ICMP and the profile's own ports; everything else dropped and counted. `KLDLOAD_SELINUX=permissive` is the matching opt-in on the RPM family; the doctor reports both |
 
 ---
 

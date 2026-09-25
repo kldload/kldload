@@ -1144,6 +1144,11 @@ EOFSTAB
     # whenever SB is intended. Operators who are not using Secure Boot untick
     # the Secure Boot card in the installer and get ZBM as the default
     # boot-environment picker; ZBM also stays reachable from the 5s menu.
+    # selinux=0 on the kernel line only while SELinux is disabled: with
+    # KLDLOAD_SELINUX=permissive the config file decides and the kernel arg
+    # would silently undo it (2026-09-24).
+    local _sel_arg="selinux=0"
+    [[ "${KLDLOAD_SELINUX:-disabled}" == "permissive" ]] && _sel_arg=""
     local _grub_default="zbm"
     [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] && _grub_default="direct"
     # A `direct` default with nothing behind it is a GRUB "file not found" on
@@ -1405,7 +1410,7 @@ menuentry "kldload — ZFS Boot Menu (boot environments + snapshot rollback)" --
 }
 
 menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro ${_direct_bootargs}${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} psi=1 selinux=0
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro ${_direct_bootargs}${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} psi=1 ${_sel_arg}
     initrd /EFI/BOOT/initrd.img
 }
 
@@ -1415,7 +1420,7 @@ menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct 
 # entry that also cannot import the pool leaves them with nothing but the
 # initramfs prompt they were trying to escape.
 menuentry "kldload — rescue (single-user)" --id=rescue {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro single${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} selinux=0
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro single${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} ${_sel_arg}
     initrd /EFI/BOOT/initrd.img
 }
 GRUBCFG

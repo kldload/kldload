@@ -725,7 +725,11 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     ((_zbm_arc > 0)) || _zbm_arc=8589934592
     _zbm_args+=" zfs.zfs_arc_max=${_zbm_arc} zfs.zfs_txg_timeout=10 zfs.l2arc_noprefetch=0"
     k_zfs_log "pinned ZFS module params on the ZBM cmdline (arc_max=${_zbm_arc})"
-    zfs set org.zfsbootmenu:commandline="${_zbm_args} psi=1 selinux=0" rpool/ROOT
+    # selinux=0 only while SELinux is disabled (KLDLOAD_SELINUX, profiles.sh):
+    # ZBM builds the kernel line from this property alone.
+    local _sel_arg="selinux=0"
+    [[ "${KLDLOAD_SELINUX:-disabled}" == "permissive" ]] && _sel_arg=""
+    zfs set org.zfsbootmenu:commandline="${_zbm_args} psi=1${_sel_arg:+ ${_sel_arg}}" rpool/ROOT
 
     # ── Make the boot menu reachable ─────────────────────────────────────────
     # ZFSBootMenu is the rollback path: it is where you pick an older boot

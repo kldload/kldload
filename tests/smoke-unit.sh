@@ -649,6 +649,41 @@ else
     _fail "autoinstall netboot override" "${_abad}"
 fi
 
+# ─── host firewall: the rendered ruleset parses, with and without netboot ────
+# kldload-firewall renders from the manifest; nft -c proves the result is a
+# ruleset the kernel would take, with the storage profile's fragment beside it.
+# A gate that only checked the file existed would pass an unloadable firewall.
+_section "host firewall: rendered rules parse"
+_fw="${CHROOT}/usr/local/sbin/kldload-firewall"
+if command -v nft >/dev/null 2>&1; then
+    _ft="$(mktemp -d)"
+    mkdir -p "${_ft}/d"
+    sed -n '/STORAGENFT.$/,/^STORAGENFT$/p' "${CHROOT}/usr/lib/kldload-installer/lib/profiles.sh" | sed '1d;$d' >"${_ft}/d/kldload-storage.nft"
+    _fbad=""
+    for _nb in 1 0; do
+        printf 'KLDLOAD_KEEP_NETBOOT="%s"\n' "$_nb" >"${_ft}/m.env"
+        KLDLOAD_FIREWALL_FRAG_DIR="${_ft}/d" KLDLOAD_FIREWALL_MANIFEST="${_ft}/m.env" bash "$_fw" rules >"${_ft}/all.nft" 2>/dev/null || _fbad+=" render-failed(netboot=${_nb})"
+        # nft -c reads the ruleset without loading it; it needs CAP_NET_ADMIN
+        # for some checks, so root or sudo -n, else this case did not run.
+        if ((EUID == 0)); then _nftc=(nft -c -f); else _nftc=(sudo -n nft -c -f); fi
+        "${_nftc[@]}" "${_ft}/all.nft" >/dev/null 2>&1 || _fbad+=" does-not-parse(netboot=${_nb})"
+        _n="$(grep -c 'netboot' "${_ft}/all.nft" || true)"
+        [[ "$_nb" == 1 && "${_n:-0}" -ge 2 ]] || [[ "$_nb" == 0 && "${_n:-0}" -eq 0 ]] || _fbad+=" netboot-ports-wrong(netboot=${_nb})"
+    done
+    grep -q 'kldload_storage' "${_ft}/all.nft" || _fbad+=" storage-fragment-not-included"
+    printf 'table inet broken { chain x { tcp dport { 1 accept } }\n' >"${_ft}/d/zz.nft"
+    KLDLOAD_FIREWALL_FRAG_DIR="${_ft}/d" KLDLOAD_FIREWALL_MANIFEST="${_ft}/m.env" bash "$_fw" rules >"${_ft}/all.nft" 2>/dev/null || true
+    "${_nftc[@]}" "${_ft}/all.nft" >/dev/null 2>&1 && _fbad+=" broken-fragment-accepted"
+    rm -rf "${_ft}"
+    if [[ -z "$_fbad" ]]; then
+        _pass "kldload-firewall: rules parse with and without netboot, include the storage fragment, and a broken fragment is refused"
+    else
+        _fail "kldload-firewall rules" "${_fbad}"
+    fi
+else
+    _didnotrun "kldload-firewall rules" "nft is not installed on this host (dnf install nftables)"
+fi
+
 # ─── netboot manual override: the menu ───────────────────────────────────────
 _section "netboot override: the menu"
 _nbs="${CHROOT}/usr/local/sbin/kldload-netboot-server"

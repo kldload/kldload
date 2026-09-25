@@ -1,0 +1,24 @@
+# kldload-firewall.service — load the host firewall (table inet kldload_host)
+# from the rules kldload-firewall renders plus every /etc/nftables.d/*.nft.
+#
+# Enabled by the installer only when the answers file says KLDLOAD_FIREWALL=1
+# (profiles.sh); absent otherwise, and the doctor warns. Runs before the
+# network comes up so nothing listens unprotected, and again on demand:
+#   systemctl restart kldload-firewall
+# If this unit is missing the machine has no host firewall — that is the
+# 1.5.x default and it is stated in the README.
+[Unit]
+Description=kldload host firewall (nftables)
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+ConditionPathExists=/usr/sbin/nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/kldload-firewall apply
+ExecReload=/usr/local/sbin/kldload-firewall apply
+
+[Install]
+WantedBy=sysinit.target

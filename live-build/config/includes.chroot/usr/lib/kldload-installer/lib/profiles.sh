@@ -1153,7 +1153,7 @@ k_install_system_files() {
         # klab-hubble-relay.service is listed so the klab block further down
         # finds it the day it ships; as of 2026-09-23 no such unit is in the
         # tree, and that block says so rather than skipping in silence.
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-autodeploy.service kldload-firstboot-show.service kldload-firstboot-kiosk.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer klab-hubble-relay.service kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer kldload-io-scheduler.service; do
+        for f in kldload-firewall.service kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-autodeploy.service kldload-firstboot-show.service kldload-firstboot-kiosk.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer klab-hubble-relay.service kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer kldload-io-scheduler.service; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -4576,16 +4576,67 @@ KLABTIMER
         ;;
     esac
 
-    # ── SELinux on ZFS — disabled ─────────────────────────────────────────
-    # ZFS does not support xattr-based SELinux labels. All files get unlabeled_t
-    # which triggers thousands of AVC denials. Permissive still floods the
-    # console and audit log with noise. Disabled is the only clean option until
-    # OpenZFS ships proper SELinux policy modules.
-    # RPM distros only (CentOS, RHEL, Rocky, Fedora) — Debian/Ubuntu/Arch don't ship SELinux.
+    # ── SELinux on the RPM family ─────────────────────────────────────────
+    # KLDLOAD_SELINUX=disabled (the default) or permissive. Disabled is what
+    # every kldload install has shipped with; the old comment here said ZFS
+    # could not label files, which has not been true of OpenZFS with xattr=sa
+    # (the root datasets are created with it) for years — but no sweep has
+    # ever run with SELinux on, so it is opt-in until one has
+    # (docs/release-1.0-manifest.md §5.1). Permissive never denies; it labels
+    # the tree at install time and logs AVCs, which the doctor counts, so the
+    # step to enforcing is measured rather than guessed. Debian/Ubuntu/Arch
+    # ship no SELinux; the file test keeps them out.
     if [[ -f "${target}/etc/selinux/config" ]]; then
-        sed -i 's/^SELINUX=enforcing/SELINUX=disabled/' "${target}/etc/selinux/config"
-        sed -i 's/^SELINUX=permissive/SELINUX=disabled/' "${target}/etc/selinux/config"
-        k_log "SELinux disabled (ZFS has no SELinux policy — re-enable manually if needed)"
+        case "${KLDLOAD_SELINUX:-disabled}" in
+        permissive)
+            sed -i 's/^SELINUX=.*/SELINUX=permissive/' "${target}/etc/selinux/config"
+            grep -q '^SELINUX=permissive$' "${target}/etc/selinux/config" ||
+                k_die "could not set SELINUX=permissive in ${target}/etc/selinux/config"
+            # Label the tree now, or the first boot spends a reboot on
+            # /.autorelabel. setfiles is in policycoreutils; a target without
+            # it gets the autorelabel marker instead, which is slower but right.
+            if [[ -x "${target}/usr/sbin/setfiles" && -f "${target}/etc/selinux/targeted/contexts/files/file_contexts" ]]; then
+                k_log "SELinux permissive: labelling the target with setfiles (this takes a minute)"
+                chroot "${target}" /usr/sbin/setfiles -r / /etc/selinux/targeted/contexts/files/file_contexts / 2>&1 |
+                    tail -n 5 >>"${KLDLOAD_LOG_DIR:-/var/log/installer}/selinux-relabel.log" ||
+                    k_log "WARNING: setfiles reported errors — see selinux-relabel.log; the first boot will relabel"
+                touch "${target}/.autorelabel"
+            else
+                k_log "SELinux permissive: setfiles not on the target — /.autorelabel set, first boot relabels once"
+                touch "${target}/.autorelabel"
+            fi
+            k_log "SELinux permissive (KLDLOAD_SELINUX=permissive): denials are logged, nothing is blocked"
+            ;;
+        disabled | "")
+            sed -i 's/^SELINUX=.*/SELINUX=disabled/' "${target}/etc/selinux/config"
+            k_log "SELinux disabled (default; KLDLOAD_SELINUX=permissive to label and log instead)"
+            ;;
+        *)
+            k_die "KLDLOAD_SELINUX=${KLDLOAD_SELINUX} — must be disabled or permissive (enforcing is not offered until a sweep has run permissive clean)"
+            ;;
+        esac
+    fi
+
+    # ── Host firewall — opt-in ────────────────────────────────────────────
+    # KLDLOAD_FIREWALL=1 enables kldload-firewall.service, which loads one
+    # nftables table (drop on input except ssh, the web UI, the mesh, the
+    # guests' bridges, DHCP, ICMP and any /etc/nftables.d fragment a profile
+    # wrote). Off by default because no sweep has run behind it yet; the
+    # doctor warns while it is off. The unit ships on every profile so
+    # `systemctl enable --now kldload-firewall` turns it on later.
+    if [[ "${KLDLOAD_FIREWALL:-0}" == "1" ]]; then
+        if [[ -f "${target}/usr/lib/systemd/system/kldload-firewall.service" ]]; then
+            mkdir -p "${target}/etc/systemd/system/sysinit.target.wants"
+            ln -sf /usr/lib/systemd/system/kldload-firewall.service \
+                "${target}/etc/systemd/system/sysinit.target.wants/kldload-firewall.service"
+            [[ -L "${target}/etc/systemd/system/sysinit.target.wants/kldload-firewall.service" ]] ||
+                k_die "kldload-firewall.service enable symlink did not land"
+            k_log "host firewall ENABLED (KLDLOAD_FIREWALL=1): kldload-firewall.service loads at boot"
+        else
+            k_die "KLDLOAD_FIREWALL=1 but kldload-firewall.service is not on the target — the unit copy above missed it"
+        fi
+    else
+        k_log "host firewall not enabled (KLDLOAD_FIREWALL=1 to turn it on; kldload-firewall apply later)"
     fi
 
     k_log "System files installed (root_ds=${root_ds})"

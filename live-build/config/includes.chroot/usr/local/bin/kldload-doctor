@@ -1328,7 +1328,49 @@ def check_ai_payload_reclaimed():
                                "(safe once Ollama and Open WebUI are running)")
 
 
+# ── Hardening checks ─────────────────────────────────────────────────────────
+
+def check_host_firewall():
+    """Is the host firewall loaded? Opt-in (KLDLOAD_FIREWALL=1), so its absence
+    is a warning that says how to turn it on, not a failure."""
+    rc, out, _ = _run(["nft", "list", "table", "inet", "kldload_host"], timeout=10)
+    if rc == 0 and "chain input" in out:
+        return _result("security", "host firewall", "ok",
+                       "table inet kldload_host loaded", "loaded",
+                       severity="high")
+    return _result("security", "host firewall", "warn",
+                   "table inet kldload_host loaded",
+                   "not loaded — every listener is reachable from the LAN",
+                   severity="high",
+                   remediation="systemctl enable --now kldload-firewall  (or KLDLOAD_FIREWALL=1 at install)")
+
+
+def check_selinux():
+    """Mode, and how many denials the running kernel has logged. Disabled is
+    the shipped default (a warning with the way up); permissive with zero
+    denials is what an enforcing switch needs to see first."""
+    if not os.path.exists("/etc/selinux/config"):
+        return _result("security", "selinux mode", "skip",
+                       "n/a on this family", "no /etc/selinux/config",
+                       severity="low")
+    rc, mode, _ = _run(["getenforce"], timeout=5)
+    mode = (mode or "").strip() or "unknown"
+    if mode == "Disabled":
+        return _result("security", "selinux mode", "warn",
+                       "Permissive or Enforcing", "Disabled",
+                       severity="medium",
+                       remediation="KLDLOAD_SELINUX=permissive at install; or set SELINUX=permissive, touch /.autorelabel, reboot")
+    rc, jl, _ = _run(["journalctl", "-k", "-b", "--no-pager", "-q", "-g", "avc:  denied"], timeout=20)
+    denials = len([ln for ln in (jl or "").splitlines() if "avc:  denied" in ln])
+    status = "ok" if denials == 0 else "warn"
+    return _result("security", "selinux denials this boot", status,
+                   f"{mode} with 0 denials", f"{mode} with {denials} denial(s)",
+                   severity="medium",
+                   remediation="ausearch -m avc -ts boot; fix the labels or the policy before enforcing" if denials else "")
+
+
 CHECKS = [
+    check_host_firewall, check_selinux,
     check_zfs_bootfs,
     check_audio_stack,
     check_dock_pins,

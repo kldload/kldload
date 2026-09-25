@@ -41,7 +41,7 @@ DISTROS="fedora rhel centos rocky debian ubuntu arch"
 PROFILES="core server desktop kvm k8s storage ai"
 BOOL_KEYS="KLDLOAD_ZFS_ENCRYPT KLDLOAD_ENABLE_SECURE_BOOT KLDLOAD_ENABLE_KVM KLDLOAD_ENABLE_K8S
 KLDLOAD_K8S_BOOTSTRAP KLDLOAD_BUILD_IMAGES KLDLOAD_ENABLE_AI KLDLOAD_KLAB_ZFS_DEV KLDLOAD_WIREGUARD
-KLDLOAD_ENABLE_WEBUI KLDLOAD_KEEP_NETBOOT KLDLOAD_NO_AUTO_REBOOT KLDLOAD_DEVOPS KLDLOAD_ZFS_DEDUP"
+KLDLOAD_ENABLE_WEBUI KLDLOAD_KEEP_NETBOOT KLDLOAD_NO_AUTO_REBOOT KLDLOAD_DEVOPS KLDLOAD_ZFS_DEDUP KLDLOAD_FIREWALL"
 
 # The installer's loader. Same lookup the netboot server uses.
 answers_lib() {
@@ -168,6 +168,9 @@ cmd_check() {
     fi
     if [[ "$(get KLDLOAD_BUILD_IMAGES)" == 1 && "$(get KLDLOAD_ENABLE_KVM)" == 0 ]]; then
         err "KLDLOAD_BUILD_IMAGES=1 with KLDLOAD_ENABLE_KVM=0 — goldens are VMs"
+    fi
+    if has KLDLOAD_SELINUX && [[ "$(get KLDLOAD_SELINUX)" != disabled && "$(get KLDLOAD_SELINUX)" != permissive ]]; then
+        err "KLDLOAD_SELINUX=$(get KLDLOAD_SELINUX) — must be disabled or permissive"
     fi
     has KLDLOAD_PASSWORD ||
         warn "no KLDLOAD_PASSWORD: the machine will ask on its screen — an unattended install waits there"
