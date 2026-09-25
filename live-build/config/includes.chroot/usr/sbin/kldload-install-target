@@ -899,14 +899,6 @@ if ! k_have_func k_configure_network; then
         local hostname="${KLDLOAD_HOSTNAME:-kldload}"
         local distro="${KLDLOAD_DISTRO:-centos}"
 
-        # BSD network config is handled in bootstrap — rc.conf / hostname.* files
-        case "${distro}" in
-        freebsd | openbsd | ghostbsd)
-            k_log "Network: handled by ${distro} bootstrap (rc.conf)"
-            return 0
-            ;;
-        esac
-
         echo "${hostname}" >"${KLDLOAD_TARGET_MNT}/etc/hostname"
         cat >"${KLDLOAD_TARGET_MNT}/etc/hosts" <<EOS
 127.0.0.1 localhost
@@ -1025,14 +1017,6 @@ if ! k_have_func k_configure_security; then
         local _pw_defaulted=0
         [[ -n "${KLDLOAD_PASSWORD:-}" ]] || _pw_defaulted=1
 
-        # BSD user creation and SSH config is handled in bootstrap
-        case "${distro}" in
-        freebsd | openbsd | ghostbsd)
-            k_log "Security: handled by ${distro} bootstrap (pw/useradd, sshd_config)"
-            return 0
-            ;;
-        esac
-
         # Bare `chroot $target $cmd` doesn't go through bash, so PATH inside
         # the chroot is whatever the caller had (often without /usr/sbin),
         # and chroot fails with "failed to run command '$cmd'". Absolute
@@ -1146,14 +1130,6 @@ if ! k_have_func k_apply_profile; then
             k_log "Arch profile packages already installed by bootstrap — skipping fallback"
             return 0
         fi
-
-        # BSD: no package manager available from Linux chroot — base sets are complete
-        case "${distro}" in
-        freebsd | openbsd | ghostbsd)
-            k_log "BSD profile: base sets include everything needed — no extra packages from Linux"
-            return 0
-            ;;
-        esac
 
         # ── Distro-specific package names ──────────────────────────────────────
         if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then

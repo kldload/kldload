@@ -245,6 +245,14 @@ it. That path needs three extra steps:
 > any terminal &mdash; including the live USB) diagnoses and queues the fix
 > in one step.
 
+### Before you ask for help
+
+| Command | What it does |
+|---|---|
+| `sudo kldload-support` | Runs the doctor, collects the redacted bundle (no keys, passwords or passphrases), prints the one file to attach and the doctor's failures with their fixes |
+| `kldload-answers check FILE` | Checks an answers file the way the installer will read it — distro/profile the image offers, disk, 0/1 keys, placeholders, encryption/RHEL/Kubernetes cross-key rules, undocumented keys, file mode — before a machine is armed with it |
+| `kldload-doctor` | Every check as JSON; exit 0 clean, 1 failures, 2 a check crashed |
+
 ---
 
 ## Troubleshooting
