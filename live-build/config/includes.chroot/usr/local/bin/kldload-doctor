@@ -14,6 +14,7 @@
 #
 # Each check is a callable that returns a dict:
 #   {
+#     "id":        "zfs.pool-online",  # stable; monitoring keys on it
 #     "subsystem": "zfs",           # grouping in UI
 #     "name":      "pool online",
 #     "status":    "ok|fail|warn|skip",
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -56,9 +58,19 @@ def _has(cmd):
     return rc == 0
 
 
+def _check_id(subsystem: str, name: str) -> str:
+    """A stable id for a check: '<subsystem>.<name>' with the name lower-cased
+    and anything that is not a letter or digit folded to one '-'. Monitoring
+    keys on this (an alert can say WHICH check), so it changes only when the
+    check's meaning does — renaming a check is renaming an alert."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return f"{subsystem}.{slug}"
+
+
 def _result(subsystem, name, status, expected, actual,
             severity="medium", remediation=""):
     return {
+        "id":          _check_id(subsystem, name),
         "subsystem":   subsystem, "name": name, "status": status,
         "expected":    expected, "actual": actual,
         "severity":    severity, "remediation": remediation,

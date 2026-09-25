@@ -436,7 +436,31 @@ cmd_serve() {
     log "starting nginx + dnsmasq"
     nginx -c "$ROOT/nginx.conf"
     trap 'nginx -c "$ROOT/nginx.conf" -s quit 2>/dev/null || true' EXIT
+    # One fetch, then gone: the answers file carries the login password (and
+    # the ZFS passphrase, the Red Hat login) and until 2026-09-24 it stayed on
+    # the LAN, fetchable by anyone who knew the MAC, until somebody ran
+    # disarm. The watcher below disarms the MAC the moment nginx has served
+    # its answers file; the installer fetches it exactly once. It lives in
+    # this unit's cgroup and dies with it.
+    _disarm_on_fetch &
     exec dnsmasq --conf-file="$ROOT/dnsmasq.conf" --no-daemon
+}
+
+# _disarm_on_fetch — follow the access log from its current end and disarm a
+# MAC as soon as one of its answers files has been served with a 200. Reads
+# by position (tail -F from now), never by clock. The MAC comes from the
+# request path and is validated before it reaches disarm.
+_disarm_on_fetch() {
+    local line m
+    # swallow: the log may not exist until nginx writes its first line; -F retries
+    tail -n0 -F "$ROOT/nginx-access.log" 2>/dev/null | while IFS= read -r line; do
+        [[ "$line" == *'"GET /answers/'* && "$line" == *'" 200 '* ]] || continue
+        m="$(sed -nE 's|.*"GET /answers/([0-9a-f]{2}(-[0-9a-f]{2}){5})(-[a-z0-9]+)?\.env HTTP.*|\1|p' <<<"$line")"
+        [[ -n "$m" ]] || continue
+        [[ -f "$ROOT/answers/${m}.env" || -n "$(ls "$ROOT/answers/${m}"-*.env 2>/dev/null)" ]] || continue
+        log "answers for ${m} served — disarming (one fetch is all the installer needs)"
+        cmd_disarm "${m//-/:}" || true # already disarmed by a watcher is the wanted state
+    done
 }
 
 # _link_payload <src dir> <name> — publish <src>'s kernel, initrd and root image
