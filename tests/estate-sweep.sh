@@ -428,7 +428,31 @@ for ed in "${EDITIONS[@]}"; do
         _conv_max=0
     fi
 
+    # The bench's address can MOVE during first boot: the KVM setup enslaves
+    # the PXE NIC into br0 and its lease comes back on the bridge, and a
+    # second NIC takes a lease of its own. deb-11-storage (build 66,
+    # 2026-09-24) was found at .112 at 10:24, finished first boot at 10:25,
+    # and answered on .114/.120 from then on; this loop polled .112 for the
+    # whole 2400 s and reported a finished machine as unfinished. After two
+    # missed probes the bench is looked up again by profile, the way it was
+    # found in the first place.
+    _miss=0
     while ((conv < _conv_max)); do
+        if ! ssh_bench "$ip" true >/dev/null 2>&1; then
+            _miss=$((_miss + 1))
+            if ((_miss >= 2)); then
+                _new="$(find_bench "$want_profile" || true)"
+                if [[ -n "$_new" && "$_new" != "$ip" ]]; then
+                    say "${ed}: bench moved from ${ip} to ${_new} during first boot — following it"
+                    ip="$_new"
+                fi
+                _miss=0
+            fi
+            sleep 60
+            conv=$((conv + 60))
+            continue
+        fi
+        _miss=0
         # kldload-autodeploy is a oneshot with RemainAfterExit=yes, so
         # `systemctl is-active` answers "active" for the rest of the machine's
         # uptime once it SUCCEEDS. Waiting for it to stop being active therefore
