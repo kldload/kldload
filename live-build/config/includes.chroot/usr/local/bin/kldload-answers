@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# kldload-answers — check an answers file before a machine is armed with it.
+#
+# Loads the file with the INSTALLER'S OWN loader (answers.sh), so what passes
+# here is what the installer will read, then applies the rules the installer
+# and the first boot apply later — when a wrong value costs a wiped disk and
+# an hour, not a message.
+#
+# Usage:
+#   kldload-answers check FILE        # errors -> exit 1, warnings -> exit 0
+#   kldload-answers keys              # every key the shipped template documents
+#   kldload-answers -h | --help
+#
+# What check looks at, in order:
+#   1. the loader accepts the file (an inline comment after a value, an
+#      unbalanced quote or a bad key name is refused by the installer too)
+#   2. KLDLOAD_DISTRO and KLDLOAD_PROFILE are set and are ones the image offers
+#   3. KLDLOAD_DISK or KLDLOAD_DISK_STABLE names the target disk
+#   4. every 0/1 key holds 0 or 1
+#   5. a placeholder (CHANGE-ME) in a password, passphrase or disk
+#   6. cross-key rules: encryption wants a passphrase (WARNING: unattended
+#      installs have no screen to ask on), rhel wants credentials, Kubernetes
+#      wants KVM, images want KVM
+#   7. keys the template does not document (WARNING: a typo installs nothing)
+#   8. the file's mode when it carries a secret (WARNING unless 0600)
+#
+# Exit: 0 no errors · 1 at least one error · 2 usage, or the loader is missing.
+#
+# Why: the netboot server checks 1, 2 and 5 at arm time; the web UI checks
+# nothing; a hand-written file for a rack was checked by installing it. The
+# rules in 6 were only enforced by the machine asking on its screen, which an
+# unattended install cannot answer (docs/release-1.0-manifest.md §6).
+
+set -Eeuo pipefail
+trap 'echo "kldload-answers: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"; }
+
+TEMPLATE="${KLDLOAD_ANSWERS_TEMPLATE:-/etc/kldload/answers/TEMPLATE.env}"
+DISTROS="fedora rhel centos rocky debian ubuntu arch"
+PROFILES="core server desktop kvm k8s storage ai"
+BOOL_KEYS="KLDLOAD_ZFS_ENCRYPT KLDLOAD_ENABLE_SECURE_BOOT KLDLOAD_ENABLE_KVM KLDLOAD_ENABLE_K8S
+KLDLOAD_K8S_BOOTSTRAP KLDLOAD_BUILD_IMAGES KLDLOAD_ENABLE_AI KLDLOAD_KLAB_ZFS_DEV KLDLOAD_WIREGUARD
+KLDLOAD_ENABLE_WEBUI KLDLOAD_KEEP_NETBOOT KLDLOAD_NO_AUTO_REBOOT KLDLOAD_DEVOPS KLDLOAD_ZFS_DEDUP"
+
+# The installer's loader. Same lookup the netboot server uses.
+answers_lib() {
+    local c
+    for c in "${KLDLOAD_ANSWERS_LIB:-}" /usr/lib/kldload-installer/lib/answers.sh \
+        "$(dirname "$0")/../lib/kldload-installer/lib/answers.sh"; do
+        [[ -n "$c" && -r "$c" ]] && {
+            echo "$c"
+            return 0
+        }
+    done
+    return 1
+}
+
+cmd_keys() {
+    [[ -r "$TEMPLATE" ]] || {
+        echo "kldload-answers: no template at $TEMPLATE (set KLDLOAD_ANSWERS_TEMPLATE)" >&2
+        exit 2
+    }
+    grep -oE '^#?KLDLOAD_[A-Z0-9_]+=' "$TEMPLATE" | tr -d '#=' | sort -u
+}
+
+cmd_check() {
+    local file="${1:?}" lib errors=0 warnings=0
+    [[ -r "$file" ]] || {
+        echo "kldload-answers: cannot read $file" >&2
+        exit 2
+    }
+    lib="$(answers_lib)" || {
+        echo "kldload-answers: the installer's loader (answers.sh) is not on this host — set KLDLOAD_ANSWERS_LIB" >&2
+        exit 2
+    }
+    err() {
+        printf 'ERROR   %s\n' "$*"
+        errors=$((errors + 1))
+    }
+    warn() {
+        printf 'WARNING %s\n' "$*"
+        warnings=$((warnings + 1))
+    }
+
+    # 1. The loader. Its k_die is the refusal the installer would give.
+    local loaded
+    if ! loaded="$(
+        k_die() {
+            printf 'REFUSED: %s\n' "$*"
+            exit 1
+        }
+        # shellcheck source=/dev/null
+        source "$lib"
+        k_answers_load_env_file "$file"
+        # Every KLDLOAD_ key the FILE sets, with the value the loader produced
+        # (not the caller's environment: KLDLOAD_ANSWERS_LIB and friends are
+        # exported by the harness, not written by the operator).
+        for v in $(grep -oE '^[[:space:]]*KLDLOAD_[A-Z0-9_]+=' "$file" | tr -d ' \t=' | sort -u); do
+            printf '%s=%s\n' "$v" "${!v:-}"
+        done
+    )"; then
+        err "the installer's loader refuses this file: ${loaded#REFUSED: }"
+        printf '%d error(s), %d warning(s)\n' "$errors" "$warnings"
+        RC=1
+        return 0
+    fi
+    # Read the loader's values into this shell without executing anything.
+    declare -A A=()
+    local line k v
+    while IFS= read -r line; do
+        k="${line%%=*}"
+        v="${line#*=}"
+        A["$k"]="$v"
+    done <<<"$loaded"
+    get() { printf '%s' "${A[$1]:-}"; }
+    has() { [[ -n "${A[$1]:-}" ]]; }
+
+    # 2. distro and profile
+    if ! has KLDLOAD_DISTRO; then
+        err "KLDLOAD_DISTRO is not set"
+    elif [[ " $DISTROS " != *" $(get KLDLOAD_DISTRO) "* ]]; then
+        err "KLDLOAD_DISTRO=$(get KLDLOAD_DISTRO) is not one the installer supports ($DISTROS)"
+    fi
+    if ! has KLDLOAD_PROFILE; then
+        err "KLDLOAD_PROFILE is not set"
+    elif [[ " $PROFILES " != *" $(get KLDLOAD_PROFILE) "* ]]; then
+        err "KLDLOAD_PROFILE=$(get KLDLOAD_PROFILE) is not one the image offers ($PROFILES)"
+    fi
+    # 3. the disk
+    has KLDLOAD_DISK || has KLDLOAD_DISK_STABLE ||
+        err "neither KLDLOAD_DISK nor KLDLOAD_DISK_STABLE is set — the installer has no target"
+    if has KLDLOAD_DISK && [[ "$(get KLDLOAD_DISK)" != /dev/* ]]; then
+        err "KLDLOAD_DISK=$(get KLDLOAD_DISK) is not a /dev path"
+    fi
+    # 4. booleans
+    for k in $BOOL_KEYS; do
+        has "$k" || continue
+        [[ "$(get "$k")" == 0 || "$(get "$k")" == 1 ]] ||
+            err "$k=$(get "$k") — must be 0 or 1"
+    done
+    # 5. placeholders
+    for k in KLDLOAD_PASSWORD KLDLOAD_ZFS_PASSPHRASE KLDLOAD_DISK KLDLOAD_RHEL_PASSWORD; do
+        [[ "$(get "$k")" == *CHANGE-ME* ]] && err "$k still holds the CHANGE-ME placeholder"
+    done
+    # 6. cross-key rules
+    if [[ "$(get KLDLOAD_ZFS_ENCRYPT)" == 1 ]]; then
+        if ! has KLDLOAD_ZFS_PASSPHRASE; then
+            warn "KLDLOAD_ZFS_ENCRYPT=1 with no KLDLOAD_ZFS_PASSPHRASE: the machine will ask on its screen — an unattended install waits there for ever"
+        elif ((${#A[KLDLOAD_ZFS_PASSPHRASE]} < 8)); then
+            err "KLDLOAD_ZFS_PASSPHRASE is shorter than 8 characters — ZFS refuses it"
+        fi
+    fi
+    if [[ "$(get KLDLOAD_DISTRO)" == rhel ]]; then
+        if has KLDLOAD_RHEL_USERNAME || has KLDLOAD_RHEL_PASSWORD; then
+            has KLDLOAD_RHEL_USERNAME && has KLDLOAD_RHEL_PASSWORD ||
+                err "rhel: KLDLOAD_RHEL_USERNAME and KLDLOAD_RHEL_PASSWORD go together"
+        elif has KLDLOAD_RHEL_KEY || has KLDLOAD_RHEL_ORG; then
+            has KLDLOAD_RHEL_KEY && has KLDLOAD_RHEL_ORG ||
+                err "rhel: KLDLOAD_RHEL_KEY and KLDLOAD_RHEL_ORG go together"
+        else
+            warn "rhel with no Red Hat credentials: registration will be asked for on the screen"
+        fi
+    fi
+    if [[ "$(get KLDLOAD_ENABLE_K8S)" == 1 || "$(get KLDLOAD_K8S_BOOTSTRAP)" == 1 ]] &&
+        [[ "$(get KLDLOAD_ENABLE_KVM)" == 0 ]]; then
+        err "Kubernetes asked for (ENABLE_K8S/K8S_BOOTSTRAP=1) with KLDLOAD_ENABLE_KVM=0 — the cluster nodes are VMs"
+    fi
+    if [[ "$(get KLDLOAD_BUILD_IMAGES)" == 1 && "$(get KLDLOAD_ENABLE_KVM)" == 0 ]]; then
+        err "KLDLOAD_BUILD_IMAGES=1 with KLDLOAD_ENABLE_KVM=0 — goldens are VMs"
+    fi
+    has KLDLOAD_PASSWORD ||
+        warn "no KLDLOAD_PASSWORD: the machine will ask on its screen — an unattended install waits there"
+    has KLDLOAD_HOSTNAME || warn "no KLDLOAD_HOSTNAME: the installer's default is 'kldload'"
+    # 7. keys the template does not know
+    if [[ -r "$TEMPLATE" ]]; then
+        local known
+        known=" $(cmd_keys | tr '\n' ' ') "
+        for k in "${!A[@]}"; do
+            [[ "$known" == *" $k "* ]] || warn "$k is not a key the template documents — a typo installs nothing"
+        done
+    else
+        warn "no template at $TEMPLATE — unknown keys were not checked"
+    fi
+    # 8. mode
+    if has KLDLOAD_PASSWORD || has KLDLOAD_ZFS_PASSPHRASE || has KLDLOAD_RHEL_PASSWORD; then
+        local mode
+        mode="$(stat -c %a "$file")"
+        [[ "$mode" == 600 || "$mode" == 400 ]] ||
+            warn "$file carries a secret and is mode $mode — make it 0600"
+    fi
+
+    printf '%d error(s), %d warning(s) — %s/%s\n' "$errors" "$warnings" "$(get KLDLOAD_DISTRO)" "$(get KLDLOAD_PROFILE)"
+    RC=$((errors > 0))
+}
+
+case "${1:-}" in
+-h | --help)
+    usage
+    exit 0
+    ;;
+check)
+    [[ -n "${2:-}" ]] || {
+        echo "kldload-answers: check needs a file" >&2
+        usage >&2
+        exit 2
+    }
+    RC=0
+    cmd_check "$2"
+    exit "$RC"
+    ;;
+keys) cmd_keys ;;
+*)
+    usage >&2
+    exit 2
+    ;;
+esac
