@@ -2,7 +2,7 @@
 
 > **Status:** DRAFT / planning. Consolidates the 2026-06-13 security audit, the
 > deployment code review (k8s + image/clone + dashboard), and the master
-> architecture (`master-profile-architecture.md`). Line citations are from those
+> architecture (the draft was removed on 2026-09-24; see docs/release-1.0-manifest.md §7). Line citations are from those
 > reviews — verify at implementation time.
 > **Goal:** "Anyone composes infra in the dashboard, picks N control planes + M
 > workers + storage, presses deploy, and it self-wires anywhere (KVM/AWS/Azure/
@@ -211,4 +211,4 @@ dashboard end to end.
 ---
 
 *Planning artifact. Nothing here is implemented yet. Companion:
-`master-profile-architecture.md`.*
+the master-profile draft (removed 2026-09-24).*
