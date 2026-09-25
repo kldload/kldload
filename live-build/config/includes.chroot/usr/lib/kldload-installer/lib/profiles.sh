@@ -410,9 +410,8 @@ k_profile_packages() {
     # ── kldload templates ────────────────────────────────────────────────────────
 
     master)
-        # Control plane: Salt master + WireGuard hub + PXE + APT mirror
+        # Control plane: WireGuard hub + PXE + APT mirror (Salt removed 2026-09-24)
         echo "openssh-server sudo curl ca-certificates vim less iproute2 \
-        salt-master salt-minion salt-api \
         wireguard-tools \
         dnsmasq tftp-hpa \
         nginx \
@@ -430,7 +429,7 @@ k_profile_packages() {
         ;;
 
     storage)
-        # ZFS storage server: NFS + iSCSI exports, managed by Salt minion.
+        # ZFS storage server: NFS + iSCSI exports.
         # ZFS datasets are the core — NFS and an iSCSI target serve them.
         #
         # EVERY STORAGE PACKAGE HERE WAS DEBIAN-ONLY. nfs-kernel-server,
@@ -480,7 +479,7 @@ k_profile_packages() {
         evemu-tools \
         nginx \
         nftables chrony \
-        salt-minion wireguard-tools"
+        wireguard-tools"
         ;;
 
     monitoring)

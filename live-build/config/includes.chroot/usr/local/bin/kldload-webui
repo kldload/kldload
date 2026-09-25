@@ -24,7 +24,6 @@ import sys
 import threading
 import time
 import uuid
-from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 
 try:
@@ -1172,16 +1171,6 @@ def get_system_info():
         pass
     if _hide_install and not info["live_mode"]:
         info["show_install_panel"] = False
-    # Grains: node_index, wg1_ip
-    try:
-        grains_path = "/etc/salt/grains"
-        if os.path.exists(grains_path) and yaml is not None:
-            with open(grains_path) as f:
-                grains = yaml.safe_load(f) or {}
-            info["node_index"] = grains.get("node_index", "")
-            info["wg1_ip"]     = grains.get("wg1_ip", "")
-    except Exception:
-        pass
     # Quick WG up/down status for dashboard mini-table
     info["wg"] = {}
     for n, net in [(0, "10.77"), (1, "10.78"), (2, "10.79"), (3, "10.80")]:
@@ -1356,7 +1345,7 @@ RUNNING_PROCS = {}
 #
 # CRITICAL — this function was NOT a security check despite being the
 # only thing between an unauthenticated WebSocket and shell_run /
-# k8s_join / wg_peer_add / salt_apply. Real auth is a separate
+# k8s_join / wg_peer_add. Real auth is a separate
 # in-progress concern (bearer token at install time, validated on
 # every WS message — see project_release_1_0_target.md follow-ups).
 # Removing this dead gate prevents future maintainers from mistaking
@@ -1753,8 +1742,6 @@ async def ws_handler(websocket):
                     await _zfs_list(websocket)
                 elif action == "k8s_nodes":
                     await _k8s_nodes(websocket)
-                elif action == "salt_status":
-                    await _salt_status(websocket)
                 elif action == "wg_status":
                     await websocket.send(json.dumps({
                         "type": "wg_data",
@@ -1775,18 +1762,6 @@ async def ws_handler(websocket):
                     await _run_stamp(websocket, msg)
                 elif action == "k8s_join":
                     await _run_k8s_join(websocket, msg)
-                elif action == "salt_highstate":
-                    await _run_salt_highstate(websocket, msg)
-                elif action == "salt_accept_all":
-                    await _salt_accept_all(websocket)
-                elif action == "node_list":
-                    await _node_list(websocket)
-                elif action == "node_apply":
-                    await _node_apply(websocket, msg)
-                elif action == "mine_refresh":
-                    await _mine_refresh(websocket, msg)
-                elif action == "node_accept_key":
-                    await _node_accept_key(websocket, msg)
                 elif action == "poof":
                     await _run_poof(websocket, msg)
                 elif action == "cluster_deploy":
@@ -1969,8 +1944,6 @@ async def ws_handler(websocket):
                     db_delete_service(msg.get("id", ""))
                     db_log_event("service_delete", msg.get("id",""), "Service deleted")
                     await websocket.send(json.dumps({"type": "service_deleted", "id": msg.get("id")}))
-                elif action == "service_deploy":
-                    await _service_deploy(websocket, msg)
                 elif action == "db_export":
                     export = db_export_all()
                     await websocket.send(json.dumps({"type": "db_export", "data": export}))
@@ -4231,26 +4204,6 @@ async def _run_stamp(websocket, msg):
 async def _run_k8s_join(websocket, msg):
     await _unshipped(websocket, "kldload-k8s-join")
 
-async def _run_salt_highstate(websocket, msg):
-    salt_target = msg.get("target", "*")
-    ws_target   = msg.get("_target", "log")
-    if not re.match(r'^[a-zA-Z0-9_\-\*]+$', salt_target):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid salt target"}))
-        return
-    cmd = ["salt", salt_target, "state.highstate"]
-    # Salt highstate against a minion fleet — 5-15 min typical.
-    await _stream_proc_detached(websocket, cmd, target=ws_target)
-
-async def _salt_accept_all(websocket):
-    try:
-        subprocess.check_call(
-            ["salt-key", "-A", "-y"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        await websocket.send(json.dumps({"type": "log_line", "line": "All pending keys accepted.", "target": "log"}))
-    except Exception as e:
-        await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
-
 async def _tail_log(websocket, log_path):
     if not os.path.exists(log_path):
         await websocket.send(json.dumps({
@@ -4673,174 +4626,6 @@ async def _k8s_nodes(websocket):
     except Exception:
         pass
     await websocket.send(json.dumps({"type": "k8s_nodes", "nodes": nodes}))
-
-async def _node_list(websocket):
-    """Full node fleet: mine query + live ping, returns addressing table."""
-    nodes = []
-    pending_keys = []
-    try:
-        # Live ping — 5s timeout, non-fatal if salt not running
-        ping_data = {}
-        try:
-            out = subprocess.check_output(
-                ["salt", "*", "test.ping", "--out=json", "-t", "5"],
-                text=True, stderr=subprocess.DEVNULL,
-            )
-            ping_data = json.loads(out)
-        except Exception:
-            pass
-
-        # Grains: role, color, index, all four WireGuard IPs
-        grains_data = {}
-        try:
-            g_out = subprocess.check_output(
-                ["salt", "*", "grains.item",
-                 "role", "color", "node_index",
-                 "wg0_ip", "wg1_ip", "wg2_ip", "wg3_ip",
-                 "--out=json", "-t", "5"],
-                text=True, stderr=subprocess.DEVNULL,
-            )
-            grains_data = json.loads(g_out)
-        except Exception:
-            pass
-
-        # Merge: any host that appears in grains OR ping
-        all_hosts = set(grains_data.keys()) | set(ping_data.keys())
-        for host in sorted(all_hosts):
-            g = grains_data.get(host, {})
-            color = g.get("color", "")
-            index = g.get("node_index", "")
-            # Derive IPs from index+color if grains not yet set
-            if index and not g.get("wg0_ip"):
-                octet3 = 100 if color == "blue" else 200
-                g["wg0_ip"] = f"10.77.{octet3}.{index}"
-                g["wg1_ip"] = f"10.78.{octet3}.{index}"
-                g["wg2_ip"] = f"10.79.{octet3}.{index}"
-                g["wg3_ip"] = f"10.80.{octet3}.{index}"
-            nodes.append({
-                "host":   host,
-                "online": ping_data.get(host) is True,
-                "role":   g.get("role", ""),
-                "color":  color,
-                "index":  str(index),
-                "wg0":    g.get("wg0_ip", ""),
-                "wg1":    g.get("wg1_ip", ""),
-                "wg2":    g.get("wg2_ip", ""),
-                "wg3":    g.get("wg3_ip", ""),
-            })
-    except Exception as e:
-        LOG.warning("node_list failed: %s", e)
-
-    # Pending keys
-    try:
-        k_out = subprocess.check_output(
-            ["salt-key", "-l", "pre", "--out=json"],
-            text=True, stderr=subprocess.DEVNULL,
-        )
-        pending_keys = json.loads(k_out).get("minions_pre", [])
-    except Exception:
-        pass
-
-    await websocket.send(json.dumps({
-        "type":    "node_list",
-        "nodes":   nodes,
-        "pending": pending_keys,
-    }))
-
-
-async def _node_apply(websocket, msg):
-    """Apply a Salt state to a target minion (or grain match)."""
-    salt_target = msg.get("target", "")
-    state       = msg.get("state", "")
-    ws_target   = msg.get("_target", "log")
-    if not re.match(r'^[a-zA-Z0-9_\-\.\*]+$', salt_target):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid target"}))
-        return
-    if not re.match(r'^[a-zA-Z0-9_\.\-]+$', state):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid state"}))
-        return
-    cmd = ["salt", salt_target, "state.apply", state]
-    # state.apply on a fleet can run minutes — detached for the same reason
-    # as state.highstate above.
-    await _stream_proc_detached(websocket, cmd, target=ws_target)
-
-
-async def _mine_refresh(websocket, msg):
-    """Force all minions to update their mine data."""
-    salt_target = msg.get("target", "*")
-    if not re.match(r'^[a-zA-Z0-9_\-\.\*]+$', salt_target):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid target"}))
-        return
-    await _stream_proc(websocket, ["salt", salt_target, "mine.update"],
-                       target=msg.get("_target", "log"))
-
-
-async def _node_accept_key(websocket, msg):
-    """Accept a specific pending Salt key by minion name."""
-    name = msg.get("name", "")
-    if not re.match(r'^[a-zA-Z0-9_\-\.]+$', name):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid key name"}))
-        return
-    try:
-        subprocess.check_call(
-            ["salt-key", "-a", name, "-y"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        await websocket.send(json.dumps({
-            "type": "log_line", "line": f"Accepted key: {name}", "target": "log",
-        }))
-        # Immediately refresh node list
-        await _node_list(websocket)
-    except Exception as e:
-        await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
-
-
-async def _salt_status(websocket):
-    minions = []
-    pending = 0
-    try:
-        out = subprocess.check_output(
-            ["salt", "*", "test.ping", "--out=json", "-t", "5"],
-            text=True, stderr=subprocess.DEVNULL
-        )
-        ping_data = json.loads(out)
-        # Fetch grains for role/wg1_ip/node_index
-        grains_data = {}
-        try:
-            g_out = subprocess.check_output(
-                ["salt", "*", "grains.item", "role", "wg1_ip", "node_index",
-                 "--out=json", "-t", "5"],
-                text=True, stderr=subprocess.DEVNULL
-            )
-            grains_data = json.loads(g_out)
-        except Exception:
-            pass
-        for host, ok in ping_data.items():
-            g = grains_data.get(host, {})
-            minions.append({
-                "host":       host,
-                "online":     ok is True,
-                "role":       g.get("role", ""),
-                "wg1_ip":     g.get("wg1_ip", ""),
-                "node_index": g.get("node_index", ""),
-            })
-    except Exception:
-        pass
-    # Pending keys
-    try:
-        k_out = subprocess.check_output(
-            ["salt-key", "-l", "pre", "--out=json"],
-            text=True, stderr=subprocess.DEVNULL
-        )
-        k_data = json.loads(k_out)
-        pending = len(k_data.get("minions_pre", []))
-    except Exception:
-        pass
-    await websocket.send(json.dumps({
-        "type": "salt_status",
-        "minions": minions,
-        "pending": pending,
-    }))
 
 async def _run_poof(websocket, msg):
     """Run kldload-poof in live mode only; stream output then send poof_done."""
@@ -5591,200 +5376,6 @@ def _vm_cloud_os_variant(distro: str) -> str:
         "ubuntu": "ubuntu24.04",
     }.get(distro, "linux2024")
 
-
-async def _service_deploy(websocket, msg):
-    """Deploy a service to target nodes via Salt highstate.
-    Generates a Salt state from the service definition and pushes it."""
-    svc_id = msg.get("id", "")
-    svc    = db_load_service(svc_id) if svc_id else msg.get("service")
-    if not svc:
-        await websocket.send(json.dumps({"type": "error", "msg": "service not found"}))
-        return
-
-    name     = svc.get("name", "unknown")
-    dataset  = svc.get("dataset") or f"rpool/services/{name}"
-    image    = svc.get("image", "")
-    runtime  = svc.get("runtime", "systemd")
-    config   = svc.get("config", {})
-    targets  = svc.get("node_targets", [])
-    salt_tgt = " ".join(targets) if targets else "*"
-
-    await websocket.send(json.dumps({
-        "type": "log_line", "line": f"[deploy] Deploying service: {name}", "target": "svc-log"
-    }))
-
-    # Generate Salt state YAML
-    salt_state = _generate_salt_state(name, dataset, image, runtime, config)
-
-    # Write state to /srv/salt/kldload/services/<name>.sls
-    state_dir  = Path("/srv/salt/kldload/services")
-    state_file = state_dir / f"{name}.sls"
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(salt_state)
-        await websocket.send(json.dumps({
-            "type": "log_line", "line": f"[deploy] State written: {state_file}", "target": "svc-log"
-        }))
-    except Exception as e:
-        await websocket.send(json.dumps({
-            "type": "log_line", "line": f"[deploy] WARNING: could not write state: {e}", "target": "svc-log"
-        }))
-
-    # Update DB: mark as deploying
-    if svc_id:
-        db_update_service_status(svc_id, "deploying")
-
-    # Push via Salt — service deploys do package + config + restart, ~1-3 min.
-    cmd = ["salt", salt_tgt, "state.apply", f"kldload.services.{name}",
-           "--timeout=60", "--out=yaml"]
-    await _stream_proc_detached(websocket, cmd, target="svc-log")
-
-    if svc_id:
-        db_update_service_status(svc_id, "running")
-    db_log_event("service_deploy", svc_id or name, f"Service deployed: {name} → {salt_tgt}")
-    await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "svc-log"}))
-
-def _generate_salt_state(name, dataset, image, runtime, config):
-    """Generate a Salt state YAML for a ZFS-backed service."""
-    mountpoint = f"/srv/services/{name}"
-    env_lines  = "\n".join(
-        f"    - {k}={v}" for k, v in (config.get("env") or {}).items()
-    )
-    ports      = config.get("ports", [])
-    port_lines = "\n".join(f"    - {p}" for p in ports) if ports else ""
-
-    if runtime == "nspawn":
-        svc_block = f"""
-{name}-nspawn:
-  nspawn.running:
-    - name: {name}
-    - root: {mountpoint}
-    - require:
-      - zfs: {dataset}
-"""
-    elif runtime == "podman":
-        svc_block = f"""
-{name}-container:
-  cmd.run:
-    - name: >-
-        podman run -d --name {name}
-        --restart=always
-        -v {mountpoint}:/data
-        {chr(10).join('        -e ' + l.strip('- ') for l in env_lines.splitlines()) if env_lines else ''}
-        {chr(10).join('        -p ' + l.strip('- ') for l in port_lines.splitlines()) if port_lines else ''}
-        {image or 'debian:trixie'}
-    - unless: podman inspect {name}
-    - require:
-      - zfs: {dataset}
-"""
-    else:  # systemd / bare
-        svc_block = f"""
-{name}-service:
-  service.running:
-    - name: {name}
-    - enable: True
-    - require:
-      - zfs: {dataset}
-"""
-
-    return f"""# Auto-generated by kldload-webui — do not edit manually
-# Service: {name}  Runtime: {runtime}
-
-# 1. Ensure ZFS dataset exists
-{dataset}:
-  zfs.filesystem_present:
-    - properties:
-        compression: lz4
-        mountpoint: {mountpoint}
-        com.sun:auto-snapshot: 'true'
-
-# 2. Ensure mountpoint directory exists
-{mountpoint}:
-  file.directory:
-    - makedirs: True
-    - require:
-      - zfs: {dataset}
-{svc_block}
-"""
-
-# ── HTTP handler ───────────────────────────────────────────────────────────────
-
-class WebUIHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(WEBUI_DIR), **kwargs)
-
-    def log_message(self, fmt, *args):
-        pass  # silence access log
-
-    def do_GET(self):
-        if self.path == "/" or self.path == "":
-            self.path = "/index.html"
-        # /wallpaper route + wallpaper.html removed 2026-05-19 — the
-        # tactical-wallpaper / live-desktop idea was scoped out. The
-        # GNOME extension that was going to mount it as the background
-        # actor is dropped too (task #25). The design mockup
-        # (kldload-design-mockups/index-demoscene.html) is preserved
-        # outside the build as a reference for any future revival.
-        # Download endpoint for klab test run bundles. Matches
-        #   /download/klab/<run-id>.tar.gz
-        # Builds the tarball on the fly from /root/klab/<run-id>/ so we
-        # don't leave stale bundles on disk. Safe: run-id must match
-        # the YYYYMMDD-HHMMSS shape — no path traversal.
-        if self.path.startswith("/download/klab/"):
-            import io
-            import os
-            import re
-            import tarfile
-            m = re.match(r"^/download/klab/(\d{8}-\d{6})\.tar\.gz$", self.path)
-            if not m:
-                self.send_error(400, "Invalid run id"); return
-            run_id = m.group(1)
-            run_dir = f"/root/klab/{run_id}"
-            if not os.path.isdir(run_dir):
-                self.send_error(404, f"No run {run_id}"); return
-            try:
-                buf = io.BytesIO()
-                with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-                    tar.add(run_dir, arcname=f"klab-{run_id}")
-                data = buf.getvalue()
-            except Exception as e:
-                self.send_error(500, f"tar failed: {e}"); return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/gzip")
-            self.send_header("Content-Disposition",
-                             f'attachment; filename="klab-{run_id}.tar.gz"')
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
-        # Plain full.log download — the OpenZFS team can attach this
-        # single file to a bug report without unpacking the tarball.
-        if self.path.startswith("/download/klab-log/"):
-            import os
-            import re
-            m = re.match(r"^/download/klab-log/(\d{8}-\d{6})\.log$", self.path)
-            if not m:
-                self.send_error(400, "Invalid run id"); return
-            run_id = m.group(1)
-            log_path = f"/root/klab/{run_id}/full.log"
-            if not os.path.isfile(log_path):
-                self.send_error(404, f"No log for {run_id}"); return
-            try:
-                with open(log_path, "rb") as f:
-                    data = f.read()
-            except Exception as e:
-                self.send_error(500, f"read failed: {e}"); return
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Disposition",
-                             f'attachment; filename="klab-{run_id}.log"')
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
-        super().do_GET()
-
-# ── Main ───────────────────────────────────────────────────────────────────────
 
 def _get_ssl_context():
     """Generate a per-host TLS cert and return an SSLContext.

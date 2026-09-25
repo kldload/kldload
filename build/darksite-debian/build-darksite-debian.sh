@@ -267,10 +267,7 @@ if [[ "${#INSTALLER_PKGS[@]}" -gt 0 ]]; then
     # arithmetic subtraction and shfmt rewrites [salt-api] to [salt - api],
     # so the key never matches and the gate fires on its own allowlist.
     declare -A _external=(
-        ["grafana"]=1  # Grafana Labs repo, added at firstboot
-        ["salt-api"]=1 # SaltProject repo — Debian dropped salt after bookworm
-        ["salt-master"]=1
-        ["salt-minion"]=1
+        ["grafana"]=1 # Grafana Labs repo, added at firstboot
     )
     declare -a _unresolvable=()
     while read -r _p; do

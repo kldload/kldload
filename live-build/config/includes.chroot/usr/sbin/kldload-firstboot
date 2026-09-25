@@ -79,7 +79,7 @@ log "Node: ${HOSTNAME}  role: ${ROLE}  lan_ip: ${LAN_IP}"
 # hub.env arrives over plain HTTP from whichever host answers at 10.77.0.1 (or
 # the LAN address the manifest names). Until 2026-09-23 _try_fetch_hub_env
 # checked that the body contained "WG0_PUB=" and then setup_wg_client and
-# setup_salt_minion `source`d it, as root: anything on that network could hand
+# the minion setup `source`d it, as root: anything on that network could hand
 # a joining node `WG0_PUB=x; touch /pwned` and it ran. kldload-netboot-server
 # has read its env file as KEY=VALUE lines since 2026-09-13 (NETBOOT_* only);
 # this is the same idiom with the hub's own key set.
@@ -135,7 +135,7 @@ _hub_env_load() {
 
 # ── Shared: WireGuard client (all 4 planes) ───────────────────────────────────
 # wg0 = enrollment only (unreliable on some hardware — never bind services here)
-# wg1 = management (SSH, Salt)   wg2 = k8s backend   wg3 = storage
+# wg1 = management (SSH, Ansible)   wg2 = k8s backend   wg3 = storage
 setup_wg_client() {
     [[ -f "${HUB_ENV}" ]] || {
         log "No hub.env — skipping WireGuard client"
@@ -172,7 +172,7 @@ AllowedIPs = 10.77.0.0/16
 PersistentKeepalive = 25
 WG
 
-    # wg1 — management plane (Salt master binds here at 10.78.0.1)
+    # wg1 — management plane (the hub is 10.78.0.1)
     cat >/etc/wireguard/wg1.conf <<WG
 [Interface]
 PrivateKey = $(cat "${SECRETS}/wg1-client.key")
@@ -221,39 +221,6 @@ WG
     ok "WireGuard up — wg1=10.78.0.${idx} wg2=10.79.0.${idx} wg3=10.80.0.${idx}"
 }
 
-# ── Shared: Salt minion — registers on wg1 (management plane) ─────────────────
-setup_salt_minion() {
-    [[ -f "${HUB_ENV}" ]] || return 0
-    _hub_env_load "${HUB_ENV}" || die "${HUB_ENV} rejected by the hub.env parser — Salt minion not configured"
-    local idx="${KLDLOAD_NODE_INDEX:-1}"
-
-    # Salt master binds to wg1 — 10.78.0.1
-    local salt_master="10.78.0.1"
-    local wg1_pub="" wg2_pub="" wg3_pub=""
-    [[ -f "${SECRETS}/wg1-client.pub" ]] && wg1_pub="$(cat "${SECRETS}/wg1-client.pub")"
-    [[ -f "${SECRETS}/wg2-client.pub" ]] && wg2_pub="$(cat "${SECRETS}/wg2-client.pub")"
-    [[ -f "${SECRETS}/wg3-client.pub" ]] && wg3_pub="$(cat "${SECRETS}/wg3-client.pub")"
-
-    log "Registering Salt minion → ${salt_master} (wg1)"
-    mkdir -p /etc/salt/minion.d
-    cat >/etc/salt/minion.d/kldload.conf <<SALT
-master: ${salt_master}
-grains:
-  role: ${ROLE}
-  hostname: ${HOSTNAME}
-  lan_ip: ${LAN_IP}
-  node_index: ${idx}
-  wg1_ip: 10.78.0.${idx}
-  wg2_ip: 10.79.0.${idx}
-  wg3_ip: 10.80.0.${idx}
-  wg1_pub: ${wg1_pub}
-  wg2_pub: ${wg2_pub}
-  wg3_pub: ${wg3_pub}
-SALT
-    systemctl enable --now salt-minion
-    ok "Salt minion registered"
-}
-
 # ══ MASTER ═══════════════════════════════════════════════════════════════════
 setup_master() {
     log "=== MASTER setup ==="
@@ -280,7 +247,7 @@ WG
     done
 
     # 2. hub.env — minions fetch this to join
-    # wg1 is the management plane — Salt and SSH bind there
+    # wg1 is the management plane — SSH binds there
     cat >"${HUB_ENV}" <<ENV
 HUB_LAN=${LAN_IP}
 HUB_HOSTNAME=${HOSTNAME}
@@ -288,7 +255,7 @@ HUB_HOSTNAME=${HOSTNAME}
 HUB_WG0_IP=10.77.0.1
 WG0_PUB=$(cat "${SECRETS}/wg0.pub")
 WG0_PORT=51820
-# wg1 management — Salt master, SSH, admin (SERVICES BIND HERE)
+# wg1 management — SSH, admin (SERVICES BIND HERE)
 HUB_WG1_IP=10.78.0.1
 WG1_PUB=$(cat "${SECRETS}/wg1.pub")
 WG1_PORT=51821
@@ -314,8 +281,6 @@ table inet filter {
     udp dport { 51820, 51821, 51822, 51823 } accept
     # SSH on LAN + wg1 management plane
     tcp dport 22 accept
-    # Salt master on wg1 management plane only
-    ip saddr 10.78.0.0/16 tcp dport { 4505, 4506 } accept
     # nginx hub.env enrollment on wg0 (enrollment only)
     ip saddr 10.77.0.0/16 tcp dport 80 accept
     # Kubernetes API on wg2 backend plane
@@ -331,37 +296,9 @@ NFT
     systemctl enable --now nftables
     ok "nftables configured (wg1=mgmt wg2=k8s wg3=storage)"
 
-    # 4. Salt master — binds to wg1 (10.78.0.1), management plane
-    mkdir -p /srv/salt/roles /srv/pillar
-    cat >/etc/salt/master.d/kldload.conf <<SALT
-# Bind to wg1 management plane only
-interface: 10.78.0.1
-auto_accept: False
-file_roots:
-  base: [/srv/salt]
-pillar_roots:
-  base: [/srv/pillar]
-SALT
-    cat >/srv/salt/top.sls <<TOP
-base:
-  '*':             [roles.common]
-  'G@role:kvm':    [roles.kvm]
-  'G@role:storage':[roles.storage]
-  'G@role:vdi':    [roles.vdi]
-  'G@role:k8s-worker': [roles.k8s-worker]
-  'G@role:k8s-etcd':   [roles.k8s-etcd]
-TOP
-    cat >/srv/pillar/top.sls <<TOP
-base:
-  '*': [common]
-TOP
-    cat >/srv/pillar/common.sls <<PIL
-kldload:
-  hub_lan: ${LAN_IP}
-  hub_wg0_ip: 10.77.0.1
-PIL
-    systemctl enable --now salt-master
-    ok "Salt master started (auto-accept minions)"
+    # 4. (There is no configuration master on the hub since 2026-09-24: Salt is
+    #    gone from the product; Ansible runs from the operator's machine
+    #    against kldload-inventory, which is what the estate tests prove.)
 
     # 5. nginx — hub.env served on wg0 (enrollment), admin on wg1
     cat >/etc/nginx/sites-available/kldload-hub <<NGINX
@@ -371,7 +308,7 @@ server {
   location /hub.env { alias ${HUB_ENV}; default_type text/plain; }
   location /health  { return 200 "ok\n"; }
 }
-# wg1 management endpoint — admin + Salt API
+# wg1 management endpoint — admin
 server {
   listen 10.78.0.1:80;
   location /health  { return 200 "ok\n"; }
@@ -406,7 +343,7 @@ DNS
     #
     # Steps 8 and 9 and the zero-trust steps in setup_zero_trust name tools
     # that are not in this repository: kldload-tang-setup, kldload-dns-api
-    # (a unit, never written), kldload-issue-cert, kldload-salt-ssl-enable,
+    # (a unit, never written), kldload-issue-cert,
     # kldload-nftables-apply, kldload-clevis-seal, kldload-dns-register and
     # kldload-firstboot-master. Every one sat behind `[[ -x … ]] &&`, which
     # skipped in silence, except the dns-api enable, which logged a WARNING
@@ -906,7 +843,6 @@ UNLOCK
 # ══ ZERO TRUST ════════════════════════════════════════════════════════════════
 # Runs after WireGuard is up for all roles.
 # 1. Issue node cert signed by ISO CA (SAN includes all WG IPs + hostname)
-# 2. Enable Salt mTLS using the issued cert
 # 3. Apply nftables per-plane microsegmentation
 # 4. Mark node as permanently installed
 # _install_initramfs_zfs_key — stop asking for the passphrase twice.
@@ -1176,9 +1112,6 @@ setup_zero_trust() {
     # 10.77.${oct3}.1.
     # 1. Issue node cert with all WireGuard IPs as SANs
     log "UNIMPLEMENTED: node certificate (SANs 10.7{7,8,9}.${oct3}.${idx}, 10.80.${oct3}.${idx}, ${LAN_IP}) — kldload-issue-cert is not shipped"
-
-    # 2. Enable Salt mTLS (requires cert from step 1)
-    log "UNIMPLEMENTED: Salt mTLS — kldload-salt-ssl-enable is not shipped"
 
     # 3. Apply per-plane nftables microsegmentation
     log "UNIMPLEMENTED: per-plane nftables microsegmentation — kldload-nftables-apply is not shipped"
@@ -2940,19 +2873,6 @@ SMBSHARE
     # ── FREE edition: standalone only ─────────────────────────────────────────
     if [[ "$_edition" == "free" ]]; then
         log "Free edition — standalone setup only (no WireGuard mesh, no cluster)"
-
-        # Basic single-node Salt minion config (master = localhost, useful for local states)
-        if command -v salt-call &>/dev/null; then
-            mkdir -p /etc/salt/minion.d
-            cat >/etc/salt/minion.d/kldload-standalone.conf <<SALT
-# kldload Free — standalone Salt config (masterless mode)
-file_client: local
-file_roots:
-  base:
-    - /srv/salt
-SALT
-            ok "Salt configured for standalone/masterless mode"
-        fi
 
         # Suppress GNOME Terminal "set as default terminal" nag
         # Find whatever path gnome-terminal registered with update-alternatives
@@ -5093,31 +5013,25 @@ CHROMEPOL
     kvm)
         setup_wg_client
         setup_kvm
-        setup_salt_minion
         ;;
     storage)
         setup_wg_client
         setup_storage
-        setup_salt_minion
         ;;
     vdi)
         setup_wg_client
         setup_vdi
-        setup_salt_minion
         ;;
     monitoring)
         setup_wg_client
         setup_monitoring
-        setup_salt_minion
         ;;
     server | client | desktop)
         setup_wg_client
-        setup_salt_minion
         ;;
     *)
         log "Unknown role '${ROLE}' — base setup only"
         setup_wg_client
-        setup_salt_minion
         ;;
     esac
 
