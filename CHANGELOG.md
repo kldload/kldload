@@ -566,8 +566,10 @@ Neither breaks an existing answers file, but both change what a machine does:
 - The installer refuses to create `rpool` while another importable pool already
   has that name — three importable pools called `rpool` is how a machine boots
   into the wrong one
-- A storage profile that actually serves something: NFS, SMB and iSCSI, verified
-  against real clients rather than against a running daemon
+- A storage profile that actually serves something: NFS and SMB, verified
+  against real clients rather than against a running daemon; the iSCSI
+  target daemon is installed and enabled, and targets are yours to define
+  with `targetcli` (a default target is on the list for the next release)
 - The encrypted root can be unlocked by the TPM, bound to Secure Boot through
   PCR 7. Inert until you seal it, and not yet tested on real hardware
 - Every ISO records the commit it was built from and a digest of the resolved

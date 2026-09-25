@@ -246,8 +246,15 @@ if command -v targetcli >/dev/null 2>&1 || command -v tgtadm >/dev/null 2>&1; th
         _warn "iSCSI discovery" "DID NOT RUN — iscsiadm is not installed (iscsi-initiator-utils / open-iscsi)"
     elif _why="$(iscsi_discovery)"; then
         _pass "iSCSI discovery: ${_why}"
+    elif [[ "$_why" == *"Connection refused"* ]]; then
+        # The profile ships the target daemon and no target: there is no
+        # portal until an operator defines one (targetcli). That is the
+        # product's state, said plainly — not a failure of this machine.
+        # 11-storage, build 67, 2026-09-24: the daemon was up, discovery was
+        # refused, and this read as a broken storage server.
+        _warn "iSCSI discovery" "no portal on 127.0.0.1:3260 — the profile installs the target daemon only; define a target with targetcli (a default target is 2.0 work)"
     else
-        _fail "iSCSI discovery" "${_why} — the daemon is up but no portal answers on 127.0.0.1:3260; nothing configures a target yet"
+        _fail "iSCSI discovery" "${_why} — the daemon is up and a portal exists, but discovery failed"
     fi
 else
     _fail "iSCSI target tooling" "neither targetcli nor tgtadm is installed — the profile lists one of them"
