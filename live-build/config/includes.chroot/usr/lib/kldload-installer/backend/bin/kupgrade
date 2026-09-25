@@ -14,20 +14,22 @@
 #   the machine then boots to a root it cannot mount. The snapshot is the way
 #   back, the per-kernel check is what tells you BEFORE the reboot.
 #
-# What it does NOT do: roll back by itself. Nothing here is automatic after
-#   the snapshot; if the upgrade or the module build fails, this tool exits
-#   non-zero, names the snapshot, and the operator decides:
-#     kldload-rollback to <snapshot>     (or: apt rollback / dnf rollback)
+#   4. If the package transaction failed, or a kernel was left without a ZFS
+#      module, STAGES a rollback: kldload-rollback clones the pre-upgrade
+#      snapshot into a new boot environment and makes it the next boot. The
+#      running root is not touched and nothing reboots; the operator reboots
+#      into the old root, or runs `kldload-rollback cancel` to keep the new
+#      one. --no-rollback leaves the snapshot and does nothing else.
 #
-# Usage:   kupgrade [-h|--help]          (must run as root; takes no other
-#                                         arguments)
+# Usage:   kupgrade [--no-rollback] [-h|--help]     (must run as root)
 # Inputs:  /etc/kldload/boot-environment (optional; else the dataset at /)
 # Outputs: the snapshot above, the package manager's own changes, and
 #          /var/log/kldload/upgrade.log with everything that was printed.
 # Exit:    0 upgraded and every kernel has ZFS modules
 #          1 not root, no package manager, the upgrade itself failed, or a
 #            ZFS DKMS build failed for at least one kernel (the summary
-#            names the pre-upgrade snapshot)
+#            names the pre-upgrade snapshot and says whether a rollback
+#            was staged)
 #          2 usage error (unknown argument)
 #
 # Notes:
@@ -42,14 +44,22 @@ set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Arguments first: help needs no root and must not start an upgrade.
+ROLLBACK=1
 case "${1:-}" in
 "") ;;
 -h | --help)
     sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
     exit 0
     ;;
+--no-rollback)
+    ROLLBACK=0
+    [[ -z "${2:-}" ]] || {
+        printf 'kupgrade: unknown argument: %s (-h for help)\n' "$2" >&2
+        exit 2
+    }
+    ;;
 *)
-    printf 'kupgrade: unknown argument: %s (this tool takes none; -h for help)\n' "$1" >&2
+    printf 'kupgrade: unknown argument: %s (-h for help)\n' "$1" >&2
     exit 2
     ;;
 esac
@@ -116,6 +126,7 @@ log "Boot environment dataset: ${BE_DATASET}"
 # ---------------------------------------------------------------------------
 
 SNAPSHOT_CREATED=""
+UPG_RC=0 # the package transaction's own exit status; decides the rollback below
 if zfs list -H "${BE_DATASET}" >/dev/null 2>&1; then
     SNAP="${BE_DATASET}@pre-upgrade-$(date +%Y%m%d-%H%M%S)"
     log "Creating pre-upgrade boot environment: ${SNAP}"
@@ -134,7 +145,7 @@ fi
 
 if [[ "${PKG}" == "dnf" ]]; then
     log "Running: dnf upgrade"
-    dnf upgrade -y 2>&1 | tee -a "$LOG"
+    dnf upgrade -y 2>&1 | tee -a "$LOG" || UPG_RC=$?
 elif [[ "${PKG}" == "pacman" ]]; then
     # Arch+ZFS: the kernel is pinned to whatever version archzfs supports.
     # A full pacman -Syu will fail if the repos have a newer kernel that
@@ -153,7 +164,7 @@ else
     DEBIAN_FRONTEND=noninteractive apt-get update 2>&1 | tee -a "$LOG"
 
     log "Running: apt-get dist-upgrade"
-    DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y 2>&1 | tee -a "$LOG"
+    DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y 2>&1 | tee -a "$LOG" || UPG_RC=$?
 
     log "Running: apt-get autoremove"
     DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>&1 | tee -a "$LOG"
@@ -227,12 +238,31 @@ fi
 # ---------------------------------------------------------------------------
 
 log "==================================================================="
-if [[ "${DKMS_WARN}" -eq 1 ]]; then
+FAILED=0
+if [[ "${UPG_RC}" -ne 0 ]]; then
+    log "kldload upgrade FAILED: the package transaction exited ${UPG_RC}"
+    FAILED=1
+elif [[ "${DKMS_WARN}" -eq 1 ]]; then
     log "kldload upgrade FINISHED WITH ERRORS: ZFS DKMS build failed for at least one kernel"
+    FAILED=1
 else
     log "kldload upgrade complete"
 fi
 [[ -n "${SNAPSHOT_CREATED}" ]] && log "Pre-upgrade snapshot: ${SNAPSHOT_CREATED}"
+# The way back, staged rather than taken: kldload-rollback clones the snapshot
+# into a boot environment and points the next boot at it; the running root is
+# untouched, so nothing here can make a bad upgrade worse. Until 2026-09-24
+# the README promised "automatic rollback" and nothing existed behind it.
+if [[ "${FAILED}" -eq 1 && "${ROLLBACK}" -eq 1 && -n "${SNAPSHOT_CREATED}" ]]; then
+    if command -v kldload-rollback >/dev/null 2>&1 &&
+        KLDLOAD_ROLLBACK_REBOOT=0 kldload-rollback to "${SNAPSHOT_CREATED}" 2>&1 | tee -a "$LOG"; then
+        log "ROLLBACK STAGED: reboot to return to the pre-upgrade root, or keep this one with: kldload-rollback cancel"
+    else
+        log "WARNING: could not stage the rollback — do it by hand: kldload-rollback to ${SNAPSHOT_CREATED}"
+    fi
+elif [[ "${FAILED}" -eq 1 && -n "${SNAPSHOT_CREATED}" ]]; then
+    log "Rollback NOT staged (--no-rollback); by hand: kldload-rollback to ${SNAPSHOT_CREATED}"
+fi
 log "Log: ${LOG}"
 log "==================================================================="
-[[ "${DKMS_WARN}" -eq 0 ]] || exit 1
+[[ "${FAILED}" -eq 0 ]] || exit 1

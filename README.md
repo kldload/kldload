@@ -623,7 +623,7 @@ updater get the same protection.
 | `apt rollback cancel` | Un-stages it — nothing has changed until you reboot |
 | `kldload-rollback` | The same machinery directly, with boot-environment control |
 | `kpkg` | Package operations with pre-install snapshots |
-| `kupgrade` | Guided upgrade with automatic rollback on failure |
+| `kupgrade` | Snapshot, upgrade every package, check ZFS builds for every kernel; on failure a rollback is STAGED for the next boot (`--no-rollback` to skip) |
 
 Rollback **clones** the snapshot into a new boot environment rather than running
 `zfs rollback`, which cannot touch a mounted root and would destroy every newer
@@ -644,7 +644,7 @@ snapshot. Nothing is overwritten.
 | `kbe` | Boot environment manager |
 | `kdf` | ZFS-aware disk usage |
 | `kpkg` | Package manager with pre-install snapshots |
-| `kupgrade` | Safe upgrade with automatic rollback |
+| `kupgrade` | Upgrade with a staged rollback on failure |
 | `krecovery` | Disaster recovery |
 | `kexport` | Export golden images (qcow2 / VMDK / VHD / OVA / raw) |
 
