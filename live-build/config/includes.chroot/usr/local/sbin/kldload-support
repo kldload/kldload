@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# kldload-support — one command to run before asking for help.
+#
+# Runs the doctor, collects the redacted diagnostic bundle, folds the doctor's
+# report into it, and prints the one path to attach and a summary of what the
+# doctor found. Nothing on the machine is changed.
+#
+# What it does, in order:
+#   1. kldload-doctor            -> doctor.json (every check, ok/fail/warn/skip)
+#   2. kldload-debug-bundle      -> the redacted tarball (no keys, no passwords,
+#                                   no passphrases: an allowlist of /etc/kldload,
+#                                   logs, units, hardware, ZFS and network state)
+#   3. adds doctor.json to that tarball and prints the path
+#
+# Usage:
+#   sudo kldload-support               # bundle under /root
+#   sudo kldload-support --out DIR     # bundle under DIR
+#   kldload-support -h | --help
+#
+# Exit: 0 bundle written (the doctor's verdict is printed, not returned);
+#       1 the bundle could not be written; 2 usage.
+#
+# Why: the review of 2026-09-23 found the bundle carried private keys and the
+# doctor could not fail; both were fixed, and the third gap was that an
+# operator had to know two tools and their flags to produce a report. This is
+# the one they are told to run.
+
+set -Eeuo pipefail
+trap 'echo "kldload-support: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"; }
+case "${1:-}" in
+-h | --help)
+    usage
+    exit 0
+    ;;
+esac
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+OUT_DIR=/root
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --out)
+        [[ -n "${2:-}" && -d "${2}" ]] || {
+            echo "kldload-support: --out needs an existing directory" >&2
+            exit 2
+        }
+        OUT_DIR="$2"
+        shift 2
+        ;;
+    *)
+        echo "kldload-support: unknown argument: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+done
+
+for _t in kldload-doctor kldload-debug-bundle; do
+    command -v "$_t" >/dev/null 2>&1 || {
+        echo "kldload-support: $_t is not installed — this is not a kldload host, or a core install without the tools" >&2
+        exit 1
+    }
+done
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# 1. The doctor. Its exit code is its verdict (0 ok, 1 failures, 2 a check
+#    crashed); the report is wanted whatever it says, so the code is kept,
+#    not acted on.
+doctor_rc=0
+kldload-doctor >"$work/doctor.json" 2>"$work/doctor.stderr" || doctor_rc=$?
+[[ -s "$work/doctor.json" ]] ||
+    echo "kldload-support: WARNING: the doctor produced no report (rc=${doctor_rc}) — see doctor.stderr in the bundle" >&2
+
+# 2. The bundle. --quiet: its per-section progress is noise here; its own
+#    summary line still prints.
+bundle="$(kldload-debug-bundle --out "$OUT_DIR" --quiet 2>&1 | sed -n 's/.*\(\/[^ ]*kldload-debug-[^ ]*\.tar\.gz\).*/\1/p' | tail -1)"
+if [[ -z "$bundle" || ! -s "$bundle" ]]; then
+    # The bundle names itself; find the newest one written since this run began.
+    bundle="$(find "$OUT_DIR" -maxdepth 1 -name 'kldload-debug-*.tar.gz' -newer "$work" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)"
+fi
+[[ -n "$bundle" && -s "$bundle" ]] || {
+    echo "kldload-support: kldload-debug-bundle wrote nothing under $OUT_DIR" >&2
+    exit 1
+}
+
+# 3. Fold the doctor's report in. gzip cannot be appended to, so the tarball
+#    is rewritten once; the result keeps the bundle's own 0600.
+(
+    cd "$work"
+    mkdir -p bundle && tar -xzf "$bundle" -C bundle
+    cp doctor.json doctor.stderr bundle/ 2>/dev/null || true # stderr may be empty
+    tar -czf "$bundle.new" -C bundle .
+)
+mv -f "$bundle.new" "$bundle"
+chmod 0600 "$bundle"
+
+# The summary an operator can read before deciding what to send.
+if [[ -s "$work/doctor.json" ]] && command -v python3 >/dev/null 2>&1; then
+    # swallow: a malformed report is printed as such by the script itself
+    python3 - "$work/doctor.json" <<'PY' || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"doctor report unreadable: {e}")
+    sys.exit(1)
+checks = d.get("checks", d if isinstance(d, list) else [])
+by = {}
+for c in checks:
+    by[c.get("status", "?")] = by.get(c.get("status", "?"), 0) + 1
+print("doctor: " + ", ".join(f"{k} {v}" for k, v in sorted(by.items())))
+for c in checks:
+    if c.get("status") == "fail":
+        print(f"  FAIL {c.get('subsystem','?')}/{c.get('name','?')}: {c.get('actual','')}")
+        if c.get("remediation"):
+            print(f"       fix: {c['remediation']}")
+PY
+fi
+echo "bundle: $bundle"
+echo "send that file. It carries no key, password or passphrase (allowlisted and redacted by name)."

@@ -1339,7 +1339,12 @@ cmd_golden() {
     if zfs send -R "$snap" >"$out"; then
         # Outcome, not exit code: a truncated stream fails a receive halfway.
         [[ -s "$out" ]] || die "golden stream came out empty"
-        log "golden '${name}' ready: $(numfmt --to=iec "$(stat -c%s "$out")") at $out"
+        # The digest the receiver checks (kldload-restore-machine fetches
+        # <stream>.sha256 and refuses a mismatch). Written beside the stream,
+        # same mode, so the same nginx location serves it.
+        (cd "$ROOT/golden" && sha256sum "${name}.zfs" >"${name}.zfs.sha256") ||
+            die "could not write the stream digest"
+        log "golden '${name}' ready: $(numfmt --to=iec "$(stat -c%s "$out")") at $out (sha256: $(cut -c1-16 "${out}.sha256")…)"
         log "  arm a target with: kldload-netboot-server arm-deploy <mac> --golden ${name}"
     else
         rm -f "$out"

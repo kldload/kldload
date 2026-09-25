@@ -318,9 +318,38 @@ if ((ARCHIVE_IS_URL)); then
     if ((DRY_RUN)); then
         say "  would run: curl $ARCHIVE_URL | zfs receive -F -d -u $POOL"
     else
+        # Integrity: the server publishes <stream>.sha256 beside the stream
+        # (kldload-netboot-server golden, since 2026-09-24). The digest is
+        # computed on the bytes as they are received, and a mismatch — anyone
+        # on the path, a truncated file, a stale stream — destroys what was
+        # received and fails the restore. A stream with no digest is accepted
+        # with a WARNING so older servers still work; that warning is the
+        # thing to remove once every server publishes one.
+        want_sum="$(curl -fsSL --connect-timeout 10 "${ARCHIVE_URL}.sha256" 2>/dev/null | awk '{print $1; exit}' || true)"
+        sum_file="$(mktemp)"
         curl -fsSL --retry 3 --retry-delay 2 --speed-time 60 --speed-limit 102400 "$ARCHIVE_URL" |
+            tee >(sha256sum | awk '{print $1}' >"$sum_file") |
             zfs receive -F -d -u "$POOL" ||
             say "WARNING: receive pipeline exited non-zero; the verification below decides"
+        # The tee side runs in a process substitution; wait for its file.
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [[ -s "$sum_file" ]] && break
+            sleep 1
+        done
+        got_sum="$(cat "$sum_file" 2>/dev/null || true)"
+        rm -f "$sum_file"
+        if [[ -n "$want_sum" ]]; then
+            if [[ "$got_sum" != "$want_sum" ]]; then
+                say "sha256 MISMATCH: received ${got_sum:-nothing}, server published ${want_sum} — destroying what was received"
+                zfs list -H -o name -r "$POOL" | tail -n +2 | sort -r | while read -r _ds; do
+                    zfs destroy -r "$_ds" 2>/dev/null || true # a child already gone with its parent
+                done
+                die "golden stream from $ARCHIVE_URL failed its integrity check"
+            fi
+            say "  sha256 verified: ${got_sum}"
+        else
+            say "WARNING: ${ARCHIVE_URL}.sha256 is not published — the stream was NOT integrity-checked"
+        fi
         got="$(zfs list -H -o name -r "$POOL" | wc -l)"
         ((got > 1)) || die "nothing was received into $POOL from $ARCHIVE_URL"
         say "  received: ${got} datasets"
