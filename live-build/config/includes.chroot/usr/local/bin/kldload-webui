@@ -1451,10 +1451,85 @@ def _ws_client_ip(websocket):
 _LOOPBACK_AUTH_OK = False
 
 
+def _loopback_peer_uid(port):
+    """The uid that owns the loopback TCP socket whose LOCAL port is `port`,
+    read from /proc/net/tcp and /proc/net/tcp6, or None. This is the peer
+    credential nginx cannot carry: a client on 127.0.0.1:PORT talking to
+    nginx is a socket the kernel attributes to a uid. Fail closed: no row,
+    or an unreadable table, is None."""
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < port < 65536):
+        return None
+    wanted = {f"0100007F:{port:04X}",                                   # 127.0.0.1
+              f"0000000000000000FFFF00000100007F:{port:04X}",           # ::ffff:127.0.0.1
+              f"00000000000000000000000001000000:{port:04X}"}           # ::1
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table) as f:
+                next(f)  # header
+                for line in f:
+                    cols = line.split()
+                    if len(cols) > 7 and cols[1] in wanted and cols[3] == "01":  # 01 = ESTABLISHED
+                        return int(cols[7])
+        except (OSError, ValueError, StopIteration):
+            continue
+    return None
+
+
+# uids allowed to drive the console without a credential from loopback:
+# root, the first-boot show's kiosk user (kldload-show, the physical screen),
+# and every member of wheel/sudo — i.e. the people who could sudo anyway.
+_TRUSTED_LOCAL_UIDS = None
+
+
+def _trusted_local_uids():
+    global _TRUSTED_LOCAL_UIDS
+    if _TRUSTED_LOCAL_UIDS is None:
+        import grp
+        import pwd
+        uids = {0}
+        for name in ("kldload-show",):
+            try:
+                uids.add(pwd.getpwnam(name).pw_uid)
+            except KeyError:
+                pass
+        for gname in ("wheel", "sudo"):
+            try:
+                for member in grp.getgrnam(gname).gr_mem:
+                    try:
+                        uids.add(pwd.getpwnam(member).pw_uid)
+                    except KeyError:
+                        pass
+            except KeyError:
+                pass
+        _TRUSTED_LOCAL_UIDS = uids
+    return _TRUSTED_LOCAL_UIDS
+
+
 def _ws_is_local(websocket):
+    """A loopback client is the operator only when the socket belongs to a
+    trusted uid. Until 2026-09-24 any process on the machine that reached
+    wss://127.0.0.1:8443 through nginx — a container on the host network, an
+    exporter, any unprivileged user — got root actions with no credential."""
     if not _LOOPBACK_AUTH_OK:
         return False
-    return _ws_client_ip(websocket) in ("127.0.0.1", "::1")
+    if _ws_client_ip(websocket) not in ("127.0.0.1", "::1"):
+        return False
+    try:
+        port = (websocket.request.headers.get("X-Real-Port", "") or "").strip()
+    except Exception:
+        return False
+    uid = _loopback_peer_uid(port)
+    if uid is None:
+        LOG.warning("loopback client on port %s: no owning uid found — not trusted", port or "?")
+        return False
+    if uid in _trusted_local_uids():
+        return True
+    LOG.warning("loopback client on port %s belongs to uid %d — not a console admin, credential required", port, uid)
+    return False
 
 
 def _user_is_console_admin(user):
