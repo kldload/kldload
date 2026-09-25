@@ -401,9 +401,12 @@ off, and it stayed off on the installed machine — including the EL ZFS reposit
 which its host serves only over plain HTTP. Every repository now checks
 signatures with its vendor's key; on EL the EPEL and OpenZFS keys are installed
 for the first time. A repository whose key is missing refuses updates instead of
-installing them unverified. On a Fedora machine installed with an earlier
-release, this switches checking on (it adds Fedora's key, which the machine
-already has):
+installing them unverified. The NVIDIA CUDA repository on RHEL, Rocky and
+CentOS was the last one left open: the installer wrote it after the hardening
+pass, with checking off. It is now written signed with the key NVIDIA's own
+repository file names, as on Fedora. On a Fedora machine installed with an
+earlier release, this switches checking on (it adds Fedora's key, which the
+machine already has):
 
     sed -i -e 's/^gpgcheck=0/gpgcheck=1/' \
         -e '/^\[fedora/a gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$releasever-$basearch' \
