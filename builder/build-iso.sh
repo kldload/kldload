@@ -1526,13 +1526,19 @@ grep -q '^PermitRootLogin prohibit-password$' "${ROOTFS}/etc/ssh/sshd_config.d/5
 
 # Enable services
 enable_live_unit NetworkManager.service sshd.service
-# qemu-guest-agent is installed (PKGS above) and was never enabled: a
-# hypervisor could not read a live guest's address. Its only enabler was a
-# live-build hook the lorax build never ran (deleted 2026-09-23).
-enable_live_unit qemu-guest-agent.service
-# Live environment always boots to GNOME desktop — the web UI installer is
-# browser-based, so even "server" and "kvm" profile ISOs need a graphical session
-enable_live_unit gdm.service
+if [[ "$EDITION" != "core" ]]; then
+    # qemu-guest-agent is installed (PKGS above) and was never enabled: a
+    # hypervisor could not read a live guest's address. Its only enabler was a
+    # live-build hook the lorax build never ran (deleted 2026-09-23).
+    enable_live_unit qemu-guest-agent.service
+    # Live environment always boots to GNOME desktop — the web UI installer is
+    # browser-based, so even "server" and "kvm" profile ISOs need a graphical session
+    enable_live_unit gdm.service
+else
+    # The core edition installs neither (its package set stops at the
+    # substrate); enabling them died the core build of 67 (2026-09-24).
+    log "core edition: no guest agent, no display manager — nothing more to enable"
+fi
 chroot "$ROOTFS" systemctl set-default graphical.target 2>/dev/null || true
 
 # GDM autologin for live session — boots straight to desktop with no login prompt
