@@ -1434,9 +1434,19 @@ if [[ "${WANT[klab]}" == "1" ]]; then
                 esac
                 sleep 30
             done
-            if [[ -f /var/lib/kldload/klab-firstboot-done ]]; then
+            # klab-firstboot-done is the unit saying it ran, not that it built
+            # anything: on 2026-09-18 it exited 0 with 0 of 5 goldens sealed (no
+            # rpool/vms) and this wrote klab-ready. Count the outcome.
+            _kg_sealed=0
+            # swallow: no pool or no snapshots is zero sealed, which is the finding
+            _kg_sealed="$(zfs list -H -t snapshot -o name 2>/dev/null | grep -cE '/klab-golden-[a-z]+@golden$' || true)"
+            _kg_sealed="${_kg_sealed:-0}"
+            if [[ -f /var/lib/kldload/klab-firstboot-done && "${_kg_sealed}" -eq 0 ]]; then
+                log "[klab] ERROR: klab-firstboot.service finished but ZERO klab-golden-* goldens are sealed — NOT marking klab ready (journalctl -u klab-firstboot)"
+                _klab_ok=0
+            elif [[ -f /var/lib/kldload/klab-firstboot-done ]]; then
                 mark "klab"
-                log "[klab] klab-firstboot.service finished — blue-green ready"
+                log "[klab] klab-firstboot.service finished — ${_kg_sealed} lean golden(s) sealed, blue-green ready"
                 # The blue/green sites are clones waiting for a test run, and
                 # the ztest phase below runs for another ~hour. Handing that
                 # phase eight idle VMs' worth of RAM is the whole difference

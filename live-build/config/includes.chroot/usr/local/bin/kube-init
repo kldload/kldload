@@ -78,7 +78,15 @@ fi
 # installing whatever the chart repo offers today, which on an air-gapped box
 # is nothing.
 CILIUM_VERSION="${CILIUM_VERSION:-unknown}"
-METALLB_VERSION="${METALLB_VERSION:-0.14.9}"
+# From the lock, like Cilium: the build resolves and mirrors the MetalLB
+# images for the version in k8s-stack.lock, and until 2026-09-24 this line
+# pinned 0.14.9 while the lock said 0.16.1 — the installed chart pulled images
+# the darksite did not carry, so a Kubernetes bootstrap needed the network.
+if [[ -z "${METALLB_VERSION:-}" && -s "$_k8s_lock" ]]; then
+    METALLB_VERSION="$(sed -n 's/^CHART=//p' "$_k8s_lock" |
+        awk -F'|' '$3=="metallb"{print $4; exit}')" || METALLB_VERSION=""
+fi
+METALLB_VERSION="${METALLB_VERSION:-unknown}"
 METALLB_POOL="${METALLB_POOL:-}" # auto-detect from node subnet if empty
 # The pool's NAME, not its range. Anything that asks MetalLB for an address BY
 # NAME — a Service annotated metallb.universe.tf/address-pool — has to spell
@@ -403,7 +411,18 @@ install_metallb() {
     # metallb check failed -- as it had on 4-k8s and deb-4-k8s before, with
     # every node Ready. Rendered offline: default = speaker, frr, reloader,
     # frr-metrics + 3 init; with this = speaker, no init.
-    helm install metallb metallb/metallb \
+    # The staged chart when the darksite has it (build-iso.sh stages every
+    # CHART= line of the lock as <name>.tgz); the repo only as a fallback.
+    local _metallb_chart="metallb/metallb"
+    if [[ -f /root/darksite/helm-charts/metallb.tgz ]]; then
+        _metallb_chart=/root/darksite/helm-charts/metallb.tgz
+        log "Using cached MetalLB chart from darksite (${METALLB_VERSION})"
+    else
+        log "WARNING: no staged MetalLB chart — installing ${METALLB_VERSION} from the online repo"
+        helm repo add metallb https://metallb.github.io/metallb 2>/dev/null || true
+        helm repo update >/dev/null 2>&1
+    fi
+    helm install metallb "$_metallb_chart" \
         --namespace metallb-system --create-namespace \
         --version "${METALLB_VERSION}" \
         --set speaker.frr.enabled=false \
