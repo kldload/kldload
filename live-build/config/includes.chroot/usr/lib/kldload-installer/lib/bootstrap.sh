@@ -1184,6 +1184,21 @@ _k_repo_key() {
     return 0
 }
 
+# _k_cuda_repo_key <repo dir> — the gpgkey URL NVIDIA's own published .repo
+# names for that CUDA repository (rhel10, fedora44, ...), on stdout; empty when
+# it cannot be read. The key id is per release (D42D0685 for fedora42, CDF6BA43
+# for rhel10), so it is read from NVIDIA's file, never written down here.
+# HISTORY: the EL branch wrote cuda.repo with gpgcheck=0 AFTER
+# k_harden_repo_signatures had run, so the one repository that ships kernel
+# modules was the one left unverified (rhel-5-desktop, fiend, 2026-09-25).
+_k_cuda_repo_key() {
+    local dir="$1"
+    curl -fsS --max-time 20 \
+        "https://developer.download.nvidia.com/compute/cuda/repos/${dir}/x86_64/cuda-${dir}.repo" 2>/dev/null |
+        sed -n 's/^gpgkey=//p' | head -1 || true
+    return 0
+}
+
 # k_harden_repo_signatures <target> <distro> <release> — set gpgcheck=1 (and
 # the vendor gpgkey) on every persistent repo section that had it off. Logs one
 # line per repo and a summary; returns 0 (a missing key is logged, and fails
@@ -3568,9 +3583,7 @@ NOUVEAU
             # gpgcheck=1 with no key -- updates from CUDA are then refused and
             # the log says why, rather than installing unverified driver code.
             local _cuda_key=""
-            _cuda_key="$(curl -fsS --max-time 20 \
-                "https://developer.download.nvidia.com/compute/cuda/repos/fedora${_nv_alt_release}/x86_64/cuda-fedora${_nv_alt_release}.repo" 2>/dev/null |
-                sed -n 's/^gpgkey=//p' | head -1 || true)"
+            _cuda_key="$(_k_cuda_repo_key "fedora${_nv_alt_release}")"
             [[ -n "$_cuda_key" ]] ||
                 k_log_to "$log" "WARNING: could not read NVIDIA's CUDA repo file for its signing key — cuda.repo is gpgcheck=1 with no key, so CUDA updates will be refused until one is set"
             cat >"${target}/etc/yum.repos.d/cuda.repo" <<CUDAREPO
@@ -3587,12 +3600,21 @@ CUDAREPO
             ;;
         centos | rocky | rhel | *)
             # EL family: CUDA repo's kmod-nvidia-open-dkms is the canonical path.
+            # Signed, like the Fedora branch above. This block runs AFTER
+            # k_harden_repo_signatures, so a gpgcheck=0 written here is never
+            # corrected: the RHEL 10 desktop shipped its driver repo unverified
+            # while every other repo on the machine checked (fiend, 2026-09-25).
+            local _cuda_key=""
+            _cuda_key="$(_k_cuda_repo_key "rhel${release}")"
+            [[ -n "$_cuda_key" ]] ||
+                k_log_to "$log" "WARNING: could not read NVIDIA's CUDA repo file for its signing key — cuda.repo is gpgcheck=1 with no key, so the driver install below and CUDA updates will be refused until one is set"
             cat >"${target}/etc/yum.repos.d/cuda.repo" <<CUDAREPO
 [cuda-rhel${release}]
 name=NVIDIA CUDA for rhel${release}
 baseurl=https://developer.download.nvidia.com/compute/cuda/repos/rhel${release}/x86_64/
 enabled=1
-gpgcheck=0
+gpgcheck=1
+${_cuda_key:+gpgkey=${_cuda_key}}
 CUDAREPO
             chroot "${target}" /usr/bin/dnf install -y --skip-broken \
                 nvidia-driver nvidia-driver-libs nvidia-driver-cuda \
