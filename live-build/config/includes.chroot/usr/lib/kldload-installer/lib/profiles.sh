@@ -66,20 +66,6 @@ k_profile_packages() {
     fedora | centos | rocky | rhel) _cxx="gcc-c++" _pw_utils="pipewire-utils" _pam="python3-pam" ;;
     esac
 
-    # Alpine Linux — core profile only (Alpine is a musl-based distro that lacks
-    # the glibc ecosystem needed by GNOME, sanoid, k* tools, etc.)
-    if [[ "$_distro" == "alpine" ]]; then
-        case "$profile" in
-        core)
-            echo "openssh sudo curl ca-certificates vim less iproute2 nftables wireguard-tools"
-            ;;
-        *)
-            k_die "Alpine only supports 'core' profile (got: $profile)"
-            ;;
-        esac
-        return
-    fi
-
     # Arch Linux uses different package names (e.g., "openssh" not "openssh-server",
     # "python" not "python3", no "-find" suffix on fd, etc.). Arch also lacks
     # sanoid in its repos — it gets installed from GitHub by k_install_system_files.
