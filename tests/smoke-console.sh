@@ -159,6 +159,8 @@ storage pool
 storage topology
 storage datasets
 storage snapshots
+storage explorer
+storage versions
 storage bootenvs
 storage shares
 storage arc
@@ -192,7 +194,7 @@ provision feed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 45)) && _pass "every sub-tab tried (45/45)" || _fail "sub-tabs tried" "${_tabs} of 45"
+    ((_tabs == 47)) && _pass "every sub-tab tried (47/47)" || _fail "sub-tabs tried" "${_tabs} of 47"
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"

@@ -25,7 +25,7 @@ func TestVerbKeysDoNotCollideWithNavigation(t *testing.T) {
 				t.Errorf("%s: key %q is bound twice", tab, v.key)
 			}
 			seen[v.key] = true
-			if v.argv == nil && v.ctxArgv == nil {
+			if v.argv == nil && v.ctxArgv == nil && v.rowCtxArgv == nil {
 				t.Errorf("%s: verb %q builds no command", tab, v.label)
 			}
 		}

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -298,6 +299,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.marks[k] = true
 				}
 			}
+		case "backspace":
+			// Explorer: up one directory; Versions: back to the file's directory
+			if sections[m.active].name == "Storage" && (m.subName() == "Explorer" || m.subName() == "Versions") && m.ctx[m.key()] != "" {
+				ds, rel := splitExplorerCtx(m.ctx[m.key()])
+				if m.subName() == "Versions" {
+					m.switchTo(m.active, subIndex(m.active, "Explorer"))
+				}
+				if rel != "/" {
+					m.ctx[m.key()] = ds + ":" + path.Dir(rel)
+				} else {
+					m.ctx[m.key()] = ds + ":/"
+				}
+				m.filter.SetValue("")
+				m.loading[m.key()] = true
+				m.row = 0
+				return m, m.reload()
+			}
 		case "esc":
 			// esc clears the marks first, then leaves a context
 			if n := m.markedRows(); len(n) > 0 {
@@ -306,6 +324,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						delete(m.marks, k)
 					}
 				}
+				return m, nil
+			}
+			// then an applied filter: "(esc: all)" promises that, and it
+			// used to jump straight to leaving the context instead
+			if m.filter.Value() != "" {
+				m.filter.SetValue("")
+				m.row = 0
 				return m, nil
 			}
 			// esc leaves a context: the VM's snapshots become every VM's
@@ -317,6 +342,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			return m.drill()
+		case "x":
+			// explore a dataset's files (Datasets) — a drill, not a verb
+			if sections[m.active].name+"/"+m.subName() == "Storage/Datasets" && m.selected() != "" {
+				ds := m.selected()
+				m.switchTo(m.active, subIndex(m.active, "Explorer"))
+				m.ctx[m.key()] = ds + ":/"
+				m.loading[m.key()] = true
+				return m, m.reload()
+			}
+			for _, v := range m.verbsHere() {
+				if v.key == "x" {
+					return m.runVerb(v)
+				}
+			}
+		case "v":
+			if sections[m.active].name+"/"+m.subName() == "Storage/Explorer" {
+				return m.drill()
+			}
+			for _, v := range m.verbsHere() {
+				if v.key == "v" {
+					return m.runVerb(v)
+				}
+			}
 		default:
 			for _, v := range m.verbsHere() {
 				if v.key == msg.String() {
@@ -360,6 +408,24 @@ func (m model) drill() (tea.Model, tea.Cmd) {
 		target = "Snapshots"
 	case "Storage/Pools":
 		target = "Pool"
+	case "Storage/Explorer":
+		r := m.selectedRow()
+		ds, rel := splitExplorerCtx(m.ctx[m.key()])
+		switch col(r, 1) {
+		case "up":
+			m.ctx[m.key()] = ds + ":" + path.Dir(rel)
+		case "dir":
+			m.ctx[m.key()] = ds + ":" + path.Join(rel, col(r, 0))
+		default:
+			m.switchTo(m.active, subIndex(m.active, "Versions"))
+			m.ctx[m.key()] = ds + ":" + path.Join(rel, col(r, 0))
+		}
+		// a new directory is a new table: the filter that found the row
+		// must not hide everything in it (caught on the first probe run)
+		m.filter.SetValue("")
+		m.loading[m.key()] = true
+		m.row = 0
+		return m, m.reload()
 	case "Cluster/Pods":
 		r := m.selectedRow()
 		m.switchTo(m.active, subIndex(m.active, "Logs"))
@@ -609,9 +675,12 @@ func (m model) execBatch(v verb, rows [][]string) tea.Cmd {
 func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
 	var argv []string
 	var err error
-	if v.argv == nil && v.ctxArgv != nil {
+	switch {
+	case v.rowCtxArgv != nil:
+		argv, err = v.rowCtxArgv(row, m.ctx[m.key()])
+	case v.argv == nil && v.ctxArgv != nil:
 		argv, err = v.ctxArgv(m.ctx[m.key()])
-	} else {
+	default:
 		argv, err = v.argv(row, in)
 	}
 	if err != nil {
@@ -773,10 +842,16 @@ func (m model) keyHints() string {
 	k := func(key, what string) string { return stKey.Render(key) + stDim.Render(" "+what) }
 	parts := []string{k("1-0", "section"), k("tab", m.subName()), k("j/k", "row"), k("/", "filter"), k("o", "sort")}
 	switch sections[m.active].name + "/" + m.subName() {
-	case "Machines/VMs", "Storage/Datasets":
+	case "Machines/VMs":
 		parts = append(parts, k("enter", "snapshots"))
+	case "Storage/Datasets":
+		parts = append(parts, k("enter", "snapshots"), k("x", "explore"))
 	case "Storage/Pools":
 		parts = append(parts, k("enter", "open the pool"))
+	case "Storage/Explorer":
+		parts = append(parts, k("enter", "open"), k("v", "versions"), k("backspace", "up"))
+	case "Storage/Versions":
+		parts = append(parts, k("backspace", "back"))
 	case "Cluster/Pods":
 		parts = append(parts, k("enter", "logs"))
 	case "Cluster/Nodes", "Cluster/Deployments", "Cluster/Services":
@@ -909,6 +984,11 @@ func (m model) detailView(d *sectionData, w, h int) string {
 	lines = append(lines, "")
 	for _, v := range m.verbsHere() {
 		if v.noRow || v.argv == nil {
+			if v.rowCtxArgv != nil {
+				if argv, err := v.rowCtxArgv(r, m.ctx[m.key()]); err == nil {
+					lines = append(lines, stKey.Render(v.key)+"  "+stDim.Render(truncate(strings.Join(argv, " "), w-3)))
+				}
+			}
 			continue
 		}
 		if argv, err := v.argv(r, "…"); err == nil {
@@ -936,7 +1016,7 @@ func (m model) helpView() string {
 		k("tab, [ ]", "next / previous sub-tab of the section"),
 		k("j / k", "move down / up   (g, G first / last · ctrl+f, ctrl+b page)"),
 		k("enter", "drill in: a VM's or a dataset's snapshots, a group's hosts"),
-		k("esc", "clear the marks, then leave a drill-in (back to every VM / dataset)"),
+		k("esc", "clear the marks, then the filter, then leave a drill-in (back to every VM / dataset)"),
 		k("space", "mark the row (verbs then run on every marked row)   ·   ctrl+a all / none"),
 		k("/", "filter rows; enter keeps it, esc clears it"),
 		k("o", "sort: next column, then descending, then the tool's order"),

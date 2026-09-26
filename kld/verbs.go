@@ -32,6 +32,9 @@ type verb struct {
 	ctxArgv func(ctx string) ([]string, error)
 	secret  bool // the prompt's input is a passphrase: masked on screen
 	stdin   bool // the input is fed to the command's stdin, not argv
+	// rowCtxArgv builds the command from the row AND the tab's context (a
+	// snapshot row under a file's Versions).
+	rowCtxArgv func(row []string, ctx string) ([]string, error)
 }
 
 // col returns column i of a row, or "".
@@ -281,6 +284,25 @@ var verbs = map[string][]verb{
 		}},
 		{key: "d", label: "destroy the dataset and everything under it", confirm: true, argv: onRow("zfs", "destroy", "-r", "{}")},
 		{key: "z", label: "zxplore", noRow: true, inter: true, argv: fixed("zxplore", "--tui")},
+	},
+	"Storage/Versions": {
+		// the restores name their source and destination from the context
+		// (the file) and the row (the snapshot), never from a cursor that
+		// moved since — zxplore's explorer restored the wrong file that way
+		{key: "c", label: "restore this version as a copy beside the live file", rowCtxArgv: func(row []string, ctx string) ([]string, error) {
+			src, dst, err := versionPaths(row, ctx)
+			if err != nil {
+				return nil, err
+			}
+			return []string{"cp", "-a", "--", src, dst + ".from-" + col(row, 0)}, nil
+		}},
+		{key: "R", label: "restore this version over the live file", confirm: true, rowCtxArgv: func(row []string, ctx string) ([]string, error) {
+			src, dst, err := versionPaths(row, ctx)
+			if err != nil {
+				return nil, err
+			}
+			return []string{"cp", "-a", "--", src, dst}, nil
+		}},
 	},
 	"Storage/Snapshots": {
 		{key: "b", label: "roll back (the root goes through a boot environment)", confirm: true, argv: func(row []string, _ string) ([]string, error) {
@@ -592,4 +614,19 @@ func macOrAny(s string) bool {
 		}
 	}
 	return true
+}
+
+// versionPaths resolves a Versions row (a snapshot) and its context (the
+// file) to the snapshot's copy of the file and the live path.
+func versionPaths(row []string, ctx string) (src, dst string, err error) {
+	snap := col(row, 0)
+	if snap == "" || snap == "(live)" || !snapNameOK(snap) {
+		return "", "", errors.New("pick a snapshot row")
+	}
+	ds, rel := splitExplorerCtx(ctx)
+	mp, mounted := datasetMountpoint(ds)
+	if !mounted || rel == "/" {
+		return "", "", errors.New("no file is open, or its dataset is not mounted")
+	}
+	return mp + "/.zfs/snapshot/" + snap + rel, mp + rel, nil
 }
