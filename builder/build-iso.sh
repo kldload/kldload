@@ -4083,8 +4083,15 @@ log "Building ISO..."
 mkdir -p "${ISO_STAGING}/EFI/BOOT" "${ISO_STAGING}/images/pxeboot" "${ISO_STAGING}/isolinux"
 
 # Copy kernel + initramfs
-cp "${ROOTFS}/boot/vmlinuz-${KVER}" "${ISO_STAGING}/images/pxeboot/vmlinuz"
-cp "${ROOTFS}/boot/initramfs-${KVER}.img" "${ISO_STAGING}/images/pxeboot/initrd.img"
+# install -m 0644, not cp: dracut writes /boot/initramfs-*.img 0600 and cp kept
+# that, so every ISO shipped images/pxeboot/initrd.img unreadable by anyone but
+# root. Nothing minded until the live medium became a netboot payload: the
+# server's unprivileged nginx would 403 the initrd, which iPXE reports as
+# "Operation not permitted" (2026-09-25, found on build 69's image).
+install -m 0644 "${ROOTFS}/boot/vmlinuz-${KVER}" "${ISO_STAGING}/images/pxeboot/vmlinuz"
+install -m 0644 "${ROOTFS}/boot/initramfs-${KVER}.img" "${ISO_STAGING}/images/pxeboot/initrd.img"
+[[ "$(stat -c%a "${ISO_STAGING}/images/pxeboot/initrd.img")" == 644 ]] ||
+    die "images/pxeboot/initrd.img is not 0644 in the ISO tree — the netboot server could not serve it"
 
 # EFI bootloader for the live ISO — use GRUB directly (no shim).
 # Shim on the live USB causes "failed to load image" because the live GRUB

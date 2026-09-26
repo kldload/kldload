@@ -109,8 +109,13 @@ _live_payload() {
         # directory; the absent payload is then reported as absent, which is
         # true from where they stand.
         install -d -m 0755 "$link" 2>/dev/null || return 1
-        ln -sfn "$d/images/pxeboot/vmlinuz" "$link/vmlinuz"
-        ln -sfn "$d/images/pxeboot/initrd.img" "$link/initrd.img"
+        # The kernel and initrd are COPIED (about 100 MB, into /run), not
+        # linked: images every build before 70 carry initrd.img as 0600 on the
+        # medium, a read-only filesystem nobody can chmod, and _link_payload
+        # rightly refuses a file the unprivileged web server cannot read. The
+        # root image is linked; 15 GB has no business in RAM.
+        install -m 0644 "$d/images/pxeboot/vmlinuz" "$link/vmlinuz" 2>/dev/null || return 1
+        install -m 0644 "$d/images/pxeboot/initrd.img" "$link/initrd.img" 2>/dev/null || return 1
         ln -sfn "$d/LiveOS/squashfs.img" "$link/squashfs.img"
         # The commit stamp: the ISO root carries VERSION (build-iso.sh); the
         # running live system carries the same file under /etc/kldload.
