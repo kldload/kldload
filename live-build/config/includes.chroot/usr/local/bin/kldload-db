@@ -16,7 +16,12 @@
 #                  [--cpu N] [--ram-gb N] [--disk-gb N] [--golden-src G]
 #                  [--status S]
 #   vm-status      --name N --status S [--ip IP]
-#   vm-delete      --name N
+#                    (--ip '' clears the address; no --ip leaves it alone)
+#   vm-mesh        --name N --mesh-id ID --wg-pubkey KEY | --clear
+#                    the VM's WireGuard identity, so a delete can undo an enrol
+#   vm-show        --name N            (one live row as JSON; exit 1 if absent)
+#   vm-delete      --name N            (soft: status=deleted, deleted_at set)
+#   init           create the database and every table; migrate old ones
 #   cluster-upsert --name N [--template T] [--status S] [--data JSON]
 #   event          --type T --subject S --message M [--data JSON]
 #   deploy-start   --playbook P [--cluster C] [--target T] [--extras JSON]
@@ -24,9 +29,16 @@
 #   deploy-finish  --id N --rc RC [--status S] [--log PATH]
 #   dump           (json of all tables for debugging)
 #
-# Exit code is 0 on success. Errors go to stderr; SQL layer is tolerant —
-# unknown columns or missing tables print a warning, do not die. Scripts can
-# safely `kldload-db node-register ... || true` during bootstrap.
+# THE SCHEMA LIVES HERE. It used to live in kldload-webui's db_init(), which
+# ran only when the web UI started: on a host where it never had (a server
+# edition, a bench mid-install), every writer below hit "no such table", every
+# caller swallowed it, and the estate was empty with nothing logged (source
+# audit, 2026-09-26). Every connection now ensures the schema first, so the
+# first tool to touch the database creates it, whoever that is. The web UI
+# calls `kldload-db init` and owns nothing.
+#
+# Exit code is 0 on success, 1 on a database error or an absent row for
+# vm-show, 2 for usage. Errors go to stderr.
 # ══════════════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -91,12 +103,148 @@ def _heal_perms():
             pass  # a read-only mount or an odd filesystem is not fatal here
 
 
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS templates (
+    id          TEXT PRIMARY KEY,
+    type        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    data        TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS nodes (
+    id          TEXT PRIMARY KEY,
+    hostname    TEXT NOT NULL UNIQUE,
+    role        TEXT DEFAULT 'unknown',
+    ip_mgmt     TEXT DEFAULT '',
+    ip_wg0      TEXT DEFAULT '',
+    ip_wg1      TEXT DEFAULT '',
+    ip_wg2      TEXT DEFAULT '',
+    ip_wg3      TEXT DEFAULT '',
+    wg_pubkey   TEXT DEFAULT '',
+    cluster_id  TEXT DEFAULT '',
+    status      TEXT DEFAULT 'unknown',
+    last_seen   TEXT DEFAULT '',
+    facts       TEXT DEFAULT '{}',
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS clusters (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    template_id TEXT DEFAULT '',
+    status      TEXT DEFAULT 'designing',
+    data        TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vms (
+    id          TEXT PRIMARY KEY,
+    cluster_id  TEXT NOT NULL,
+    node_id     TEXT DEFAULT '',
+    name        TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    cpu         INTEGER DEFAULT 2,
+    ram_gb      INTEGER DEFAULT 4,
+    disk_gb     INTEGER DEFAULT 64,
+    status      TEXT DEFAULT 'defined',
+    golden_src  TEXT DEFAULT '',
+    ip_addr     TEXT DEFAULT '',
+    wg_pubkey   TEXT DEFAULT '',
+    last_seen   TEXT DEFAULT '',
+    data        TEXT DEFAULT '{}',
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    subject     TEXT DEFAULT '',
+    message     TEXT NOT NULL,
+    data        TEXT DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS services (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    description  TEXT DEFAULT '',
+    cluster_id   TEXT DEFAULT '',
+    node_targets TEXT DEFAULT '[]',
+    dataset      TEXT DEFAULT '',
+    image        TEXT DEFAULT '',
+    runtime      TEXT DEFAULT 'systemd',
+    status       TEXT DEFAULT 'defined',
+    version      TEXT DEFAULT '',
+    replicas     INTEGER DEFAULT 1,
+    repl_targets TEXT DEFAULT '[]',
+    config       TEXT DEFAULT '{}',
+    salt_state   TEXT DEFAULT '',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bob_conversations (
+    id          TEXT PRIMARY KEY,
+    title       TEXT DEFAULT 'New conversation',
+    messages    TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+-- Deployment ledger: every run of a kldload-shipped playbook against a
+-- cluster or node lands here. User-uploaded content is NOT tracked.
+CREATE TABLE IF NOT EXISTS deployments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id  TEXT DEFAULT '',
+    target      TEXT DEFAULT '',
+    playbook    TEXT NOT NULL,
+    extras      TEXT DEFAULT '{}',
+    status      TEXT DEFAULT 'running',
+    rc          INTEGER DEFAULT -1,
+    log_path    TEXT DEFAULT '',
+    started_at  TEXT NOT NULL,
+    finished_at TEXT DEFAULT ''
+);
+-- Secrets at rest. value_enc is Fernet-encrypted with the master key at
+-- /var/lib/kldload/master.key (mode 0600). Never log the decrypted value.
+CREATE TABLE IF NOT EXISTS secrets (
+    name        TEXT PRIMARY KEY,
+    value_enc   TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+"""
+
+# Additive migrations: SQLite has no ALTER TABLE ... IF NOT EXISTS, so each
+# column an older database may lack is listed here and added when absent.
+# mesh_id joins wg_pubkey (2026-09-26): the enrolment record under
+# /var/lib/kldload/mesh/enrolled/<vm> was the ONLY place a VM's mesh id and
+# key lived, so the inventory, the estate view and the web UI could not show
+# who was on the mesh without parsing files.
+MIGRATIONS = (
+    ("nodes", "deleted_at", "TEXT DEFAULT ''"),
+    ("vms", "deleted_at", "TEXT DEFAULT ''"),
+    ("nodes", "mesh_id", "TEXT DEFAULT ''"),
+    ("vms", "mesh_id", "TEXT DEFAULT ''"),
+)
+
+
+def ensure_schema(con):
+    """Create every table that is missing and add every column an older
+    database lacks. Idempotent and cheap (a handful of IF NOT EXISTS and
+    PRAGMA table_info calls), so every connection runs it."""
+    con.executescript(SCHEMA)
+    for table, col, decl in MIGRATIONS:
+        cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+        if col not in cols:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    con.commit()
+
+
 def _connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     _heal_perms()
     con = sqlite3.connect(str(DB_PATH))
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
+    ensure_schema(con)
     return con
 
 
@@ -241,6 +389,47 @@ def cmd_vm_delete(args):
     con.close()
 
 
+def cmd_init(args):
+    con = _connect()  # _connect already ensured the schema
+    tables = [r["name"] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+    con.close()
+    _heal_perms()
+    print(f"kldload-db: {DB_PATH} ready ({len(tables)} tables: {', '.join(tables)})")
+
+
+def cmd_vm_show(args):
+    con = _connect()
+    row = con.execute("SELECT * FROM vms WHERE name=? AND deleted_at=''", (args.name,)).fetchone()
+    con.close()
+    if not row:
+        sys.stderr.write(f"kldload-db: no live VM named {args.name}\n")
+        return 1
+    print(json.dumps(dict(row), indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_vm_mesh(args):
+    con = _connect()
+    if args.clear:
+        mesh_id, pub = "", ""
+    else:
+        if not (args.mesh_id and args.wg_pubkey):
+            sys.stderr.write("kldload-db: vm-mesh needs --mesh-id and --wg-pubkey, or --clear\n")
+            return 2
+        mesh_id, pub = args.mesh_id, args.wg_pubkey
+    cur = con.execute(
+        "UPDATE vms SET mesh_id=?, wg_pubkey=?, last_seen=? WHERE name=? AND deleted_at=''",
+        (mesh_id, pub, _now(), args.name))
+    con.commit()
+    con.close()
+    if cur.rowcount == 0:
+        sys.stderr.write(f"kldload-db: no live VM named {args.name} — register it first\n")
+        return 1
+    return 0
+
+
 def cmd_cluster_upsert(args):
     con = _connect()
     now = _now()
@@ -352,10 +541,26 @@ def main(argv):
     s = sub.add_parser("vm-status");      s.set_defaults(fn=cmd_vm_status)
     s.add_argument("--name", required=True)
     s.add_argument("--status", required=True)
-    s.add_argument("--ip", default="")
+    # None, not "": cmd_vm_status tests `is not None`, so a default of ""
+    # cleared the address on every call that omitted --ip (audit 2026-09-26).
+    s.add_argument("--ip", default=None)
+
+    s = sub.add_parser("vm-mesh")
+    s.set_defaults(fn=cmd_vm_mesh)
+    s.add_argument("--name", required=True)
+    s.add_argument("--mesh-id", dest="mesh_id", default="")
+    s.add_argument("--wg-pubkey", dest="wg_pubkey", default="")
+    s.add_argument("--clear", action="store_true")
+
+    s = sub.add_parser("vm-show")
+    s.set_defaults(fn=cmd_vm_show)
+    s.add_argument("--name", required=True)
 
     s = sub.add_parser("vm-delete");      s.set_defaults(fn=cmd_vm_delete)
     s.add_argument("--name", required=True)
+
+    s = sub.add_parser("init")
+    s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("cluster-upsert"); s.set_defaults(fn=cmd_cluster_upsert)
     s.add_argument("--name", required=True)
@@ -385,11 +590,11 @@ def main(argv):
 
     args = p.parse_args(argv)
     try:
-        args.fn(args)
+        rc = args.fn(args)
     except sqlite3.Error as e:
         sys.stderr.write(f"kldload-db: {e}\n")
         return 1
-    return 0
+    return int(rc or 0)
 
 
 if __name__ == "__main__":

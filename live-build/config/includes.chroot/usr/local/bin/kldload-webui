@@ -94,131 +94,27 @@ def _db_connect():
     return con
 
 def db_init():
-    """Create state.db and all tables if not present."""
+    """Make sure state.db exists with every table, by asking the tool that
+    owns the schema.
+
+    The schema used to be defined HERE, so it existed only on hosts where the
+    web UI had started: a server edition or a bench mid-install had no tables,
+    every kldload-db writer failed "no such table", and every caller swallowed
+    it (source audit, 2026-09-26). kldload-db now creates the schema on every
+    connection; this call only makes the first creation happen early and
+    loudly, before the first client asks.
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = _db_connect()
-    con.executescript("""
-    CREATE TABLE IF NOT EXISTS templates (
-        id          TEXT PRIMARY KEY,
-        type        TEXT NOT NULL,
-        name        TEXT NOT NULL,
-        description TEXT DEFAULT '',
-        data        TEXT NOT NULL,
-        created_at  TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS nodes (
-        id          TEXT PRIMARY KEY,
-        hostname    TEXT NOT NULL UNIQUE,
-        role        TEXT DEFAULT 'unknown',
-        ip_mgmt     TEXT DEFAULT '',
-        ip_wg0      TEXT DEFAULT '',
-        ip_wg1      TEXT DEFAULT '',
-        ip_wg2      TEXT DEFAULT '',
-        ip_wg3      TEXT DEFAULT '',
-        wg_pubkey   TEXT DEFAULT '',
-        cluster_id  TEXT DEFAULT '',
-        status      TEXT DEFAULT 'unknown',
-        last_seen   TEXT DEFAULT '',
-        facts       TEXT DEFAULT '{}',
-        created_at  TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS clusters (
-        id          TEXT PRIMARY KEY,
-        name        TEXT NOT NULL UNIQUE,
-        template_id TEXT DEFAULT '',
-        status      TEXT DEFAULT 'designing',
-        data        TEXT NOT NULL,
-        created_at  TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS vms (
-        id          TEXT PRIMARY KEY,
-        cluster_id  TEXT NOT NULL,
-        node_id     TEXT DEFAULT '',
-        name        TEXT NOT NULL,
-        role        TEXT NOT NULL,
-        cpu         INTEGER DEFAULT 2,
-        ram_gb      INTEGER DEFAULT 4,
-        disk_gb     INTEGER DEFAULT 64,
-        status      TEXT DEFAULT 'defined',
-        golden_src  TEXT DEFAULT '',
-        ip_addr     TEXT DEFAULT '',
-        wg_pubkey   TEXT DEFAULT '',
-        last_seen   TEXT DEFAULT '',
-        data        TEXT DEFAULT '{}',
-        created_at  TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS events (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts          TEXT NOT NULL,
-        type        TEXT NOT NULL,
-        subject     TEXT DEFAULT '',
-        message     TEXT NOT NULL,
-        data        TEXT DEFAULT '{}'
-    );
-    CREATE TABLE IF NOT EXISTS services (
-        id           TEXT PRIMARY KEY,
-        name         TEXT NOT NULL UNIQUE,
-        description  TEXT DEFAULT '',
-        cluster_id   TEXT DEFAULT '',
-        node_targets TEXT DEFAULT '[]',
-        dataset      TEXT DEFAULT '',
-        image        TEXT DEFAULT '',
-        runtime      TEXT DEFAULT 'systemd',
-        status       TEXT DEFAULT 'defined',
-        version      TEXT DEFAULT '',
-        replicas     INTEGER DEFAULT 1,
-        repl_targets TEXT DEFAULT '[]',
-        config       TEXT DEFAULT '{}',
-        salt_state   TEXT DEFAULT '',
-        created_at   TEXT NOT NULL,
-        updated_at   TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS bob_conversations (
-        id          TEXT PRIMARY KEY,
-        title       TEXT DEFAULT 'New conversation',
-        messages    TEXT NOT NULL DEFAULT '[]',
-        created_at  TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
-    );
-    -- Deployment ledger: every run of a kldload-shipped playbook against a
-    -- cluster or node lands here. User-uploaded content is NOT tracked —
-    -- the application layer is the user's responsibility.
-    CREATE TABLE IF NOT EXISTS deployments (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        cluster_id  TEXT DEFAULT '',
-        target      TEXT DEFAULT '',
-        playbook    TEXT NOT NULL,
-        extras      TEXT DEFAULT '{}',
-        status      TEXT DEFAULT 'running',
-        rc          INTEGER DEFAULT -1,
-        log_path    TEXT DEFAULT '',
-        started_at  TEXT NOT NULL,
-        finished_at TEXT DEFAULT ''
-    );
-    -- Secrets at rest. value_enc is Fernet-encrypted with the master key at
-    -- /var/lib/kldload/master.key (mode 0600). Used for SSH keys, kubeconfig,
-    -- Helm repo creds, etc. Never log or transmit the decrypted value.
-    CREATE TABLE IF NOT EXISTS secrets (
-        name        TEXT PRIMARY KEY,
-        value_enc   TEXT NOT NULL,
-        created_at  TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
-    );
-    """)
-    # Additive migrations — ALTER TABLE IF NOT EXISTS isn't a thing in SQLite,
-    # so we inspect pragma_table_info and add missing columns idempotently.
-    def _ensure_col(table, col, decl):
-        cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
-        if col not in cols:
-            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-    _ensure_col("nodes", "deleted_at", "TEXT DEFAULT ''")
-    _ensure_col("vms",   "deleted_at", "TEXT DEFAULT ''")
-    con.commit()
-    con.close()
+    try:
+        r = subprocess.run(["kldload-db", "init"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        LOG.error("kldload-db init could not run: %s — the estate has no database", e)
+        return
+    if r.returncode != 0:
+        LOG.error("kldload-db init failed (rc=%s): %s", r.returncode, r.stderr.strip())
+        return
     _state_db_group_perms(DB_PATH)
-    LOG.info("State DB ready: %s", DB_PATH)
+    LOG.info("%s", r.stdout.strip() or f"State DB ready: {DB_PATH}")
 
 # ── Bob conversation persistence ──────────────────────────────────────────────
 
