@@ -187,9 +187,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if n := len(m.rows()); n > 0 {
 				m.row = n - 1
 			}
-		case "pgdown", "ctrl+d":
+		case "pgdown", "ctrl+d", "ctrl+f": // ctrl+f/ctrl+b are vmxplore's paging keys; both sets work here
 			m.row = min(m.row+m.pageSize(), max(len(m.rows())-1, 0))
-		case "pgup", "ctrl+u":
+		case "pgup", "ctrl+u", "ctrl+b":
 			m.row = max(m.row-m.pageSize(), 0)
 		case "/":
 			m.filterOn = true
@@ -757,7 +757,7 @@ func (m model) helpView() string {
 		stTitle.Render("kld " + versionFull() + " — keys"),
 		"",
 		k("1-8, tab", "switch section"),
-		k("j / k", "move down / up   (g, G first / last · ctrl+d, ctrl+u page)"),
+		k("j / k", "move down / up   (g, G first / last · ctrl+f, ctrl+b page)"),
 		k("/", "filter rows; enter keeps it, esc clears it"),
 		k("o", "sort: next column, then descending, then the tool's order"),
 		k("i", "show or hide the detail pane"),
