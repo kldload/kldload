@@ -634,6 +634,20 @@ $ kldload-netboot-server status</div>
       </details>
 
       <div id="firstboot-banner" style="display:none;margin-bottom:1rem;padding:0.8rem 1rem;background:rgba(139,92,246,0.1);border:1px solid rgba(139,92,246,0.3);border-radius:8px;font-size:0.85rem;color:var(--subtle);animation:pulse-glow 8s ease-in-out infinite"></div>
+      <!-- ── The estate at a glance (console design, 2026-09-26) ────────────
+           Four facts from the tools that own them, then the last events the
+           state DB recorded. overview_status fills it; a source that cannot
+           answer leaves its tile at a dash. -->
+      <div class="stat-grid" id="ov-grid" style="margin-bottom:0.9rem">
+        <div class="stat-card"><div class="stat-label">Machines</div><div class="stat-value" id="ov-machines">—</div><div class="stat-sub" id="ov-machines-sub">libvirt · goldens sealed</div></div>
+        <div class="stat-card"><div class="stat-label">Storage</div><div class="stat-value" id="ov-storage">—</div><div class="stat-sub" id="ov-storage-sub">root pool</div></div>
+        <div class="stat-card"><div class="stat-label">Mesh</div><div class="stat-value" id="ov-mesh">—</div><div class="stat-sub" id="ov-mesh-sub">peers with a handshake in the last 3 min</div></div>
+        <div class="stat-card"><div class="stat-label">Cluster</div><div class="stat-value" id="ov-cluster">—</div><div class="stat-sub" id="ov-cluster-sub">Kubernetes nodes Ready</div></div>
+      </div>
+      <div class="ws-panel" style="margin-bottom:0.9rem">
+        <div class="ws-panel-hdr"><span>Activity — the state DB's last events</span><button class="btn btn-ghost btn-sm" onclick="overviewRefresh()" title="Reload">↻</button></div>
+        <div id="ov-events" style="padding:0.4rem 1rem;color:var(--muted)">Loading…</div>
+      </div>
 
       <div class="stat-grid" id="stat-grid">
         <div class="stat-card">
@@ -4179,6 +4193,7 @@ setInterval(() => {
 function _refreshActiveView() {
   const isActive = id => !!document.getElementById(id)?.classList.contains('active');
   if (isActive('view-dashboard')) {
+    send({ action: 'overview_status' });
     send({ action: 'system_info' });
     send({ action: 'klab_status' });
   }
@@ -5214,6 +5229,7 @@ function handle(msg) {
     case 'secret_deleted':   { send({action:'secret_list'}); break; }
     case 'helm_status':    { renderHelmStatus(msg);    break; }
     case 'helm_repo_list': { renderHelmRepos(msg);     break; }
+    case 'overview_status': { renderOverview(msg);     break; }
     case 'network_status': { renderNetwork(msg);       break; }
     case 'provision_status': { renderProvision(msg);   break; }
     case 'provision_result': { renderProvisionResult(msg); break; }
@@ -5545,6 +5561,7 @@ document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
     document.getElementById('view-' + li.dataset.view).classList.add('active');
     try { localStorage.setItem('kldload:view', li.dataset.view); } catch (e) {}
     if (location.hash !== '#' + li.dataset.view) history.replaceState(null, '', '#' + li.dataset.view);
+    if (li.dataset.view === 'dashboard') overviewRefresh();
     if (li.dataset.view === 'dashboard') {
       send({ action: 'system_info' });
       refreshZFS();
@@ -10213,6 +10230,33 @@ function renderHelmRepos(msg) {
     <td style="color:var(--muted);font-size:0.82rem">${esc(r.url)}</td>
     <td><button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="helmRepoRemove('${esc(r.name)}')">Remove</button></td>
   </tr>`).join('');
+}
+
+// ── Overview strip ──────────────────────────────────────────────────────────
+function overviewRefresh() { send({ action: 'overview_status' }); }
+function renderOverview(msg) {
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  const m = msg.machines || {}, s = msg.storage || {}, w = msg.mesh || {}, c = msg.cluster || {};
+  if (m.defined !== undefined) { set('ov-machines', `${m.running} / ${m.defined}`); set('ov-machines-sub', `running of defined · ${m.goldens} goldens sealed`); }
+  else { set('ov-machines', '—'); set('ov-machines-sub', 'no hypervisor here'); }
+  if (s.root) {
+    const r = s.root;
+    set('ov-storage', r.health);
+    const ov = document.getElementById('ov-storage'); if (ov) ov.style.color = r.health === 'ONLINE' ? 'var(--good)' : 'var(--danger)';
+    set('ov-storage-sub', `${r.name} · ${r.cap} used of ${r.size} · frag ${r.frag} · ${s.errors || ''}`);
+  } else { set('ov-storage', '—'); set('ov-storage-sub', 'no pool imported'); }
+  if (w.peers !== undefined) { set('ov-mesh', `${w.alive} / ${w.peers}`); set('ov-mesh-sub', `alive of peers on ${(w.planes || []).join(', ')}`); }
+  else { set('ov-mesh', '—'); set('ov-mesh-sub', 'no WireGuard plane up'); }
+  if (c.server) {
+    set('ov-cluster', c.unreachable ? 'unreachable' : `${c.ready} / ${c.nodes}`);
+    set('ov-cluster-sub', c.unreachable ? `no apiserver at ${c.server}` : `Ready of nodes · ${c.version}`);
+  } else { set('ov-cluster', '—'); set('ov-cluster-sub', 'no kubeconfig on this host'); }
+  const ev = document.getElementById('ov-events');
+  if (ev) {
+    const rows = msg.events || [];
+    ev.innerHTML = rows.length ? rows.map(e => `<div style="display:grid;grid-template-columns:150px 80px minmax(0,1fr);gap:12px;padding:0.3rem 0;border-bottom:1px solid var(--border)"><span style="font-family:var(--font-mono);color:var(--muted)">${esc((e.ts || '').replace('T', ' ').replace('Z', ''))}</span><span class="badge badge-dim">${esc(e.type)}</span><span><span style="font-family:var(--font-mono)">${esc(e.subject)}</span> <span style="color:var(--muted)">${esc(e.message)}</span></span></div>`).join('')
+      : 'No events recorded yet.';
+  }
 }
 
 // ── Provision view ──────────────────────────────────────────────────────────

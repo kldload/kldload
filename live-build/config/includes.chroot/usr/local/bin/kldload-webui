@@ -17,6 +17,7 @@ import re
 import secrets
 import shlex
 import signal
+import socket
 import sqlite3
 import ssl
 import subprocess
@@ -1099,6 +1100,107 @@ def get_system_info():
     return info
 
 
+# ── Overview: the estate at a glance ─────────────────────────────────────────
+# Four facts a hypervisor's operator wants first (console design,
+# 2026-09-26): machines, pool, mesh, cluster — each from the tool that owns
+# it — plus the last events the state DB recorded. Every source is bounded
+# and optional; a missing one leaves its tile at "—" rather than failing the
+# view.
+def collect_overview_status():
+    def sh(cmd, timeout=10):
+        try:
+            return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                           timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    out = {"type": "overview_status", "machines": {}, "storage": {}, "mesh": {},
+           "cluster": {}, "events": []}
+    running = sh(["virsh", "list", "--state-running", "--name"]).split()
+    defined = sh(["virsh", "list", "--all", "--name"]).split()
+    # Goldens live under <pool>/vms; listing every snapshot on the host took
+    # eight seconds on onyx, this takes a fraction of one.
+    goldens = []
+    for pool in sh(["zpool", "list", "-H", "-o", "name"]).split():
+        goldens += [ln for ln in sh(["zfs", "list", "-H", "-t", "snapshot", "-o", "name",
+                                     "-r", f"{pool}/vms"], 20).splitlines()
+                    if ln.endswith("@golden")]
+    if defined or goldens:
+        out["machines"] = {"running": len(running), "defined": len(defined),
+                           "goldens": len(goldens)}
+    pools = []
+    cols = "name,health,size,alloc,free,frag,cap"
+    for ln in sh(["zpool", "list", "-H", "-o", cols]).splitlines():
+        f = ln.split("\t")
+        if len(f) == 7:
+            pools.append(dict(zip(cols.split(","), f)))
+    if pools:
+        root = next((p for p in pools if p["name"] == "rpool"), pools[0])
+        status = sh(["zpool", "status", root["name"]])
+        scan = next((ln.strip()[6:].strip() for ln in status.splitlines()
+                     if ln.strip().startswith("scan:")), "")
+        errors = next((ln.strip()[8:].strip() for ln in status.splitlines()
+                       if ln.strip().startswith("errors:")), "")
+        out["storage"] = {"pools": pools, "root": root, "scan": scan, "errors": errors}
+    ifaces = sh(["wg", "show", "interfaces"]).split()
+    if ifaces:
+        import time
+        now = int(time.time())
+        peers = alive = 0
+        for iface in ifaces:
+            for ln in sh(["wg", "show", iface, "dump"]).splitlines()[1:]:
+                p = ln.split("\t")
+                if len(p) >= 5:
+                    peers += 1
+                    hs = int(p[4]) if p[4].isdigit() else 0
+                    if hs and now - hs < 180:
+                        alive += 1
+        out["mesh"] = {"planes": ifaces, "peers": peers, "alive": alive}
+    # The cluster: only when an apiserver answers its port (a stale kubeconfig
+    # makes kubectl hang in connect, see kldload-estate).
+    server = sh(["kubectl", "config", "view", "--minify", "-o",
+                 "jsonpath={.clusters[0].cluster.server}"], 5).strip()
+    if server:
+        try:
+            import urllib.parse
+            u = urllib.parse.urlsplit(server)
+            with socket.create_connection((u.hostname, u.port or 443), timeout=1.5):
+                pass
+            nodes = json.loads(sh(["kubectl", "get", "nodes", "-o", "json",
+                                   "--request-timeout=3s"], 8) or "{}").get("items", [])
+            ready = sum(
+                1 for n in nodes
+                if any(c.get("type") == "Ready" and c.get("status") == "True"
+                       for c in n.get("status", {}).get("conditions", [])))
+            ver = next((n.get("status", {}).get("nodeInfo", {}).get("kubeletVersion", "")
+                        for n in nodes), "")
+            out["cluster"] = {"nodes": len(nodes), "ready": ready, "version": ver, "server": server}
+        except (OSError, ValueError):
+            out["cluster"] = {"nodes": 0, "ready": 0, "version": "", "server": server,
+                              "unreachable": True}
+    try:
+        ev = json.loads(sh(["kldload-db", "dump"], 15) or "{}").get("events", [])
+        recent = []
+        last = None
+        for e in reversed(ev):
+            key = (e.get("type"), e.get("subject"), e.get("message"))
+            if key == last:
+                continue  # the enrol sweep repeats "enrolled" every ten minutes
+            last = key
+            recent.append({"ts": e.get("ts", ""), "type": e.get("type", ""),
+                           "subject": e.get("subject", ""), "message": e.get("message", "")})
+            if len(recent) >= 12:
+                break
+        out["events"] = recent
+    except (ValueError, TypeError):
+        pass
+    return out
+
+
+async def _overview_status(websocket):
+    loop = asyncio.get_running_loop()
+    await websocket.send(json.dumps(await loop.run_in_executor(None, collect_overview_status)))
+
+
 # ── Provision view: the netboot server, its armed machines and its feed ─────
 # kldload-netboot-server owns the facts (status --json since 2026-09-26); the
 # nginx access log under its serve tree is the live feed of what each machine
@@ -1804,6 +1906,8 @@ async def ws_handler(websocket):
                     await _salt_status(websocket)
                 elif action == "network_status":
                     await _network_status(websocket)
+                elif action == "overview_status":
+                    await _overview_status(websocket)
                 elif action == "provision_status":
                     await _provision_status(websocket)
                 elif action == "provision_arm":
