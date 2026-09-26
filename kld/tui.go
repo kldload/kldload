@@ -875,6 +875,9 @@ func (m model) execBatch(v verb, rows [][]string) tea.Cmd {
 			argv, err := v.argv(r, "")
 			if err == nil {
 				_, err = run(600*time.Second, argv[0], argv[1:]...)
+				if benign(err) != "" {
+					err = nil
+				}
 			}
 			if err != nil {
 				failed = append(failed, col(r, 0)+": "+err.Error())
@@ -956,8 +959,31 @@ func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
 	}
 	return func() tea.Msg {
 		_, err := run(600*time.Second, argv[0], argv[1:]...)
+		if note := benign(err); note != "" {
+			return doneMsg{what: what + ": " + note}
+		}
 		return doneMsg{what: what, err: err}
 	}
+}
+
+// benign turns the virsh answers that mean "nothing to do" into a note
+// instead of an error: force off on a machine that is off, start on one
+// that runs. The operator read four of them as failed deletes
+// (2026-09-26); vmxplore treats "domain is not running" as success too.
+func benign(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "domain is not running"):
+		return "already off"
+	case strings.Contains(s, "domain is already active"), strings.Contains(s, "Domain is already active"):
+		return "already running"
+	case strings.Contains(s, "domain is not paused"), strings.Contains(s, "domain is already paused"):
+		return "already in that state"
+	}
+	return ""
 }
 
 // ── view ────────────────────────────────────────────────────────────────────

@@ -35,9 +35,10 @@ never a second implementation of them.
 - done — no typed confirmation on Machines verbs; the argv is what the
   status line reports (vmxplore's model). Storage keeps typed consent
   (zxplore's model).
-- todo — `virsh destroy` "not running" treated as success; delete
-  tolerating "domain not found"; zfs destroy busy retry with backoff.
-  (kvm-delete owns these; check it, do not re-implement.)
+- done — `virsh destroy` "not running" (and start on a running machine)
+  reported as a note, not an error. kvm-delete owns "domain not found" and
+  the zfs destroy busy retry; checked 2026-09-26: two deletes of clones of
+  one source at once both clean.
 
 ### Snapshot and rollback
 - done — snapshot s (kvm-snap), rollback b to newest, Snapshots drill-in
