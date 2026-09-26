@@ -57,7 +57,8 @@ func usage() {
 
 Keys inside:  1-8 or Tab  section   j/k  move   r  reload   Enter  open the
 deep console for the section (vmxplore, zxplore, wgx, k9s)   c  clone the
-selected machine   s  snapshot it   d  delete it   ?  help   q  quit
+selected machine   s  snapshot it   d  delete it   a  arm a machine for a
+netboot install (Provision)   x  disarm the selected one   ?  help   q  quit
 `)
 }
 

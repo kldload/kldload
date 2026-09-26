@@ -128,6 +128,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.verbSnap()
 		case "d":
 			return m.verbDelete()
+		case "a":
+			return m.verbArm()
+		case "x":
+			return m.verbDisarm()
 		}
 	}
 	return m, nil
@@ -234,6 +238,55 @@ func (m model) verbDelete() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// Provision verbs: the consent tokens kldload-netboot-server keeps per MAC.
+// `a` arms one machine (or "any" for open mode) with an answers file; `x`
+// removes the selected machine's token so it boots its own disk again.
+func (m model) verbArm() (tea.Model, tea.Cmd) {
+	if sections[m.active] != "Provision" {
+		m.status = stWarn.Render("arm: open Provision first")
+		return m, nil
+	}
+	m.prompt = "arm-install <mac|any> <answers.env>: "
+	m.pending = func(typed string) tea.Cmd {
+		f := strings.Fields(typed)
+		if len(f) != 2 || !macOrAny(f[0]) || strings.HasPrefix(f[1], "-") {
+			return func() tea.Msg { return doneMsg{"arm-install", fmt.Errorf("need a MAC (or any) and an answers file")} }
+		}
+		return runVerb("arm-install "+f[0], "kldload-netboot-server", "arm-install", f[0], f[1])
+	}
+	return m, nil
+}
+
+func (m model) verbDisarm() (tea.Model, tea.Cmd) {
+	mac := m.selected()
+	if sections[m.active] != "Provision" || !macOrAny(mac) {
+		m.status = stWarn.Render("disarm: pick an armed machine in Provision first")
+		return m, nil
+	}
+	return m, runVerb("disarm "+mac, "kldload-netboot-server", "disarm", mac)
+}
+
+// macOrAny accepts aa:bb:cc:dd:ee:ff, the aa-bb-… form the token files use,
+// or the word any; nothing else reaches the tool's argv.
+func macOrAny(s string) bool {
+	if s == "any" {
+		return true
+	}
+	if len(s) != 17 {
+		return false
+	}
+	for i, c := range s {
+		if i%3 == 2 {
+			if c != ':' && c != '-' {
+				return false
+			}
+		} else if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 func nameOK(s string) bool {
 	if s == "" || len(s) > 63 || s[0] == '-' {
 		return false
@@ -315,7 +368,7 @@ func (m model) body() string {
 	} else if m.status != "" {
 		b.WriteString(m.status + "\n")
 	} else if m.help {
-		b.WriteString(stDim.Render("1-8/Tab section · j/k row · r reload · Enter open the deep console · c clone · s snapshot · d delete · ? help · q quit") + "\n")
+		b.WriteString(stDim.Render("1-8/Tab section · j/k row · r reload · Enter open the deep console · c clone · s snapshot · d delete · a arm · x disarm · ? help · q quit") + "\n")
 	} else {
 		b.WriteString(stDim.Render("? for keys") + "\n")
 	}
