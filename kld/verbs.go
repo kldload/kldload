@@ -228,6 +228,35 @@ var verbs = map[string][]verb{
 		{key: "D", label: "drain", confirm: true, argv: onRow("kubectl", "drain", "{}", "--ignore-daemonsets", "--delete-emptydir-data", "--request-timeout=60s")},
 		{key: "U", label: "uncordon", argv: onRow("kubectl", "uncordon", "{}", "--request-timeout=30s")},
 		{key: "k", label: "k9s", noRow: true, inter: true, argv: fixed("k9s")},
+		// The shape is kube-cluster's own: bootstrap asks for three control
+		// planes (HA; the tool clamps to what fits and says so), scale adds
+		// workers or grows the control plane through the integrated path.
+		{key: "B", label: "bootstrap an HA cluster (3 control planes)", noRow: true, inter: true, prompt: "kube-cluster bootstrap --control-planes 3 --workers <N> (blank = 3): ", argv: func(_ []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			if in == "" {
+				in = "3"
+			}
+			if strings.Trim(in, "0123456789") != "" {
+				return nil, errors.New("workers must be a number")
+			}
+			return []string{"kube-cluster", "bootstrap", "--control-planes", "3", "--workers", in}, nil
+		}},
+		{key: "A", label: "add workers", noRow: true, inter: true, prompt: "kube-cluster scale <N more workers>: ", argv: func(_ []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			if in == "" || strings.Trim(in, "0123456789") != "" {
+				return nil, errors.New("a number of workers is needed")
+			}
+			return []string{"kube-cluster", "scale", in}, nil
+		}},
+		{key: "P", label: "set the control-plane count (odd)", noRow: true, inter: true, prompt: "kube-cluster scale --control-planes <1|3|5>: ", argv: func(_ []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			if in != "1" && in != "3" && in != "5" {
+				return nil, errors.New("control planes are 1, 3 or 5 (etcd quorum)")
+			}
+			return []string{"kube-cluster", "scale", "--control-planes", in}, nil
+		}},
+		{key: "W", label: "power the cluster off", noRow: true, confirm: false, inter: true, argv: fixed("kube-cluster", "stop")},
+		{key: "O", label: "power the cluster on", noRow: true, inter: true, argv: fixed("kube-cluster", "start")},
 	},
 	"Cluster/Pods": {
 		{key: "L", label: "logs (follow)", inter: true, argv: func(row []string, _ string) ([]string, error) {
