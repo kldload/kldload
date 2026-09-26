@@ -835,6 +835,34 @@ if [[ "$EDITION" != "core" ]]; then
     rm -f /tmp/wgx-bin
     rm -rf /tmp/wgx-src
 
+    # ── kld — the operator console hub, from in-tree kld/ (2026-09-26).
+    # One static binary, the eight sections of the web console for ssh; it
+    # opens vmxplore, zxplore, wgx and k9s on Enter and acts through the
+    # shipped bash verbs. Static and cgo-free on purpose: it has to run on
+    # the core profile, where there is a terminal and nothing else.
+    _kld_src="/build/kld"
+    [[ -f "${_kld_src}/main.go" ]] ||
+        die "FATAL: kld/ missing from the repo — the console hub lives in-tree."
+    log "Building kld from in-tree kld/ ..."
+    rm -rf /tmp/kld-src
+    cp -a "$_kld_src" /tmp/kld-src
+    rm -f /tmp/kld-src/kld /tmp/kld-src/.buildnum
+    _kld_commit="$(git -C /build rev-parse HEAD 2>/dev/null || echo unknown)"
+    if (cd /tmp/kld-src &&
+        HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+            CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_kld_commit:0:8}" -o /tmp/kld-bin .) >>"$LOG_FILE" 2>&1; then
+        install -Dm0755 /tmp/kld-bin "${ROOTFS}/usr/local/bin/kld" ||
+            die "FATAL: kld install failed."
+        # Outcome, not exit code: the binary answers --version from the rootfs.
+        "${ROOTFS}/usr/local/bin/kld" --version >>"$LOG_FILE" 2>&1 ||
+            die "FATAL: kld installed but does not run (--version failed)."
+        log "kld installed (static, ${_kld_commit:0:8})."
+    else
+        die "FATAL: kld build failed — refusing to ship an ISO without the console hub."
+    fi
+    rm -f /tmp/kld-bin
+    rm -rf /tmp/kld-src
+
     # ── kldload-buildmon — build progress and install audit, from in-tree
     # buildmon/. In-tree for the same reason wg/ is: it reads
     # /var/lib/kldload/phases, drives kldload-component and parses

@@ -313,6 +313,16 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
         else
             _fail "live USB rack mode in the image" "missing:${_rack_bad} — the 'provision the rack' entry would boot a plain desktop and serve nothing"
         fi
+        # kld, the console hub, is built from kld/ by build-iso.sh and dies
+        # there if the build fails; this asks the sealed image, because a
+        # build that dies after mksquashfs (2026-09-26 VERSION lesson) or a
+        # path typo would still ship an ISO with no hub and no error here.
+        if unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" usr/local/bin/kld 2>/dev/null |
+            awk '$NF == "squashfs-root/usr/local/bin/kld" && $1 ~ /^-rwx/ {f = 1} END {exit !f}'; then
+            _pass "kld console hub in the image (usr/local/bin/kld, executable)"
+        else
+            _fail "kld console hub in the image" "usr/local/bin/kld is missing or not executable in the rootfs"
+        fi
         _nb_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${NB_FILES[@]}" 2>/dev/null)" || _nb_list="" # absent paths make unsquashfs exit non-zero; the loop below names them
         _nb_bad=""
         for _df in "${NB_FILES[@]}"; do
