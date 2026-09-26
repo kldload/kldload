@@ -783,8 +783,10 @@ func (m model) body() string {
 	b.WriteString("kldload  operator console · " + hostname() + "\n")
 	var rail []string
 	for i, s := range sections {
+		// the active section in brackets, every name still framed by spaces
+		// so a script (and tests/smoke-console.sh) can grep " Provision "
 		if i == m.active {
-			rail = append(rail, fmt.Sprintf("[%d %s]", i+1, s))
+			rail = append(rail, fmt.Sprintf("[ %d %s ]", i+1, s))
 		} else {
 			rail = append(rail, fmt.Sprintf(" %d %s ", i+1, s))
 		}
