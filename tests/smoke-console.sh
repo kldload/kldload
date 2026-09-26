@@ -152,7 +152,7 @@ machines vms
 machines snapshots
 machines microvms
 machines appliances
-machines factory
+machines build
 machines networks
 machines pools
 storage pools
@@ -341,7 +341,15 @@ TABS
         # the row under the cursor MUST be the probe before d: delete asks
         # nothing on a VM row
         if tmux -L "$_t3" capture-pane -t "$_t3" -p | grep -q "/${_pv} · 1 of "; then
+            # kvm-create leaves the probe running, and a running machine
+            # takes d twice within three seconds (the 2026-09-26 rule)
             tmux -L "$_t3" send-keys -t "$_t3" d
+            sleep 0.5
+            if tmux -L "$_t3" capture-pane -t "$_t3" -p | grep -q "${_pv} is running — d again"; then
+                tmux -L "$_t3" send-keys -t "$_t3" d
+            else
+                _fail "table delete" "the first d on a running probe did not arm the delete"
+            fi
         else
             _fail "table delete" "the filter did not leave exactly ${_pv} selected; not pressing d"
         fi

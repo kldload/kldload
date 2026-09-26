@@ -13,6 +13,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,9 @@ type verb struct {
 	// emulator) instead of silently or by taking the terminal over: for
 	// anything that runs long or whose output the operator must read
 	job bool
+	// argvs is argv for a verb that runs several commands in order in one
+	// job pane (the Build menu's "everything")
+	argvs func(row []string, in string) ([][]string, error)
 	// names lists what the verb would create, so the TUI can refuse a name
 	// the table already shows before anything runs (a count-clone named
 	// vdi-1 over the operator's own vdi-1, 2026-09-26: kvm-clone refused
@@ -107,6 +111,14 @@ var verbs = map[string][]verb{
 				return []string{"virsh", "autostart", "--disable", col(row, 0)}, nil
 			}
 			return []string{"virsh", "autostart", col(row, 0)}, nil
+		}},
+		{key: "M", label: "make golden (shut down, seal, @golden)", job: true, argv: func(row []string, _ string) ([]string, error) {
+			// vmxplore's MakeGolden: shut it down and wait, seal the zvol with
+			// kldload-seal (virt-sysprep is what it falls back to), then a
+			// fresh @golden on the zvol. One shell with a fixed argv: the VM
+			// name is $1 and never meets the shell as text.
+			script := `vm="$1"; ds="rpool/vms/$vm"; if virsh domstate "$vm" | grep -q running; then echo "== shutting $vm down"; virsh shutdown "$vm"; for i in $(seq 180); do virsh domstate "$vm" | grep -q "shut off" && break; sleep 1; done; fi; virsh domstate "$vm" | grep -q "shut off" || { echo "$vm is still running after 3 minutes; K forces it off"; exit 1; }; echo "== sealing /dev/zvol/$ds"; kldload-seal "/dev/zvol/$ds" || virt-sysprep -a "/dev/zvol/$ds" || { echo "seal failed"; exit 1; }; if zfs list -H "$ds@golden" >/dev/null 2>&1; then echo "== replacing $ds@golden"; zfs destroy "$ds@golden" || { echo "clones still depend on the old @golden: zfs promote them first"; exit 1; }; fi; zfs snapshot "$ds@golden" && echo "== $vm@golden is the golden; c clones it"`
+			return []string{"sh", "-c", script, "_", col(row, 0)}, nil
 		}},
 		{key: "F", label: "seal as a Firecracker golden", job: true, argv: onRow("kfire", "golden", "{}")},
 		{key: "v", label: "vcpus and memory", prompt: "{}: <vcpus> <memory GiB> (applies to the next boot): ", argv: func(row []string, in string) ([]string, error) {
@@ -190,22 +202,34 @@ var verbs = map[string][]verb{
 		}},
 		{key: "B", label: "build every appliance (vmx --build-all)", noRow: true, job: true, argv: fixed("vmxplore", "--build-all")},
 	},
-	"Machines/Factory": {
-		{key: "x", label: "run it", job: true, argv: func(row []string, _ string) ([]string, error) {
-			return strings.Fields(col(row, 3)), nil
+	"Machines/Build": {
+		{key: "x", label: "build it", job: true, argvs: func(row []string, _ string) ([][]string, error) {
+			return buildArgvs(col(row, 4), "")
 		}},
-		{key: "X", label: "run it for one distro", prompt: "distro for {} (centos rocky fedora debian ubuntu): ", job: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "X", label: "build it with an argument (a distro, a format, an image and a count)", job: true, prompt: "argument for {}: ", argvs: func(row []string, in string) ([][]string, error) {
 			in = strings.TrimSpace(in)
-			switch in {
-			case "centos", "rocky", "fedora", "debian", "ubuntu", "all":
-			default:
-				return nil, errors.New("one of centos rocky fedora debian ubuntu all")
+			switch col(row, 5) {
+			case "distro":
+				if !slices.Contains(append(slices.Clone(klabDistros), "all"), in) {
+					return nil, errors.New("one of " + strings.Join(klabDistros, " ") + " all")
+				}
+				return buildArgvs(col(row, 4), in)
+			case "format":
+				if !slices.Contains([]string{"qcow2", "raw", "vhd", "vmdk", "all"}, in) {
+					return nil, errors.New("one of qcow2 raw vhd vmdk all")
+				}
+				return [][]string{{"kimage", "export", in}}, nil
+			case "deploy":
+				f := strings.Fields(in)
+				if len(f) != 2 || !nameOK(f[0]) {
+					return nil, errors.New("<image name> <count>")
+				}
+				if n, err := strconv.Atoi(f[1]); err != nil || n < 1 || n > 64 {
+					return nil, errors.New("a count from 1 to 64")
+				}
+				return [][]string{{"kimage", "deploy", f[0], f[1]}}, nil
 			}
-			argv := strings.Fields(col(row, 3))
-			if len(argv) > 0 && argv[len(argv)-1] == "all" {
-				argv[len(argv)-1] = in
-			}
-			return argv, nil
+			return nil, errors.New(col(row, 0) + " takes no argument; x builds it")
 		}},
 	},
 	"Machines/microVMs": {
@@ -690,4 +714,25 @@ func cloneNames(in string) (names []string, snap string, err error) {
 		}
 	}
 	return names, snap, nil
+}
+
+// buildArgvs splits a Build row's command column (commands joined by " ; ")
+// into argvs; with a distro, the trailing "all" of each klab command
+// becomes that distro.
+func buildArgvs(cmd, distro string) ([][]string, error) {
+	if strings.TrimSpace(cmd) == "" {
+		return nil, errors.New("this row is a pointer, not a build: read its description")
+	}
+	var out [][]string
+	for _, c := range strings.Split(cmd, " ; ") {
+		argv := strings.Fields(c)
+		if len(argv) == 0 {
+			continue
+		}
+		if distro != "" && argv[len(argv)-1] == "all" {
+			argv[len(argv)-1] = distro
+		}
+		out = append(out, argv)
+	}
+	return out, nil
 }

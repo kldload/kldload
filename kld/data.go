@@ -35,7 +35,7 @@ type section struct {
 // Section order is the sidebar order of the web console, and the number keys.
 var sections = []section{
 	{"Overview", []string{"Summary", "Activity"}},
-	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Appliances", "Factory", "Networks", "Pools"}},
+	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Appliances", "Build", "Networks", "Pools"}},
 	{"Storage", []string{"Pools", "Pool", "Topology", "Datasets", "Snapshots", "Explorer", "Versions", "Boot envs", "Shares", "ARC"}},
 	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet", "Check"}},
 	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services", "Events", "Logs", "Describe"}},
@@ -147,7 +147,7 @@ var collectors = map[string]func(*sectionData){
 	"Overview/Activity":   loadActivity,
 	"Machines/VMs":        loadVMsGrouped,
 	"Machines/Appliances": loadAppliances,
-	"Machines/Factory":    loadFactory,
+	"Machines/Build":      loadBuild,
 	"Machines/Snapshots":  loadVMSnapshots,
 	"Machines/microVMs":   loadMicroVMs,
 	"Machines/Networks":   loadVMNetworks,

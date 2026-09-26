@@ -909,6 +909,14 @@ func (m model) execBatch(v verb, rows [][]string) tea.Cmd {
 func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
 	var argv []string
 	var err error
+	if v.argvs != nil {
+		argvs, err := v.argvs(row, in)
+		if err != nil {
+			return func() tea.Msg { return doneMsg{v.label, err} }
+		}
+		label := v.label + " " + col(row, 0)
+		return func() tea.Msg { return jobStartMsg{label: label, argvs: argvs} }
+	}
 	if v.names != nil {
 		// refuse a name the table already shows — a domain, a DB ghost or
 		// an orphan zvol — before anything starts

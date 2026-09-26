@@ -4,7 +4,7 @@
 // machine belongs to (from the same rules file vmxplore reads, so an
 // operator's /etc/vmxplore/rules still applies), autostart, what it was
 // cloned from, how many snapshots it carries, and pending-operation notes;
-// plus the twelve-appliance catalogue and the Factory of image-set commands.
+// plus the twelve-appliance catalogue and the Build menu of every image.
 // Every verb still runs a shipped command (2026-09-26 port).
 package main
 
@@ -330,27 +330,131 @@ func loadAppliances(d *sectionData) {
 	d.headline = fmt.Sprintf("%d appliances (vmxplore --appliances) — b builds one, B builds them all", len(d.rows))
 }
 
-// ── the Factory: image sets, each a shipped command ─────────────────────────
+// ── (the Build menu follows) ─────────────────────────────────────────────────
 
-var factoryRows = [][]string{
-	{"klab golden", "goldens", "lean cloud goldens for every distro", "klab golden all"},
-	{"klab golden-desktop", "goldens", "GNOME desktop goldens", "klab golden-desktop all"},
-	{"klab golden-xfce", "goldens", "Xfce desktop goldens", "klab golden-xfce all"},
-	{"klab golden-kde", "goldens", "KDE Plasma desktop goldens", "klab golden-kde all"},
-	{"klab golden-db", "goldens", "PostgreSQL goldens", "klab golden-db all"},
-	{"klab golden-ztest", "goldens", "OpenZFS test-lab goldens", "klab golden-ztest all"},
-	{"kube-cluster golden", "goldens", "the Kubernetes node golden", "kube-cluster golden"},
-	{"vmx --build-all", "appliances", "every appliance as a VM, sealed as Firecracker goldens where kfire is", "vmxplore --build-all"},
-	{"kube-smoke-test", "tests", "the cluster's smoke test", "kube-smoke-test"},
-	{"kldload-test", "tests", "the kldload suite", "kldload-test"},
+// ── the Build menu ──────────────────────────────────────────────────────
+// Every image the platform can make, as rows: one button for everything,
+// one per family (all klab goldens, all appliances), one per kind (lean,
+// GNOME, Xfce, KDE, PostgreSQL, ztest) with X asking for a single distro,
+// plus Kubernetes, Windows, this host as a cloud image, exports, tests.
+// "have" counts what already exists (@golden snapshots under rpool/vms,
+// app-* domains) so the operator sees what a button would add. A row with
+// several commands (joined by " ; ") runs them in order in one job pane.
+// The operator's ask, 2026-09-26: "some way to build all 30+ images,
+// ideally via smaller buttons — build all the goldens, build klab, etc."
+
+type buildRow struct {
+	name, kind, what, cmd, arg string // arg: distro | format | deploy | ""
+	have                       func(g map[string]bool, apps int) string
 }
 
-func loadFactory(d *sectionData) {
-	d.columns = []string{"image set", "kind", "what it builds", "command"}
-	for _, r := range factoryRows {
-		d.rows = append(d.rows, append([]string(nil), r...))
+var klabDistros = []string{"centos", "rocky", "fedora", "debian", "ubuntu"}
+
+// klabHave counts klab-<prefix>-<distro>@golden over the five distros.
+func klabHave(prefix string) func(map[string]bool, int) string {
+	return func(g map[string]bool, _ int) string {
+		n := 0
+		for _, d := range klabDistros {
+			if g["klab-"+prefix+"-"+d] {
+				n++
+			}
+		}
+		return fmt.Sprintf("%d/%d", n, len(klabDistros))
 	}
-	d.headline = "image sets — x runs the selected command in the terminal, X with a distro"
+}
+
+var klabKinds = []struct{ verb, prefix, what string }{
+	{"golden", "golden", "lean cloud goldens"},
+	{"golden-desktop", "desktop", "GNOME desktop goldens"},
+	{"golden-xfce", "xfce", "Xfce desktop goldens"},
+	{"golden-kde", "kde", "KDE Plasma desktop goldens"},
+	{"golden-db", "db", "PostgreSQL goldens"},
+	{"golden-ztest", "ztest", "OpenZFS test-lab goldens"},
+}
+
+func buildRows() []buildRow {
+	var klabAll []string
+	for _, k := range klabKinds {
+		klabAll = append(klabAll, "klab "+k.verb+" all")
+	}
+	allKlab := strings.Join(klabAll, " ; ")
+	sumKlab := func(g map[string]bool, _ int) string {
+		n := 0
+		for _, k := range klabKinds {
+			for _, d := range klabDistros {
+				if g["klab-"+k.prefix+"-"+d] {
+					n++
+				}
+			}
+		}
+		return fmt.Sprintf("%d/%d", n, len(klabKinds)*len(klabDistros))
+	}
+	rows := []buildRow{
+		{"EVERYTHING", "everything", "every klab golden, the Kubernetes golden, every appliance", allKlab + " ; kube-cluster golden ; vmxplore --build-all", "", func(g map[string]bool, apps int) string {
+			k := sumKlab(g, 0)
+			n, _, _ := strings.Cut(k, "/")
+			kn, _ := strconv.Atoi(n)
+			if g["k8s-golden"] {
+				kn++
+			}
+			return fmt.Sprintf("%d/%d + %d apps", kn, len(klabKinds)*len(klabDistros)+1, apps)
+		}},
+		{"all klab goldens", "goldens", "the six kinds for the five distros (30 images)", allKlab, "", sumKlab},
+	}
+	for _, k := range klabKinds {
+		rows = append(rows, buildRow{"klab " + k.verb, "goldens", k.what + " for every distro (X: one distro)", "klab " + k.verb + " all", "distro", klabHave(k.prefix)})
+	}
+	rows = append(rows,
+		buildRow{"kubernetes golden", "kubernetes", "the node image kube-cluster clones control planes and workers from", "kube-cluster golden", "", func(g map[string]bool, _ int) string { return yesNo(g["k8s-golden"]) }},
+		buildRow{"windows 11 golden", "windows", "unattended Win11 eval golden (fetched on demand, q35 + TPM)", "kvm-win golden win11", "", nil},
+		buildRow{"windows server golden", "windows", "unattended Windows Server golden", "kvm-win golden server", "", nil},
+		buildRow{"all appliances", "appliances", "every catalogue appliance as a VM (app-*), sealed as Firecracker goldens where kfire is", "vmxplore --build-all", "", func(_ map[string]bool, apps int) string { return strconv.Itoa(apps) + " built" }},
+		buildRow{"appliance self-test", "appliances", "build every tile as a VM and audit it (st-*), tear down the passing ones", "vmxplore --selftest", "", nil},
+		buildRow{"one appliance", "appliances", "b on the Appliances tab: pick the tile, name the VM, set its KEY=VALUE fields", "", "", nil},
+		buildRow{"this host as a cloud image", "images", "kimage build: prep this system as a cloud-init golden", "kimage build", "", nil},
+		buildRow{"export this host's image", "images", "kimage export (X: qcow2 raw vhd vmdk all) to /srv/images", "kimage export qcow2", "format", nil},
+		buildRow{"deploy VMs from an image", "images", "kimage deploy (X: <image> <count>)", "", "deploy", nil},
+		buildRow{"custom golden from a VM", "custom", "n makes a VM, its screen/serial/ssh customise it, M on its row seals it as @golden; c then clones it", "", "", nil},
+		buildRow{"verify the goldens", "tests", "klab verify all: boot a clone of each golden and check it", "klab verify all", "distro", nil},
+		buildRow{"kubernetes smoke test", "tests", "the cluster's smoke test", "kube-smoke-test", "", nil},
+		buildRow{"kldload suite", "tests", "the kldload test suite", "kldload-test", "", nil},
+	)
+	return rows
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+func loadBuild(d *sectionData) {
+	d.columns = []string{"build", "kind", "have", "what it builds", "command"}
+	goldens := map[string]bool{}
+	if out, err := run(30*time.Second, "zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-r", "rpool/vms"); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			if ds, snap, ok := strings.Cut(line, "@"); ok && snap == "golden" {
+				goldens[filepath.Base(ds)] = true
+			}
+		}
+	}
+	apps := 0
+	if out, err := run(10*time.Second, "virsh", "list", "--all", "--name"); err == nil {
+		for _, n := range strings.Fields(out) {
+			if strings.HasPrefix(n, "app-") {
+				apps++
+			}
+		}
+	}
+	for _, r := range buildRows() {
+		have := "-"
+		if r.have != nil {
+			have = r.have(goldens, apps)
+		}
+		d.rows = append(d.rows, []string{r.name, r.kind, have, r.what, r.cmd, r.arg})
+	}
+	d.headline = fmt.Sprintf("%d goldens on this host — x builds the row (a job pane), X asks for its argument (a distro, a format); rows with several commands run them in order", len(goldens))
 }
 
 // ── the light VM stats path ─────────────────────────────────────────────
