@@ -3389,12 +3389,15 @@ cmd_scale_cp() {
 }
 
 cmd_scale() {
-    local N="${1:-${WORKERS:-1}}"
-    [[ "$N" =~ ^[0-9]+$ ]] || die "scale: N must be a non-negative integer (got '$N')"
-    [[ "$N" -gt 0 ]] || die "scale: nothing to do (N=0)"
+    # `count`, not N: N is the colour reset, and a local N here shadowed it,
+    # so every log line of a scale ended in the worker count instead of a
+    # reset (a "3" after each [kube-cluster], seen in kld's pane 2026-09-26)
+    local count="${1:-${WORKERS:-1}}"
+    [[ "$count" =~ ^[0-9]+$ ]] || die "scale: N must be a non-negative integer (got '$count')"
+    [[ "$count" -gt 0 ]] || die "scale: nothing to do (N=0)"
 
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
-    echo -e "${W}  kube-cluster scale — add ${N} worker(s) to ${CLUSTER_NAME} ${N}"
+    echo -e "${W}  kube-cluster scale — add ${count} worker(s) to ${CLUSTER_NAME}${N}"
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 
     _ensure_libvirt_default_net
@@ -3457,7 +3460,7 @@ cmd_scale() {
     done < <(zfs list -H -o name 2>/dev/null | grep -E "/${WORKER_PREFIX}-[0-9]+$")
 
     declare -a new_ids=()
-    for i in $(seq 1 "$N"); do new_ids+=($((existing_max + i))); done
+    for i in $(seq 1 "$count"); do new_ids+=($((existing_max + i))); done
     log "Adding workers: ${new_ids[*]/#/${WORKER_PREFIX}-}"
 
     ensure_ssh_key
