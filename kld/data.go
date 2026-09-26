@@ -35,7 +35,7 @@ type section struct {
 var sections = []section{
 	{"Overview", []string{"Summary"}},
 	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Appliances", "Factory", "Networks", "Pools"}},
-	{"Storage", []string{"Pools", "Topology", "Datasets", "Snapshots", "Boot envs", "ARC"}},
+	{"Storage", []string{"Pools", "Pool", "Topology", "Datasets", "Snapshots", "Boot envs", "Shares", "ARC"}},
 	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet", "Check"}},
 	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services", "Events", "Logs", "Describe"}},
 	{"Ansible", []string{"Hosts", "Groups", "Plays"}},
@@ -109,6 +109,27 @@ func run(timeout time.Duration, name string, args ...string) (string, error) {
 	return string(out), nil
 }
 
+// runStdin is run with the command's stdin fed from a string; the output is
+// not needed by its callers (zfs load-key), the error is.
+func runStdin(timeout time.Duration, stdin string, name string, args ...string) error {
+	cmd := exec.Command("sudo", append([]string{"-n", name}, args...)...)
+	cmd.Stdin = strings.NewReader(stdin)
+	done := make(chan struct{})
+	var out []byte
+	var err error
+	go func() { out, err = cmd.CombinedOutput(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("%s: no answer in %s", name, timeout)
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %s", name, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func loadSection(si, sub int, ctx string) sectionData {
 	d := sectionData{section: si, sub: sub, ctx: ctx, loadedAt: time.Now()}
 	key := sections[si].name + "/" + sections[si].subs[sub]
@@ -130,7 +151,9 @@ var collectors = map[string]func(*sectionData){
 	"Machines/Networks":   loadVMNetworks,
 	"Machines/Pools":      loadVMPools,
 	"Storage/Pools":       loadPools,
+	"Storage/Pool":        loadPoolDetail,
 	"Storage/Topology":    loadTopology,
+	"Storage/Shares":      loadShares,
 	"Storage/Datasets":    loadDatasets,
 	"Storage/Snapshots":   loadSnapshots,
 	"Storage/Boot envs":   loadBootEnvs,

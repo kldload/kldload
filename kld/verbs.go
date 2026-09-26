@@ -30,6 +30,8 @@ type verb struct {
 	// ctxArgv builds it from the tab's context instead (a pod's logs on
 	// the Logs tab, where the context is "namespace/pod").
 	ctxArgv func(ctx string) ([]string, error)
+	secret  bool // the prompt's input is a passphrase: masked on screen
+	stdin   bool // the input is fed to the command's stdin, not argv
 }
 
 // col returns column i of a row, or "".
@@ -96,7 +98,7 @@ var verbs = map[string][]verb{
 			}
 			return []string{"kvm-grow", col(row, 0), in}, nil
 		}},
-		{key: "R", label: "reconcile an unreconciled row", confirm: true, argv: func(row []string, _ string) ([]string, error) {
+		{key: "X", label: "reconcile an unreconciled row", confirm: true, argv: func(row []string, _ string) ([]string, error) {
 			if col(row, 1) != "unreconciled" {
 				return nil, errors.New("only rows in the unreconciled group")
 			}
@@ -115,7 +117,7 @@ var verbs = map[string][]verb{
 			// changes every rebuild, so its host key is not pinned
 			return []string{"ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "root@" + ip}, nil
 		}},
-		{key: "v", label: "vmxplore", noRow: true, inter: true, argv: fixed("vmxplore", "--tui")},
+		{key: "V", label: "vmxplore", noRow: true, inter: true, argv: fixed("vmxplore", "--tui")},
 		{key: "n", label: "new VM", noRow: true, prompt: "kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]: ", argv: func(_ []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 || !nameOK(f[0]) {
@@ -247,6 +249,37 @@ var verbs = map[string][]verb{
 		}},
 		{key: "M", label: "mount", argv: onRow("zfs", "mount", "{}")},
 		{key: "N", label: "unmount", confirm: true, argv: onRow("zfs", "unmount", "{}")},
+		{key: "n", label: "create a child dataset", prompt: "child of {}: ", argv: func(row []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			if in == "" || !datasetOK(col(row, 0)+"/"+in) || strings.Contains(in, "/") {
+				return nil, errors.New("a child name (no slashes)")
+			}
+			return []string{"zfs", "create", "-p", col(row, 0) + "/" + in}, nil
+		}},
+		{key: "V", label: "create a zvol", prompt: "zvol under {}: <name> <size, e.g. 10G>: ", argv: func(row []string, in string) ([]string, error) {
+			f := strings.Fields(in)
+			if len(f) != 2 || strings.Contains(f[0], "/") || !datasetOK(col(row, 0)+"/"+f[0]) || strings.Trim(f[1], "0123456789KMGTkmgt") != "" {
+				return nil, errors.New("a name and a size like 10G")
+			}
+			return []string{"zfs", "create", "-V", f[1], col(row, 0) + "/" + f[0]}, nil
+		}},
+		{key: "m", label: "rename", prompt: "rename {} to: ", argv: func(row []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			if !datasetOK(in) {
+				return nil, errors.New("a full dataset name, pool/…")
+			}
+			return []string{"zfs", "rename", col(row, 0), in}, nil
+		}},
+		{key: "L", label: "load the encryption key", prompt: "passphrase for {}: ", secret: true, stdin: true, argv: onRow("zfs", "load-key", "{}")},
+		{key: "U", label: "unload the encryption key", confirm: true, argv: onRow("zfs", "unload-key", "{}")},
+		{key: "E", label: "create an encrypted child (zfs asks the passphrase)", prompt: "encrypted child of {}: ", inter: true, argv: func(row []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			if in == "" || strings.Contains(in, "/") || !datasetOK(col(row, 0)+"/"+in) {
+				return nil, errors.New("a child name (no slashes)")
+			}
+			return []string{"zfs", "create", "-o", "encryption=on", "-o", "keyformat=passphrase", "-o", "keylocation=prompt", col(row, 0) + "/" + in}, nil
+		}},
+		{key: "d", label: "destroy the dataset and everything under it", confirm: true, argv: onRow("zfs", "destroy", "-r", "{}")},
 		{key: "z", label: "zxplore", noRow: true, inter: true, argv: fixed("zxplore", "--tui")},
 	},
 	"Storage/Snapshots": {
@@ -264,6 +297,41 @@ var verbs = map[string][]verb{
 				return nil, fmt.Errorf("%q is not a dataset name", in)
 			}
 			return []string{"zfs", "clone", col(row, 0), in}, nil
+		}},
+		{key: "D", label: "diff against live", inter: true, argv: func(row []string, _ string) ([]string, error) {
+			return []string{"sh", "-c", `zfs diff -H "$1" | less -S`, "_", col(row, 0)}, nil
+		}},
+		{key: "f", label: "diff against another snapshot", prompt: "diff {} against snapshot (name after @): ", inter: true, argv: func(row []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			if !snapNameOK(in) {
+				return nil, errors.New("a snapshot name, the part after @")
+			}
+			return []string{"sh", "-c", `zfs diff -H "$1" "$2" | less -S`, "_", col(row, 0), col(row, 1) + "@" + in}, nil
+		}},
+		{key: "K", label: "bookmark", prompt: "bookmark {} as (name after #): ", argv: func(row []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			if !snapNameOK(in) {
+				return nil, errors.New("a bookmark name")
+			}
+			return []string{"zfs", "bookmark", col(row, 0), col(row, 1) + "#" + in}, nil
+		}},
+		{key: "H", label: "hold (tag kld)", argv: onRow("zfs", "hold", "kld", "{}")},
+		{key: "U", label: "release the hold", argv: onRow("zfs", "release", "kld", "{}")},
+		{key: "T", label: "replicate to a dataset, local or user@host:pool/ds", confirm: true, prompt: "send {} to <dataset> or <user@host:dataset>: ", inter: true, argv: func(row []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			host, ds, remote := strings.Cut(in, ":")
+			if !remote {
+				ds = in
+			}
+			if !datasetOK(ds) || (remote && (host == "" || strings.ContainsAny(host, " ;|&"))) {
+				return nil, errors.New("a dataset, or user@host:dataset")
+			}
+			// zfs recv -F rolls the destination back to match: that is why
+			// this verb asks for the snapshot's name to be typed
+			if remote {
+				return []string{"sh", "-c", `zfs send -vP "$1" | ssh -o BatchMode=yes "$2" zfs recv -s -F -o readonly=on -o canmount=noauto "$3"`, "_", col(row, 0), host, ds}, nil
+			}
+			return []string{"sh", "-c", `zfs send -vP "$1" | zfs recv -s -F -o readonly=on -o canmount=noauto "$2"`, "_", col(row, 0), ds}, nil
 		}},
 	},
 	"Storage/Boot envs": {
@@ -305,7 +373,7 @@ var verbs = map[string][]verb{
 	"Cluster/Nodes": {
 		{key: "D", label: "drain", confirm: true, argv: onRow("kubectl", "drain", "{}", "--ignore-daemonsets", "--delete-emptydir-data", "--request-timeout=60s")},
 		{key: "U", label: "uncordon", argv: onRow("kubectl", "uncordon", "{}", "--request-timeout=30s")},
-		{key: "k", label: "k9s", noRow: true, inter: true, argv: fixed("k9s")},
+		{key: "K", label: "k9s", noRow: true, inter: true, argv: fixed("k9s")},
 		// The shape is kube-cluster's own: bootstrap asks for three control
 		// planes (HA; the tool clamps to what fits and says so), scale adds
 		// workers or grows the control plane through the integrated path.
@@ -346,7 +414,7 @@ var verbs = map[string][]verb{
 		{key: "X", label: "delete pod", confirm: true, argv: func(row []string, _ string) ([]string, error) {
 			return []string{"kubectl", "delete", "pod", "-n", col(row, 1), col(row, 0), "--request-timeout=60s"}, nil
 		}},
-		{key: "k", label: "k9s", noRow: true, inter: true, argv: fixed("k9s")},
+		{key: "K", label: "k9s", noRow: true, inter: true, argv: fixed("k9s")},
 	},
 	"Cluster/Logs": {
 		{key: "L", label: "follow in the terminal", noRow: true, inter: true, ctxArgv: func(ctx string) ([]string, error) {
@@ -408,7 +476,7 @@ var verbs = map[string][]verb{
 		}},
 	},
 	"Helm/Examples": {
-		{key: "i", label: "install", prompt: "helm install <release> [namespace] from {}: ", inter: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "I", label: "install", prompt: "helm install <release> [namespace] from {}: ", inter: true, argv: func(row []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 || !nameOK(f[0]) {
 				return nil, errors.New("a release name is needed")

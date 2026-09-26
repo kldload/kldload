@@ -155,10 +155,12 @@ machines factory
 machines networks
 machines pools
 storage pools
+storage pool
 storage topology
 storage datasets
 storage snapshots
 storage bootenvs
+storage shares
 storage arc
 network planes
 network peers
@@ -190,7 +192,7 @@ provision feed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 43)) && _pass "every sub-tab tried (43/43)" || _fail "sub-tabs tried" "${_tabs} of 43"
+    ((_tabs == 45)) && _pass "every sub-tab tried (45/45)" || _fail "sub-tabs tried" "${_tabs} of 45"
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"

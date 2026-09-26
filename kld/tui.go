@@ -78,6 +78,7 @@ type model struct {
 	status   string
 	statusAt time.Time
 	prompt   string // non-empty while a verb waits for typed input
+	secret   bool   // the prompt's input is a passphrase: masked on screen
 	input    string
 	pending  func(string) tea.Cmd
 	help     bool
@@ -357,6 +358,8 @@ func (m model) drill() (tea.Model, tea.Cmd) {
 		target = "Snapshots"
 	case "Storage/Datasets":
 		target = "Snapshots"
+	case "Storage/Pools":
+		target = "Pool"
 	case "Cluster/Pods":
 		r := m.selectedRow()
 		m.switchTo(m.active, subIndex(m.active, "Logs"))
@@ -511,11 +514,11 @@ func (m model) selectedRow() []string {
 func (m model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		m.prompt, m.input, m.pending = "", "", nil
+		m.prompt, m.input, m.pending, m.secret = "", "", nil, false
 		m.say(stDim.Render("cancelled"))
 	case "enter":
 		cmd := m.pending(m.input)
-		m.prompt, m.input, m.pending = "", "", nil
+		m.prompt, m.input, m.pending, m.secret = "", "", nil, false
 		return m, cmd
 	case "backspace":
 		if len(m.input) > 0 {
@@ -560,6 +563,7 @@ func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
 	name := col(row, 0)
 	if v.prompt != "" {
 		m.prompt = strings.ReplaceAll(v.prompt, "{}", name)
+		m.secret = v.secret
 		m.pending = func(in string) tea.Cmd { return m.execVerb(v, row, in) }
 		return m, nil
 	}
@@ -624,6 +628,14 @@ func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
 		c := exec.Command("sudo", append([]string{"-n"}, argv...)...)
 		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 		return tea.ExecProcess(c, func(err error) tea.Msg { return doneMsg{what: what, err: err} })
+	}
+	if v.stdin {
+		// the input goes to the command's stdin (a passphrase for zfs
+		// load-key), never onto argv where ps would show it
+		return func() tea.Msg {
+			err := runStdin(600*time.Second, in+"\n", argv[0], argv[1:]...)
+			return doneMsg{what: what, err: err}
+		}
 	}
 	return func() tea.Msg {
 		_, err := run(600*time.Second, argv[0], argv[1:]...)
@@ -720,7 +732,11 @@ func (m model) View() string {
 	var sl string
 	switch {
 	case m.prompt != "":
-		sl = stWarn.Render(m.prompt) + m.input + "█"
+		shown := m.input
+		if m.secret {
+			shown = strings.Repeat("•", len(m.input))
+		}
+		sl = stWarn.Render(m.prompt) + shown + "█"
 	case m.filterOn:
 		sl = m.filter.View() + stDim.Render("   enter keep · esc clear")
 	case m.status != "":
@@ -759,6 +775,8 @@ func (m model) keyHints() string {
 	switch sections[m.active].name + "/" + m.subName() {
 	case "Machines/VMs", "Storage/Datasets":
 		parts = append(parts, k("enter", "snapshots"))
+	case "Storage/Pools":
+		parts = append(parts, k("enter", "open the pool"))
 	case "Cluster/Pods":
 		parts = append(parts, k("enter", "logs"))
 	case "Cluster/Nodes", "Cluster/Deployments", "Cluster/Services":

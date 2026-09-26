@@ -23,8 +23,10 @@ bump:
 build: bump
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) $(STAMP) -o kld .
 
+# GOTMPDIR: /tmp is noexec on a kldload host, and `go test` execs its test
+# binary from there; .gotmp is gitignored and exec-capable.
 check:
-	$(GO) vet ./... && test -z "$$(gofmt -l .)" && $(GO) test ./...
+	mkdir -p .gotmp && $(GO) vet ./... && test -z "$$(gofmt -l .)" && GOTMPDIR=$(CURDIR)/.gotmp $(GO) test ./...
 
 install: build
 	install -Dm0755 kld $(BINDIR)/kld
