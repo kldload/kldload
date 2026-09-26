@@ -1649,7 +1649,11 @@ dnf install -y qemu-guest-agent 2>/dev/null || echo "klab: WARNING qemu-guest-ag
 # swallow: these are the OPTIONAL half of the split above. bcc/bpfcc is
 # absent or renamed on some releases, and a lab image without eBPF tooling
 # is degraded, not broken — unlike the agent, which now installs alone.
-dnf install -y bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
+# wireguard-tools is NOT optional (every clone joins the mesh with it) and has
+# its own transaction, so a missing eBPF package cannot take it down too; the
+# golden's validation FAILS without it (3-kvm, build 70, 2026-09-26).
+dnf install -y wireguard-tools curl jq || echo "klab: WARNING wireguard-tools FAILED — clones of this golden cannot join the mesh" >&2
+dnf install -y bpftrace bcc-tools 2>/dev/null || true
 
 # Guest audio. The domain already carries an ich9 card (virt-install attaches
 # one), so the HOST half is done — this is the guest half, and without it the
@@ -1933,7 +1937,9 @@ apt-get install -y qemu-guest-agent 2>/dev/null || echo "klab: WARNING qemu-gues
 # swallow: these are the OPTIONAL half of the split above. bcc/bpfcc is
 # absent or renamed on some releases, and a lab image without eBPF tooling
 # is degraded, not broken — unlike the agent, which now installs alone.
-apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq 2>/dev/null || true
+# wireguard-tools apart from the optional eBPF tools: see the dnf block.
+apt-get install -y wireguard-tools curl jq || echo "klab: WARNING wireguard-tools FAILED — clones of this golden cannot join the mesh" >&2
+apt-get install -y bpftrace bpfcc-tools 2>/dev/null || true
 
 # Guest audio. The domain already carries an ich9 card (virt-install attaches
 # one), so the HOST half is done — this is the guest half, and without it the
@@ -2071,7 +2077,9 @@ WANT_ZFS="${2:-1}"
 pacman -Syu --noconfirm 2>/dev/null || true
 
 # Always: headers, dkms, eBPF, essentials
-pacman -S --noconfirm linux-headers dkms bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
+# wireguard-tools apart from the optional eBPF tools: see the dnf block.
+pacman -S --noconfirm wireguard-tools curl jq || echo "klab: WARNING wireguard-tools FAILED — clones of this golden cannot join the mesh" >&2
+pacman -S --noconfirm linux-headers dkms bpftrace bcc-tools 2>/dev/null || true
 
 # Dev tools (only when KLAB_ZFS_DEV=1)
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
@@ -2120,7 +2128,9 @@ fi
 apk update
 
 # Always: essentials + eBPF
-apk add bash coreutils util-linux findutils grep sed wireguard-tools curl jq 2>/dev/null || true
+apk add bash coreutils util-linux findutils grep sed curl jq 2>/dev/null || true
+# wireguard-tools apart from the rest: see the dnf block.
+apk add wireguard-tools || echo "klab: WARNING wireguard-tools FAILED — clones of this golden cannot join the mesh" >&2
 
 # Dev tools (only when KLAB_ZFS_DEV=1)
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
@@ -2983,6 +2993,7 @@ echo "V_DKMS=$(dkms status 2>/dev/null | head -1 || echo n/a)"
 echo "V_TESTS=$(test -f /usr/share/zfs/zfs-tests.sh && echo OK || (command -v zfs-tests.sh >/dev/null 2>&1 && echo OK || echo MISSING))"
 echo "V_VDEVS=$(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)"
 echo "V_KSH=$(command -v ksh >/dev/null 2>&1 && echo OK || echo MISSING)"
+echo "V_WG=$(command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1 && echo OK || echo MISSING)"
 echo zfs > /etc/modules-load.d/zfs.conf 2>/dev/null || true
 depmod -a 2>/dev/null || true
 cloud-init clean --logs 2>/dev/null || true
@@ -3025,7 +3036,7 @@ echo "V_SEALED=OK"
 shutdown -h now 2>/dev/null || true
 VALIDATE
 
-    local _v_kernel _v_zfs _v_mod _v_ver _v_dkms _v_tests _v_vdevs _v_ksh
+    local _v_kernel _v_zfs _v_mod _v_ver _v_dkms _v_tests _v_vdevs _v_ksh _v_wg
     _v_kernel="$(grep '^V_KERNEL=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "unknown")"
     _v_zfs="$(grep '^V_ZFS=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "MISSING")"
     _v_mod="$(grep '^V_MOD=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "0")"
@@ -3034,6 +3045,7 @@ VALIDATE
     _v_tests="$(grep '^V_TESTS=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "MISSING")"
     _v_vdevs="$(grep '^V_VDEVS=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "0")"
     _v_ksh="$(grep '^V_KSH=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "MISSING")"
+    _v_wg="$(grep '^V_WG=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "MISSING")"
     rm -f "$_val_tmp"
     [[ -z "$_v_kernel" ]] && _v_kernel="unknown"
     [[ -z "$_v_mod" ]] && _v_mod="0"
@@ -3057,6 +3069,14 @@ VALIDATE
         _zfs_line_bin="not wanted (desktop lineage — xfs on a zvol; KLAB_DESKTOP_ZFS=1 puts it back)"
         _zfs_line_mod="not wanted"
     fi
+    # Every lineage needs WireGuard: kldload-enroll puts each clone on the
+    # mesh with wg + wg-quick in the guest, and without them it can only warn.
+    # wireguard-tools rode in one dnf transaction with the optional eBPF tools
+    # under `|| true`, so one failed fetch sealed a golden that no clone of
+    # could ever join the estate (klab-desktop-rocky on 3-kvm, build 70,
+    # fiend 2026-09-26: "neither kube-network nor wireguard-tools in the
+    # guest", three sweeps in a row).
+    [[ "$_v_wg" != "OK" ]] && _result="FAIL (no wireguard-tools: clones cannot join the mesh)"
 
     {
         echo ""
@@ -3071,6 +3091,7 @@ VALIDATE
         echo "  zfs-tests.sh:   ${_v_tests}"
         echo "  vdev images:    ${_v_vdevs}/4"
         echo "  ksh:            ${_v_ksh}"
+        echo "  wireguard:      ${_v_wg}"
         echo "  ZFS source:     ${ZFS_SOURCE}"
         echo "  NVIDIA:         $([[ $NVIDIA_DETECTED -eq 1 ]] && echo "installed" || echo "n/a")"
         echo "  Result:         ${_result}"
@@ -3086,6 +3107,7 @@ VALIDATE
     log "    zfs-tests.sh:   ${_v_tests}"
     log "    vdev images:    ${_v_vdevs}/4"
     log "    ksh:            ${_v_ksh}"
+    log "    wireguard:      ${_v_wg}"
     log "  Sealed + shutdown initiated in validation pass"
 
     for _ in $(seq 1 30); do
