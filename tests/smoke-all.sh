@@ -223,6 +223,14 @@ run_suite "Feature Ledger (apps, rollback, estate, goldens, audio, mesh)" "$SCRI
 run_suite "Estate (ansible reach, playbook, monitoring, mesh)" "$SCRIPT_DIR/smoke-estate.sh" \
     '^[[:space:]]*estate: [0-9]+ passed'
 
+# The console suite runs everywhere the webui does (every profile ships it):
+# the views were verified by hand as they were built (2026-09-26) and this
+# keeps a host whose collector broke from showing "Loading…" to the first
+# operator who opens it. The same script runs on a workstation against a
+# remote host with KLDLOAD_WEBUI_URL.
+run_suite "Console (every view's backend over the websocket, kld)" "$SCRIPT_DIR/smoke-console.sh" \
+    '^[[:space:]]*console: [0-9]+ passed'
+
 # Server tests for server, kvm, desktop, ai profiles
 case "$PROFILE" in
 server | kvm | desktop | ai | zfslab)
