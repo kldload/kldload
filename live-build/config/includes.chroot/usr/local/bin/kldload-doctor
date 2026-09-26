@@ -35,6 +35,35 @@ import subprocess
 import sys
 from pathlib import Path
 
+_APISERVER: dict[str, bool | None] = {"reachable": None}
+
+
+def _apiserver_reachable() -> bool:
+    """Once per run: does the kubeconfig's apiserver answer its port?
+
+    Forty-one checks call kubectl. On a host whose kubeconfig points at a
+    cluster that is gone (onyx keeps one from an earlier lab), every one of
+    them sat in TCP connect until its timeout, and the doctor took over two
+    minutes to say "no cluster" (2026-09-26). One 1.5 s probe answers for all
+    of them; a live apiserver answers in milliseconds.
+    """
+    if _APISERVER["reachable"] is None:
+        _APISERVER["reachable"] = False
+        try:
+            p = subprocess.run(["kubectl", "config", "view", "--minify", "-o",
+                                "jsonpath={.clusters[0].cluster.server}"],
+                               capture_output=True, text=True, timeout=5)
+            server = p.stdout.strip()
+            if server:
+                import socket
+                import urllib.parse
+                u = urllib.parse.urlsplit(server)
+                with socket.create_connection((u.hostname, u.port or 443), timeout=1.5):
+                    _APISERVER["reachable"] = True
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return bool(_APISERVER["reachable"])
+
 
 def _run(cmd: list[str], timeout: float = 5,
          stdin: int | None = None) -> tuple[int, str, str]:
@@ -42,6 +71,10 @@ def _run(cmd: list[str], timeout: float = 5,
     surface as rc != 0 with empty stdout; that's what checks expect.
     stdin is passed through: ssh must get DEVNULL or it reads the
     doctor's own stdin."""
+    # kubectl against an apiserver nothing answers at is the timeout it would
+    # have been, reported at once; every check reads rc != 0 as it always did.
+    if cmd and cmd[0] == "kubectl" and cmd[1:2] != ["config"] and not _apiserver_reachable():
+        return -1, "", "apiserver unreachable (port probe)"
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                            stdin=stdin)
@@ -384,6 +417,8 @@ def _kubectl_json(args, default=None):
     env.setdefault("KUBECONFIG", "/root/.kube/config")
     env.setdefault("HOME", "/root")
     try:
+        if not _apiserver_reachable():
+            raise OSError("apiserver unreachable (port probe)")
         out = subprocess.check_output(["kubectl"] + args + ["-o", "json"],
                                       text=True, stderr=subprocess.DEVNULL,
                                       timeout=8, env=env)
@@ -491,6 +526,8 @@ def check_helm_releases():
     if not _has("helm"):
         return _result("helm", "helm CLI", "skip", "", "helm not installed")
     try:
+        if not _apiserver_reachable():
+            raise OSError("apiserver unreachable (port probe)")
         out = subprocess.check_output(["helm", "list", "-A", "-o", "json"],
                                       text=True, stderr=subprocess.DEVNULL, timeout=8)
         releases = json.loads(out)
