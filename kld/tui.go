@@ -60,6 +60,12 @@ type doneMsg struct {
 
 type tickMsg time.Time
 
+// detailMsg carries a detailer's lines for one row of one tab.
+type detailMsg struct {
+	key, name string
+	lines     []string
+}
+
 type model struct {
 	active   int
 	sub      []int             // current sub-tab per section
@@ -76,7 +82,9 @@ type model struct {
 	pending  func(string) tea.Cmd
 	help     bool
 	detail   bool
-	marks    map[string]bool // marked row names, per section/sub key + name
+	marks    map[string]bool     // marked row names, per section/sub key + name
+	details  map[string][]string // detailer lines, per section/sub key + name
+	asked    map[string]bool     // detailers already fired, same key
 	filter   textinput.Model
 	filterOn bool
 	sortCol  int
@@ -99,6 +107,7 @@ func newModel(start, sub, width int) model {
 	m := model{active: start, width: width, detail: true, sortCol: -1,
 		sub: make([]int, len(sections)), ctx: map[string]string{},
 		data: map[string]*sectionData{}, loading: map[string]bool{}, marks: map[string]bool{},
+		details: map[string][]string{}, asked: map[string]bool{},
 		filter: f, spin: sp, now: time.Now()}
 	m.sub[start] = sub
 	return m
@@ -131,8 +140,30 @@ func tickEvery() tea.Cmd {
 }
 
 func (m model) reload() tea.Cmd {
+	for k := range m.details {
+		if strings.HasPrefix(k, m.key()+"\x00") {
+			delete(m.details, k)
+			delete(m.asked, k)
+		}
+	}
 	si, sub, ctx := m.active, m.sub[m.active], m.ctx[m.key()]
 	return func() tea.Msg { return loadedMsg(loadSection(si, sub, ctx)) }
+}
+
+// detailCmd fires the tab's detailer for the selected row once.
+func (m *model) detailCmd() tea.Cmd {
+	f, ok := detailers[sections[m.active].name+"/"+m.subName()]
+	row := m.selectedRow()
+	if !ok || row == nil {
+		return nil
+	}
+	k := m.key() + "\x00" + col(row, 0)
+	if m.asked[k] {
+		return nil
+	}
+	m.asked[k] = true
+	key, name := m.key(), col(row, 0)
+	return func() tea.Msg { return detailMsg{key, name, f(row)} }
 }
 
 func (m *model) say(s string) {
@@ -157,6 +188,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case loadedMsg:
 		m.apply(sectionData(msg))
+		return m, m.detailCmd()
+	case detailMsg:
+		m.details[msg.key+"\x00"+msg.name] = msg.lines
 		return m, nil
 	case doneMsg:
 		if msg.err != nil {
@@ -289,6 +323,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		return m, m.detailCmd()
 	}
 	return m, nil
 }
@@ -804,6 +839,27 @@ func (m model) detailView(d *sectionData, w, h int) string {
 				v = v[n:]
 			}
 		}
+	}
+	if extra, ok := m.details[m.key()+"\x00"+col(r, 0)]; ok {
+		// the detailer's keys (a property name, a MAC) size their own column
+		ekw := 0
+		for _, e := range extra {
+			if k, _, isKV := strings.Cut(e, "\t"); isKV {
+				ekw = max(ekw, min(len(k), 17))
+			}
+		}
+		lines = append(lines, "")
+		for _, e := range extra {
+			k, v, isKV := strings.Cut(e, "\t")
+			if !isKV {
+				lines = append(lines, stTitle.Render(truncate(e, w)))
+				continue
+			}
+			vw := w - ekw - 2
+			lines = append(lines, stDim.Render(fmt.Sprintf("%-*s", ekw, truncate(k, ekw)))+"  "+truncate(v, max(vw, 1)))
+		}
+	} else if _, ok := detailers[sections[m.active].name+"/"+m.subName()]; ok {
+		lines = append(lines, "", stDim.Render("…"))
 	}
 	lines = append(lines, "")
 	for _, v := range m.verbsHere() {
