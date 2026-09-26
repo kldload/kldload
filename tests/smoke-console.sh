@@ -150,6 +150,8 @@ overview summary
 machines vms
 machines snapshots
 machines microvms
+machines appliances
+machines factory
 machines networks
 machines pools
 storage pools
@@ -188,7 +190,7 @@ provision feed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 41)) && _pass "every sub-tab tried (41/41)" || _fail "sub-tabs tried" "${_tabs} of 41"
+    ((_tabs == 43)) && _pass "every sub-tab tried (43/43)" || _fail "sub-tabs tried" "${_tabs} of 43"
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"

@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kvm-grow — grow a VM's root disk to N GiB, all three layers
+#
+# What it does, in order:
+#   1. grows the block device: `zfs set volsize=NG` on the zvol behind the
+#      first disk (or `qemu-img resize` for a file-backed disk)
+#   2. tells the running guest the disk changed: `virsh blockresize`
+#   3. inside the guest, over ssh as root: grows the root partition to the end
+#      of the disk (growpart) and the filesystem to fill it (resize2fs,
+#      xfs_growfs, btrfs filesystem resize, resize.f2fs) — the script it runs
+#      is below, ported from vmxplore's TUI `+` verb (2026-09-26)
+#
+# Why: growing the block device is the first of three layers. The partition
+# table and the filesystem both still describe the old size, so a 40G -> 50G
+# resize leaves a guest that HAS 50G and can only USE 40G. Every layer reports
+# what it did and the last one checks the outcome, not exit codes.
+#
+# Usage: kvm-grow <vm> <GiB>     (the VM must be running and have an address)
+# Exit:  0 grown or already full   1 a layer failed   2 usage / refused
+#        (shrinking, an unknown size, a stopped guest, no address)
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kvm-grow: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+usage() {
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit "${1:-2}"
+}
+[[ "${1:-}" == -h || "${1:-}" == --help ]] && usage 0
+[[ $# -eq 2 ]] || usage
+if [[ $EUID -ne 0 ]]; then exec sudo -n "$0" "$@"; fi
+VM="$1"
+GIB="$2"
+[[ "$VM" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] || {
+    echo "kvm-grow: '$VM' is not a VM name" >&2
+    exit 2
+}
+[[ "$GIB" =~ ^[0-9]+$ && "$GIB" -gt 0 ]] || {
+    echo "kvm-grow: size must be whole GiB, got '$GIB'" >&2
+    exit 2
+}
+[[ "$(virsh domstate "$VM" 2>/dev/null)" == running ]] || {
+    echo "kvm-grow: $VM is not running — the guest has to be up to grow its filesystem" >&2
+    exit 2
+}
+
+# ── 1. the block device ─────────────────────────────────────────────────────
+# The first disk is the root disk on every image kldload ships.
+# One listing, read whole: an awk that `exit`s early closes the pipe under
+# pipefail and virsh's SIGPIPE reads as a failure (first run, 2026-09-26).
+_blk="$(virsh domblklist "$VM" --details 2>/dev/null)"
+_src="$(awk '$2 == "disk" && !done {print $4; done = 1}' <<<"$_blk")"
+[[ -n "$_src" ]] || {
+    echo "kvm-grow: $VM has no disk in its domain XML" >&2
+    exit 1
+}
+_target="$(awk '$2 == "disk" && !done {print $3; done = 1}' <<<"$_blk")"
+_bytes=$((GIB * 1024 * 1024 * 1024))
+case "$_src" in
+/dev/zvol/*)
+    _zvol="${_src#/dev/zvol/}"
+    _cur="$(zfs get -H -p -o value volsize "$_zvol")"
+    [[ "$_cur" =~ ^[0-9]+$ ]] || {
+        echo "kvm-grow: cannot read the current size of $_zvol" >&2
+        exit 2
+    }
+    if ((_bytes < _cur)); then
+        echo "kvm-grow: refusing to shrink $_zvol ($((_cur / 1073741824))G -> ${GIB}G)" >&2
+        exit 2
+    fi
+    if ((_bytes == _cur)); then
+        echo "block:      $_zvol is already ${GIB}G"
+    else
+        zfs set "volsize=${GIB}G" "$_zvol"
+        echo "block:      $_zvol $((_cur / 1073741824))G -> ${GIB}G"
+    fi
+    ;;
+*)
+    _cur="$(qemu-img info --output=json "$_src" | python3 -c 'import json,sys; print(json.load(sys.stdin)["virtual-size"])')"
+    if ((_bytes < _cur)); then
+        echo "kvm-grow: refusing to shrink $_src" >&2
+        exit 2
+    fi
+    qemu-img resize "$_src" "${GIB}G" >/dev/null
+    echo "block:      $_src -> ${GIB}G"
+    ;;
+esac
+
+# ── 2. the running guest sees it ────────────────────────────────────────────
+virsh blockresize "$VM" "$_target" "${GIB}G" >/dev/null
+echo "guest:      virsh blockresize $VM $_target ${GIB}G"
+
+# ── 3. partition + filesystem, inside the guest ─────────────────────────────
+_ip="$(kldload-vm-ip "$VM" 2>/dev/null || true)"
+[[ -n "$_ip" ]] || {
+    echo "kvm-grow: $VM has no address yet — the block device is grown; run again for the filesystem" >&2
+    exit 1
+}
+# The guest changes identity on every rebuild, so its host key is not pinned
+# (the same policy as kldload-enroll's ssh to a fresh clone).
+ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    -o ConnectTimeout=10 "root@${_ip}" 'sh -s' <<'GROW'
+#!/bin/sh
+# growroot — grow the root partition and filesystem to fill its disk. Runs
+# INSIDE the guest. Idempotent: "already at full size" exits 0, so a re-run
+# is how an operator recovers. Driven by the FILESYSTEM, not the distro: the
+# command that grows a filesystem is a property of the filesystem, and the OS
+# is only consulted to name the package to install when growpart is missing.
+# Exit: 0 grown or already full   1 could not grow   2 unsupported layout
+set -u
+say() { printf '%s\n' "$*"; }
+die() { printf 'growroot: %s\n' "$*" >&2; exit "${2:-1}"; }
+# findmnt renders a btrfs subvolume as "/dev/vda3[/root]"; strip the brackets
+SRC="$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//')"
+FST="$(findmnt -no FSTYPE / 2>/dev/null)"
+[ -n "$SRC" ] && [ -n "$FST" ] || die "cannot determine the root device or filesystem" 2
+case "$SRC" in
+    /dev/*) ;;
+    *) die "root is $SRC, not a block device" 2 ;;
+esac
+DISK="$(lsblk -no PKNAME "$SRC" 2>/dev/null | head -1)"
+[ -n "$DISK" ] && DISK="/dev/$DISK"
+if [ -z "$DISK" ]; then
+    case "$SRC" in
+        *[0-9]p[0-9]*) DISK="$(printf '%s' "$SRC" | sed 's/p[0-9]*$//')" ;;
+        *) DISK="$(printf '%s' "$SRC" | sed 's/[0-9]*$//')" ;;
+    esac
+fi
+PART="$(printf '%s' "$SRC" | sed 's/.*[^0-9]\([0-9]*\)$/\1/')"
+[ -n "$PART" ] || die "cannot derive a partition number from $SRC" 2
+[ -b "$DISK" ] || die "derived disk $DISK is not a block device" 2
+before_fs="$(df -B1 --output=size / 2>/dev/null | tail -1 | tr -d ' ')"
+say "root:       $SRC ($FST) on $DISK partition $PART"
+say "filesystem: $(df -h --output=size / 2>/dev/null | tail -1 | tr -d ' ') before"
+# growpart exits 1 with NOCHANGE when the partition already reaches the end
+# of the disk — a success here, told apart by message, not exit code
+PART_FULL=0
+if command -v growpart >/dev/null 2>&1; then
+    gp_out="$(growpart "$DISK" "$PART" 2>&1)"; gp_rc=$?
+    case "$gp_out" in
+        *NOCHANGE*|*"could only be grown by"*) PART_FULL=1; say "partition:  already at full size" ;;
+        *)
+            if [ "$gp_rc" -eq 0 ]; then
+                say "partition:  grown -- $gp_out"
+                partx -u "$DISK" >/dev/null 2>&1 || partprobe "$DISK" >/dev/null 2>&1 || true
+            else
+                say "partition:  growpart failed (rc=$gp_rc): $gp_out"
+                say "            continuing -- the filesystem step below reports the truth"
+            fi ;;
+    esac
+else
+    . /etc/os-release 2>/dev/null || true
+    case "${ID_LIKE:-${ID:-}}" in
+        *debian*|debian|ubuntu|arch) pkg="cloud-guest-utils" ;;
+        *rhel*|*fedora*|fedora|rhel|centos|rocky) pkg="cloud-utils-growpart" ;;
+        *suse*) pkg="growpart" ;;
+        *) pkg="cloud-utils-growpart or cloud-guest-utils" ;;
+    esac
+    say "partition:  growpart NOT INSTALLED on ${PRETTY_NAME:-this guest} -- install $pkg"
+fi
+case "$FST" in
+    ext2|ext3|ext4) resize2fs "$SRC" 2>&1 | sed 's/^/            /' ;;
+    xfs)            xfs_growfs / 2>&1 | sed 's/^/            /' ;;
+    btrfs)          btrfs filesystem resize max / 2>&1 | sed 's/^/            /' ;;
+    f2fs)           resize.f2fs "$SRC" 2>&1 | sed 's/^/            /' ;;
+    *)              die "filesystem $FST is not supported" 2 ;;
+esac
+after_fs="$(df -B1 --output=size / 2>/dev/null | tail -1 | tr -d ' ')"
+say "filesystem: $(df -h --output=size / 2>/dev/null | tail -1 | tr -d ' ') after"
+if [ "${after_fs:-0}" -gt "${before_fs:-0}" ]; then say "RESULT: grown"; exit 0; fi
+# Nothing changed: correct only when the partition already ends at the disk's
+# end (Debian's genericcloud puts p14/p15 BEFORE p1, so "disk minus partition"
+# is the wrong question; the growpart verdict is the right one).
+if [ "$PART_FULL" -eq 1 ]; then say "RESULT: already at full size"; exit 0; fi
+die "NOT grown -- the filesystem did not change size; see the lines above"
+GROW

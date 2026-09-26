@@ -34,7 +34,7 @@ type section struct {
 // Section order is the sidebar order of the web console, and the number keys.
 var sections = []section{
 	{"Overview", []string{"Summary"}},
-	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Networks", "Pools"}},
+	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Appliances", "Factory", "Networks", "Pools"}},
 	{"Storage", []string{"Pools", "Topology", "Datasets", "Snapshots", "Boot envs", "ARC"}},
 	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet", "Check"}},
 	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services", "Events", "Logs", "Describe"}},
@@ -122,7 +122,9 @@ func loadSection(si, sub int, ctx string) sectionData {
 
 var collectors = map[string]func(*sectionData){
 	"Overview/Summary":    loadOverview,
-	"Machines/VMs":        loadVMs,
+	"Machines/VMs":        loadVMsGrouped,
+	"Machines/Appliances": loadAppliances,
+	"Machines/Factory":    loadFactory,
 	"Machines/Snapshots":  loadVMSnapshots,
 	"Machines/microVMs":   loadMicroVMs,
 	"Machines/Networks":   loadVMNetworks,
@@ -206,75 +208,6 @@ func readEstate() (estateReport, error) {
 }
 
 // ── Machines ────────────────────────────────────────────────────────────────
-
-// loadVMs is libvirt's own list with the address resolver and the state DB
-// on top: what vmxplore's estate shows, in the order it shows it. A per-VM
-// dominfo costs 50 ms; forty VMs is two seconds, which is why the address
-// and the DB row come from one call each.
-func loadVMs(d *sectionData) {
-	names, err := run(15*time.Second, "virsh", "list", "--all", "--name")
-	if err != nil {
-		d.err = err.Error()
-		return
-	}
-	ips := map[string]string{}
-	if out, err := run(20*time.Second, "kldload-vm-ip", "--all", "--json"); err == nil {
-		_ = json.Unmarshal([]byte(out), &ips)
-	}
-	type dbrow struct {
-		Name, Role, Cluster, Status, MeshID, Golden string
-	}
-	db := map[string]dbrow{}
-	if out, err := run(15*time.Second, "kldload-db", "dump"); err == nil {
-		var dump struct {
-			VMs []struct {
-				Name      string `json:"name"`
-				Role      string `json:"role"`
-				ClusterID string `json:"cluster_id"`
-				Status    string `json:"status"`
-				MeshID    string `json:"mesh_id"`
-				GoldenSrc string `json:"golden_src"`
-				DeletedAt string `json:"deleted_at"`
-			} `json:"vms"`
-		}
-		if json.Unmarshal([]byte(out), &dump) == nil {
-			for _, v := range dump.VMs {
-				if v.DeletedAt == "" {
-					db[v.Name] = dbrow{v.Name, v.Role, v.ClusterID, v.Status, v.MeshID, v.GoldenSrc}
-				}
-			}
-		}
-	}
-	d.columns = []string{"vm", "state", "vcpus", "memory", "address", "mesh", "role", "from"}
-	running := 0
-	for _, name := range strings.Fields(names) {
-		info, _ := run(10*time.Second, "virsh", "dominfo", name)
-		state, cpus, mem := "?", "-", "-"
-		for _, line := range strings.Split(info, "\n") {
-			k, v, ok := strings.Cut(line, ":")
-			if !ok {
-				continue
-			}
-			v = strings.TrimSpace(v)
-			switch strings.TrimSpace(k) {
-			case "State":
-				state = v
-			case "CPU(s)":
-				cpus = v
-			case "Max memory":
-				if kib, err := strconv.ParseInt(strings.Fields(v)[0], 10, 64); err == nil {
-					mem = human(kib * 1024)
-				}
-			}
-		}
-		if state == "running" {
-			running++
-		}
-		r := db[name]
-		d.rows = append(d.rows, []string{name, state, cpus, mem, orDash(ips[name]), orDash(r.MeshID), orDash(r.Role), orDash(r.Golden)})
-	}
-	d.headline = fmt.Sprintf("%d machines, %d running (libvirt · kldload-vm-ip · state.db)", len(d.rows), running)
-}
 
 // loadVMSnapshots lists the zvol snapshots under rpool/vms — what kvm-snap
 // list shows per VM, for every VM at once (one zfs call, a second on onyx).
@@ -1313,7 +1246,10 @@ func loadEvents(d *sectionData) {
 	}
 	var dump struct {
 		Events []struct {
-			TS, Type, Subject, Message string
+			TS      string `json:"ts"`
+			Type    string `json:"type"`
+			Subject string `json:"subject"`
+			Message string `json:"message"`
 		} `json:"events"`
 	}
 	if err := json.Unmarshal([]byte(out), &dump); err != nil {

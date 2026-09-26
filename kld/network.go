@@ -69,7 +69,9 @@ func localRoster() roster {
 	if out, err := run(15*time.Second, "kldload-db", "dump"); err == nil {
 		var dump struct {
 			VMs []struct {
-				Name, WgPubkey, DeletedAt string
+				Name      string `json:"name"`
+				WgPubkey  string `json:"wg_pubkey"`
+				DeletedAt string `json:"deleted_at"`
 			} `json:"vms"`
 		}
 		if jsonUnmarshal(out, &dump) == nil {

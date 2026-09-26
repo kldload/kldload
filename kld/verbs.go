@@ -72,6 +72,39 @@ var verbs = map[string][]verb{
 		{key: "b", label: "rollback to the newest snapshot", confirm: true, argv: onRow("kvm-snap", "{}", "rollback")},
 		{key: "d", label: "delete VM + zvol", confirm: true, argv: onRow("kvm-delete", "{}", "--force")},
 		{key: "e", label: "enrol on the mesh", argv: onRow("kldload-enroll", "{}")},
+		{key: "z", label: "suspend", argv: onRow("virsh", "suspend", "{}")},
+		{key: "Z", label: "resume", argv: onRow("virsh", "resume", "{}")},
+		{key: "A", label: "autostart on/off", argv: func(row []string, _ string) ([]string, error) {
+			if col(row, 3) == "on" {
+				return []string{"virsh", "autostart", "--disable", col(row, 0)}, nil
+			}
+			return []string{"virsh", "autostart", col(row, 0)}, nil
+		}},
+		{key: "F", label: "seal as a Firecracker golden", argv: onRow("kfire", "golden", "{}")},
+		{key: "v", label: "vcpus and memory", prompt: "{}: <vcpus> <memory GiB> (applies to the next boot): ", argv: func(row []string, in string) ([]string, error) {
+			f := strings.Fields(in)
+			if len(f) != 2 || strings.Trim(f[0], "0123456789") != "" || strings.Trim(f[1], "0123456789") != "" {
+				return nil, errors.New("two numbers: vcpus and memory in GiB")
+			}
+			// four virsh calls, fixed argv with the values as positionals
+			return []string{"sh", "-c", `virsh setvcpus "$1" "$2" --config --maximum && virsh setvcpus "$1" "$2" --config && virsh setmaxmem "$1" "$3"G --config && virsh setmem "$1" "$3"G --config`, "_", col(row, 0), f[0], f[1]}, nil
+		}},
+		{key: "+", label: "grow the root disk", prompt: "grow {} to <GiB> (block device, partition and filesystem): ", argv: func(row []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			if in == "" || strings.Trim(in, "0123456789") != "" {
+				return nil, errors.New("a size in GiB")
+			}
+			return []string{"kvm-grow", col(row, 0), in}, nil
+		}},
+		{key: "R", label: "reconcile an unreconciled row", confirm: true, argv: func(row []string, _ string) ([]string, error) {
+			if col(row, 1) != "unreconciled" {
+				return nil, errors.New("only rows in the unreconciled group")
+			}
+			if col(row, 2) == "zvol" {
+				return []string{"zfs", "destroy", "-r", "rpool/vms/" + col(row, 0)}, nil
+			}
+			return []string{"kldload-db", "vm-delete", "--name", col(row, 0)}, nil
+		}},
 		{key: "C", label: "serial console (ctrl+] leaves)", inter: true, argv: onRow("virsh", "console", "{}")},
 		{key: "H", label: "ssh", inter: true, argv: func(row []string, _ string) ([]string, error) {
 			ip := col(row, 4)
@@ -110,6 +143,42 @@ var verbs = map[string][]verb{
 			return []string{"kvm-snap", col(row, 0), "delete", "@" + col(row, 1)}, nil
 		}},
 		{key: "s", label: "snapshot this VM now", argv: onRow("kvm-snap", "{}")},
+	},
+	"Machines/Appliances": {
+		{key: "b", label: "build one as a VM", prompt: "vm name, then KEY=VALUE settings for {}: ", inter: true, argv: func(row []string, in string) ([]string, error) {
+			f := strings.Fields(in)
+			if len(f) == 0 || !nameOK(f[0]) {
+				return nil, errors.New("a VM name comes first, then KEY=VALUE settings")
+			}
+			for _, kv := range f[1:] {
+				if !strings.Contains(kv, "=") || strings.HasPrefix(kv, "-") {
+					return nil, errors.New("settings are KEY=VALUE")
+				}
+			}
+			return append([]string{"vmxplore", "--appliance", col(row, 0), "--vm", f[0]}, f[1:]...), nil
+		}},
+		{key: "s", label: "show its install script", inter: true, argv: func(row []string, _ string) ([]string, error) {
+			return []string{"sh", "-c", `vmxplore --appliance-script "$1" | less`, "_", col(row, 0)}, nil
+		}},
+		{key: "B", label: "build every appliance (vmx --build-all)", noRow: true, inter: true, argv: fixed("vmxplore", "--build-all")},
+	},
+	"Machines/Factory": {
+		{key: "x", label: "run it", inter: true, argv: func(row []string, _ string) ([]string, error) {
+			return strings.Fields(col(row, 3)), nil
+		}},
+		{key: "X", label: "run it for one distro", prompt: "distro for {} (centos rocky fedora debian ubuntu): ", inter: true, argv: func(row []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			switch in {
+			case "centos", "rocky", "fedora", "debian", "ubuntu", "all":
+			default:
+				return nil, errors.New("one of centos rocky fedora debian ubuntu all")
+			}
+			argv := strings.Fields(col(row, 3))
+			if len(argv) > 0 && argv[len(argv)-1] == "all" {
+				argv[len(argv)-1] = in
+			}
+			return argv, nil
+		}},
 	},
 	"Machines/microVMs": {
 		{key: "c", label: "clone microVMs from a golden", noRow: true, prompt: "kfire clone <golden> [options]: ", argv: func(_ []string, in string) ([]string, error) {
