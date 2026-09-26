@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-tty1 — what tty1 runs at boot: the install menu on the live medium,
+# an ordinary login everywhere else.
+#
+#   1. On the live medium (the live mount is present) booted with
+#      kldload.tui=1 on the kernel command line, tty1 logs root in without a
+#      password and root's login profile then runs `kld install` (the
+#      netboot menu's questions, on this machine) — see /root/.bash_profile.
+#   2. Otherwise tty1 is the plain agetty login it always was.
+#
+# WHY a wrapper and not a unit with conditions: the getty@tty1 drop-in that
+# calls this ships into every INSTALLED system too (the live rootfs is what
+# gets copied to the target), so a ConditionKernelCommandLine= on the drop-in
+# would leave installed hosts with no login on tty1, and a Conflicts= from a
+# separate unit is the fight over tty1 that cost the kiosk two days
+# (2026-09-13). One ExecStart, deciding at the moment tty1 opens, cannot
+# strand anyone: the worst case is a normal login prompt.
+#
+# Inputs:  $1 the tty (systemd's %I), /proc/cmdline, the live mount
+# Output:  exec agetty; never returns
+# Test hooks (tests only, unset in real use): KLDLOAD_TTY1_CMDLINE a file to
+#   read instead of /proc/cmdline; KLDLOAD_TTY1_LIVE a directory to test
+#   instead of the live mounts; KLDLOAD_TTY1_DRYRUN=1 print the agetty line
+#   instead of exec'ing it.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+tty="${1:-tty1}"
+cmdline="${KLDLOAD_TTY1_CMDLINE:-/proc/cmdline}"
+live=0
+for m in ${KLDLOAD_TTY1_LIVE:-/run/initramfs/live /run/live/medium /lib/live/mount/medium}; do
+    [[ -d "$m" ]] && live=1 && break
+done
+if ((live)) && grep -qwE 'kldload\.tui=1' "$cmdline" 2>/dev/null; then
+    set -- /sbin/agetty --autologin root --noclear "$tty" "${TERM:-linux}"
+else
+    set -- /sbin/agetty --noclear "$tty" "${TERM:-linux}"
+fi
+if [[ "${KLDLOAD_TTY1_DRYRUN:-0}" == 1 ]]; then
+    echo "$*"
+    exit 0
+fi
+exec "$@"

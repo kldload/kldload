@@ -313,6 +313,27 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
         else
             _fail "live USB rack mode in the image" "missing:${_rack_bad} — the 'provision the rack' entry would boot a plain desktop and serve nothing"
         fi
+        # The live install menu (2026-09-26): tty1 runs kldload-tty1, which
+        # logs root into `kld install` on the live medium booted with
+        # kldload.tui=1 — the USB's default GRUB entry. All four pieces must
+        # be in the sealed image and the default entry must carry the flag,
+        # or the USB boots to a login prompt and the menu never appears.
+        declare -a TUI_FILES=(usr/local/sbin/kldload-tty1
+            etc/systemd/system/getty@tty1.service.d/kldload-tty1.conf
+            root/.bash_profile usr/local/bin/kld)
+        _tui_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${TUI_FILES[@]}" 2>/dev/null)" || _tui_list="" # absent paths make unsquashfs exit non-zero
+        _tui_bad=""
+        for _df in "${TUI_FILES[@]}"; do
+            awk -v p="squashfs-root/$_df" '$NF == p && $1 ~ /^-/ {f = 1} END {exit !f}' <<<"$_tui_list" ||
+                _tui_bad+=" $_df"
+        done
+        awk '/^menuentry/ {e = $0} /kldload\.tui=1/ && e ~ /install or provision/ {f = 1} END {exit !f}' "$MOUNTPOINT/EFI/BOOT/grub.cfg" 2>/dev/null ||
+            _tui_bad+=" (the 'install or provision' GRUB entry does not carry kldload.tui=1)"
+        if [[ -z "$_tui_bad" ]]; then
+            _pass "live install menu in the image (kldload-tty1, getty drop-in, root profile, kld, GRUB default with kldload.tui=1)"
+        else
+            _fail "live install menu in the image" "missing:${_tui_bad} — the USB would boot to a login prompt"
+        fi
         # kld, the console hub, is built from kld/ by build-iso.sh and dies
         # there if the build fails; this asks the sealed image, because a
         # build that dies after mksquashfs (2026-09-26 VERSION lesson) or a

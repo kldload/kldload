@@ -4172,6 +4172,17 @@ search --no-floppy --set=root --label 'KLDLOAD'
 # Ryzen mini-PCs (Beelink/Minisforum/GMKtec/etc), and any USB stick whose
 # controller has UAS quirks. The headline failure mode this avoids is
 # "dracut-initqueue: timeout, still waiting for /dev/disk/by-label/KLDLOAD".
+# The default: the install menu on tty1 — the netboot menu's questions on
+# this machine, or provision another one — with no desktop started
+# (systemd.unit=multi-user.target) and kldload.tui=1 so kldload-tty1 logs
+# root into `kld install`. The GNOME live session is the next entry. This
+# is the operator's "one installer" (2026-09-26): the iPXE menu for PXE
+# clients, this menu for the machine the USB is in, one answers file.
+menuentry "kldloadOS — install or provision (menu)" --hotkey=i {
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1 kldload.tui=1 systemd.unit=multi-user.target
+    initrdefi /images/pxeboot/initrd.img
+}
+
 menuentry "kldloadOS Live (Fedora 44 + ZFS)" --hotkey=l {
     linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1
     initrdefi /images/pxeboot/initrd.img
