@@ -252,6 +252,26 @@ var verbs = map[string][]verb{
 			return []string{"helm", "install", f[0], helmExamples + "/" + col(row, 0), "-n", ns, "--create-namespace"}, nil
 		}},
 	},
+	"Estate/Units": {
+		{key: "J", label: "journal", inter: true, argv: onRow("journalctl", "-u", "{}", "-e", "--no-hostname")},
+		{key: "S", label: "start", argv: onRow("systemctl", "start", "{}")},
+		{key: "T", label: "stop", confirm: true, argv: onRow("systemctl", "stop", "{}")},
+		{key: "R", label: "restart", argv: onRow("systemctl", "restart", "{}")},
+		{key: "F", label: "reset failed state", argv: onRow("systemctl", "reset-failed", "{}")},
+	},
+	"Provision/Goldens": {
+		{key: "a", label: "arm-deploy a machine with this golden", prompt: "arm-deploy <mac> --disk <disk> [--hostname <h>] for {}: ", argv: func(row []string, in string) ([]string, error) {
+			f := strings.Fields(in)
+			if len(f) < 3 || !macOrAny(f[0]) || f[0] == "any" || f[1] != "--disk" || strings.HasPrefix(f[2], "-") {
+				return nil, errors.New("need: <mac> --disk <disk> [--hostname <h>]")
+			}
+			argv := []string{"kldload-netboot-server", "arm-deploy", f[0], "--golden", strings.TrimSuffix(col(row, 0), ".zfs"), "--disk", f[2]}
+			if len(f) >= 5 && f[3] == "--hostname" && nameOK(f[4]) {
+				argv = append(argv, "--hostname", f[4])
+			}
+			return argv, nil
+		}},
+	},
 	"Provision/Armed": {
 		{key: "a", label: "arm a machine", noRow: true, prompt: "arm-install <mac|any> <answers.env>: ", argv: func(_ []string, in string) ([]string, error) {
 			f := strings.Fields(in)

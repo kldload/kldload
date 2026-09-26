@@ -41,7 +41,7 @@ var sections = []section{
 	{"Ansible", []string{"Hosts", "Groups", "Plays"}},
 	{"Helm", []string{"Releases", "Examples"}},
 	{"Metrics", []string{"Targets"}},
-	{"Estate", []string{"Drift", "Events"}},
+	{"Estate", []string{"Drift", "Units", "Events"}},
 	{"Provision", []string{"Armed", "Goldens", "Answers"}},
 }
 
@@ -145,6 +145,7 @@ var collectors = map[string]func(*sectionData){
 	"Helm/Examples":       loadHelmExamples,
 	"Metrics/Targets":     loadMetrics,
 	"Estate/Drift":        loadEstate,
+	"Estate/Units":        loadUnits,
 	"Estate/Events":       loadEvents,
 	"Provision/Armed":     loadProvision,
 	"Provision/Goldens":   loadGoldens,
@@ -1066,6 +1067,49 @@ func loadEstate(d *sectionData) {
 				d.rows = append(d.rows, []string{"doctor:" + c.Subsystem, c.Status + " " + c.Name, c.Actual, c.Remediation})
 			}
 		}
+	}
+}
+
+// loadUnits is every kldload-* and klab-* unit with its state — "is the
+// first boot done", "is the netboot server up", "did the enrol sweep run"
+// — the questions that used to take a systemctl pattern to answer.
+func loadUnits(d *sectionData) {
+	out, err := run(15*time.Second, "systemctl", "list-units", "--all", "--no-legend", "--plain",
+		"kldload-*", "klab-*", "kfire-*", "grafana-server.service", "prometheus.service", "libvirtd.service", "nginx.service")
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"unit", "load", "active", "sub", "description"}
+	running, failed := 0, 0
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			continue
+		}
+		switch f[3] {
+		case "running":
+			running++
+		case "failed":
+			failed++
+		}
+		d.rows = append(d.rows, []string{f[0], f[1], f[2], f[3], strings.Join(f[4:], " ")})
+	}
+	// timers too: the sweeps and snapshots that run on their own
+	if out, err := run(15*time.Second, "systemctl", "list-timers", "--all", "--no-legend", "--plain", "kldload-*", "klab-*"); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			f := strings.Fields(line)
+			if len(f) < 6 {
+				continue
+			}
+			// NEXT LEFT LAST PASSED UNIT ACTIVATES: the unit is the second-to-last field
+			unit := f[len(f)-2]
+			d.rows = append(d.rows, []string{unit, "timer", "next " + f[0] + " " + f[1], "left " + strings.Join(f[2:len(f)-6+2], " "), "activates " + f[len(f)-1]})
+		}
+	}
+	d.headline = fmt.Sprintf("%d units, %d running, %d failed", len(d.rows), running, failed)
+	if failed > 0 {
+		d.headline = fmt.Sprintf("%d units, %d running, %d FAILED", len(d.rows), running, failed)
 	}
 }
 
