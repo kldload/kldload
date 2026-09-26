@@ -24,7 +24,6 @@ import sys
 import threading
 import time
 import uuid
-from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 
 try:
@@ -5530,80 +5529,63 @@ def _generate_salt_state(name, dataset, image, runtime, config):
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────
 
-class WebUIHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(WEBUI_DIR), **kwargs)
+# ── klab run downloads ───────────────────────────────────────────────────────
+# These two routes lived in a WebUIHandler(SimpleHTTPRequestHandler) class
+# that nothing ever instantiated: the SPA's "download log" and "download run"
+# links returned Not Found from process_request below while looking present in
+# the source (source audit, 2026-09-26). The class is gone; this is the same
+# logic, answered by the server that actually runs.
+KLAB_RUN_ROOT = Path(os.environ.get("KLDLOAD_KLAB_RUN_ROOT", "/root/klab"))
 
-    def log_message(self, fmt, *args):
-        pass  # silence access log
 
-    def do_GET(self):
-        if self.path == "/" or self.path == "":
-            self.path = "/index.html"
-        # /wallpaper route + wallpaper.html removed 2026-05-19 — the
-        # tactical-wallpaper / live-desktop idea was scoped out. The
-        # GNOME extension that was going to mount it as the background
-        # actor is dropped too (task #25). The design mockup
-        # (kldload-design-mockups/index-demoscene.html) is preserved
-        # outside the build as a reference for any future revival.
-        # Download endpoint for klab test run bundles. Matches
-        #   /download/klab/<run-id>.tar.gz
-        # Builds the tarball on the fly from /root/klab/<run-id>/ so we
-        # don't leave stale bundles on disk. Safe: run-id must match
-        # the YYYYMMDD-HHMMSS shape — no path traversal.
-        if self.path.startswith("/download/klab/"):
-            import io
-            import os
-            import re
-            import tarfile
-            m = re.match(r"^/download/klab/(\d{8}-\d{6})\.tar\.gz$", self.path)
-            if not m:
-                self.send_error(400, "Invalid run id"); return
-            run_id = m.group(1)
-            run_dir = f"/root/klab/{run_id}"
-            if not os.path.isdir(run_dir):
-                self.send_error(404, f"No run {run_id}"); return
-            try:
-                buf = io.BytesIO()
-                with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-                    tar.add(run_dir, arcname=f"klab-{run_id}")
-                data = buf.getvalue()
-            except Exception as e:
-                self.send_error(500, f"tar failed: {e}"); return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/gzip")
-            self.send_header("Content-Disposition",
-                             f'attachment; filename="klab-{run_id}.tar.gz"')
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
-        # Plain full.log download — the OpenZFS team can attach this
-        # single file to a bug report without unpacking the tarball.
-        if self.path.startswith("/download/klab-log/"):
-            import os
-            import re
-            m = re.match(r"^/download/klab-log/(\d{8}-\d{6})\.log$", self.path)
-            if not m:
-                self.send_error(400, "Invalid run id"); return
-            run_id = m.group(1)
-            log_path = f"/root/klab/{run_id}/full.log"
-            if not os.path.isfile(log_path):
-                self.send_error(404, f"No log for {run_id}"); return
-            try:
-                with open(log_path, "rb") as f:
-                    data = f.read()
-            except Exception as e:
-                self.send_error(500, f"read failed: {e}"); return
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Disposition",
-                             f'attachment; filename="klab-{run_id}.log"')
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
-        super().do_GET()
+def _klab_download_response(url_path):
+    """(status, reason, headers, body) for /download/klab/<run>.tar.gz and
+    /download/klab-log/<run>.log, or None when the path is neither.
+
+    The run id must match YYYYMMDD-HHMMSS, so no path can be traversed. The
+    tarball is built on the fly from the run directory, so no bundle is left on
+    disk; the log is the run's full.log alone, which the OpenZFS team can attach
+    to a bug report without unpacking anything.
+    """
+    m = re.match(r"^/download/klab/(\d{8}-\d{6})\.tar\.gz$", url_path)
+    if m:
+        run_id = m.group(1)
+        run_dir = KLAB_RUN_ROOT / run_id
+        if not run_dir.is_dir():
+            return 404, "Not Found", [("Content-Type", "text/plain")], f"No run {run_id}\n".encode()
+        import io
+        import tarfile
+        try:
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                tar.add(str(run_dir), arcname=f"klab-{run_id}")
+            data = buf.getvalue()
+        except (OSError, tarfile.TarError) as e:
+            return 500, "Internal Server Error", [("Content-Type", "text/plain")], f"tar failed: {e}\n".encode()
+        return 200, "OK", [
+            ("Content-Type", "application/gzip"),
+            ("Content-Disposition", f'attachment; filename="klab-{run_id}.tar.gz"'),
+            ("Content-Length", str(len(data))),
+        ], data
+    m = re.match(r"^/download/klab-log/(\d{8}-\d{6})\.log$", url_path)
+    if m:
+        run_id = m.group(1)
+        log_path = KLAB_RUN_ROOT / run_id / "full.log"
+        if not log_path.is_file():
+            return 404, "Not Found", [("Content-Type", "text/plain")], f"No log for {run_id}\n".encode()
+        try:
+            data = log_path.read_bytes()
+        except OSError as e:
+            return 500, "Internal Server Error", [("Content-Type", "text/plain")], f"read failed: {e}\n".encode()
+        return 200, "OK", [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Content-Disposition", f'attachment; filename="klab-{run_id}.log"'),
+            ("Content-Length", str(len(data))),
+        ], data
+    if url_path.startswith("/download/klab"):
+        return 400, "Bad Request", [("Content-Type", "text/plain")], b"Invalid run id\n"
+    return None
+
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
@@ -11810,11 +11792,17 @@ async def main_async(args):
         if url_path == "/":
             url_path = "/index.html"
 
-        # Install progress for the SEEDED path. This file contains TWO HTTP
-        # servers: a WebUIHandler(SimpleHTTPRequestHandler) that is never
-        # instantiated, and this one, which is what actually answers. The route
-        # went into the dead one first and returned "Not Found" from the line
-        # below while looking present in the source (2026-09-12).
+        # klab run downloads (the SPA's "download log" / "download run" links).
+        _dl = _klab_download_response(url_path)
+        if _dl is not None:
+            _st, _reason, _hdrs, _body = _dl
+            return WsResponse(_st, _reason, WsHeaders(_hdrs), _body)
+
+        # Install progress for the SEEDED path. This used to be one of TWO HTTP
+        # servers in this file; the other, a SimpleHTTPRequestHandler subclass,
+        # was never instantiated, and routes added to it returned "Not Found"
+        # from the line below while looking present in the source (2026-09-12).
+        # That class is gone (2026-09-26); every route lives here.
         #
         # kldload-autoinstall is a unit the webui never spawns, so there is no
         # process to attach to; the installer publishes to /run/kldload and this

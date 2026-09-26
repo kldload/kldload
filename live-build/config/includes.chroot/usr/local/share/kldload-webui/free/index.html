@@ -3696,8 +3696,6 @@ $ kldload-netboot-server status</div>
       <span style="font-size:0.68rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1">· F1 help · F2 k9s · F3 logs · F5-12 cockpits (disk / syscall / tcp / cilium / top / zfs / trace / ktcp) · S-FN deep-dive · Alt+\ / Alt+- split · Alt+Enter new · Ctrl+q close · type <b>menu</b> in klab for full cheatsheet</span>
     </div>
     <div style="display:flex;gap:0.25rem">
-      <button onclick="termSend('k9s')" title="Switch to k9s window" style="background:transparent;border:1px solid var(--border);color:var(--subtle);font-size:0.7rem;padding:0 0.4rem;border-radius:3px;cursor:pointer">k9s</button>
-      <button onclick="termSend('shell')" title="Switch to shell window" style="background:transparent;border:1px solid var(--border);color:var(--subtle);font-size:0.7rem;padding:0 0.4rem;border-radius:3px;cursor:pointer">shell</button>
       <!-- Copy bridge: pull the tmux paste-buffer (filled whenever you
            drag-select text in the terminal) into a real DOM textarea so
            you can Cmd+C/Ctrl+C natively. Workaround for browsers that
@@ -3841,33 +3839,29 @@ const ACTION_REGISTRY = [
   { id: 'bob.chat',     section: 'Bob', label: 'Open Bob chat',
     keywords: ['bob','chat','ai','assistant'],
     cli: '(navigate to /bob/)',
-    handler: () => { if (typeof showTab === 'function') showTab('bob'); else location.hash = '#bob'; } },
+    handler: () => _kldSwitchView('bob') },
 
   // ── Navigation ────────────────────────────────────────────────────────
   { id: 'nav.dashboard',  section: 'Navigation', label: 'Go to Dashboard',
     keywords: ['nav','dashboard','home','overview'],
     cli: '(navigate)',
-    handler: () => { if (typeof showTab === 'function') showTab('dashboard'); } },
+    handler: () => _kldSwitchView('dashboard') },
   { id: 'nav.vms',        section: 'Navigation', label: 'Go to Virtual Machines',
     keywords: ['nav','vms','virtual','machines'],
     cli: '(navigate)',
-    handler: () => { if (typeof showTab === 'function') showTab('vms'); } },
+    handler: () => _kldSwitchView('vms') },
   { id: 'nav.k8s',        section: 'Navigation', label: 'Go to Kubernetes',
     keywords: ['nav','k8s','kubernetes'],
     cli: '(navigate)',
-    handler: () => { if (typeof showTab === 'function') showTab('k8s'); } },
+    handler: () => _kldSwitchView('k8s') },
   { id: 'nav.klab',       section: 'Navigation', label: 'Go to klab',
     keywords: ['nav','klab','lab'],
     cli: '(navigate)',
-    handler: () => { if (typeof showTab === 'function') showTab('klab'); } },
+    handler: () => _kldSwitchView('klab') },
   { id: 'nav.storage',    section: 'Navigation', label: 'Go to Storage / ZFS',
     keywords: ['nav','storage','zfs','snapshots'],
     cli: '(navigate)',
-    handler: () => { if (typeof showTab === 'function') showTab('storage'); } },
-  { id: 'nav.logs',       section: 'Navigation', label: 'Go to Logs',
-    keywords: ['nav','logs','journal'],
-    cli: '(navigate)',
-    handler: () => { if (typeof showTab === 'function') showTab('logs'); } },
+    handler: () => _kldSwitchView('zfs') },
 ];
 
 // dispatch — single entry point: echoes CLI to footer, then runs handler.
@@ -9202,26 +9196,11 @@ function _termToast(msg, success) {
   setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 250); }, 2000);
 }
 
-function termSend(window) {
-  termOpen();
-  const ifr = document.getElementById('term-iframe');
-  if (!ifr) return;
-  // Named windows set by kldload-console: 0=shell, 1=k9s, 2=logs, 3=doctor
-  const idx = ({ shell:'0', k9s:'1', logs:'2', doctor:'3' })[window] ?? '1';
-  setTimeout(() => {
-    try {
-      ifr.focus();
-      // Send Ctrl+B then digit via the iframe's contentWindow. ttyd passes
-      // keyboard events to the remote pty natively, so just dispatching
-      // keydown events works when the iframe is focused.
-      const doc = ifr.contentWindow.document;
-      const ev1 = new KeyboardEvent('keydown', { key:'b', code:'KeyB', ctrlKey:true, bubbles:true });
-      const ev2 = new KeyboardEvent('keydown', { key:idx, code:`Digit${idx}`, bubbles:true });
-      doc.dispatchEvent(ev1);
-      setTimeout(() => doc.dispatchEvent(ev2), 50);
-    } catch (e) { /* cross-origin focus will quietly fail — user can click the tab */ }
-  }, 200);
-}
+// The drawer's "k9s" and "shell" buttons were removed 2026-09-26: they sent
+// Ctrl+B and a window digit into the ttyd iframe for tmux windows (0=shell,
+// 1=k9s, 2=logs, 3=doctor) that kldload-console stopped creating long ago --
+// the console starts with one window and binds k9s to F2 and the shell to
+// Shift+F3, which the drawer's own banner says.
 // Drag-to-resize handle. The CSS transition was removed from the
 // drawer because it animates every mousemove frame → visible jitter
 // while dragging. We also briefly disable pointer-events on the
