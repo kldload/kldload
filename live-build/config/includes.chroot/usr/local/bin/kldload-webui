@@ -5215,62 +5215,84 @@ async def _run_audit(websocket):
         await websocket.send(json.dumps({"type": "error", "msg": str(exc)}))
 
 
+def _vm_join_later(name: str) -> bool:
+    """Retry `kldload-enroll NAME` in a transient unit until it succeeds.
+
+    Exit 1 from kldload-enroll means "no address yet": retry. 0 is enrolled
+    and 3 is a failure a retry cannot fix (a golden, or the mesh refused), so
+    both stop the loop. 20 tries 30 s apart is the ceiling; after that the
+    10-minute sweep timer owns it. The name reaches bash as a positional
+    argument, never interpolated (it is regex-checked by the caller too).
+    """
+    unit = f"kldload-join-{name}.service"
+    loop = ('for i in $(seq 1 20); do sleep 30; kldload-enroll "$1"; rc=$?; '
+            '[ "$rc" -eq 1 ] || exit "$rc"; done; exit 1')
+    return subprocess.call(["systemd-run", "--unit", unit, "--collect", "--quiet",
+                            "bash", "-c", loop, "_", name],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+
 async def _vm_clone(websocket, msg):
-    """Clone a VM from its golden image and stamp a new identity."""
+    """Clone a VM the way the shipped verb does it, then bring it into the estate.
+
+    kvm-clone is the one clone path: a ZFS snapshot + clone of the zvol,
+    a fresh domain, a reseeded identity and a state-DB row. This handler
+    used to build qcow2 overlays under /var/lib/kldload/golden and then
+    stop at a stamp tool that never shipped, so every Clone button in the
+    UI ended in "not shipped" (console read-through, 2026-09-26). The
+    estate-lifecycle test proves the sequence below on every kvm edition:
+    clone, start, run the enrol sweep now instead of waiting for its
+    10-minute timer, and the mesh, inventory and Prometheus follow.
+    """
     # Accept both key shapes — JS sends src/dst (5 call sites), older
     # callers may still send vm/new_name. Without this, every Clone
     # button click in the VM list silently failed with "invalid vm name"
     # because msg keys didn't match. Caught .133 2026-05-16.
     src_vm   = msg.get("src") or msg.get("vm", "")
     new_name = msg.get("dst") or msg.get("new_name", "")
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', src_vm):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid vm name"}))
-        return
     if not new_name:
-        import time as _time
-        new_name = f"{src_vm}-clone-{int(_time.time()) % 100000}"
-    await websocket.send(json.dumps({"type": "log_line", "line": f"[clone] Cloning {src_vm} → {new_name}", "target": "vm-log"}))
-    # Drop "building" marker — cleared by _list_vms when QGA first responds.
+        new_name = f"{src_vm}-clone-{int(time.time()) % 100000}"
+    for _n in (src_vm, new_name):
+        if not _VM_NAME_RE.match(_n):
+            await websocket.send(json.dumps({"type": "error", "msg": f"invalid VM name: {_n!r}"}))
+            return
+
+    async def _log(line):
+        await websocket.send(json.dumps({"type": "log_line", "line": line, "target": "vm-log"}))
+
+    await _log(f"[clone] kvm-clone {src_vm} -> {new_name}")
+    # "building" marker — cleared by _list_vms when QGA first responds.
     try:
         Path("/var/lib/kldload/vm-build-pending").mkdir(parents=True, exist_ok=True)
         Path(f"/var/lib/kldload/vm-build-pending/{new_name}").touch()
-    except Exception:
-        pass
-    golden_dir = Path("/var/lib/kldload/golden")
-    image_path = golden_dir / f"{src_vm}.qcow2"
-    if not image_path.exists():
-        # Fall back: look for any golden matching the vm's role pattern
-        await websocket.send(json.dumps({"type": "log_line", "line": f"[clone] No golden image for {src_vm} — using live disk clone via virsh", "target": "vm-log"}))
-        cmd = ["virt-clone", "--original", src_vm, "--name", new_name, "--auto-clone"]
-    else:
-        clone_path = golden_dir / f"{new_name}.qcow2"
-        try:
-            subprocess.check_call(
-                ["qemu-img", "create", "-f", "qcow2", "-b", str(image_path), "-F", "qcow2", str(clone_path)],
-                stderr=subprocess.DEVNULL
-            )
-        except Exception as e:
-            await websocket.send(json.dumps({"type": "error", "msg": f"qemu-img clone failed: {e}"}))
-            return
-        # kldload-stamp-identity was never shipped; this qcow2-golden branch
-        # cannot complete. Say so rather than exec a missing tool.
-        await _unshipped(websocket, "kldload-stamp-identity")
+    except OSError:
+        pass  # a missing marker only costs the row its "building" flash
+    rc = await _stream_proc_detached(websocket, ["kvm-clone", src_vm, new_name], target="vm-log")
+    # Outcome, not exit code: the domain must exist (estate-lifecycle asks
+    # the same question of the same verb).
+    if subprocess.call(["virsh", "dominfo", new_name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        await _log(f"[clone] FAILED: kvm-clone exited {rc} and no domain named {new_name} exists")
+        await websocket.send(json.dumps({"type": "error",
+                                          "msg": f"clone of {src_vm} failed — see the log"}))
         return
-    # virt-clone copies a full disk; stamp-identity boots + edits + reseals.
-    # 2-5 min minimum, often longer on slow disks.
-    await _stream_proc_detached(websocket, cmd, target="vm-log")
-    # Persist the cloned domain — same bug as vm_create_cloud: virt-install/
-    # virt-clone may produce a transient domain that auto-undefines on
-    # shutdown. dumpxml | define is idempotent.
-    try:
-        _xml = subprocess.check_output(
-            ["virsh", "dumpxml", new_name], text=True, stderr=subprocess.DEVNULL, timeout=5)
-        subprocess.run(["virsh", "define", "/dev/stdin"], input=_xml, text=True,
-                       check=False, capture_output=True, timeout=5)
-    except Exception:
-        pass
-    db_log_event("vm_clone", src_vm, f"Cloned {src_vm} → {new_name}")
+    if subprocess.call(["virsh", "start", new_name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+        await _log(f"[clone] {new_name} started")
+    else:
+        await _log(f"[clone] WARNING: {new_name} did not start — it joins the mesh once it does")
+    # The join — mesh key, DB role, inventory, Prometheus target — is
+    # kldload-enroll, and it needs the guest's address, which a clone does
+    # not have for the first 30-90 s (the sweep run at t=0 on onyx said
+    # "no address yet — nothing to enroll", 2026-09-26). A transient unit
+    # retries it every 30 s for up to ten minutes, outside the websocket.
+    if _vm_join_later(new_name):
+        await _log(f"[clone] join queued: kldload-enroll {new_name} retries until it has an address")
+    else:
+        await _log("[clone] WARNING: could not queue the join — the 10-minute sweep will do it")
+    db_log_event("vm_clone", src_vm, f"Cloned {src_vm} -> {new_name}")
     await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log"}))
+    await _list_vms(websocket)
 
 async def _vm_snaps(websocket, msg):
     """List user-initiated (@manual-*) snapshots for a single VM — used by
@@ -5704,15 +5726,16 @@ async def _vm_create_cloud(websocket, msg):
                                       "vm_created": name}))
 
 async def _vm_delete_full(websocket, msg):
-    """Full VM teardown: virsh destroy + undefine + zfs destroy zvol + rm seed.
+    """Delete a VM through kvm-delete, the verb that knows what a VM owns.
 
-    The legacy vm_op delete only ran `virsh undefine --nvram`, leaving the
-    backing zvol and the cloud-init seed ISO behind. Operators thought the
-    VM was gone but the zvol kept consuming space, and the next create with
-    the same name failed with "zvol already exists". This action does the
-    full teardown the UI's confirm dialog already promises ("destroys the
-    VM and its ZFS zvol")."""
-    import os as _os
+    This handler used to run virsh undefine + zfs destroy -r itself, which
+    left the state-DB row, the mesh peer, the enrolment record, the
+    Prometheus target and the inventory entry behind — the third delete
+    path in the tree and the only one that unjoined nothing (console
+    read-through, 2026-09-26). kvm-delete refuses when clones depend on
+    the zvol, takes the peer off wg-mgmt, clears the DB row and reports
+    with its exit status what, if anything, it could not remove.
+    """
     vm = (msg.get("vm") or "").strip()
     if not _VM_NAME_RE.match(vm):
         await websocket.send(json.dumps({"type": "error", "msg": f"invalid VM name: {vm!r}"}))
@@ -5721,43 +5744,20 @@ async def _vm_delete_full(websocket, msg):
     async def _log(line):
         await websocket.send(json.dumps({"type": "log_line", "line": line, "target": "vm-log"}))
 
-    await _log(f"[delete] {vm} — force-stop + undefine + zvol destroy")
-
-    # Force-stop (ok if already stopped) + undefine (with NVRAM so UEFI vars
-    # don't linger). Both are best-effort — if the domain doesn't exist we
-    # still want to clean up the zvol.
-    subprocess.call(["virsh", "destroy", vm],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    rc_undef = subprocess.call(["virsh", "undefine", "--nvram", vm],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if rc_undef == 0:
-        await _log(f"[delete] {vm}: libvirt domain undefined")
-    else:
-        await _log(f"[delete] {vm}: no libvirt domain (or undefine failed) — continuing")
-
-    # Destroy the zvol. -r picks up any snapshots+clones we created during
-    # vm_create_cloud (each spawn snaps the golden first). Without -r the
-    # destroy fails when the zvol has a snapshot, which it usually does.
-    zvol = f"rpool/vms/{vm}"
-    rc_zfs = subprocess.call(["zfs", "destroy", "-r", zvol],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if rc_zfs == 0:
-        await _log(f"[delete] {vm}: zvol {zvol} destroyed")
-    else:
-        await _log(f"[delete] {vm}: zvol {zvol} not present (or destroy failed)")
-
-    # Cloud-init seed iso (best-effort cleanup of files vm_create_cloud
-    # leaves behind).
-    seed = f"/var/lib/libvirt/images/{vm}-seed.iso"
-    if _os.path.exists(seed):
-        try:
-            _os.unlink(seed); await _log(f"[delete] {vm}: removed seed iso")
-        except OSError as e:
-            await _log(f"[delete] {vm}: failed to remove {seed}: {e}")
-
-    db_log_event("vm_delete_full", vm, "VM + zvol + seed removed")
+    await _log(f"[delete] kvm-delete {vm} --force")
+    rc = await _stream_proc_detached(websocket, ["kvm-delete", vm, "--force"], target="vm-log")
+    # Outcome: the domain must be gone. rc 1 with the domain gone means the
+    # zvol or the peer is still there and kvm-delete's own warnings say which.
+    if subprocess.call(["virsh", "dominfo", vm],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+        await _log(f"[delete] FAILED: {vm} still exists (kvm-delete exited {rc}) — clones may depend on it")
+        await websocket.send(json.dumps({"type": "error", "msg": f"{vm} was not deleted — see the log"}))
+        return
+    if rc != 0:
+        await _log(f"[delete] {vm}: domain removed, but kvm-delete exited {rc} — something was left behind, see above")
+    db_log_event("vm_delete_full", vm, f"kvm-delete rc={rc}")
     await _log(f"[delete] {vm}: done")
-    await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log"}))
+    await websocket.send(json.dumps({"type": "exec_done", "rc": rc, "target": "vm-log"}))
     await _list_vms(websocket)
 
 

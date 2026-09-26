@@ -7281,13 +7281,11 @@ function vmClone(name) {
 }
 
 function vmDelete(name) {
-  if (!confirm(`Delete VM ${name}? This destroys the VM and its ZFS zvol.`)) return;
-  // Single-action full teardown — was previously two vm_op calls with a
-  // colliding `action` key inside the message, so the dispatcher saw
-  // action='destroy' (no such handler) and silently dropped both.
-  // vm_delete_full destroys the libvirt domain, zfs destroys the zvol
-  // (with snapshots), and removes the cloud-init seed ISO — what the
-  // confirm dialog has always promised but never actually did.
+  if (!confirm(`Delete VM ${name}? This removes the VM, its ZFS zvol and its place in the estate.`)) return;
+  // vm_delete_full runs kvm-delete --force: domain, zvol, mesh peer, DB
+  // row, inventory and Prometheus target all go together (2026-09-26;
+  // before that the webui undefined + zfs-destroyed by itself and left
+  // the VM enrolled everywhere else).
   _busyShow(`deleting ${name}…`, 10000);
   send({ action: 'vm_delete_full', vm: name });
   // Stay on the VMs list (was hopping to log). The VM will vanish from the
