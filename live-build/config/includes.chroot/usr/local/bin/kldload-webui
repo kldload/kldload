@@ -1100,6 +1100,49 @@ def get_system_info():
     return info
 
 
+# ── Cluster: the stack this image pins ───────────────────────────────────────
+# k8s-stack.lock is what one build resolved — kubeadm, the CLIs, every chart
+# and every image the offline installer carries. The console shows it so
+# "which Cilium does this image install" has an answer before there is a
+# cluster to ask (2026-09-26). The installer puts it under /root/darksite;
+# an older host that predates the lock has neither and says so.
+_K8S_LOCK_PATHS = ("/root/darksite/k8s-stack.lock", "/usr/share/kldload/k8s-stack.lock")
+
+
+def collect_k8s_stack():
+    out = {"type": "k8s_stack", "path": "", "resolved": "", "versions": {}, "charts": [],
+           "images": [], "error": ""}
+    path = next((p for p in _K8S_LOCK_PATHS if os.path.isfile(p)), "")
+    if not path:
+        out["error"] = ("no k8s-stack.lock on this host: it was not installed from an image "
+                        "that pins a stack")
+        return out
+    out["path"] = path
+    try:
+        for line in Path(path).read_text().splitlines():
+            line = line.strip()
+            if line.startswith("# Resolved "):
+                out["resolved"] = line[len("# Resolved "):]
+            elif line.startswith("CHART="):
+                f = line[len("CHART="):].split("|")
+                if len(f) == 4:
+                    out["charts"].append({"repo": f[0], "url": f[1], "chart": f[2],
+                                          "version": f[3]})
+            elif line.startswith("IMAGE="):
+                out["images"].append(line[len("IMAGE="):].split("@")[0])
+            elif "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                out["versions"][k] = v
+    except OSError as e:
+        out["error"] = f"{path}: {e}"
+    return out
+
+
+async def _k8s_stack(websocket):
+    loop = asyncio.get_running_loop()
+    await websocket.send(json.dumps(await loop.run_in_executor(None, collect_k8s_stack)))
+
+
 # ── Storage: the snapshot timeline and boot environments ─────────────────────
 # A flat "100 newest" snapshot list stopped meaning anything at 4,818
 # snapshots across 250 datasets (onyx, 2026-09-26). The timeline answers the
@@ -2096,6 +2139,8 @@ async def ws_handler(websocket):
                     await _overview_status(websocket)
                 elif action == "estate_status":
                     await _estate_status(websocket)
+                elif action == "k8s_stack":
+                    await _k8s_stack(websocket)
                 elif action == "snapshot_timeline":
                     await _snapshot_timeline(websocket, msg)
                 elif action == "be_status":

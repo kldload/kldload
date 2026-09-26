@@ -2214,6 +2214,18 @@ $ kldload-netboot-server status</div>
           <div class="stat-card"><div class="stat-label">Pods</div><div class="stat-value" id="k8s-pod-count">—</div></div>
         </div>
 
+        <!-- The stack this image pins (k8s-stack.lock): answers "which
+             Cilium/MetalLB/kubeadm does this host install" before there is
+             a cluster to ask, and beside the running cluster afterwards. -->
+        <div class="ws-panel" style="margin-bottom:0.9rem">
+          <div class="ws-panel-hdr"><span>Stack pinned by this image</span><span id="k8s-stack-status" style="color:var(--muted);font-size:0.78rem"></span></div>
+          <div id="k8s-stack-versions" style="padding:0.6rem 1rem 0.2rem;display:flex;gap:0.4rem;flex-wrap:wrap"></div>
+          <table class="data-table">
+            <thead><tr><th>chart</th><th>version</th><th>repository</th></tr></thead>
+            <tbody id="k8s-stack-charts"><tr><td colspan="3" style="color:var(--muted)">Loading…</td></tr></tbody>
+          </table>
+        </div>
+
         <!-- Deploy + Lifecycle panel (2026-05-18) — surfaces what was
              hidden in the Deploy ▾ dropdown. The same buttons one click
              away on Overview so the demo flow is obvious:
@@ -4292,6 +4304,7 @@ function _refreshActiveView() {
   }
   if (isActive('view-network')) send({ action: 'network_status' });
   if (isActive('view-estate')) send({ action: 'estate_status' });
+  if (isActive('view-k8s')) send({ action: 'k8s_stack' });
   if (isActive('view-provision')) send({ action: 'provision_status' });
   if (isActive('view-klab')) {
     send({ action: 'klab_status' });
@@ -5272,6 +5285,7 @@ function handle(msg) {
     }
     case 'vm_log':       { appendLog(document.getElementById('vm-log'), msg.line); break; }
     case 'k8s_status': { renderK8sStatus(msg); break; }
+    case 'k8s_stack':  { renderK8sStack(msg);  break; }
     case 'k8s_pods': { renderK8sPods(msg.pods); break; }
     case 'k8s_top': { renderK8sTop(msg); break; }
     case 'k8s_inspect': { renderK8sInspect(msg); break; }
@@ -5688,6 +5702,7 @@ document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
     if (li.dataset.view === 'ansible')      { ansibleRefresh(); _ansibleRestoreTab(); }
     if (li.dataset.view === 'network')      networkRefresh();
     if (li.dataset.view === 'estate')       estateRefresh();
+    if (li.dataset.view === 'k8s')          send({ action: 'k8s_stack' });
     if (li.dataset.view === 'provision')    provisionRefresh();
     if (li.dataset.view === 'helm')         { helmRefresh(); _helmRestoreTab(); }
     if (li.dataset.view === 'metrics')        metricsRefreshList();
@@ -7427,6 +7442,30 @@ function kIcon(name, size) {
   return `<svg viewBox="0 0 24 24" width="${s}" height="${s}" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-3px">${K_ICONS[name] || ''}</svg>`;
 }
 
+// ── Cluster: the stack this image pins ───────────────────────────────────────
+function renderK8sStack(msg) {
+  const st = document.getElementById('k8s-stack-status');
+  const vs = document.getElementById('k8s-stack-versions');
+  const tb = document.getElementById('k8s-stack-charts');
+  if (!st || !vs || !tb) return;
+  if (msg.error) {
+    st.textContent = '';
+    vs.innerHTML = '';
+    tb.innerHTML = `<tr><td colspan="3" style="color:var(--muted)">${esc(msg.error)}</td></tr>`;
+    return;
+  }
+  st.textContent = `${msg.images.length} images · resolved ${msg.resolved || '?'} · ${msg.path}`;
+  const label = { K8S_VERSION: 'kubernetes', HELM_CLI_VERSION: 'helm', CILIUM_CLI_VERSION: 'cilium cli',
+                  HUBBLE_CLI_VERSION: 'hubble cli', K9S_VERSION: 'k9s' };
+  vs.innerHTML = Object.entries(msg.versions || {}).map(([k, v]) =>
+    `<span class="badge" title="${esc(k)}">${esc(label[k] || k.toLowerCase())} <span style="font-family:var(--font-mono);color:var(--bright)">${esc(v)}</span></span>`).join('');
+  tb.innerHTML = (msg.charts || []).length ? msg.charts.map(c => `<tr>
+    <td style="font-family:var(--font-mono)">${esc(c.chart)}</td>
+    <td style="font-family:var(--font-mono)">${esc(c.version)}</td>
+    <td style="color:var(--muted);font-size:0.78rem">${esc(c.repo)} · ${esc(c.url)}</td>
+  </tr>`).join('') : '<tr><td colspan="3" style="color:var(--muted)">no charts in the lock</td></tr>';
+}
+
 // ── Estate chips on a VM row: DB · mesh · prom ─────────────────────────────
 // Each chip is one join step the estate-lifecycle test checks, in its
 // order: registered in state.db, a live wg-mgmt peer, a Prometheus target.
@@ -7690,7 +7729,7 @@ function k8sUpdateAddBtn() {
 // to rebuild later. Routed through the new k8s_destroy_cluster backend
 // action which runs `kube-cluster destroy --yes` detached.
 function k8sDestroyClusterPrompt() {
-  if (!confirm('DESTROY the entire K8s cluster?\n\nThis tears down:\n  • kldload-cp (control plane VM)\n  • All worker VMs\n  • Every zvol cloned from k8s-golden\n  • kubelet + etcd state\n\nNothing is rebuilt — use 🚀 Bootstrap cluster afterwards to come back online.\n\nIrreversible. Continue?')) return;
+  if (!confirm('DESTROY the entire K8s cluster?\n\nThis tears down:\n  • kldload-cp (control plane VM)\n  • All worker VMs\n  • Every zvol cloned from k8s-golden\n  • kubelet + etcd state\n\nNothing is rebuilt — use Bootstrap cluster afterwards to come back online.\n\nIrreversible. Continue?')) return;
   send({ action: 'k8s_destroy_cluster' });
   k8sSubTab('log');  // jump to log so the user sees the teardown stream
 }
@@ -8616,7 +8655,9 @@ function k8sSubTab(name) {
   try { localStorage.setItem(K8S_TAB_KEY, name); } catch (e) {}
   // Per-tab refresh — cheap WS calls, UI already caches the rest.
   const ns = document.getElementById('k8s-ns-filter')?.value || 'all';
-  if (name === 'workloads') {
+  if (name === 'overview') {
+    send({action: 'k8s_stack'});
+  } else if (name === 'workloads') {
     send({action: 'k8s_deployments', namespace: ns});
     send({action: 'k8s_pods', namespace: ns});
     send({action: 'k8s_statefulsets', namespace: ns});
@@ -9108,7 +9149,7 @@ function renderK8sStorage(msg) {
   } else {
     const hasSnapClass = (msg.vol_snapshot_classes || []).length > 0;
     const msgText = hasSnapClass
-      ? 'No snapshots yet — click 📸 Snap on a PVC row'
+      ? 'No snapshots yet — click Snap on a PVC row'
       : 'No VolumeSnapshotClass installed — snapshots unsupported (install ZFS CSI or another CSI driver that provides snapshots)';
     vsTbody.innerHTML = `<tr><td colspan="7" style="padding:0.6rem 0.8rem;color:var(--muted)">${msgText}</td></tr>`;
   }
@@ -9512,7 +9553,7 @@ function _termCopyNow(text) {
 // One-step copy (2026-05-19): write straight to the clipboard, flash a
 // toast, done. The old behaviour popped a modal with the selection in
 // a textarea — two steps, two clicks, two key sequences. Now it's
-// "drag-select in tmux, click 📋 Copy selection, done." If clipboard
+// "drag-select in tmux, click Copy selection, done." If clipboard
 // API is blocked (insecure context / older browser), fall back to a
 // hidden-textarea + execCommand pattern that still works in one click.
 function _termShowBufferModal(text) {
@@ -9646,7 +9687,7 @@ function _termToast(msg, success) {
 // carry all the heavy lifting (see :root + [data-theme="light"] in app.css).
 // Persisted to localStorage so the choice survives refresh.
 function _currentTheme() {
-  // User's explicit choice (via the 🌙 toggle) wins. If they never picked,
+  // User's explicit choice (via the theme toggle) wins. If they never picked,
   // follow the OS prefers-color-scheme so a system-wide light/dark flip
   // takes the SPA with it.
   //
@@ -9706,7 +9747,7 @@ function toggleTheme() {
 // Apply theme on page load BEFORE render to avoid light/dark flash.
 // Also listen for OS-level prefers-color-scheme flips so the SPA tracks the
 // system toggle automatically — UNLESS the user has explicitly clicked the
-// in-app 🌙 toggle (which sets localStorage and takes precedence per
+// in-app theme toggle (which sets localStorage and takes precedence per
 // _currentTheme above).
 (function _initTheme() {
   // Migration: an earlier patch unconditionally persisted auto-detected
@@ -9716,7 +9757,7 @@ function toggleTheme() {
   // path — clear it so system pref wins.
   try {
     // Always defer to system on first init — clear any cached pin so the
-    // initial render matches system. User can re-pin via 🌙 mid-session.
+    // initial render matches system. User can re-pin via the theme toggle mid-session.
     if (window.matchMedia) {
       const mqSysLight = window.matchMedia('(prefers-color-scheme: light)').matches;
       const sysTheme = mqSysLight ? 'light' : 'dark';
@@ -11430,7 +11471,7 @@ const KLAB_PHASES = {
   'booting':    { label: 'Booting',       color: '#fbbf24', icon: '▲' },
   'ssh-wait':   { label: 'Waiting SSH',   color: '#fbbf24', icon: '◴' },
   'configuring':{ label: 'Configuring',   color: '#fbbf24', icon: '◐' },
-  'registering':{ label: 'Registering',   color: '#a78bfa', icon: '🔑' },
+  'registering':{ label: 'Registering',   color: '#a78bfa', icon: '' },
   'validating': { label: 'Validating',    color: '#a78bfa', icon: '✓?' },
   'sealing':    { label: 'Sealing',       color: '#a78bfa', icon: '◑' },
   'ready':      { label: 'Ready',         color: '#34d399', icon: '✓' },
@@ -12229,7 +12270,7 @@ async function bobRequestMicPermission() {
 }
 
 // ── Voice input (open-mic speech-to-text via Web Speech API) ──────────────
-// Toggle the 🎤 once and the mic stays live: every phrase you speak is
+// Toggle the mic once and the mic stays live: every phrase you speak is
 // auto-sent on its final result, then recognition keeps running for the
 // next utterance. Click again to turn it off. Chrome silently ends a
 // recognition session every ~60 s, so onend auto-restarts it whenever the
@@ -12324,7 +12365,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── Voice output (text-to-speech via SpeechSynthesis) ──────────────────────
-// Speaks Bob's assistant replies when the 🔊 checkbox is ticked. Chunked so
+// Speaks Bob's assistant replies when the speak-replies checkbox is ticked. Chunked so
 // long replies start playing before the final token arrives.
 let _bobTtsEnabled = false;
 let _bobTtsBuffer = '';
