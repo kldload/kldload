@@ -92,7 +92,7 @@ func main() {
 		}
 	}
 	start, sub := 0, 0
-	print, gui := false, false
+	print, gui, sawSection := false, false, false
 	for _, a := range args {
 		switch a {
 		case "--print":
@@ -104,8 +104,16 @@ func main() {
 		case "--tui": // the old default's opt-out, kept as a no-op alias
 			continue
 		}
+		// a sub-tab of the section already named wins over a section of the
+		// same name: `kld metrics machines` is Metrics/Machines, not Machines
+		if sawSection {
+			if j := subIndex(start, a); j >= 0 {
+				sub = j
+				continue
+			}
+		}
 		if i := sectionIndex(a); i >= 0 {
-			start, sub = i, 0
+			start, sub, sawSection = i, 0, true
 			continue
 		}
 		if j := subIndex(start, a); j >= 0 {

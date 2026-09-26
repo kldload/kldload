@@ -171,6 +171,10 @@ ansible groups
 ansible plays
 helm releases
 helm examples
+metrics host
+metrics storage
+metrics machines
+metrics mesh
 metrics targets
 estate drift
 estate units
@@ -180,7 +184,7 @@ provision feed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 33)) && _pass "every sub-tab tried (33/33)" || _fail "sub-tabs tried" "${_tabs} of 33"
+    ((_tabs == 37)) && _pass "every sub-tab tried (37/37)" || _fail "sub-tabs tried" "${_tabs} of 37"
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
