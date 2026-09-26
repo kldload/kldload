@@ -1100,6 +1100,157 @@ def get_system_info():
     return info
 
 
+# ── Storage: the snapshot timeline and boot environments ─────────────────────
+# A flat "100 newest" snapshot list stopped meaning anything at 4,818
+# snapshots across 250 datasets (onyx, 2026-09-26). The timeline answers the
+# operator's question first — which datasets carry what, under which policy —
+# and lists one dataset's snapshots on demand (75 ms) instead of all of them
+# (11.7 s). Boot environments go through kldload-rollback: rollback of the
+# root is staged into a boot environment and taken by a reboot, never a
+# `zfs rollback -r` on the filesystem that is running the console.
+_SNAP_FAMILY_RE = re.compile(r"^([A-Za-z]+)")
+_SNAP_TIMELINE_CACHE = {"at": 0.0, "data": None}
+_SNAP_TIMELINE_TTL = 120
+
+
+def _snap_family(snapname: str) -> str:
+    """autosnap_2026-…_hourly -> autosnap, dnf-pre-2026… -> dnf, clone-… -> clone."""
+    m = _SNAP_FAMILY_RE.match(snapname)
+    return m.group(1).lower() if m else "other"
+
+
+def collect_snapshot_timeline():
+    now = time.time()
+    c = _SNAP_TIMELINE_CACHE
+    if c["data"] is not None and now - c["at"] < _SNAP_TIMELINE_TTL:
+        return dict(c["data"], cached=True)
+    t0 = time.monotonic()
+    try:
+        out = subprocess.check_output(
+            ["zfs", "list", "-H", "-p", "-t", "snapshot", "-o", "name,creation", "-s", "creation"],
+            text=True, stderr=subprocess.DEVNULL, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"type": "snapshot_timeline", "datasets": [], "total": 0, "error": str(e)}
+    by_ds: dict = {}
+    total = 0
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2 or "@" not in parts[0]:
+            continue
+        ds, snap = parts[0].split("@", 1)
+        d = by_ds.setdefault(ds, {"dataset": ds, "count": 0, "families": {},
+                                  "newest": "", "newest_ts": 0, "oldest_ts": 0})
+        d["count"] += 1
+        total += 1
+        fam = _snap_family(snap)
+        d["families"][fam] = d["families"].get(fam, 0) + 1
+        try:
+            ts = int(parts[1])
+        except ValueError:
+            ts = 0
+        # sorted ascending by creation, so the last one seen is the newest
+        d["newest"], d["newest_ts"] = snap, ts
+        if not d["oldest_ts"]:
+            d["oldest_ts"] = ts
+    datasets = sorted(by_ds.values(), key=lambda d: -d["newest_ts"])
+    data = {"type": "snapshot_timeline", "datasets": datasets, "total": total,
+            "took_s": round(time.monotonic() - t0, 1), "error": ""}
+    c["at"], c["data"] = now, data
+    return dict(data, cached=False)
+
+
+async def _snapshot_timeline(websocket, msg):
+    if msg.get("refresh"):
+        _SNAP_TIMELINE_CACHE["data"] = None
+    loop = asyncio.get_running_loop()
+    await websocket.send(json.dumps(await loop.run_in_executor(None, collect_snapshot_timeline)))
+
+
+_BE_ROOT = "rpool/ROOT"
+
+
+def _running_root_dataset() -> str:
+    try:
+        return subprocess.check_output(["findmnt", "-n", "-o", "SOURCE", "/"], text=True,
+                                       stderr=subprocess.DEVNULL, timeout=5).strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def collect_be_status():
+    """Boot environments under rpool/ROOT, which one runs, which boots next."""
+    res = {"type": "be_status", "running": _running_root_dataset(), "bootfs": "",
+           "environments": [], "status": {}, "error": ""}
+    try:
+        res["bootfs"] = subprocess.check_output(
+            ["zpool", "get", "-H", "-o", "value", "bootfs", _BE_ROOT.split("/")[0]],
+            text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+        out = subprocess.check_output(
+            ["zfs", "list", "-H", "-p", "-o", "name,used,creation,origin", "-r", "-d1",
+             "-t", "filesystem", _BE_ROOT],
+            text=True, stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        res["error"] = f"no boot environments: {e}"
+        return res
+    for line in out.splitlines():
+        name, used, created, origin = (line.split("\t") + ["", "", ""])[:4]
+        if name == _BE_ROOT:
+            continue
+        res["environments"].append({
+            "name": name, "used": int(used or 0), "created": int(created or 0),
+            "origin": "" if origin == "-" else origin,
+            "running": name == res["running"], "next": name == res["bootfs"]})
+    # kldload-rollback status knows the boot path and the staged rollback; its
+    # "Key : value" lines are the operator's own view, shown as they are.
+    try:
+        st = subprocess.check_output(["kldload-rollback", "status"], text=True,
+                                     stderr=subprocess.STDOUT, timeout=20)
+        for line in st.splitlines():
+            if ":" in line:
+                k, _, v = line.partition(":")
+                res["status"][k.strip()] = v.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        res["status"]["error"] = str(e)[:200]
+    return res
+
+
+async def _be_status(websocket):
+    loop = asyncio.get_running_loop()
+    await websocket.send(json.dumps(await loop.run_in_executor(None, collect_be_status)))
+
+
+async def _be_action(websocket, msg):
+    """activate <env> / to <snapshot> (staged, no reboot) / cancel — all via
+    kldload-rollback, which owns bootfs, grub.cfg and the ESP on Secure Boot."""
+    verb = msg.get("verb", "")
+    arg = msg.get("name", "")
+
+    async def _err(text):
+        await websocket.send(json.dumps({"type": "error", "msg": text}))
+
+    in_root = arg.startswith(_BE_ROOT + "/") and _zfs_name_ok(arg)
+    if verb == "activate":
+        if not in_root or "@" in arg:
+            return await _err(f"not a boot environment: {arg}")
+        cmd = ["kldload-rollback", "activate", arg]
+    elif verb == "to":
+        if not in_root or "@" not in arg:
+            return await _err(f"not a root snapshot: {arg}")
+        cmd = ["kldload-rollback", "to", arg, "--no-reboot"]
+    elif verb == "cancel":
+        cmd = ["kldload-rollback", "cancel"]
+    else:
+        return await _err(f"unknown boot-environment verb: {verb}")
+    rc, out = await _run_text(cmd, timeout=120)
+    tail = out.strip()[-300:]
+    if rc != 0:
+        await _err(f"{' '.join(cmd)} failed ({rc}): {tail}")
+    else:
+        db_log_event("boot_environment", arg or verb, f"kldload-rollback {verb} {arg}".strip())
+        await websocket.send(json.dumps({"type": "zfs_notice", "msg": tail or f"{verb} done"}))
+    await _be_status(websocket)
+
+
 # ── Estate view: every machine any source knows about, and the drift ─────────
 # kldload-estate is the one place libvirt, the state DB, the leases, the mesh
 # and the cluster are compared; the console shows its answer as it is.
@@ -1930,6 +2081,12 @@ async def ws_handler(websocket):
                     await _overview_status(websocket)
                 elif action == "estate_status":
                     await _estate_status(websocket)
+                elif action == "snapshot_timeline":
+                    await _snapshot_timeline(websocket, msg)
+                elif action == "be_status":
+                    await _be_status(websocket)
+                elif action == "be_action":
+                    await _be_action(websocket, msg)
                 elif action == "provision_status":
                     await _provision_status(websocket)
                 elif action == "provision_arm":
@@ -2361,9 +2518,15 @@ async def ws_handler(websocket):
                     # to first 20 — newest manual snaps got cut off.
                     # Async exec so a slow `zfs list` on a large pool
                     # doesn't freeze every other client's event loop.
+                    # `dataset` narrows it to one dataset's own snapshots (-d1):
+                    # 75 ms against 11.7 s for the whole pool on onyx.
+                    _ds = msg.get("dataset") or ""
+                    if _ds and not _zfs_name_ok(_ds):
+                        await websocket.send(json.dumps({"type": "error", "msg": "invalid dataset"}))
+                        continue
                     _rc, out = await _run_text(
                         ["zfs", "list", "-t", "snapshot", "-o", "name,used,creation",
-                         "-S", "creation", "-H"], timeout=15)
+                         "-S", "creation", "-H"] + (["-d1", _ds] if _ds else []), timeout=30)
                     snaps = []
                     if _rc == 0:
                         for line in out.strip().splitlines():
@@ -2374,7 +2537,8 @@ async def ws_handler(websocket):
                                     "used":     parts[1],
                                     "creation": parts[2] if len(parts) >= 3 else "",
                                 })
-                    await websocket.send(json.dumps({"type": "snapshot_list", "snapshots": snaps}))
+                    await websocket.send(json.dumps({"type": "snapshot_list", "snapshots": snaps,
+                                                     "dataset": _ds}))
 
                 elif action == "snapshot_take":
                     # `path` is optional — if present, snapshot that dataset
@@ -2426,6 +2590,14 @@ async def ws_handler(websocket):
 
                 elif action == "snapshot_rollback":
                     snap = msg.get("name", "")
+                    # A root snapshot is rolled back by booting into it
+                    # (be_action "to"); `zfs rollback -r` on the filesystem
+                    # that runs this console would rip out its own state.
+                    if "@" not in snap or not _zfs_name_ok(snap) or snap.startswith(_BE_ROOT + "/"):
+                        await websocket.send(json.dumps({"type": "error",
+                            "msg": f"refusing in-place rollback of {snap}: root snapshots are "
+                                   "rolled back through a boot environment"}))
+                        continue
                     try:
                         subprocess.check_call(
                             ["zfs", "rollback", "-r", snap],

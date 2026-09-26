@@ -1595,32 +1595,65 @@ $ kldload-netboot-server status</div>
         </div>
       </div>
 
+      <!-- Snapshot timeline: which datasets carry what, under which policy;
+           one dataset's snapshots on demand (console design, 2026-09-26). -->
       <div class="ws-subview" id="zfs-sub-snapshots">
+        <div class="ws-panel" style="margin-bottom:0.9rem">
+          <div class="ws-panel-hdr">
+            <span>Snapshots by dataset <span id="snap-tl-status" style="font-weight:normal;color:var(--muted);font-size:0.78rem"></span></span>
+            <span style="display:flex;gap:0.4rem">
+              <button class="btn btn-primary btn-sm" onclick="takeSnapshot()">＋ Take snapshot</button>
+              <button class="btn btn-ghost btn-sm" onclick="send({action:'snapshot_timeline', refresh:true})" title="Re-read every snapshot (slow on a big pool)">↻</button>
+            </span>
+          </div>
+          <input class="ws-table-search" placeholder="Filter datasets…" oninput="zfsTableFilter('snap-ds-table', this.value)">
+          <table class="data-table">
+            <thead><tr><th>dataset</th><th style="text-align:right">snapshots</th><th>policy</th><th>newest</th><th>span</th></tr></thead>
+            <tbody id="snap-ds-table"><tr><td colspan="5" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
+          </table>
+        </div>
         <div class="ws-panel">
           <div class="ws-panel-hdr">
-            <span>⏱ Snapshots</span>
-            <button class="btn btn-primary btn-sm" onclick="takeSnapshot()">＋ Take snapshot</button>
+            <span id="snap-ds-title">Pick a dataset above</span>
           </div>
           <input class="ws-table-search" placeholder="Filter snapshots…" oninput="zfsTableFilter('snap-table', this.value)">
           <table>
             <thead><tr><th>Snapshot</th><th>Used</th><th style="text-align:right">Actions</th></tr></thead>
-            <tbody id="snap-table"><tr><td colspan="3" style="color:var(--muted);padding:1rem">No snapshots yet</td></tr></tbody>
+            <tbody id="snap-table"><tr><td colspan="3" style="color:var(--muted);padding:1rem">No dataset picked</td></tr></tbody>
           </table>
         </div>
       </div>
 
+      <!-- Boot environments: what runs, what boots next, and rollback that is
+           staged into an environment and taken by a reboot — never an in-place
+           zfs rollback of the root that runs this page (kldload-rollback). -->
       <div class="ws-subview" id="zfs-sub-be">
-        <div class="ws-panel">
+        <div class="stat-grid" style="margin-bottom:0.9rem">
+          <div class="stat-card"><div class="stat-label">Running from</div><div class="stat-value" id="be-running" style="font-size:0.95rem;font-family:var(--font-mono)">—</div></div>
+          <div class="stat-card"><div class="stat-label">Next boot</div><div class="stat-value" id="be-next" style="font-size:0.95rem;font-family:var(--font-mono)">—</div></div>
+          <div class="stat-card"><div class="stat-label">Boot path</div><div class="stat-value" id="be-bootpath" style="font-size:0.95rem">—</div></div>
+          <div class="stat-card"><div class="stat-label">Newest pre-transaction snapshot</div><div class="stat-value" id="be-newest-pre" style="font-size:0.95rem;font-family:var(--font-mono)">—</div></div>
+        </div>
+        <div class="ws-panel" style="margin-bottom:0.9rem">
           <div class="ws-panel-hdr">
-            <span>◎ Boot environments</span>
+            <span>Boot environments <span id="be-status-line" style="font-weight:normal;color:var(--muted);font-size:0.78rem"></span></span>
             <div style="display:flex;gap:0.4rem">
+              <button class="btn btn-ghost btn-sm" onclick="beCancel()" title="Un-stage a rollback that has not booted yet">Cancel staged rollback</button>
               <button class="btn btn-ghost btn-sm" onclick="createBE()">＋ New BE</button>
               <button class="btn btn-ghost btn-sm" onclick="listBEs()">↻</button>
             </div>
           </div>
-          <div style="padding:0.5rem 1rem">
-            <div class="log-box" id="be-list" style="height:50vh;min-height:200px;margin:0">(no boot environments — install to disk first)</div>
-          </div>
+          <table class="data-table">
+            <thead><tr><th>environment</th><th>created</th><th>used</th><th>origin</th><th></th><th style="text-align:right">actions</th></tr></thead>
+            <tbody id="be-table"><tr><td colspan="6" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="ws-panel">
+          <div class="ws-panel-hdr"><span>Snapshots of the running environment — roll back by booting into one</span></div>
+          <table>
+            <thead><tr><th>Snapshot</th><th>Used</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody id="be-snap-table"><tr><td colspan="3" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -1885,6 +1918,13 @@ $ kldload-netboot-server status</div>
       .ws-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
       .ws-tab .tab-count{display:inline-block;margin-left:0.4rem;padding:0.05em 0.5em;font-size:0.7rem;background:var(--surface2);color:var(--muted);border-radius:10px}
       .ws-tab.active .tab-count{background:rgba(52,211,153,0.16);color:var(--good)}
+      /* State badges (2026-09-26): one shape, colour only for state — grey is
+       * a label, green/blue/yellow/red are running / boots-next / drift / bad. */
+      .badge{display:inline-block;padding:0.05em 0.55em;font-size:0.72rem;border-radius:10px;background:var(--surface2);color:var(--muted);white-space:nowrap}
+      .badge-green{background:rgba(52,211,153,0.16);color:var(--good)}
+      .badge-blue{background:rgba(50,108,229,0.18);color:var(--accent)}
+      .badge-yellow{background:rgba(201,160,74,0.18);color:#c9a04a}
+      .badge-red{background:rgba(239,68,68,0.16);color:var(--danger)}
       /* Custom table-row checkboxes — overrides browser default white box.
        * Unchecked: muted grey-on-grey, blends with surface but visibly present.
        * Checked: emerald fill matching the running/healthy status palette.
@@ -4827,34 +4867,40 @@ function handle(msg) {
     }
 
     case 'snapshot_list': {
-      const tbody = document.getElementById('snap-table');
+      // A per-dataset answer lands in the timeline's lower table, or in the
+      // boot-environment tab when it is the running root; the pool-wide
+      // answer (no dataset) feeds the dashboard mini status only.
       const snaps = msg.snapshots || [];
+      const ds = msg.dataset || '';
+      const isRoot = ds === _beRunning;
+      const tbody = document.getElementById(isRoot ? 'be-snap-table' : 'snap-table');
+      const mini = document.getElementById('snap-status-mini');
+      if (!ds && mini) mini.textContent = snaps.length ? `${snaps.length} snapshot(s)` : 'No snapshots yet';
+      if (!ds) break;
+      if (!isRoot) {
+        const t = document.getElementById('snap-ds-title');
+        if (t) t.textContent = `${ds} — ${snaps.length} snapshot(s), newest first`;
+      }
+      if (!tbody) break;
       if (!snaps.length) {
-        tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">No snapshots yet</td></tr>';
-        document.getElementById('snap-status-mini').textContent = 'No snapshots yet';
+        tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">No snapshots</td></tr>';
         break;
       }
-      // Show first 100 (sorted newest-first by backend). 20 was too few
-      // when 400+ snaps exist — newest manual snaps got cut. Operator
-      // can drill via Storage > ZFS Snapshots for the full list.
-      tbody.innerHTML = snaps.slice(0, 100).map(s => `
+      tbody.innerHTML = snaps.map(s => `
         <tr>
           <td style="font-family:monospace;font-size:0.82rem">${esc(s.name)}</td>
           <td style="color:var(--muted)">${esc(s.used || '—')}</td>
           <td style="text-align:right;white-space:nowrap">
-            <button class="btn btn-ghost btn-sm" onclick="rollback('${esc(s.name)}')" title="Roll the dataset back to this snapshot">Rollback</button>
+            <button class="btn btn-ghost btn-sm" onclick="rollback('${esc(s.name)}')" title="${isRoot ? 'Stage a rollback: boots into this snapshot on the next reboot' : 'Roll the dataset back to this snapshot'}">${isRoot ? 'Boot into' : 'Rollback'}</button>
             <button class="btn btn-ghost btn-sm" onclick="snapClone('${esc(s.name)}')" title="Clone into a new writable dataset">Clone</button>
             <button class="btn btn-ghost btn-sm" onclick="snapDestroy('${esc(s.name)}')" title="Destroy this snapshot" style="color:var(--warn)">Destroy</button>
           </td>
         </tr>`).join('');
-      document.getElementById('snap-status-mini').textContent = `${snaps.length} snapshot(s) — showing 100 newest`;
       break;
     }
 
-    case 'be_list': {
-      document.getElementById('be-list').textContent = msg.output || '(no boot environments)';
-      break;
-    }
+    case 'snapshot_timeline': { renderSnapshotTimeline(msg); break; }
+    case 'be_status':         { renderBeStatus(msg);        break; }
 
     case 'zfs_pools':   { renderZfsPools(msg.pools || []); break; }
     case 'zfs_datasets': { renderZfsDatasets(msg.datasets || []); break; }
@@ -6247,16 +6293,99 @@ function zfsScrubAll() {
   if (!confirm('Start zpool scrub on every imported pool?\n\nScrub runs in the background — progress shows in pool status and on the ZFS Pool Health dashboard.')) return;
   send({ action: 'zfs_scrub_all' });
 }
-function refreshSnapshots() { send({ action: 'snapshot_list' }); }
-function listBEs()          { send({ action: 'be_list' }); }
+function refreshSnapshots() { send({ action: 'snapshot_timeline' }); }
+function listBEs()          { send({ action: 'be_status' }); }
 function createBE() {
   const name = prompt('New boot environment name:');
   if (name) send({ action: 'be_create', name });
 }
 function rollback(snap) {
+  // The root is never rolled back in place: kldload-rollback stages it and
+  // the next reboot boots into it (rollback cancel undoes a staged one).
+  if (snap.startsWith('rpool/ROOT/')) {
+    if (confirm(`Boot into ${snap} on the next reboot?\n\nThe running system is left alone until then; "Cancel staged rollback" undoes it.`)) {
+      send({ action: 'be_action', verb: 'to', name: snap });
+    }
+    return;
+  }
   if (confirm(`Roll back to ${snap}?\n\nThis will destroy all changes made after this snapshot.`)) {
     send({ action: 'snapshot_rollback', name: snap });
   }
+}
+let _beRunning = '';
+function beActivate(env) {
+  if (confirm(`Boot ${env} next?\n\nSets the pool's bootfs (and grub.cfg + the ESP kernel on Secure Boot). Nothing reboots.`)) {
+    send({ action: 'be_action', verb: 'activate', name: env });
+  }
+}
+function beCancel() { send({ action: 'be_action', verb: 'cancel' }); }
+function _kBytes(n) {
+  n = Number(n) || 0;
+  const u = ['B', 'K', 'M', 'G', 'T'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + u[i];
+}
+function _kWhen(ts) { return ts ? new Date(ts * 1000).toLocaleString() : '—'; }
+function _kAgo(ts) {
+  if (!ts) return '—';
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
+function renderSnapshotTimeline(msg) {
+  const st = document.getElementById('snap-tl-status');
+  const tb = document.getElementById('snap-ds-table');
+  if (!tb) return;
+  const ds = msg.datasets || [];
+  if (st) st.textContent = msg.error ? msg.error
+    : `${msg.total} snapshots on ${ds.length} datasets${msg.cached ? ' (cached)' : msg.took_s != null ? ` (read in ${msg.took_s} s)` : ''}`;
+  if (!ds.length) {
+    tb.innerHTML = '<tr><td colspan="5" style="color:var(--muted)">No snapshots on any dataset</td></tr>';
+    return;
+  }
+  tb.innerHTML = ds.map(d => {
+    const fams = Object.entries(d.families || {}).sort((a, b) => b[1] - a[1])
+      .map(([f, n]) => `<span class="badge badge-gray" title="${n} ${esc(f)} snapshot(s)">${esc(f)} ${n}</span>`).join(' ');
+    const span = d.oldest_ts && d.newest_ts && d.oldest_ts !== d.newest_ts
+      ? `${Math.max(1, Math.round((d.newest_ts - d.oldest_ts) / 86400))} d` : '—';
+    return `<tr style="cursor:pointer" onclick="snapPick('${esc(d.dataset)}')" title="Show this dataset's snapshots">
+      <td style="font-family:var(--font-mono)">${esc(d.dataset)}</td>
+      <td style="text-align:right">${d.count}</td>
+      <td>${fams}</td>
+      <td style="color:var(--muted)" title="${esc(d.newest)}">${_kAgo(d.newest_ts)}</td>
+      <td style="color:var(--muted)">${span}</td>
+    </tr>`;
+  }).join('');
+}
+function snapPick(ds) {
+  const t = document.getElementById('snap-ds-title');
+  if (t) t.textContent = `${ds} — loading…`;
+  send({ action: 'snapshot_list', dataset: ds });
+}
+function renderBeStatus(msg) {
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  _beRunning = msg.running || '';
+  set('be-running', msg.running || '—');
+  set('be-next', msg.bootfs || '—');
+  const st = msg.status || {};
+  set('be-bootpath', st['Boot path'] || '—');
+  set('be-newest-pre', st['Newest pre-transaction snapshot'] || '—');
+  set('be-status-line', msg.error ? msg.error : (st['Staged rollback'] ? `staged: ${st['Staged rollback']}` : ''));
+  const tb = document.getElementById('be-table');
+  if (tb) {
+    const envs = msg.environments || [];
+    tb.innerHTML = envs.length ? envs.map(e => `<tr>
+      <td style="font-family:var(--font-mono)">${esc(e.name)}</td>
+      <td style="color:var(--muted)">${_kWhen(e.created)}</td>
+      <td style="color:var(--muted)">${_kBytes(e.used)}</td>
+      <td style="font-family:var(--font-mono);color:var(--muted);font-size:0.78rem">${esc(e.origin || '—')}</td>
+      <td>${e.running ? '<span class="badge badge-green">running</span> ' : ''}${e.next ? '<span class="badge badge-blue">boots next</span>' : ''}</td>
+      <td style="text-align:right;white-space:nowrap">${e.next ? '' : `<button class="btn btn-ghost btn-sm" onclick="beActivate('${esc(e.name)}')">Boot next</button>`}</td>
+    </tr>`).join('') : `<tr><td colspan="6" style="color:var(--muted)">${esc(msg.error || 'No boot environments — install to disk first')}</td></tr>`;
+  }
+  if (_beRunning) send({ action: 'snapshot_list', dataset: _beRunning });
 }
 function takeSnapshot() { send({ action: 'snapshot_take' }); }
 
