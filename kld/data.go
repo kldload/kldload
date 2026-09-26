@@ -1293,6 +1293,19 @@ func loadOverview(d *sectionData) {
 	} else {
 		d.rows = append(d.rows, []string{"doctor", err.Error()})
 	}
+	if out, err := run(15*time.Second, "systemctl", "list-units", "--state=failed", "--no-legend", "--plain"); err == nil {
+		var failed []string
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			if f := strings.Fields(line); len(f) > 0 {
+				failed = append(failed, f[0])
+			}
+		}
+		if len(failed) == 0 {
+			d.rows = append(d.rows, []string{"units", "no failed units"})
+		} else {
+			d.rows = append(d.rows, []string{"units", fmt.Sprintf("%d FAILED: %s", len(failed), truncateList(failed, 4))})
+		}
+	}
 	d.headline = hostname() + " · " + time.Now().Format("2006-01-02 15:04")
 }
 

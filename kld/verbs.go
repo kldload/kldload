@@ -80,6 +80,24 @@ var verbs = map[string][]verb{
 			return []string{"ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "root@" + ip}, nil
 		}},
 		{key: "v", label: "vmxplore", noRow: true, inter: true, argv: fixed("vmxplore", "--tui")},
+		{key: "n", label: "new VM", noRow: true, prompt: "kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]: ", argv: func(_ []string, in string) ([]string, error) {
+			f := strings.Fields(in)
+			if len(f) == 0 || !nameOK(f[0]) {
+				return nil, errors.New("a VM name comes first")
+			}
+			for i := 1; i < len(f); i++ {
+				switch f[i] {
+				case "--ram", "--cpus", "--disk", "--iso", "--bridge", "--os", "--volblocksize":
+					if i+1 >= len(f) || strings.HasPrefix(f[i+1], "-") {
+						return nil, errors.New(f[i] + " needs a value")
+					}
+					i++
+				default:
+					return nil, errors.New("unknown option " + f[i])
+				}
+			}
+			return append([]string{"kvm-create"}, f...), nil
+		}},
 	},
 	"Machines/Snapshots": {
 		{key: "b", label: "roll the VM back to this snapshot", confirm: true, argv: func(row []string, _ string) ([]string, error) {
@@ -127,6 +145,16 @@ var verbs = map[string][]verb{
 			}
 			return []string{"zfs", "snapshot", col(row, 0) + "@" + in}, nil
 		}},
+		{key: "P", label: "set a property", prompt: "zfs set <property>=<value> on {}: ", argv: func(row []string, in string) ([]string, error) {
+			in = strings.TrimSpace(in)
+			k, val, ok := strings.Cut(in, "=")
+			if !ok || k == "" || val == "" || strings.ContainsAny(k, " \t") || strings.HasPrefix(k, "-") {
+				return nil, errors.New("need property=value")
+			}
+			return []string{"zfs", "set", in, col(row, 0)}, nil
+		}},
+		{key: "M", label: "mount", argv: onRow("zfs", "mount", "{}")},
+		{key: "N", label: "unmount", confirm: true, argv: onRow("zfs", "unmount", "{}")},
 		{key: "z", label: "zxplore", noRow: true, inter: true, argv: fixed("zxplore", "--tui")},
 	},
 	"Storage/Snapshots": {
