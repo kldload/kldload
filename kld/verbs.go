@@ -215,7 +215,13 @@ var verbs = map[string][]verb{
 	},
 	"Network/Fleet": {
 		{key: "w", label: "wgx", noRow: true, inter: true, argv: fixed("wgx", "tui")},
-		{key: "C", label: "check: orphaned peers and one-way links", noRow: true, inter: true, argv: fixed("sh", "-c", `wgx check; echo; read -r -p "enter to return" _`)},
+		{key: "H", label: "ssh to the host", inter: true, argv: func(row []string, _ string) ([]string, error) {
+			t := col(row, 7)
+			if t == "" || t == "local" || strings.HasPrefix(t, "unreachable") {
+				return nil, errors.New("this row is the local host or unreachable")
+			}
+			return []string{"ssh", t}, nil
+		}},
 	},
 	"Network/Enrolled": {
 		{key: "e", label: "enrol a VM", noRow: true, prompt: "kldload-enroll <vm>: ", argv: func(_ []string, in string) ([]string, error) {

@@ -162,6 +162,7 @@ network planes
 network peers
 network enrolled
 network fleet
+network check
 cluster nodes
 cluster pods
 cluster deployments
@@ -187,7 +188,7 @@ provision feed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 40)) && _pass "every sub-tab tried (40/40)" || _fail "sub-tabs tried" "${_tabs} of 40"
+    ((_tabs == 41)) && _pass "every sub-tab tried (41/41)" || _fail "sub-tabs tried" "${_tabs} of 41"
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"

@@ -36,7 +36,7 @@ var sections = []section{
 	{"Overview", []string{"Summary"}},
 	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Networks", "Pools"}},
 	{"Storage", []string{"Pools", "Topology", "Datasets", "Snapshots", "Boot envs", "ARC"}},
-	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet"}},
+	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet", "Check"}},
 	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services", "Events", "Logs", "Describe"}},
 	{"Ansible", []string{"Hosts", "Groups", "Plays"}},
 	{"Helm", []string{"Releases", "Examples"}},
@@ -134,9 +134,10 @@ var collectors = map[string]func(*sectionData){
 	"Storage/Boot envs":   loadBootEnvs,
 	"Storage/ARC":         loadARC,
 	"Network/Planes":      loadPlanes,
-	"Network/Peers":       loadPeers,
+	"Network/Peers":       loadPeersNamed,
 	"Network/Enrolled":    loadEnrolled,
 	"Network/Fleet":       loadFleet,
+	"Network/Check":       loadCheck,
 	"Cluster/Nodes":       loadNodes,
 	"Cluster/Pods":        loadPods,
 	"Cluster/Deployments": loadDeployments,
@@ -674,32 +675,6 @@ func loadARC(d *sectionData) {
 	d.headline = fmt.Sprintf("ARC %s of %s (target %s) · hit ratio %s", human(st["size"]), human(st["c_max"]), human(st["c"]), ratio(st["hits"], st["misses"]))
 }
 
-// loadFleet is wgx's estate tree: every host it can ssh to, every plane,
-// every peer, as lines — the one view that looks past this host.
-func loadFleet(d *sectionData) {
-	if _, err := exec.LookPath("wgx"); err != nil {
-		d.err = "wgx is not installed on this host"
-		return
-	}
-	out, err := run(90*time.Second, "wgx", "estate")
-	if err != nil && strings.TrimSpace(out) == "" {
-		d.err = err.Error()
-		return
-	}
-	d.columns = []string{"wgx estate"}
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) > 0 {
-		d.headline = strings.TrimSpace(lines[0])
-		lines = lines[1:]
-	}
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		d.rows = append(d.rows, []string{l})
-	}
-}
-
 // ── Network: wg show dump ───────────────────────────────────────────────────
 
 type peer struct {
@@ -774,28 +749,6 @@ func loadPlanes(d *sectionData) {
 		d.rows = append(d.rows, []string{p, purpose, strconv.Itoa(n), strconv.Itoa(alive), human(rx) + "/" + human(tx)})
 	}
 	d.headline = fmt.Sprintf("%d plane(s), %d peers", len(planes), len(peers))
-}
-
-func loadPeers(d *sectionData) {
-	_, peers, err := readPeers()
-	if err != nil {
-		d.err = err.Error()
-		return
-	}
-	d.columns = []string{"peer", "plane", "endpoint", "allowed", "handshake", "rx/tx"}
-	alive := 0
-	for _, p := range peers {
-		hs, ok := handshakeAge(p.handshake)
-		if ok {
-			alive++
-		}
-		id := p.allowed
-		if strings.HasPrefix(p.allowed, "10.25") {
-			id = "node " + strings.TrimSuffix(p.allowed[strings.LastIndex(p.allowed, ".")+1:], "/32")
-		}
-		d.rows = append(d.rows, []string{id, p.plane, orDash(p.endpoint), p.allowed, hs, human(p.rx) + "/" + human(p.tx)})
-	}
-	d.headline = fmt.Sprintf("%d peers, %d with a handshake in the last 3 min", len(peers), alive)
 }
 
 func loadEnrolled(d *sectionData) {
@@ -1614,6 +1567,8 @@ func loadOverview(d *sectionData) {
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────
+
+func jsonUnmarshal(s string, v any) error { return json.Unmarshal([]byte(s), v) }
 
 func orDash(s string) string {
 	if strings.TrimSpace(s) == "" {
