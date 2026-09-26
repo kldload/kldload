@@ -124,16 +124,55 @@ if ! command -v kld >/dev/null 2>&1; then
     _fail "kld installed" "not on PATH"
 else
     kld --help 2>/dev/null | grep -q 'operator console' && _pass "kld --help" || _fail "kld --help" "no usage text"
-    for s in overview machines storage network cluster metrics estate provision; do
-        # Every section prints its rail; the data line under it is the
-        # tool's answer or the tool's error, both acceptable to this gate —
-        # the tools have their own.
-        if timeout 180 kld "$s" --print 2>/dev/null | grep -qi " $s "; then
-            _pass "kld $s --print"
+    # Every sub-tab of every section prints its rail and its own name; the
+    # data under it is the tool's answer or the tool's error, both acceptable
+    # to this gate — the tools have their own. The list is the console's:
+    # a sub-tab added to kld without a collector fails here.
+    _tabs=0
+    while read -r s sub; do
+        _tabs=$((_tabs + 1))
+        # Captured, not piped into grep -q: under pipefail a `grep -q` that
+        # matches early closes the pipe, kld dies of SIGPIPE writing its
+        # 4,800 snapshot rows, and the pipeline reads as a failure (onyx,
+        # 2026-09-26). kld's own exit is 0 even when the tool it asked erred.
+        _out="$(timeout 180 kld "$s" "$sub" --print 2>/dev/null)" || _warn "kld $s $sub --print" "exited non-zero or timed out"
+        if grep -qiE "^  ${s} / ${sub//envs/ envs}" <<<"$_out"; then
+            _pass "kld $s $sub --print"
         else
-            _fail "kld $s --print" "no section rail in the output"
+            _fail "kld $s $sub --print" "no '$s / $sub' line in the output"
         fi
-    done
+    done <<'TABS'
+overview summary
+machines vms
+machines snapshots
+machines networks
+machines pools
+storage pools
+storage topology
+storage datasets
+storage snapshots
+storage bootenvs
+network planes
+network peers
+network enrolled
+cluster nodes
+cluster pods
+cluster deployments
+cluster services
+ansible hosts
+ansible groups
+ansible plays
+helm releases
+helm examples
+metrics targets
+estate drift
+estate units
+estate events
+provision armed
+provision goldens
+provision answers
+TABS
+    ((_tabs == 29)) && _pass "every sub-tab tried (29/29)" || _fail "sub-tabs tried" "${_tabs} of 29"
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
