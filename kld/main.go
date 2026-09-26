@@ -68,6 +68,9 @@ func usage() {
                             (kldload-chrome-app; needs a display)
   kld <section> [<sub-tab>] --print
                             print that sub-tab once and exit
+  kld install               the install menu: profile, distribution, security,
+                            disk, hostname, user — then the unattended
+                            installer; or provision another machine
   kld --version
 
 Keys inside:  1-9, 0  section   tab  sub-tab   j/k  row   enter  drill in
@@ -88,6 +91,13 @@ func main() {
 			return
 		case "--version", "-V":
 			fmt.Println("kld " + versionFull())
+			return
+		case "install":
+			// the install menu: the live medium's boot target
+			if err := runInstallMenu(); err != nil {
+				fmt.Fprintln(os.Stderr, "kld install:", err)
+				os.Exit(1)
+			}
 			return
 		}
 	}
