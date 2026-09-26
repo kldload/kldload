@@ -280,6 +280,82 @@ TABS
         fi
         tmux -L "$_t2" kill-server 2>/dev/null || true # already gone once the pane's shell exited
     fi
+
+    # ── a job pane: the n verb creates kld-probe-gate, in the TUI ──────────
+    # The first long verb the operator ran (kvm-create) left the TUI and
+    # scrolled on the terminal (2026-09-26). Jobs now run in a pane: this
+    # creates a 2 GB probe VM through the pane, waits for "done in", leaves
+    # the pane, and deletes the probe by typed name from the table. Only
+    # the name kld-probe-gate is ever created or destroyed here.
+    if command -v tmux >/dev/null && command -v kvm-create >/dev/null && [[ -d /sys/class/net/br0 || -d /sys/class/net/virbr0 ]]; then
+        _pv="kld-probe-gate"
+        _t3="console-probe-job-$$"
+        _job_cleanup() {
+            tmux -L "$_t3" kill-server 2>/dev/null || true # gone already if kld quit
+            if sudo -n virsh dominfo "$_pv" >/dev/null 2>&1 || sudo -n zfs list "rpool/vms/$_pv" >/dev/null 2>&1; then
+                sudo -n kvm-delete "$_pv" --force >/dev/null 2>&1 || sudo -n kvm-delete "$_pv" >/dev/null 2>&1 || true # the table's delete is the check; this is the safety net
+            fi
+        }
+        tmux -L "$_t3" new-session -d -s "$_t3" -x 160 -y 45 "kld machines vms --tui"
+        for _i in $(seq 40); do
+            tmux -L "$_t3" capture-pane -t "$_t3" -p | grep -q 'machines,' && break
+            sleep 0.5
+        done
+        tmux -L "$_t3" send-keys -t "$_t3" n
+        sleep 0.5
+        tmux -L "$_t3" send-keys -t "$_t3" -l "$_pv --ram 512 --cpus 1 --disk 2"
+        sleep 0.3
+        tmux -L "$_t3" send-keys -t "$_t3" Enter
+        _done=0
+        for _i in $(seq 120); do
+            if tmux -L "$_t3" capture-pane -t "$_t3" -p | grep -q 'done in'; then
+                _done=1
+                break
+            fi
+            sleep 1
+        done
+        if ((_done)); then
+            _pass "job pane: kvm-create ${_pv} ran inside the TUI to done"
+        else
+            _fail "job pane" "kvm-create ${_pv} did not reach 'done in' in 120 s"
+        fi
+        tmux -L "$_t3" send-keys -t "$_t3" C-]
+        sleep 0.4
+        tmux -L "$_t3" send-keys -t "$_t3" d
+        sleep 6
+        if sudo -n virsh dominfo "$_pv" >/dev/null 2>&1; then
+            _pass "job pane: the probe VM exists after the pane was left"
+        else
+            _fail "job pane" "${_pv} does not exist after the job reported done"
+        fi
+        tmux -L "$_t3" send-keys -t "$_t3" '/'
+        sleep 0.3
+        tmux -L "$_t3" send-keys -t "$_t3" -l "$_pv"
+        sleep 0.3
+        tmux -L "$_t3" send-keys -t "$_t3" Enter
+        sleep 2
+        tmux -L "$_t3" send-keys -t "$_t3" d
+        sleep 0.5
+        tmux -L "$_t3" send-keys -t "$_t3" -l "$_pv"
+        sleep 0.3
+        tmux -L "$_t3" send-keys -t "$_t3" Enter
+        _gone=0
+        for _i in $(seq 30); do
+            if ! sudo -n virsh dominfo "$_pv" >/dev/null 2>&1 && ! sudo -n zfs list "rpool/vms/$_pv" >/dev/null 2>&1; then
+                _gone=1
+                break
+            fi
+            sleep 1
+        done
+        if ((_gone)); then
+            _pass "table delete by typed name removed ${_pv} (domain and zvol)"
+        else
+            _fail "table delete" "${_pv} still present 30 s after the typed confirm"
+        fi
+        _job_cleanup
+    else
+        _warn "job pane" "tmux, kvm-create or a bridge missing: the job check DID NOT RUN"
+    fi
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"

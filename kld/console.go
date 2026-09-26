@@ -52,29 +52,36 @@ const (
 	conScreen
 	conSerial
 	conSSH
+	conJob // a long-running verb, run in a pty so its output is a pane, not a wait
 )
 
 func (k consoleKind) String() string {
-	return [...]string{"", "screen", "serial", "ssh"}[k]
+	return [...]string{"", "screen", "serial", "ssh", "job"}[k]
 }
 
 // console is one open session. Exactly one is open at a time (model.con).
 type console struct {
-	kind  consoleKind
-	vm    string
-	addr  string // the ssh target, for conSSH
-	rfb   *rfbConn
-	pty   *os.File
-	cmd   *exec.Cmd
-	vt    *vt.Emulator
-	vtMu  sync.Mutex
-	seq   atomic.Uint64 // bumps on every new frame / pty read
-	exit  atomic.Pointer[error]
-	cols  int
-	rows  int
-	menu  bool
-	mask  uint8 // mouse buttons held (screen)
-	cache struct {
+	kind consoleKind
+	vm   string // the VM, or the job's label
+	addr string // the ssh target, for conSSH
+	// jobs: what runs, since when, and whether the table has been told
+	// the result yet
+	argv     []string
+	started  time.Time
+	finished time.Time
+	reported bool
+	rfb      *rfbConn
+	pty      *os.File
+	cmd      *exec.Cmd
+	vt       *vt.Emulator
+	vtMu     sync.Mutex
+	seq      atomic.Uint64 // bumps on every new frame / pty read
+	exit     atomic.Pointer[error]
+	cols     int
+	rows     int
+	menu     bool
+	mask     uint8 // mouse buttons held (screen)
+	cache    struct {
 		seq  uint64
 		w, h int
 		menu bool
@@ -134,6 +141,23 @@ func openConsole(kind consoleKind, vm, addr string, cols, rows int) (*console, e
 	return c, nil
 }
 
+// openJob runs a verb's command in a pty behind the emulator: the output
+// is a pane the operator can read and return to, the TUI stays up, and
+// the job keeps running when the pane is left (ctrl+] d). Before this,
+// a long verb either took the terminal over (kvm-create's minutes of
+// output scrolled past the console, 2026-09-26) or ran silently with a
+// ten-minute timeout and no progress at all.
+func openJob(label string, argv []string, cols, rows int) (*console, error) {
+	c := &console{kind: conJob, vm: label, argv: argv, started: time.Now(), cols: max(cols, 20), rows: max(rows, 5)}
+	if err := c.spawn(append([]string{"sudo", "-n"}, argv...)...); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// running reports whether a job's child is still alive.
+func (c *console) running() bool { return c.exit.Load() == nil }
+
 // spawn runs argv in a fresh pty with the emulator sized like the pane.
 func (c *console) spawn(argv ...string) error {
 	master, slave, err := openPTY()
@@ -171,6 +195,7 @@ func (c *console) spawn(argv ...string) error {
 				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
 					e = fmt.Errorf("%s ended: %s", argv[len(argv)-1], cmd.ProcessState)
 				}
+				c.finished = time.Now()
 				c.exit.Store(&e)
 				return
 			}
@@ -263,6 +288,21 @@ func (c *console) close() {
 
 // status is the line under the console.
 func (c *console) status() string {
+	if c.kind == conJob {
+		if c.menu {
+			return stKey.Render("ctrl+]") + stDim.Render("  d back to the table (the job keeps running) · k kill it · J the next job · any other key back")
+		}
+		cmd := strings.Join(c.argv, " ")
+		state := stKey.Render("running " + time.Since(c.started).Truncate(time.Second).String())
+		if p := c.exit.Load(); p != nil {
+			state = stGood.Render("done in " + c.finished.Sub(c.started).Truncate(time.Second).String())
+			if !strings.HasSuffix((*p).Error(), " ended") {
+				state = stBad.Render((*p).Error())
+			}
+			state += stDim.Render(" · enter or ctrl+] d back")
+		}
+		return stKey.Render(c.vm) + stDim.Render("  "+truncate(cmd, 60)+"  ·  ") + state + stDim.Render("  ·  keys go to the job  ·  ") + stKey.Render("ctrl+]") + stDim.Render(" menu")
+	}
 	if c.menu {
 		return stKey.Render("ctrl+]") + stDim.Render("  d detach · 1 screen · 2 serial · 3 ssh · x ctrl+alt+del · r redraw · ] send ctrl+] · any other key back")
 	}

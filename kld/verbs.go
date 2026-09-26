@@ -38,6 +38,10 @@ type verb struct {
 	// console opens an in-TUI console of this kind on the row's VM instead
 	// of running a command (console.go)
 	console consoleKind
+	// job runs the command in a pane inside the TUI (a pty behind the
+	// emulator) instead of silently or by taking the terminal over: for
+	// anything that runs long or whose output the operator must read
+	job bool
 }
 
 // col returns column i of a row, or "".
@@ -69,7 +73,7 @@ var verbs = map[string][]verb{
 		{key: "T", label: "shutdown", argv: onRow("virsh", "shutdown", "{}")},
 		{key: "R", label: "reboot", argv: onRow("virsh", "reboot", "{}")},
 		{key: "K", label: "force off", confirm: true, argv: onRow("virsh", "destroy", "{}")},
-		{key: "c", label: "clone", prompt: "clone {} as: ", argv: func(row []string, in string) ([]string, error) {
+		{key: "c", label: "clone", job: true, prompt: "clone {} as: ", argv: func(row []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
 			if !nameOK(in) {
 				return nil, fmt.Errorf("%q is not a VM name", in)
@@ -79,7 +83,7 @@ var verbs = map[string][]verb{
 		{key: "s", label: "snapshot", argv: onRow("kvm-snap", "{}")},
 		{key: "b", label: "rollback to the newest snapshot", confirm: true, argv: onRow("kvm-snap", "{}", "rollback")},
 		{key: "d", label: "delete VM + zvol", confirm: true, argv: onRow("kvm-delete", "{}", "--force")},
-		{key: "e", label: "enrol on the mesh", argv: onRow("kldload-enroll", "{}")},
+		{key: "e", label: "enrol on the mesh", job: true, argv: onRow("kldload-enroll", "{}")},
 		{key: "z", label: "suspend", argv: onRow("virsh", "suspend", "{}")},
 		{key: "Z", label: "resume", argv: onRow("virsh", "resume", "{}")},
 		{key: "A", label: "autostart on/off", argv: func(row []string, _ string) ([]string, error) {
@@ -88,7 +92,7 @@ var verbs = map[string][]verb{
 			}
 			return []string{"virsh", "autostart", col(row, 0)}, nil
 		}},
-		{key: "F", label: "seal as a Firecracker golden", argv: onRow("kfire", "golden", "{}")},
+		{key: "F", label: "seal as a Firecracker golden", job: true, argv: onRow("kfire", "golden", "{}")},
 		{key: "v", label: "vcpus and memory", prompt: "{}: <vcpus> <memory GiB> (applies to the next boot): ", argv: func(row []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) != 2 || strings.Trim(f[0], "0123456789") != "" || strings.Trim(f[1], "0123456789") != "" {
@@ -97,7 +101,7 @@ var verbs = map[string][]verb{
 			// four virsh calls, fixed argv with the values as positionals
 			return []string{"sh", "-c", `virsh setvcpus "$1" "$2" --config --maximum && virsh setvcpus "$1" "$2" --config && virsh setmaxmem "$1" "$3"G --config && virsh setmem "$1" "$3"G --config`, "_", col(row, 0), f[0], f[1]}, nil
 		}},
-		{key: "+", label: "grow the root disk", prompt: "grow {} to <GiB> (block device, partition and filesystem): ", argv: func(row []string, in string) ([]string, error) {
+		{key: "+", label: "grow the root disk", job: true, prompt: "grow {} to <GiB> (block device, partition and filesystem): ", argv: func(row []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
 			if in == "" || strings.Trim(in, "0123456789") != "" {
 				return nil, errors.New("a size in GiB")
@@ -119,7 +123,7 @@ var verbs = map[string][]verb{
 		{key: "C", label: "serial console", console: conSerial},
 		{key: "H", label: "ssh terminal", console: conSSH},
 		{key: "V", label: "vmxplore", noRow: true, inter: true, argv: fixed("vmxplore", "--tui")},
-		{key: "n", label: "new VM", noRow: true, prompt: "kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]: ", argv: func(_ []string, in string) ([]string, error) {
+		{key: "n", label: "new VM", job: true, noRow: true, prompt: "kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]: ", argv: func(_ []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 || !nameOK(f[0]) {
 				return nil, errors.New("a VM name comes first")
@@ -148,7 +152,7 @@ var verbs = map[string][]verb{
 		{key: "s", label: "snapshot this VM now", argv: onRow("kvm-snap", "{}")},
 	},
 	"Machines/Appliances": {
-		{key: "b", label: "build one as a VM", prompt: "vm name, then KEY=VALUE settings for {}: ", inter: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "b", label: "build one as a VM", prompt: "vm name, then KEY=VALUE settings for {}: ", job: true, argv: func(row []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 || !nameOK(f[0]) {
 				return nil, errors.New("a VM name comes first, then KEY=VALUE settings")
@@ -160,16 +164,16 @@ var verbs = map[string][]verb{
 			}
 			return append([]string{"vmxplore", "--appliance", col(row, 0), "--vm", f[0]}, f[1:]...), nil
 		}},
-		{key: "s", label: "show its install script", inter: true, argv: func(row []string, _ string) ([]string, error) {
+		{key: "s", label: "show its install script", job: true, argv: func(row []string, _ string) ([]string, error) {
 			return []string{"sh", "-c", `vmxplore --appliance-script "$1" | less`, "_", col(row, 0)}, nil
 		}},
-		{key: "B", label: "build every appliance (vmx --build-all)", noRow: true, inter: true, argv: fixed("vmxplore", "--build-all")},
+		{key: "B", label: "build every appliance (vmx --build-all)", noRow: true, job: true, argv: fixed("vmxplore", "--build-all")},
 	},
 	"Machines/Factory": {
-		{key: "x", label: "run it", inter: true, argv: func(row []string, _ string) ([]string, error) {
+		{key: "x", label: "run it", job: true, argv: func(row []string, _ string) ([]string, error) {
 			return strings.Fields(col(row, 3)), nil
 		}},
-		{key: "X", label: "run it for one distro", prompt: "distro for {} (centos rocky fedora debian ubuntu): ", inter: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "X", label: "run it for one distro", prompt: "distro for {} (centos rocky fedora debian ubuntu): ", job: true, argv: func(row []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
 			switch in {
 			case "centos", "rocky", "fedora", "debian", "ubuntu", "all":
@@ -201,7 +205,7 @@ var verbs = map[string][]verb{
 		{key: "d", label: "destroy", confirm: true, argv: onRow("kfire", "destroy", "{}")},
 		{key: "H", label: "ssh", inter: true, argv: onRow("kfire", "ssh", "{}")},
 		{key: "C", label: "serial console log", inter: true, argv: onRow("kfire", "console", "{}")},
-		{key: "!", label: "kfire status", noRow: true, inter: true, argv: fixed("sh", "-c", `kfire status; echo; read -r -p "enter to return" _`)},
+		{key: "!", label: "kfire status", noRow: true, job: true, argv: fixed("sh", "-c", `kfire status; echo; read -r -p "enter to return" _`)},
 	},
 	"Machines/Networks": {
 		{key: "S", label: "start", argv: onRow("virsh", "net-start", "{}")},
@@ -273,7 +277,7 @@ var verbs = map[string][]verb{
 		}},
 		{key: "L", label: "load the encryption key", prompt: "passphrase for {}: ", secret: true, stdin: true, argv: onRow("zfs", "load-key", "{}")},
 		{key: "U", label: "unload the encryption key", confirm: true, argv: onRow("zfs", "unload-key", "{}")},
-		{key: "E", label: "create an encrypted child (zfs asks the passphrase)", prompt: "encrypted child of {}: ", inter: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "E", label: "create an encrypted child (zfs asks the passphrase)", prompt: "encrypted child of {}: ", job: true, argv: func(row []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
 			if in == "" || strings.Contains(in, "/") || !datasetOK(col(row, 0)+"/"+in) {
 				return nil, errors.New("a child name (no slashes)")
@@ -318,10 +322,10 @@ var verbs = map[string][]verb{
 			}
 			return []string{"zfs", "clone", col(row, 0), in}, nil
 		}},
-		{key: "D", label: "diff against live", inter: true, argv: func(row []string, _ string) ([]string, error) {
+		{key: "D", label: "diff against live", job: true, argv: func(row []string, _ string) ([]string, error) {
 			return []string{"sh", "-c", `zfs diff -H "$1" | less -S`, "_", col(row, 0)}, nil
 		}},
-		{key: "f", label: "diff against another snapshot", prompt: "diff {} against snapshot (name after @): ", inter: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "f", label: "diff against another snapshot", prompt: "diff {} against snapshot (name after @): ", job: true, argv: func(row []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
 			if !snapNameOK(in) {
 				return nil, errors.New("a snapshot name, the part after @")
@@ -337,7 +341,7 @@ var verbs = map[string][]verb{
 		}},
 		{key: "H", label: "hold (tag kld)", argv: onRow("zfs", "hold", "kld", "{}")},
 		{key: "U", label: "release the hold", argv: onRow("zfs", "release", "kld", "{}")},
-		{key: "T", label: "replicate to a dataset, local or user@host:pool/ds", confirm: true, prompt: "send {} to <dataset> or <user@host:dataset>: ", inter: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "T", label: "replicate to a dataset, local or user@host:pool/ds", confirm: true, prompt: "send {} to <dataset> or <user@host:dataset>: ", job: true, argv: func(row []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
 			host, ds, remote := strings.Cut(in, ":")
 			if !remote {
@@ -397,7 +401,7 @@ var verbs = map[string][]verb{
 		// The shape is kube-cluster's own: bootstrap asks for three control
 		// planes (HA; the tool clamps to what fits and says so), scale adds
 		// workers or grows the control plane through the integrated path.
-		{key: "B", label: "bootstrap an HA cluster (3 control planes)", noRow: true, inter: true, prompt: "kube-cluster bootstrap --control-planes 3 --workers <N> (blank = 3): ", argv: func(_ []string, in string) ([]string, error) {
+		{key: "B", label: "bootstrap an HA cluster (3 control planes)", noRow: true, job: true, prompt: "kube-cluster bootstrap --control-planes 3 --workers <N> (blank = 3): ", argv: func(_ []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
 			if in == "" {
 				in = "3"
@@ -407,22 +411,22 @@ var verbs = map[string][]verb{
 			}
 			return []string{"kube-cluster", "bootstrap", "--control-planes", "3", "--workers", in}, nil
 		}},
-		{key: "A", label: "add workers", noRow: true, inter: true, prompt: "kube-cluster scale <N more workers>: ", argv: func(_ []string, in string) ([]string, error) {
+		{key: "A", label: "add workers", noRow: true, job: true, prompt: "kube-cluster scale <N more workers>: ", argv: func(_ []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
 			if in == "" || strings.Trim(in, "0123456789") != "" {
 				return nil, errors.New("a number of workers is needed")
 			}
 			return []string{"kube-cluster", "scale", in}, nil
 		}},
-		{key: "P", label: "set the control-plane count (odd)", noRow: true, inter: true, prompt: "kube-cluster scale --control-planes <1|3|5>: ", argv: func(_ []string, in string) ([]string, error) {
+		{key: "P", label: "set the control-plane count (odd)", noRow: true, job: true, prompt: "kube-cluster scale --control-planes <1|3|5>: ", argv: func(_ []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
 			if in != "1" && in != "3" && in != "5" {
 				return nil, errors.New("control planes are 1, 3 or 5 (etcd quorum)")
 			}
 			return []string{"kube-cluster", "scale", "--control-planes", in}, nil
 		}},
-		{key: "W", label: "power the cluster off", noRow: true, confirm: false, inter: true, argv: fixed("kube-cluster", "stop")},
-		{key: "O", label: "power the cluster on", noRow: true, inter: true, argv: fixed("kube-cluster", "start")},
+		{key: "W", label: "power the cluster off", noRow: true, confirm: false, job: true, argv: fixed("kube-cluster", "stop")},
+		{key: "O", label: "power the cluster on", noRow: true, job: true, argv: fixed("kube-cluster", "start")},
 	},
 	"Cluster/Pods": {
 		{key: "L", label: "logs (follow)", inter: true, argv: func(row []string, _ string) ([]string, error) {
@@ -458,11 +462,11 @@ var verbs = map[string][]verb{
 		}},
 	},
 	"Ansible/Hosts": {
-		{key: "p", label: "ping", inter: true, argv: onRow("ansible", "{}", "-i", "/usr/local/bin/kldload-inventory", "-m", "ping")},
+		{key: "p", label: "ping", job: true, argv: onRow("ansible", "{}", "-i", "/usr/local/bin/kldload-inventory", "-m", "ping")},
 		{key: "H", label: "ssh", inter: true, argv: func(row []string, _ string) ([]string, error) {
 			return []string{"ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", col(row, 2) + "@" + col(row, 1)}, nil
 		}},
-		{key: "m", label: "run a module", prompt: "ansible {} -m <module> -a <args>: ", inter: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "m", label: "run a module", prompt: "ansible {} -m <module> -a <args>: ", job: true, argv: func(row []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 {
 				return nil, errors.New("a module name is needed")
@@ -475,28 +479,28 @@ var verbs = map[string][]verb{
 		}},
 	},
 	"Ansible/Groups": {
-		{key: "p", label: "ping the group", inter: true, argv: onRow("ansible", "{}", "-i", "/usr/local/bin/kldload-inventory", "-m", "ping")},
+		{key: "p", label: "ping the group", job: true, argv: onRow("ansible", "{}", "-i", "/usr/local/bin/kldload-inventory", "-m", "ping")},
 	},
 	"Ansible/Plays": {
-		{key: "p", label: "run the play", prompt: "--limit for {} (blank = the play's hosts): ", inter: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "p", label: "run the play", prompt: "--limit for {} (blank = the play's hosts): ", job: true, argv: func(row []string, in string) ([]string, error) {
 			argv := []string{"ansible-playbook", "-i", "/usr/local/bin/kldload-inventory", playbookDir + "/" + col(row, 0)}
 			if in = strings.TrimSpace(in); in != "" {
 				argv = append(argv, "--limit", in)
 			}
 			return argv, nil
 		}},
-		{key: "n", label: "check mode (no changes)", inter: true, argv: onRow("ansible-playbook", "-i", "/usr/local/bin/kldload-inventory", "--check", "--diff", playbookDir+"/{}")},
+		{key: "n", label: "check mode (no changes)", job: true, argv: onRow("ansible-playbook", "-i", "/usr/local/bin/kldload-inventory", "--check", "--diff", playbookDir+"/{}")},
 	},
 	"Helm/Releases": {
 		{key: "U", label: "uninstall", confirm: true, argv: func(row []string, _ string) ([]string, error) {
 			return []string{"helm", "uninstall", "-n", col(row, 1), col(row, 0)}, nil
 		}},
-		{key: "Y", label: "history", inter: true, argv: func(row []string, _ string) ([]string, error) {
+		{key: "Y", label: "history", job: true, argv: func(row []string, _ string) ([]string, error) {
 			return []string{"sh", "-c", `helm history -n "$1" "$2"; echo; read -r -p "enter to return" _`, "_", col(row, 1), col(row, 0)}, nil
 		}},
 	},
 	"Helm/Examples": {
-		{key: "I", label: "install", prompt: "helm install <release> [namespace] from {}: ", inter: true, argv: func(row []string, in string) ([]string, error) {
+		{key: "I", label: "install", prompt: "helm install <release> [namespace] from {}: ", job: true, argv: func(row []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 || !nameOK(f[0]) {
 				return nil, errors.New("a release name is needed")
@@ -509,7 +513,7 @@ var verbs = map[string][]verb{
 		}},
 	},
 	"Estate/Units": {
-		{key: "J", label: "journal", inter: true, argv: onRow("journalctl", "-u", "{}", "-e", "--no-hostname")},
+		{key: "J", label: "journal", job: true, argv: onRow("journalctl", "-u", "{}", "-e", "--no-hostname")},
 		{key: "S", label: "start", argv: onRow("systemctl", "start", "{}")},
 		{key: "T", label: "stop", confirm: true, argv: onRow("systemctl", "stop", "{}")},
 		{key: "R", label: "restart", argv: onRow("systemctl", "restart", "{}")},

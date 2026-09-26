@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // The calm palette of the web console: one accent, colour only for state.
@@ -93,7 +94,14 @@ type model struct {
 	sortDesc bool
 	spin     spinner.Model
 	now      time.Time
-	con      *console // an open in-TUI console (screen, serial, ssh); nil otherwise
+	con      *console   // an open in-TUI console (screen, serial, ssh, job); nil otherwise
+	jobs     []*console // every job started this session, oldest first
+}
+
+// jobStartMsg asks Update to open a job pane for a verb's command.
+type jobStartMsg struct {
+	label string
+	argv  []string
 }
 
 // conBodyTop is the first row of a console's body: title, rail, sub-tabs.
@@ -188,10 +196,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.con.resize(m.width, m.conBodyH())
 		}
 	case conTickMsg:
-		if m.con != nil {
-			return m, conTick()
+		// jobs that finished since the last tick are reported once and the
+		// table reloaded, whether or not their pane is showing
+		var cmds []tea.Cmd
+		for _, j := range m.jobs {
+			if !j.running() && !j.reported {
+				j.reported = true
+				if p := j.exit.Load(); p != nil && !strings.HasSuffix((*p).Error(), " ended") {
+					m.say(stBad.Render(j.vm + ": " + (*p).Error()))
+				} else {
+					m.say(stGood.Render(j.vm + ": done in " + j.finished.Sub(j.started).Truncate(time.Second).String()))
+				}
+				m.loading[m.key()] = true
+				cmds = append(cmds, m.reload())
+			}
 		}
-		return m, nil
+		if m.con != nil || m.runningJobs() > 0 {
+			cmds = append(cmds, conTick())
+		}
+		return m, tea.Batch(cmds...)
+	case jobStartMsg:
+		c, err := openJob(msg.label, msg.argv, m.width, m.conBodyH())
+		if err != nil {
+			m.say(stBad.Render(msg.label + ": " + err.Error()))
+			return m, nil
+		}
+		m.jobs = append(m.jobs, c)
+		if len(m.jobs) > 20 { // the pane list, not a log: the oldest finished ones go
+			for i, j := range m.jobs {
+				if !j.running() {
+					m.jobs = append(m.jobs[:i], m.jobs[i+1:]...)
+					break
+				}
+			}
+		}
+		if m.con != nil && m.con.kind != conJob {
+			m.con.close()
+		}
+		m.con = c
+		c.resize(m.width, m.conBodyH())
+		return m, tea.Batch(conTick(), tea.DisableMouse)
 	case tea.MouseMsg:
 		if m.con != nil {
 			m.con.mouse(msg, conBodyTop)
@@ -363,6 +407,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.row = 0
 				return m, m.reload()
 			}
+		case "ctrl+j":
+			// the job panes: newest first
+			if len(m.jobs) == 0 {
+				m.say(stDim.Render("no jobs this session"))
+				return m, nil
+			}
+			m.con = m.jobs[len(m.jobs)-1]
+			m.con.resize(m.width, m.conBodyH())
+			return m, conTick()
 		case "enter":
 			return m.drill()
 		case "x":
@@ -716,10 +769,19 @@ func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
 	if len(what) > 60 {
 		what = what[:57] + "…"
 	}
-	if v.inter {
+	if v.job || v.inter {
 		if _, err := exec.LookPath(argv[0]); err != nil {
 			return func() tea.Msg { return doneMsg{argv[0], fmt.Errorf("not installed on this host")} }
 		}
+	}
+	if v.job {
+		label := v.label
+		if name := col(row, 0); name != "" && !v.noRow {
+			label += " " + name
+		}
+		return func() tea.Msg { return jobStartMsg{label: label, argv: argv} }
+	}
+	if v.inter {
 		c := exec.Command("sudo", append([]string{"-n"}, argv...)...)
 		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 		return tea.ExecProcess(c, func(err error) tea.Msg { return doneMsg{what: what, err: err} })
@@ -873,6 +935,9 @@ func (m model) View() string {
 			sr += " · " + d.loadedAt.Format("15:04:05")
 		}
 	}
+	if n := m.runningJobs(); n > 0 {
+		sr = fmt.Sprintf("%d job(s) running (ctrl+j) · ", n) + sr
+	}
 	b.WriteString(padBetween(truncate(sl, w-lipgloss.Width(sr)-2), stDim.Render(sr), w))
 	return b.String()
 }
@@ -898,6 +963,9 @@ func (m model) keyHints() string {
 	}
 	for _, v := range m.verbsHere() {
 		parts = append(parts, k(v.key, v.label))
+	}
+	if len(m.jobs) > 0 {
+		parts = append(parts, k("ctrl+j", "jobs"))
 	}
 	parts = append(parts, k("?", "help"), k("q", "quit"))
 	return strings.Join(parts, "  ")
@@ -1205,6 +1273,9 @@ func sum(xs []int) int {
 	return t
 }
 
+// truncate cuts s to w cells with an ellipsis, escape sequences intact: the
+// rune-slicing version cut a coloured hint line inside its SGR sequence and
+// the status text after it rendered twice (2026-09-26).
 func truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
@@ -1212,14 +1283,10 @@ func truncate(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
-	r := []rune(s)
 	if w == 1 {
 		return "…"
 	}
-	if len(r) <= w {
-		return s
-	}
-	return string(r[:w-1]) + "…"
+	return ansi.Truncate(s, w, "…")
 }
 
 func padBetween(left, right string, w int) string {
@@ -1256,12 +1323,32 @@ func (m model) openConsole(kind consoleKind, vm, addr string) (tea.Model, tea.Cm
 		m.say(stWarn.Render(kind.String() + " " + vm + ": " + err.Error()))
 		return m, nil
 	}
-	if m.con != nil {
+	if m.con != nil && m.con.kind != conJob {
 		m.con.close()
 	}
 	m.con = c
 	c.resize(m.width, m.conBodyH())
-	return m, tea.Batch(conTick(), tea.EnableMouseCellMotion)
+	if kind == conScreen {
+		return m, tea.Batch(conTick(), tea.EnableMouseCellMotion)
+	}
+	return m, tea.Batch(conTick(), tea.DisableMouse)
+}
+
+// runningJobs counts the jobs whose child is still alive.
+func (m model) runningJobs() int {
+	n := 0
+	for _, j := range m.jobs {
+		if j.running() {
+			n++
+		}
+	}
+	return n
+}
+
+// leaveJob hides a job's pane; the job itself keeps running.
+func (m model) leaveJob() (tea.Model, tea.Cmd) {
+	m.con = nil
+	return m, conTick()
 }
 
 func (m model) closeConsole() (tea.Model, tea.Cmd) {
@@ -1275,6 +1362,9 @@ func (m model) closeConsole() (tea.Model, tea.Cmd) {
 
 func (m model) updateConsole(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	c := m.con
+	if c.kind == conJob {
+		return m.updateJob(msg)
+	}
 	if c.menu {
 		c.menu = false
 		c.seq.Add(1)
@@ -1335,4 +1425,42 @@ func (m model) colNamed(row []string, name string) string {
 		}
 	}
 	return ""
+}
+
+// updateJob is the key handling of a job pane: ctrl+] menu (d back, k
+// kill, J next job), Enter on a finished job goes back, everything else
+// goes to the job's pty in case it asks a question.
+func (m model) updateJob(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	c := m.con
+	if c.menu {
+		c.menu = false
+		c.seq.Add(1)
+		switch msg.String() {
+		case "d", "q":
+			return m.leaveJob()
+		case "k":
+			c.close()
+			m.say(stWarn.Render(c.vm + ": killed"))
+			return m.leaveJob()
+		case "J":
+			for i, j := range m.jobs {
+				if j == c {
+					m.con = m.jobs[(i+1)%len(m.jobs)]
+					m.con.resize(m.width, m.conBodyH())
+					break
+				}
+			}
+		}
+		return m, nil
+	}
+	if msg.String() == "ctrl+]" {
+		c.menu = true
+		c.seq.Add(1)
+		return m, nil
+	}
+	if !c.running() && msg.String() == "enter" {
+		return m.leaveJob()
+	}
+	c.key(msg)
+	return m, nil
 }
