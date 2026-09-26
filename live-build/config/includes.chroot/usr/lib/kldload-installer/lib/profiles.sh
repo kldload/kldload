@@ -2038,7 +2038,7 @@ DASHSTART
                 for _ldskt in kldload-k8s kldload-helm \
                     kldload-ansible kldload-metrics kldload-zexplore \
                     kldload-sysdiag \
-                    bob-chat kldload-k9s bob-gaming kldload-webui; do
+                    bob-chat kldload-k9s bob-gaming kldload-webui kld; do
                     if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
                         sed -i '/^NoDisplay=true$/d' "${_appdir}/${_ldskt}.desktop"
                     fi
