@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -1047,28 +1048,70 @@ def _parse_domifaddr(out: str) -> str:
     return ""
 
 
+def _parse_domifaddr_all(out: str) -> list[str]:
+    """Every IPv4 address in `virsh domifaddr` output, in order, without
+    prefix lengths. The agent source lists every interface of the guest;
+    loopback and the overlay addresses (wg-*, cilium*) are not how the
+    hypervisor reaches it, so they are dropped."""
+    ips: list[str] = []
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[2] == "ipv4":
+            ip = f[3].split("/")[0]
+            name = f[0]
+            if ip.startswith("127.") or name.startswith(("wg-", "cilium", "lo")):
+                continue
+            if ip not in ips:
+                ips.append(ip)
+    return ips
+
+
+def _answers_ssh(ip: str, timeout: float = 2.0) -> bool:
+    """Does something accept a TCP connection on ip:22? The cheapest probe
+    that separates a live address from a stale one."""
+    try:
+        with socket.create_connection((ip, 22), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def _domain_ipv4(dom: str) -> str:
-    """A running domain's IPv4 address, or '' when none can be found.
-    Three sources, in order: libvirt's own DHCP lease, the ARP table (a guest
-    on a bridge served by an external DHCP has no libvirt lease — every k8s
-    node on 4-k8s answered "no lease" on build 66, 2026-09-24, while the
-    cluster was Ready), then the state DB through kldload-inventory --host.
-    Fixed argv throughout: the domain name never meets a shell."""
-    for src in ("lease", "arp"):
+    """The IPv4 address a running domain answers ssh on, or the best guess
+    when none answers, or '' when none can be found.
+
+    Sources, in order: libvirt's own DHCP lease, the guest agent (the guest
+    saying what it has), the ARP table (a guest on a bridge served by an
+    external DHCP has no libvirt lease — every k8s node on 4-k8s answered
+    "no lease" on build 66, 2026-09-24, while the cluster was Ready), then
+    the state DB through kldload-inventory --host.
+
+    Every candidate is tried for a listener on :22 and the first that answers
+    wins. HISTORY: fiend, 2026-09-26, build 72 — ARP held two addresses for
+    kldload-w-2, the clone's first lease (.200, stale) before its live one
+    (.114); the first was taken, ssh timed out, and a 6/6 Ready cluster was
+    reported as failing its mesh-peer check. An address is not the address
+    until something answers on it. Fixed argv throughout: the domain name
+    never meets a shell."""
+    cands: list[str] = []
+    for src in ("lease", "agent", "arp"):
         rc, out, _ = _run(["virsh", "domifaddr", dom, "--source", src], timeout=15)
         if rc == 0:
-            ip = _parse_domifaddr(out)
-            if ip:
-                return ip
+            for ip in _parse_domifaddr_all(out):
+                if ip not in cands:
+                    cands.append(ip)
     rc, out, _ = _run(["kldload-inventory", "--host", dom], timeout=15)
     if rc == 0 and out.strip():
         try:
             host = json.loads(out).get("ansible_host", "")
-            if isinstance(host, str) and host:
-                return host
+            if isinstance(host, str) and host and host not in cands:
+                cands.append(host)
         except (ValueError, AttributeError):
             pass
-    return ""
+    for ip in cands:
+        if _answers_ssh(ip):
+            return ip
+    return cands[0] if cands else ""
 
 
 def check_darksite_charts():
