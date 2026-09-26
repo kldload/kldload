@@ -156,9 +156,11 @@ storage topology
 storage datasets
 storage snapshots
 storage bootenvs
+storage arc
 network planes
 network peers
 network enrolled
+network fleet
 cluster nodes
 cluster pods
 cluster deployments
@@ -176,7 +178,7 @@ provision armed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 29)) && _pass "every sub-tab tried (29/29)" || _fail "sub-tabs tried" "${_tabs} of 29"
+    ((_tabs == 31)) && _pass "every sub-tab tried (31/31)" || _fail "sub-tabs tried" "${_tabs} of 31"
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"

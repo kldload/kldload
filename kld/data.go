@@ -35,8 +35,8 @@ type section struct {
 var sections = []section{
 	{"Overview", []string{"Summary"}},
 	{"Machines", []string{"VMs", "Snapshots", "Networks", "Pools"}},
-	{"Storage", []string{"Pools", "Topology", "Datasets", "Snapshots", "Boot envs"}},
-	{"Network", []string{"Planes", "Peers", "Enrolled"}},
+	{"Storage", []string{"Pools", "Topology", "Datasets", "Snapshots", "Boot envs", "ARC"}},
+	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet"}},
 	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services"}},
 	{"Ansible", []string{"Hosts", "Groups", "Plays"}},
 	{"Helm", []string{"Releases", "Examples"}},
@@ -131,9 +131,11 @@ var collectors = map[string]func(*sectionData){
 	"Storage/Datasets":    loadDatasets,
 	"Storage/Snapshots":   loadSnapshots,
 	"Storage/Boot envs":   loadBootEnvs,
+	"Storage/ARC":         loadARC,
 	"Network/Planes":      loadPlanes,
 	"Network/Peers":       loadPeers,
 	"Network/Enrolled":    loadEnrolled,
+	"Network/Fleet":       loadFleet,
 	"Cluster/Nodes":       loadNodes,
 	"Cluster/Pods":        loadPods,
 	"Cluster/Deployments": loadDeployments,
@@ -573,6 +575,81 @@ func snapFamily(s string) string {
 		return "kldload-snapshot"
 	}
 	return "manual"
+}
+
+// loadARC reads the ARC's own counters from /proc/spl/kstat/zfs/arcstats:
+// size against its ceiling, the hit ratio, and what the cache holds — the
+// numbers zxplore's Observe tab watches, as one table.
+func loadARC(d *sectionData) {
+	out, err := run(5*time.Second, "cat", "/proc/spl/kstat/zfs/arcstats")
+	if err != nil {
+		d.err = "arcstats: " + err.Error()
+		return
+	}
+	st := map[string]int64{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 3 {
+			if v, err := strconv.ParseInt(f[2], 10, 64); err == nil {
+				st[f[0]] = v
+			}
+		}
+	}
+	ratio := func(a, b int64) string {
+		if a+b == 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%.1f%%", 100*float64(a)/float64(a+b))
+	}
+	d.columns = []string{"counter", "value", "about"}
+	rows := [][]string{
+		{"size", human(st["size"]), "ARC in use"},
+		{"c", human(st["c"]), "target size"},
+		{"c_max", human(st["c_max"]), "ceiling (zfs_arc_max)"},
+		{"c_min", human(st["c_min"]), "floor"},
+		{"hit ratio", ratio(st["hits"], st["misses"]), "hits / (hits + misses) since boot"},
+		{"hits", strconv.FormatInt(st["hits"], 10), ""},
+		{"misses", strconv.FormatInt(st["misses"], 10), ""},
+		{"demand data", ratio(st["demand_data_hits"], st["demand_data_misses"]), "file data hit ratio"},
+		{"demand metadata", ratio(st["demand_metadata_hits"], st["demand_metadata_misses"]), "metadata hit ratio"},
+		{"prefetch data", ratio(st["prefetch_data_hits"], st["prefetch_data_misses"]), "prefetch hit ratio"},
+		{"mru", human(st["mru_size"]), "recently used"},
+		{"mfu", human(st["mfu_size"]), "frequently used"},
+		{"data", human(st["data_size"]), "file data held"},
+		{"metadata", human(st["metadata_size"]), "metadata held"},
+		{"dnode", human(st["dnode_size"]), "dnodes held"},
+		{"l2 size", human(st["l2_size"]), "L2ARC (0 without a cache device)"},
+		{"l2 hit ratio", ratio(st["l2_hits"], st["l2_misses"]), ""},
+		{"memory throttle", strconv.FormatInt(st["memory_throttle_count"], 10), "times the ARC was throttled for memory"},
+	}
+	d.rows = rows
+	d.headline = fmt.Sprintf("ARC %s of %s (target %s) · hit ratio %s", human(st["size"]), human(st["c_max"]), human(st["c"]), ratio(st["hits"], st["misses"]))
+}
+
+// loadFleet is wgx's estate tree: every host it can ssh to, every plane,
+// every peer, as lines — the one view that looks past this host.
+func loadFleet(d *sectionData) {
+	if _, err := exec.LookPath("wgx"); err != nil {
+		d.err = "wgx is not installed on this host"
+		return
+	}
+	out, err := run(90*time.Second, "wgx", "estate")
+	if err != nil && strings.TrimSpace(out) == "" {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"wgx estate"}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) > 0 {
+		d.headline = strings.TrimSpace(lines[0])
+		lines = lines[1:]
+	}
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		d.rows = append(d.rows, []string{l})
+	}
 }
 
 // ── Network: wg show dump ───────────────────────────────────────────────────

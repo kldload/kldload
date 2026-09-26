@@ -190,6 +190,10 @@ var verbs = map[string][]verb{
 	"Network/Peers": {
 		{key: "w", label: "wgx", noRow: true, inter: true, argv: fixed("wgx", "tui")},
 	},
+	"Network/Fleet": {
+		{key: "w", label: "wgx", noRow: true, inter: true, argv: fixed("wgx", "tui")},
+		{key: "C", label: "check: orphaned peers and one-way links", noRow: true, inter: true, argv: fixed("sh", "-c", `wgx check; echo; read -r -p "enter to return" _`)},
+	},
 	"Network/Enrolled": {
 		{key: "e", label: "enrol a VM", noRow: true, prompt: "kldload-enroll <vm>: ", argv: func(_ []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)
