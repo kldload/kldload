@@ -43,6 +43,11 @@ type verb struct {
 	// emulator) instead of silently or by taking the terminal over: for
 	// anything that runs long or whose output the operator must read
 	job bool
+	// names lists what the verb would create, so the TUI can refuse a name
+	// the table already shows before anything runs (a count-clone named
+	// vdi-1 over the operator's own vdi-1, 2026-09-26: kvm-clone refused
+	// it, but only after the job had started)
+	names func(row []string, in string) []string
 }
 
 // col returns column i of a row, or "".
@@ -74,38 +79,13 @@ var verbs = map[string][]verb{
 		{key: "T", label: "shutdown", argv: onRow("virsh", "shutdown", "{}")},
 		{key: "R", label: "reboot", argv: onRow("virsh", "reboot", "{}")},
 		{key: "K", label: "force off", argv: onRow("virsh", "destroy", "{}")},
-		{key: "c", label: "clone", job: true, prompt: "clone {} as <name> [count] [--snap @name]  (count > 1 makes name-1, name-2, …): ", argv: func(row []string, in string) ([]string, error) {
-			f := strings.Fields(in)
-			if len(f) == 0 || !nameOK(f[0]) {
-				return nil, errors.New("a name for the clone comes first")
-			}
-			count, snap := 1, ""
-			for i := 1; i < len(f); i++ {
-				switch {
-				case f[i] == "--snap" && i+1 < len(f) && snapNameOK(strings.TrimPrefix(f[i+1], "@")):
-					snap = "@" + strings.TrimPrefix(f[i+1], "@")
-					i++
-				default:
-					n, err := strconv.Atoi(f[i])
-					if err != nil || n < 1 || n > 99 {
-						return nil, errors.New("after the name: a count from 1 to 99, or --snap @name")
-					}
-					count = n
-				}
-			}
-			names := []string{f[0]}
-			if count > 1 {
-				// the typed name is a base: fifteen clones used to be fifteen
-				// trips through the prompt (vmxplore's cloneqty round)
-				names = names[:0]
-				for i := 1; i <= count; i++ {
-					names = append(names, fmt.Sprintf("%s-%d", f[0], i))
-				}
-			}
-			for _, n := range names {
-				if !nameOK(n) {
-					return nil, fmt.Errorf("%q is not a VM name", n)
-				}
+		{key: "c", label: "clone", job: true, prompt: "clone {} as <name> [count] [--snap @name]  (count > 1 makes name-1, name-2, …): ", names: func(_ []string, in string) []string {
+			names, _, _ := cloneNames(in)
+			return names
+		}, argv: func(row []string, in string) ([]string, error) {
+			names, snap, err := cloneNames(in)
+			if err != nil {
+				return nil, err
 			}
 			if len(names) == 1 && snap == "" {
 				return []string{"kvm-clone", col(row, 0), names[0]}, nil
@@ -176,6 +156,11 @@ var verbs = map[string][]verb{
 				}
 			}
 			return append([]string{"kvm-create"}, f...), nil
+		}, names: func(_ []string, in string) []string {
+			if f := strings.Fields(in); len(f) > 0 {
+				return f[:1]
+			}
+			return nil
 		}},
 	},
 	"Machines/Snapshots": {
@@ -667,4 +652,42 @@ func versionPaths(row []string, ctx string) (src, dst string, err error) {
 		return "", "", errors.New("no file is open, or its dataset is not mounted")
 	}
 	return mp + "/.zfs/snapshot/" + snap + rel, mp + rel, nil
+}
+
+// cloneNames parses the clone prompt: a name, an optional count (the name
+// becomes a base: name-1 … name-N) and an optional --snap @name.
+func cloneNames(in string) (names []string, snap string, err error) {
+	f := strings.Fields(in)
+	if len(f) == 0 || !nameOK(f[0]) {
+		return nil, "", errors.New("a name for the clone comes first")
+	}
+	count := 1
+	for i := 1; i < len(f); i++ {
+		switch {
+		case f[i] == "--snap" && i+1 < len(f) && snapNameOK(strings.TrimPrefix(f[i+1], "@")):
+			snap = "@" + strings.TrimPrefix(f[i+1], "@")
+			i++
+		default:
+			n, err := strconv.Atoi(f[i])
+			if err != nil || n < 1 || n > 99 {
+				return nil, "", errors.New("after the name: a count from 1 to 99, or --snap @name")
+			}
+			count = n
+		}
+	}
+	names = []string{f[0]}
+	if count > 1 {
+		// the typed name is a base: fifteen clones used to be fifteen trips
+		// through the prompt (vmxplore's cloneqty round)
+		names = names[:0]
+		for i := 1; i <= count; i++ {
+			names = append(names, fmt.Sprintf("%s-%d", f[0], i))
+		}
+	}
+	for _, n := range names {
+		if !nameOK(n) {
+			return nil, "", fmt.Errorf("%q is not a VM name", n)
+		}
+	}
+	return names, snap, nil
 }

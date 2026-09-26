@@ -893,6 +893,27 @@ func (m model) execBatch(v verb, rows [][]string) tea.Cmd {
 func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
 	var argv []string
 	var err error
+	if v.names != nil {
+		// refuse a name the table already shows — a domain, a DB ghost or
+		// an orphan zvol — before anything starts
+		have := map[string]bool{}
+		if d := m.cur(); d != nil {
+			for _, r := range d.rows {
+				have[col(r, 0)] = true
+			}
+		}
+		var taken []string
+		for _, n := range v.names(row, in) {
+			if have[n] {
+				taken = append(taken, n)
+			}
+		}
+		if len(taken) > 0 {
+			return func() tea.Msg {
+				return doneMsg{v.label, fmt.Errorf("already here: %s — pick another name (delete it first if it is the one you mean)", strings.Join(taken, ", "))}
+			}
+		}
+	}
 	switch {
 	case v.rowCtxArgv != nil:
 		argv, err = v.rowCtxArgv(row, m.ctx[m.key()])
