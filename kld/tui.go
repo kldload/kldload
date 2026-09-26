@@ -1536,6 +1536,18 @@ func colourCell(rendered, raw string) string {
 // with it on, the terminal's own text selection is gone.
 
 func (m model) openConsole(kind consoleKind, vm, addr string) (tea.Model, tea.Cmd) {
+	if kind == conScreen && sixelTerminal {
+		// pixels where the terminal draws them: the full window, back to
+		// the table on ctrl+] d
+		cmd := exec.Command("kld", "screen", vm)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			if err != nil {
+				return doneMsg{"screen " + vm, err}
+			}
+			return doneMsg{what: "screen " + vm + ": back"}
+		})
+	}
 	c, err := openConsole(kind, vm, addr, m.width, m.conBodyH())
 	if err != nil {
 		m.say(stWarn.Render(kind.String() + " " + vm + ": " + err.Error()))

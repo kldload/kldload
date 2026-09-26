@@ -161,6 +161,7 @@ func main() {
 			return
 		}
 	}
+	sixelTerminal = terminalHasSixel()
 	if _, err := tea.NewProgram(newModel(start, sub, 0), tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "kld:", err)
 		os.Exit(1)

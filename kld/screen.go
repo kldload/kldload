@@ -652,3 +652,53 @@ func (s *screenView) mouse(btn, cx, cy int, press bool) {
 	}
 	s.r.pointer(s.mask, fx, fy)
 }
+
+// ── the startup probe ───────────────────────────────────────────────────
+// terminalHasSixel asks the terminal once, before the TUI owns it, whether
+// it draws sixels (DA1 attribute 4) — so w on a machine opens the full,
+// pixel-exact screen where it can, and the cell thumbnail only where it
+// cannot (the thumbnail of a 1280x800 desktop reads as "out of focus",
+// the operator's screenshot, 2026-09-26). Under tmux the answer is tmux's
+// own and its server died drawing sixels here, so tmux means no.
+// KLD_SCREEN=full|pane overrides the probe either way.
+var sixelTerminal bool
+
+func terminalHasSixel() bool {
+	switch os.Getenv("KLD_SCREEN") {
+	case "full":
+		return true
+	case "pane":
+		return false
+	}
+	if os.Getenv("TMUX") != "" {
+		return false
+	}
+	fd := os.Stdin.Fd()
+	if !term.IsTerminal(fd) {
+		return false
+	}
+	st, err := term.MakeRaw(fd)
+	if err != nil {
+		return false
+	}
+	// error ignored: restoring a terminal that went away has no recovery
+	defer func() { _ = term.Restore(fd, st) }()
+	if _, err := os.Stdout.WriteString("\x1b[c"); err != nil {
+		return false
+	}
+	got := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 256)
+		n, _ := os.Stdin.Read(buf)
+		got <- buf[:n]
+	}()
+	select {
+	case b := <-got:
+		v := &screenView{cellW: 9, cellH: 19}
+		return v.parseProbe(b)
+	case <-time.After(300 * time.Millisecond):
+		// a terminal that never answers leaves one read pending; it is
+		// consumed by bubbletea's reader as a stray key at worst
+		return false
+	}
+}
