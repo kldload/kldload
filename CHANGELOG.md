@@ -315,6 +315,14 @@ wholesale, which only showed up on the second run of the fixed build.
 
 The largest single class of fix this cycle.
 
+The storage profile on Fedora installed without `samba-client`, and said
+nothing. The installer's RPM list asked for it; the offline mirror is built from
+a separate list that never had it, so dnf logged "No match for argument" and
+carried on, and the storage suite's SMB listing could not run. The same log
+showed `wget` missing for the same reason. Both are mirrored now, and the ISO
+gate checks every package the storage profile asks for against the mirror the
+image actually ships, rather than trusting two lists to agree.
+
 A clone made with `kvm-clone` could not be enrolled, because sshd refused root.
 The tool went to some trouble over root's `authorized_keys` — including
 installing it last to beat cloud-init's forced-command banner — and never

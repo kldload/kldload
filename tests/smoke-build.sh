@@ -302,6 +302,36 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
             _warn "netboot menu iPXE in the image" "missing:${_nb_bad} — a key built from this serves a plain-text menu"
         fi
 
+        # ── The storage arm's RPMs are in the mirror the ISO ships ──────────
+        # _dnf_pkgs in bootstrap.sh is what an RPM install asks for; the Fedora
+        # mirror is built from a SEPARATE static list (build/darksite-fedora/
+        # config/package-sets). Nothing tied the two together: 3225fc52 added
+        # samba-client to the storage arm, the mirror never learned it, the
+        # offline install logged "No match for argument: samba-client" and
+        # carried on, and 11-storage failed on build 68 for a package the
+        # installer had asked for by name (fiend, 2026-09-25). So ask the
+        # ARTEFACT: every name in that arm must have an rpm under
+        # /root/darksite/fedora/rpm in the squashfs. Names are compared as
+        # NAME-<digit>, so samba does not pass on samba-client-libs.
+        _st_names="$(sed -n '/^    storage)$/,/^        ;;$/p' "$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootstrap.sh" |
+            sed -n '/_dnf_pkgs+=(/,/)/p' | sed -e 's/#.*//' -e 's/_dnf_pkgs+=(//' -e 's/)//' | tr -s ' \t\n' '\n' | grep -v '^$')"
+        _st_rpms="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" root/darksite/fedora/rpm 2>/dev/null | awk '$1 ~ /^-/ {print $NF}' | sed 's|.*/||')" || _st_rpms="" # an ISO with no Fedora mirror lists nothing; the count below says so
+        if [[ -z "$_st_names" ]]; then
+            _fail "storage RPMs in the Fedora mirror the ISO ships" "could not read the storage arm of _dnf_pkgs from bootstrap.sh — the gate has nothing to check"
+        elif [[ -z "$_st_rpms" ]]; then
+            _warn "storage RPMs in the Fedora mirror the ISO ships" "no /root/darksite/fedora/rpm in the image — not a Fedora darksite ISO, or the mirror is missing"
+        else
+            _st_bad=""
+            for _p in $_st_names; do
+                grep -qE "^${_p}-[0-9]" <<<"$_st_rpms" || _st_bad+=" $_p"
+            done
+            if [[ -z "$_st_bad" ]]; then
+                _pass "storage RPMs in the Fedora mirror the ISO ships ($(wc -w <<<"$_st_names") names)"
+            else
+                _fail "storage RPMs in the Fedora mirror the ISO ships" "not mirrored:${_st_bad} — the installer asks for them by name and dnf skips them without a word; add them to build/darksite-fedora/config/package-sets/"
+            fi
+        fi
+
         # ── Every tool in includes.chroot/usr/local/{bin,sbin} must ship ────
         # The builder copies bin/ by glob and, since 2026-09-05, sbin/ too.
         # Before that sbin/ was an allow-list, and the list dropped a new tool
