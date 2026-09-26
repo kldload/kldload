@@ -8,7 +8,7 @@
 //
 //	kld                      the terminal console
 //	kld <section> [sub]      open on that section and sub-tab
-//	kld --gui [section]      the web console in a standalone app window
+//	kld --gui [section]      this console in a terminal window (the GUI is the TUI)
 //	kld <section> --print    print that sub-tab once and exit (no TUI)
 //	kld --version
 //
@@ -16,10 +16,8 @@
 // 2026-09-26): the terminal console is the console, everywhere, and is the
 // default even under a display — the operator typed `kld` on a desktop and
 // got a Chrome window when they wanted the TUI (10:20 that day). --gui opens
-// the web console, hosted by kldload-chrome-app as a standalone app window,
-// for the things only a browser does (Grafana, the install show, Bob). A
-// second native copy of every view would drift from the web console within
-// a week, so there is none.
+// this console in a terminal window through kldload-term: the GUI is the
+// TUI, so nothing drifts between them.
 //
 // WHY: on 2026-09-26 the estate had four terminal consoles with four key
 // maps, and the answers an operator wants first — what is running, what
@@ -64,8 +62,8 @@ func usage() {
   kld <section> [<sub-tab>] open on a section: overview machines storage
                             network cluster ansible helm metrics estate
                             provision — and one of its sub-tabs
-  kld --gui [section]       the web console in a standalone app window
-                            (kldload-chrome-app; needs a display)
+  kld --gui [section]       this console in a terminal window (kldload-term;
+                            needs a display) — the GUI is the TUI
   kld <section> [<sub-tab>] --print
                             print that sub-tab once and exit
   kld install               the install menu: profile, distribution, security,
@@ -160,30 +158,27 @@ func main() {
 
 var errNoDisplay = errors.New("no display")
 
-// spaView maps a section to the web console's view id in the URL hash.
-var spaView = map[string]string{
-	"Overview": "overview", "Machines": "vms", "Storage": "zfs", "Network": "network",
-	"Cluster": "k8s", "Metrics": "metrics", "Estate": "estate", "Provision": "provision",
-}
-
-// openWindow hands off to kldload-chrome-app, the wrapper every desktop
-// launcher on a kldload host already uses (a dedicated Chrome profile, the
-// window class the .desktop file names, the localhost cert trusted). It
-// returns errNoDisplay when there is nothing to draw on, and any other error
-// when the wrapper is missing, so the caller falls back to the terminal.
+// openWindow is the GUI: this same console in a terminal window, opened by
+// kldload-term --app (the wrapper every terminal launcher on a kldload host
+// uses: whichever emulator the distro ships, full screen, closes on quit).
+// One program for a window manager and a headless box, and nothing to
+// drift between them (operator, 2026-09-26: "no web gui at all"). It
+// returns errNoDisplay when there is nothing to draw on, and any other
+// error when the wrapper is missing, so the caller falls back to the
+// terminal it is already in.
 func openWindow(section int) error {
 	if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
 		return errNoDisplay
 	}
-	wrapper, err := exec.LookPath("kldload-chrome-app")
+	wrapper, err := exec.LookPath("kldload-term")
 	if err != nil {
-		return errors.New("kldload-chrome-app is not installed (desktop profile only)")
+		return errors.New("kldload-term is not installed")
 	}
-	url := "https://localhost:8443/?app=1#" + spaView[sections[section].name]
-	// Chrome's stderr (GTK property warnings, Vulkan-vs-Wayland notes) is
-	// noise on the operator's terminal; the wrapper's own errors go to its
-	// log. Exit status still reaches the caller.
-	c := exec.Command(wrapper, "com.kldload.console", url)
+	self, err := os.Executable()
+	if err != nil {
+		self = "kld"
+	}
+	c := exec.Command(wrapper, "--app", self, "--tui", strings.ToLower(sections[section].name))
 	c.Stdin = os.Stdin
 	return c.Run()
 }
