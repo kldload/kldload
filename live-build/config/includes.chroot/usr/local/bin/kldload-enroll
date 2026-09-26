@@ -357,18 +357,23 @@ if command -v kldload-db >/dev/null 2>&1; then
     else
         warn "${VM}: kldload-db vm-register failed — Ansible will not see this VM"
     fi
-    # swallow: the event row is a timeline nicety. A DB that rejects it
-    # must not fail an enrollment that has already registered the VM.
-    kldload-db event --type vm --subject "$VM" --message "enrolled: role=${ROLE} ip=${IP}" 2>/dev/null || true
 else
     warn "kldload-db not installed — skipping inventory registration"
 fi
+# The "enrolled" event is written at the end, and only when this run changed
+# something (init ran, or a peer was added or replaced on either side). It
+# used to be written here on every run, and the 10-minute sweep re-runs this
+# for every running VM: one VM on onyx had 244 "enrolled" events by
+# 2026-09-26 and the console's activity feed was nothing else.
+_changed=0
 
 if ((!DO_WG)); then
     # swallow: the sync is an optimisation — it makes the new VM visible to
     # Ansible now rather than at the next timer tick, so failing it costs 60s,
     # not correctness.
     command -v kldload-networks >/dev/null 2>&1 && kldload-networks sync >/dev/null 2>&1 || true
+    # The only record this path leaves: nothing below runs.
+    kldload-db event --type vm --subject "$VM" --message "registered: role=${ROLE} ip=${IP} (no mesh)" 2>/dev/null || true # timeline nicety, never fatal
     log "${VM}: --no-wg, done"
     exit 0
 fi
@@ -540,6 +545,7 @@ if _ssh 'test -s /etc/wireguard/.node-id'; then
 else
     _ssh "kube-network init ${node_id}" >/dev/null 2>&1 ||
         log "${VM}: kube-network init reported a problem"
+    _changed=1
 fi
 
 guest_pub="$(_ssh 'cat /etc/wireguard/wg-mgmt.pub' | tr -d '[:space:]')"
@@ -582,6 +588,7 @@ else
     kube-network add-peer "$IP" "$guest_pub" "$node_id" >/dev/null 2>&1 &&
         log "${VM}: hypervisor now peers ${node_id}" ||
         warn "${VM}: hypervisor did not accept the peer"
+    _changed=1
 fi
 # Match the marker without anchoring the end of the line: kube-network writes
 # "# Node <id>" and a trailing space or CR (a config that has been through an
@@ -604,6 +611,7 @@ else
     _ssh "kube-network add-peer ${host_ip:-$IP} ${host_pub} ${HOST_ID}" >/dev/null 2>&1 &&
         log "${VM}: guest now peers the hypervisor" ||
         warn "${VM}: guest did not accept the hypervisor peer"
+    _changed=1
 fi
 
 # ── Verify the OUTCOME, not the exit codes ──────────────────────────────────
@@ -645,4 +653,12 @@ fi
 # swallow: same as above — the inventory timer picks this up within 60s
 # regardless, so a failed immediate sync is a delay and not a defect.
 command -v kldload-networks >/dev/null 2>&1 && kldload-networks sync >/dev/null 2>&1 || true
-log "${VM}: enrolled"
+if ((_changed)); then
+    # swallow: the event row is a timeline nicety. A DB that rejects it must
+    # not fail an enrolment that has already put the VM on the mesh.
+    command -v kldload-db >/dev/null 2>&1 &&
+        kldload-db event --type vm --subject "$VM" --message "enrolled: role=${ROLE} ip=${IP} mesh=${node_id}" 2>/dev/null || true
+    log "${VM}: enrolled"
+else
+    log "${VM}: already enrolled (id ${node_id}) — nothing changed"
+fi

@@ -860,6 +860,10 @@ if [[ "$EDITION" != "core" ]]; then
     else
         die "FATAL: kld build failed — refusing to ship an ISO without the console hub."
     fi
+    [[ -r /tmp/kld-src/docs/kld.1 ]] ||
+        die "FATAL: kld manual absent (kld/docs/kld.1) — a shipped tool ships its man page."
+    install -Dm0644 /tmp/kld-src/docs/kld.1 "${ROOTFS}/usr/share/man/man1/kld.1" ||
+        die "FATAL: kld manual install failed."
     rm -f /tmp/kld-bin
     rm -rf /tmp/kld-src
 

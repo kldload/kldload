@@ -1,0 +1,159 @@
+.\" kld.1 — manual for the kldload operator console hub. mdoc, OpenBSD
+.\" section order. Keep in lockstep with the --help banner in main.go.
+.Dd September 26, 2026
+.Dt KLD 1
+.Os
+.Sh NAME
+.Nm kld
+.Nd the kldload operator console, in a terminal
+.Sh SYNOPSIS
+.Nm
+.Op Ar section
+.Nm
+.Ar section
+.Fl -print
+.Nm
+.Fl -version
+.Sh DESCRIPTION
+.Nm
+is one terminal program with the eight sections of the kldload web console:
+Overview, Machines, Storage, Network, Cluster, Metrics, Estate and Provision.
+Each section is read from the tool that owns the fact and shown as it is:
+.Xr kldload-estate 8
+for the machines and the drift,
+.Xr kldload-doctor 8
+for the host's health,
+.Xr zpool 8
+and
+.Xr kldload-rollback 8
+for storage and boot environments,
+.Xr wg 8
+for the mesh,
+.Xr kubectl 1
+for the cluster after a port probe of the apiserver, the Prometheus targets
+API for metrics, and
+.Xr kldload-netboot-server 8
+for the rack.
+.Pp
+.Nm
+is a hub, not another console.
+The deep views stay in
+.Xr vmxplore 1 ,
+.Xr zxplore 1 ,
+.Xr wgx 1
+and
+.Xr k9s 1 ;
+.Nm
+opens the one that belongs to the current section on
+.Ic Enter
+and returns when it exits.
+Its verbs run the shipped commands
+.Xr kvm-clone 8 ,
+.Xr kvm-snap 8
+and
+.Xr kvm-delete 8 ,
+never a re-implementation of them, so what the terminal does is what the
+estate tests prove.
+.Pp
+With a
+.Ar section
+argument the console opens on that section.
+With
+.Fl -print
+it renders that section once to standard output, without a terminal, and
+exits; the text is the same the console shows.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Ar section
+One of
+.Cm overview , machines , storage , network , cluster , metrics , estate
+or
+.Cm provision ,
+case-insensitive.
+.It Fl -print
+Render the named section once and exit.
+Useful from scripts and over an ssh command that has no terminal.
+.It Fl -version
+Print the version and the build stamp.
+.It Fl h , -help
+Print the usage and the key map, and exit 0.
+.El
+.Sh KEYS
+.Bl -tag -width "Shift-Tab" -compact
+.It Ic 1 No to Ic 8
+Switch to that section.
+.It Ic Tab , Shift-Tab
+Next and previous section.
+.It Ic j , k
+Move the selection down and up.
+.It Ic r
+Reload the section.
+.It Ic Enter
+Open the section's deep console
+.Pq Xr vmxplore 1 , Xr zxplore 1 , Xr wgx 1 , Xr k9s 1 .
+.It Ic c
+Clone the selected machine
+.Pq Xr kvm-clone 8 ;
+asks for the new name.
+.It Ic s
+Snapshot the selected machine
+.Pq Xr kvm-snap 8 .
+.It Ic d
+Delete the selected machine and its zvol
+.Pq Xr kvm-delete 8 Fl -force ;
+asks for the machine's name to be typed, and does nothing otherwise.
+.It Ic \&?
+Show the key map.
+.It Ic q
+Quit.
+.El
+.Sh EXIT STATUS
+.Ex -std
+The exit status is 2 for a section that does not exist.
+.Sh EXAMPLES
+Open the console on the machines:
+.Bd -literal -offset indent
+$ kld machines
+.Ed
+.Pp
+Print the estate's drift and the doctor's findings from a script:
+.Bd -literal -offset indent
+$ kld estate --print
+42 machines across leases, libvirt, state_db, wireguard; 1 drift; doctor 22 ok 1 warn 1 fail 18 skip
+machine               finding        detail                                            repair
+klab-green-fedora     unregistered   libvirt knows this domain; the state DB does not  kldload-db vm-register --name klab-green-fedora --role <class>
+.Ed
+.Pp
+Ask which build is installed:
+.Bd -literal -offset indent
+$ kld --version
+kld 0.1.0 b3af6a94
+.Ed
+.Sh DIAGNOSTICS
+A section whose tool did not answer shows the tool's own error in red where
+the table would be, and the rest of the console keeps working; for example
+.Dq apiserver https://10.251.0.1:6443 does not answer (port probe)
+in Cluster on a host whose kubeconfig points at a cluster that is gone.
+A verb that fails shows the failing command and its message on the status
+line; nothing is retried.
+.Sh SEE ALSO
+.Xr vmxplore 1 ,
+.Xr wgx 1 ,
+.Xr zxplore 1 ,
+.Xr kldload-doctor 8 ,
+.Xr kldload-estate 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-delete 8
+.Sh HISTORY
+.Nm
+appeared in kldload 1.6 (September 2026), when the four terminal consoles had
+four key maps and the first answers an operator wants lived in eight
+different commands.
+.Sh CAVEATS
+Every collector elevates with
+.Xr sudo 8
+.Fl n ;
+a user without passwordless sudo sees each section's error instead of its
+table.
+The Cluster section needs a kubeconfig on the host; a hypervisor that is not
+a cluster node says so rather than showing an empty table.
