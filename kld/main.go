@@ -66,6 +66,12 @@ func usage() {
                             needs a display) — the GUI is the TUI
   kld <section> [<sub-tab>] --print
                             print that sub-tab once and exit
+  kld screen <vm> [--blocks|--sixel]
+                            the VM's display full-screen in this terminal:
+                            sixels where the terminal draws them (never under
+                            tmux unless --sixel), half-block cells otherwise
+                            (--blocks forces them); ctrl+] is the menu, d
+                            detaches
   kld install               the install menu: profile, distribution, security,
                             disk, hostname, user — then the unattended
                             installer; or provision another machine
@@ -94,6 +100,13 @@ func main() {
 			// the install menu: the live medium's boot target
 			if err := runInstallMenu(); err != nil {
 				fmt.Fprintln(os.Stderr, "kld install:", err)
+				os.Exit(1)
+			}
+			return
+		case "screen":
+			// a VM's display, full-screen in this terminal (screen.go)
+			if err := runScreen(args[1:]); err != nil {
+				fmt.Fprintln(os.Stderr, "kld screen:", err)
 				os.Exit(1)
 			}
 			return

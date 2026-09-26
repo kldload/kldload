@@ -224,24 +224,24 @@ TABS
             _fail "vnc wire client" "no lit frame from ${_live_vm} :${_port}"
         fi
         _t="console-probe-$$"
-        tmux new-session -d -s "$_t" -x 160 -y 45 "kld machines vms --tui"
+        tmux -L "$_t" new-session -d -s "$_t" -x 160 -y 45 "kld machines vms --tui"
         for _i in $(seq 40); do
-            tmux capture-pane -t "$_t" -p | grep -q -- "$_live_vm" && break
+            tmux -L "$_t" capture-pane -t "$_t" -p | grep -q -- "$_live_vm" && break
             sleep 0.5
         done
-        tmux send-keys -t "$_t" '/'
+        tmux -L "$_t" send-keys -t "$_t" '/'
         sleep 0.3
-        tmux send-keys -t "$_t" -l "$_live_vm"
+        tmux -L "$_t" send-keys -t "$_t" -l "$_live_vm"
         sleep 0.3
-        tmux send-keys -t "$_t" Enter
+        tmux -L "$_t" send-keys -t "$_t" Enter
         sleep 2
-        _sel="$(tmux capture-pane -t "$_t" -p | grep -c -- "$_live_vm" || true)"
+        _sel="$(tmux -L "$_t" capture-pane -t "$_t" -p | grep -c -- "$_live_vm" || true)"
         if ((_sel == 0)); then
             _fail "video console" "could not select ${_live_vm} in the VMs table"
         else
-            tmux send-keys -t "$_t" w
+            tmux -L "$_t" send-keys -t "$_t" w
             sleep 5
-            _cap="$(tmux capture-pane -t "$_t" -p -e)"
+            _cap="$(tmux -L "$_t" capture-pane -t "$_t" -p -e)"
             _blocks="$(grep -o '▀' <<<"$_cap" | wc -l)"
             _colours="$(grep -o '38;2;[0-9;]*m' <<<"$_cap" | sort -u | wc -l)"
             if ((_blocks > 100 && _colours > 1)); then
@@ -249,17 +249,36 @@ TABS
             else
                 _fail "video console in the TUI" "${_blocks} cells, ${_colours} colours from ${_live_vm}"
             fi
-            tmux send-keys -t "$_t" C-]
+            tmux -L "$_t" send-keys -t "$_t" C-]
             sleep 0.3
-            tmux send-keys -t "$_t" d
+            tmux -L "$_t" send-keys -t "$_t" d
             sleep 1
-            if tmux capture-pane -t "$_t" -p | grep -q 'screen .* detached'; then
+            if tmux -L "$_t" capture-pane -t "$_t" -p | grep -q 'screen .* detached'; then
                 _pass "video console detaches on ctrl+] d"
             else
                 _fail "video console" "ctrl+] d did not return to the table"
             fi
         fi
-        tmux kill-session -t "$_t" 2>/dev/null || true # already gone if kld exited
+        tmux -L "$_t" kill-session -t "$_t" 2>/dev/null || true # already gone if kld exited
+        # the full-screen viewer, in block mode (tmux answers DA1 with sixel
+        # support and its server died on the first sixel frame, 2026-09-26)
+        _t2="console-probe-fs-$$"
+        tmux -L "$_t2" new-session -d -s "$_t2" -x 160 -y 45 "kld screen ${_live_vm} --blocks; echo rc=\$?; sleep 5"
+        sleep 4
+        _cap="$(tmux -L "$_t2" capture-pane -t "$_t2" -p -e)"
+        _blocks="$(grep -o '▀' <<<"$_cap" | wc -l)"
+        _colours="$(grep -o '38;2;[0-9;]*m' <<<"$_cap" | sort -u | wc -l)"
+        tmux -L "$_t2" send-keys -t "$_t2" C-]
+        sleep 0.4
+        tmux -L "$_t2" send-keys -t "$_t2" d
+        sleep 1.5
+        _rc="$(tmux -L "$_t2" capture-pane -t "$_t2" -p | grep -o 'rc=[0-9]*' || true)"
+        if ((_blocks > 100 && _colours > 1)) && [[ "$_rc" == "rc=0" ]]; then
+            _pass "kld screen --blocks: ${_blocks} cells, ${_colours} colours, detached ${_rc}"
+        else
+            _fail "kld screen --blocks" "${_blocks} cells, ${_colours} colours, exit '${_rc}'"
+        fi
+        tmux -L "$_t2" kill-server 2>/dev/null || true # already gone once the pane's shell exited
     fi
 fi
 
