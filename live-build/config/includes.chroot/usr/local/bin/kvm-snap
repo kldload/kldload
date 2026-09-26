@@ -77,8 +77,22 @@ rollback)
         exit 1
     fi
     echo "Rolling back to: ${SNAP}"
+    # -r: the hourly kldload-vm-snapshot timer puts @auto- snapshots on every
+    # zvol under rpool/vms, so any target older than the newest one has newer
+    # snapshots above it and a plain `zfs rollback` refuses -- AFTER the VM was
+    # already destroyed below (source audit, 2026-09-26). Say what -r removes.
+    _newer="$(zfs list -H -t snapshot -o name -s creation -r "${ZVOL}" 2>/dev/null |
+        awk -v s="${SNAP}" 'f {print} $0 == s {f=1}')"
+    if [[ -n "$_newer" ]]; then
+        echo "  destroying $(wc -l <<<"$_newer") newer snapshot(s):"
+        sed 's/^/    /' <<<"$_newer"
+    fi
     virsh destroy "${NAME}" 2>/dev/null || true
-    zfs rollback "${SNAP}"
+    if ! zfs rollback -r "${SNAP}"; then
+        echo "✘ zfs rollback -r ${SNAP} failed — ${NAME} left as it was; starting it again" >&2
+        virsh start "${NAME}" 2>/dev/null || true
+        exit 1
+    fi
     virsh start "${NAME}" 2>/dev/null || true
     echo "✔ Rolled back to ${SNAP}"
     ;;
