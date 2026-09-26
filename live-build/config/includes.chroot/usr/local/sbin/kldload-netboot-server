@@ -1612,7 +1612,58 @@ cmd_disarm_all() {
     ((${#left[@]} == 0)) || die "disarm-all: ${#left[@]} armed or answers file(s) still present: ${left[*]}"
 }
 
+# cmd_status_json — the same facts as cmd_status, one JSON object on stdout,
+# for the console's Provision view (2026-09-26). Keys: payload {present,
+# source, version, commit}, net {configured, used, commit, distros, why},
+# service, goldens [{name, bytes}], armed [{mac, mode, golden, netdev}], open.
+cmd_status_json() {
+    local _pc _nc _nw _nused=false _svc _open=false
+    _pc="$(_payload_commit "$PAYLOAD" 2>/dev/null || true)"
+    _nc="$(_payload_commit "$PAYLOAD_NET" 2>/dev/null || true)"
+    _nw=""
+    if [[ -n "$PAYLOAD_NET" ]]; then
+        if _nw="$(_net_payload_ok)"; then _nused=true; else _nused=false; fi
+    fi
+    _svc="$(systemctl is-active kldload-netboot.service 2>/dev/null)" || _svc="inactive"
+    [[ -f "$ROOT/armed/any.ipxe" ]] && _open=true
+    # jq builds the object so every value is quoted correctly; a MAC, a path
+    # and a version string never touch a printf format.
+    command -v jq >/dev/null 2>&1 || die "status --json needs jq"
+    local _goldens='[]' _armed='[]'
+    if [[ -d "$ROOT/golden" ]]; then
+        _goldens="$(find "$ROOT/golden" -maxdepth 1 -name '*.zfs' -printf '%f\t%s\n' 2>/dev/null |
+            jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {name: (.[0] | sub("\\.zfs$"; "")), bytes: (.[1] | tonumber)})')"
+    fi
+    if [[ -d "$ROOT/armed" ]]; then
+        _armed="$(for a in "$ROOT"/armed/*.ipxe; do
+            [[ -f "$a" ]] || continue
+            m="$(basename "$a" .ipxe)"
+            mode=install
+            golden=""
+            if grep -q 'kldload.action=deploy' "$a"; then
+                mode=deploy
+                golden="$(sed -nE 's#.*golden/([^ ]*)\.zfs.*#\1#p' "$a" | head -1)"
+            fi
+            [[ "$m" == any ]] && mode=open
+            nd="$(sed -nE 's/.* BOOTIF=01-([0-9a-f-]+).*/\1/p' "$a" | head -1)"
+            printf '%s\t%s\t%s\t%s\n' "$m" "$mode" "$golden" "$nd"
+        done | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {mac: .[0], mode: .[1], golden: .[2], netdev: .[3]})')"
+    fi
+    jq -n \
+        --arg present "$([[ -s "$PAYLOAD/squashfs.img" ]] && echo true || echo false)" \
+        --arg source "$PAYLOAD_FROM" --arg version "$(sed -n 's/^kldload_version *= *//p' "$PAYLOAD/VERSION" 2>/dev/null)" \
+        --arg pc "$_pc" --arg net "$PAYLOAD_NET" --arg nused "$_nused" --arg nc "$_nc" --arg ndistros "$NB_NET_DISTROS" \
+        --arg nwhy "$_nw" --arg svc "$_svc" --arg open "$_open" --argjson goldens "$_goldens" --argjson armed "$_armed" \
+        '{payload: {present: ($present == "true"), source: $source, version: $version, commit: $pc},
+          net: {configured: ($net != ""), used: ($nused == "true"), commit: $nc, distros: $ndistros, why: $nwhy},
+          service: $svc, open: ($open == "true"), goldens: $goldens, armed: $armed}'
+}
+
 cmd_status() {
+    if [[ "${1:-}" == --json ]]; then
+        cmd_status_json
+        return
+    fi
     # The tree may not exist before `serve` has run: a bare `find` on a missing
     # dir exits non-zero and trips set -e, so every listing is guarded on the
     # directory existing first. "no tree yet" is the normal pre-serve state.
@@ -1674,7 +1725,7 @@ usage: kldload-netboot-server <command>
   golden <dataset> [as <name>]  stage a dataset as a golden stream
   disarm <mac>               remove the consent token; that MAC boots locally
   disarm-all                 disarm every armed machine
-  status                     payload, service, goldens, armed machines
+  status [--json]            payload, service, goldens, armed machines
 
 environment (read from /etc/kldload/netboot.env by the unit AND by every command
 run by hand; a variable already set in the environment wins):
@@ -1738,7 +1789,7 @@ arm-all)
     cmd_arm_all "$@"
     ;;
 disarm-all) cmd_disarm_all ;;
-status) cmd_status ;;
+status) cmd_status "${2:-}" ;;
 -h | --help | help)
     # Rule 9: --help answers, needs no root, exits 0. It fell through to the
     # catch-all and exited 2 until 2026-09-19; tests/check-help-without-root.sh

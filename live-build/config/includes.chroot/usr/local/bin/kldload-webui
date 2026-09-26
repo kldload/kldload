@@ -1099,6 +1099,111 @@ def get_system_info():
     return info
 
 
+# ── Provision view: the netboot server, its armed machines and its feed ─────
+# kldload-netboot-server owns the facts (status --json since 2026-09-26); the
+# nginx access log under its serve tree is the live feed of what each machine
+# fetched. Arming and disarming go through the tool, which validates the
+# answers file and the MAC and writes the audit line.
+NETBOOT_SERVE_ROOT = Path(os.environ.get("NETBOOT_ROOT", "/var/lib/kldload/netboot-serve"))
+_NETBOOT_LOG_RE = re.compile(
+    r'^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) (\d+|-)')
+
+
+def collect_provision_status(feed_lines=40):
+    st = {}
+    err = ""
+    try:
+        st = json.loads(subprocess.check_output(
+            ["kldload-netboot-server", "status", "--json"], text=True,
+            stderr=subprocess.STDOUT, timeout=20))
+    except subprocess.CalledProcessError as e:
+        err = (e.output or "").strip()[-400:]
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        err = str(e)
+    feed = []
+    log = NETBOOT_SERVE_ROOT / "nginx-access.log"
+    try:
+        with open(log, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 64 * 1024))
+            tail = fh.read().decode("utf-8", "replace").splitlines()[-feed_lines:]
+        for line in tail:
+            m = _NETBOOT_LOG_RE.match(line)
+            if not m:
+                continue
+            client, when, method, path, status, size_s = m.groups()
+            feed.append({"client": client, "time": when, "method": method, "path": path,
+                         "status": int(status), "bytes": int(size_s) if size_s.isdigit() else 0})
+    except OSError:
+        pass  # no serve tree yet: an empty feed is the truth
+    return {"type": "provision_status", "status": st, "error": err, "feed": feed,
+            "log": str(log)}
+
+
+def _mac_or_any(v):
+    v = (v or "").strip().lower()
+    if v == "any":
+        return v
+    if re.match(r"^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$", v):
+        return v
+    return ""
+
+
+async def _provision_status(websocket):
+    loop = asyncio.get_running_loop()
+    await websocket.send(json.dumps(await loop.run_in_executor(None, collect_provision_status)))
+
+
+async def _provision_run(websocket, argv, what):
+    """Run one netboot-server verb, report its output, then refresh the view."""
+    loop = asyncio.get_running_loop()
+
+    def run():
+        try:
+            out = subprocess.run(["kldload-netboot-server", *argv], capture_output=True,
+                                 text=True, timeout=300)
+            return out.returncode, (out.stdout + out.stderr).strip()[-2000:]
+        except (OSError, subprocess.SubprocessError) as e:
+            return 1, str(e)
+    rc, out = await loop.run_in_executor(None, run)
+    db_log_event("netboot", what, f"{' '.join(argv)} -> rc {rc}")
+    await websocket.send(json.dumps({"type": "provision_result", "what": what, "ok": rc == 0,
+                                     "output": out}))
+    await _provision_status(websocket)
+
+
+async def _provision_error(websocket, text):
+    await websocket.send(json.dumps({"type": "error", "msg": text}))
+
+
+async def _provision_disarm(websocket, msg):
+    mac = _mac_or_any(msg.get("mac"))
+    if not mac:
+        await _provision_error(websocket, "disarm: not a MAC address")
+        return
+    await _provision_run(websocket, ["disarm", mac], f"disarm {mac}")
+
+
+async def _provision_arm(websocket, msg):
+    mac = _mac_or_any(msg.get("mac"))
+    answers = (msg.get("answers") or "").strip()
+    netdev = _mac_or_any(msg.get("netdev")) if msg.get("netdev") else ""
+    if not mac:
+        await _provision_error(websocket, "arm: not a MAC address (or 'any')")
+        return
+    # An answers file is a path the operator names; the tool checks it the way
+    # the installer will read it. No relative paths and no traversal here.
+    if not answers.startswith("/") or ".." in answers.split("/"):
+        await _provision_error(websocket, "arm: the answers file must be an absolute path")
+        return
+    if msg.get("netdev") and not netdev:
+        await _provision_error(websocket, "arm: --netdev is not a MAC address")
+        return
+    argv = ["arm-install", mac, answers] + (["--netdev", netdev] if netdev and mac != "any" else [])
+    await _provision_run(websocket, argv, f"arm {mac}")
+
+
 # ── Network view: the planes as they are, joined to the estate ───────────────
 # `wg show all dump` is the truth about who is a peer; kldload-db names the
 # keys (kldload-enroll records each VM's key and mesh id since 2026-09-26);
@@ -1699,6 +1804,12 @@ async def ws_handler(websocket):
                     await _salt_status(websocket)
                 elif action == "network_status":
                     await _network_status(websocket)
+                elif action == "provision_status":
+                    await _provision_status(websocket)
+                elif action == "provision_arm":
+                    await _provision_arm(websocket, msg)
+                elif action == "provision_disarm":
+                    await _provision_disarm(websocket, msg)
                 elif action == "wg_status":
                     await websocket.send(json.dumps({
                         "type": "wg_data",

@@ -473,6 +473,9 @@ html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background
 
   <div class="nav-section">Provision</div>
   <ul>
+    <li data-view="provision">
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 17V7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10"/><path d="M2 17h20v2H2z"/><path d="M12 9v5M9.5 11.5L12 14l2.5-2.5"/></svg></span> Netboot the rack
+    </li>
     <li data-view="install">
       <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span> Install to disk
     </li>
@@ -1973,6 +1976,51 @@ $ kldload-netboot-server status</div>
       <div class="ws-panel" style="margin-top:0.9rem">
         <div class="ws-panel-hdr"><span>Drift — kldload-estate</span></div>
         <div id="net-drift" style="padding:0.7rem 1rem;color:var(--muted)">Loading…</div>
+      </div>
+    </div>
+
+    <!-- ── Provision: the netboot server as it stands ──────────────────────
+         status --json from kldload-netboot-server, the nginx feed of what
+         each machine fetched, arm and disarm through the tool (console
+         design, 2026-09-26). -->
+    <div class="view" id="view-provision">
+      <div class="ws-header">
+        <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+          <div style="font-size:1.15rem;font-weight:700">Netboot the rack</div>
+          <span id="prov-header-status" style="font-size:0.78rem;color:var(--muted)">kldload-netboot-server</span>
+          <span style="flex:1"></span>
+          <button class="btn btn-ghost btn-sm" onclick="provisionRefresh()" title="Reload">↻</button>
+        </div>
+      </div>
+      <div class="stat-grid" style="margin-bottom:0.9rem">
+        <div class="stat-card"><div class="stat-label">Serving</div><div class="stat-value" id="prov-serving" style="font-size:1rem">—</div></div>
+        <div class="stat-card"><div class="stat-label">Image</div><div class="stat-value" id="prov-image" style="font-size:1rem">—</div></div>
+        <div class="stat-card"><div class="stat-label">Mode</div><div class="stat-value" id="prov-mode" style="font-size:1rem">—</div></div>
+        <div class="stat-card"><div class="stat-label">Service</div><div class="stat-value" id="prov-service" style="font-size:1rem">—</div></div>
+      </div>
+      <div class="ws-panel" style="margin-bottom:0.9rem">
+        <div class="ws-panel-hdr"><span>Armed — what the next network boot does</span></div>
+        <table class="data-table">
+          <thead><tr><th>mac</th><th>next boot</th><th>download over</th><th></th></tr></thead>
+          <tbody id="prov-armed"><tr><td colspan="4" style="color:var(--muted)">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="ws-panel" style="margin-bottom:0.9rem">
+        <div class="ws-panel-hdr"><span>Arm a machine</span><span style="color:var(--muted);font-size:0.78rem">the answers file is checked the way the installer reads it; secrets stay off the kernel command line</span></div>
+        <div style="padding:0.7rem 1rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end">
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:0.78rem;color:var(--muted)">MAC that starts the boot, or <code>any</code><input id="prov-arm-mac" placeholder="f0:2f:74:cd:27:50" style="font-family:var(--font-mono);min-width:200px"></label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:0.78rem;color:var(--muted)">Answers file (absolute path)<input id="prov-arm-answers" placeholder="/etc/kldload/answers/rack.env" style="font-family:var(--font-mono);min-width:320px"></label>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:0.78rem;color:var(--muted)">NIC that carries the download (optional)<input id="prov-arm-netdev" placeholder="a0:36:9f:9f:10:1c" style="font-family:var(--font-mono);min-width:200px"></label>
+          <button class="btn btn-primary btn-sm" onclick="provisionArm()">Arm</button>
+        </div>
+        <div id="prov-result" style="padding:0 1rem 0.7rem;font-family:var(--font-mono);font-size:0.78rem;color:var(--muted);white-space:pre-wrap"></div>
+      </div>
+      <div class="ws-panel">
+        <div class="ws-panel-hdr"><span>Live feed — what the server handed out</span><span id="prov-feed-src" style="color:var(--muted);font-size:0.78rem"></span></div>
+        <table class="data-table">
+          <thead><tr><th>time</th><th>client</th><th>request</th><th>status</th><th style="text-align:right">bytes</th></tr></thead>
+          <tbody id="prov-feed"><tr><td colspan="5" style="color:var(--muted)">Loading…</td></tr></tbody>
+        </table>
       </div>
     </div>
 
@@ -4147,6 +4195,7 @@ function _refreshActiveView() {
            since_lines: (window._logLines && window._logLines['k8s']) || 0 });
   }
   if (isActive('view-network')) send({ action: 'network_status' });
+  if (isActive('view-provision')) send({ action: 'provision_status' });
   if (isActive('view-klab')) {
     send({ action: 'klab_status' });
     // Re-attach to any in-flight klab golden/ztest/deploy/destroy build
@@ -5166,6 +5215,8 @@ function handle(msg) {
     case 'helm_status':    { renderHelmStatus(msg);    break; }
     case 'helm_repo_list': { renderHelmRepos(msg);     break; }
     case 'network_status': { renderNetwork(msg);       break; }
+    case 'provision_status': { renderProvision(msg);   break; }
+    case 'provision_result': { renderProvisionResult(msg); break; }
     case 'helm_list':      { renderHelmReleases(msg);  break; }
 
     case 'snapshot_done': { refreshSnapshots(); break; }
@@ -5530,6 +5581,7 @@ document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
     }
     if (li.dataset.view === 'ansible')      { ansibleRefresh(); _ansibleRestoreTab(); }
     if (li.dataset.view === 'network')      networkRefresh();
+    if (li.dataset.view === 'provision')    provisionRefresh();
     if (li.dataset.view === 'helm')         { helmRefresh(); _helmRestoreTab(); }
     if (li.dataset.view === 'metrics')        metricsRefreshList();
     if (li.dataset.view === 'bob')           bobInit();
@@ -10161,6 +10213,52 @@ function renderHelmRepos(msg) {
     <td style="color:var(--muted);font-size:0.82rem">${esc(r.url)}</td>
     <td><button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="helmRepoRemove('${esc(r.name)}')">Remove</button></td>
   </tr>`).join('');
+}
+
+// ── Provision view ──────────────────────────────────────────────────────────
+function provisionRefresh() { send({ action: 'provision_status' }); }
+function provisionArm() {
+  const v = id => (document.getElementById(id)?.value || '').trim();
+  send({ action: 'provision_arm', mac: v('prov-arm-mac'), answers: v('prov-arm-answers'), netdev: v('prov-arm-netdev') });
+}
+function provisionDisarm(mac) { send({ action: 'provision_disarm', mac }); }
+function renderProvision(msg) {
+  const st = msg.status || {};
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  const pl = st.payload || {};
+  set('prov-serving', pl.present ? (pl.source || 'payload') : 'no payload');
+  set('prov-image', pl.commit ? `${pl.version || ''} · ${pl.commit.slice(0, 12)}` : '—');
+  set('prov-mode', st.open ? 'OPEN — any machine gets the menu' : 'per-MAC tokens only');
+  set('prov-service', st.service || '—');
+  set('prov-header-status', msg.error ? msg.error : `kldload-netboot-server · ${(st.armed || []).length} armed · net image ${st.net && st.net.used ? 'served to ' + st.net.distros : 'not used'}`);
+  const armed = document.getElementById('prov-armed');
+  if (armed) {
+    const rows = st.armed || [];
+    armed.innerHTML = rows.length ? rows.map(a => `<tr>
+      <td style="font-family:var(--font-mono)">${esc(a.mac)}</td>
+      <td>${a.mode === 'open' ? 'install menu for ANY machine — a key installs, the countdown boots its own disk' : a.mode === 'deploy' ? `clone golden ${esc(a.golden || '')} over HTTP` : 'install from its answers file, unattended'}</td>
+      <td style="font-family:var(--font-mono);color:var(--muted)">${esc(a.netdev || 'the boot NIC')}</td>
+      <td style="text-align:right"><button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="provisionDisarm('${esc(a.mac)}')">Disarm</button></td>
+    </tr>`).join('') : '<tr><td colspan="4" style="color:var(--muted)">Nothing is armed. A machine that network-boots now boots its own disk.</td></tr>';
+  }
+  const feed = document.getElementById('prov-feed');
+  if (feed) {
+    const rows = (msg.feed || []).slice().reverse();
+    feed.innerHTML = rows.length ? rows.map(f => `<tr>
+      <td style="font-family:var(--font-mono);color:var(--muted);white-space:nowrap">${esc(f.time.replace(/:\d\d [+-]\d{4}$/, ''))}</td>
+      <td style="font-family:var(--font-mono)">${esc(f.client)}</td>
+      <td style="font-family:var(--font-mono)">${esc(f.method)} ${esc(f.path)}</td>
+      <td style="color:${f.status < 400 ? 'var(--good)' : 'var(--danger)'}">${f.status}</td>
+      <td style="font-family:var(--font-mono);text-align:right;color:var(--muted)">${f.bytes.toLocaleString()}</td>
+    </tr>`).join('') : '<tr><td colspan="5" style="color:var(--muted)">No requests yet.</td></tr>';
+  }
+  set('prov-feed-src', msg.log || '');
+}
+function renderProvisionResult(msg) {
+  const e = document.getElementById('prov-result');
+  if (!e) return;
+  e.style.color = msg.ok ? 'var(--good)' : 'var(--danger)';
+  e.textContent = `${msg.what}: ${msg.ok ? 'ok' : 'FAILED'}\n${msg.output || ''}`;
 }
 
 // ── Network view ────────────────────────────────────────────────────────────
