@@ -2383,6 +2383,8 @@ async def ws_handler(websocket):
                     asyncio.create_task(_vm_create_cloud(websocket, msg))
                 elif action == "vm_delete_full":
                     await _vm_delete_full(websocket, msg)
+                elif action == "vm_enroll":
+                    await _vm_enroll(websocket, msg)
 
                 # ── Free-edition actions (ZFS / snapshots / logs) ──────────────
                 elif action == "zfs_status":
@@ -4743,6 +4745,79 @@ async def _vm_bulk(websocket, msg):
     await _list_vms(websocket)
 
 
+# ── Machines: the estate overlay on the VM list ──────────────────────────────
+# Three cheap reads, once per list, not per VM: the state DB (registered,
+# role, cluster, mesh id), wg-mgmt's dump (is that mesh id alive) and the
+# Prometheus file_sd directory (is it scraped). kldload-estate answers the
+# same questions in 3-4 s with libvirt and the leases thrown in; the VM
+# list is polled, so it gets the 50 ms version (2026-09-26).
+_MESH_ALIVE_S = 180
+
+
+def _estate_overlay(vms):
+    reg = {}
+    try:
+        con = _db_connect()
+        # A live row has deleted_at '' (kldload-db soft-deletes by writing a
+        # timestamp), not NULL: `IS NULL` alone matched nothing (2026-09-26).
+        for r in con.execute("SELECT name, role, cluster_id, status, mesh_id FROM vms "
+                             "WHERE deleted_at IS NULL OR deleted_at = ''"):
+            reg[r[0]] = {"role": r[1], "cluster": r[2] or "", "status": r[3],
+                         "mesh_id": r[4] or ""}
+        con.close()
+    except sqlite3.Error as e:
+        LOG.warning("estate overlay: state.db: %s", e)
+    alive = {}
+    try:
+        dump = subprocess.check_output(["wg", "show", "wg-mgmt", "dump"], text=True,
+                                       stderr=subprocess.DEVNULL, timeout=5)
+        for line in dump.splitlines()[1:]:
+            f = line.split("\t")
+            if len(f) >= 5 and f[3].startswith("10.250.0."):
+                alive[f[3].split("/")[0].rsplit(".", 1)[1]] = int(f[4] or 0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass  # no wg-mgmt on this host: nothing is marked alive, nothing else changes
+    scraped = set()
+    try:
+        for p in Path("/etc/prometheus/targets").glob("*.json"):
+            for t in json.loads(p.read_text() or "[]"):
+                vm = (t.get("labels") or {}).get("vm")
+                if vm:
+                    scraped.add(vm)
+    except (OSError, ValueError):
+        pass  # no file_sd directory: nothing is marked scraped
+    now = time.time()
+    for v in vms:
+        r = reg.get(v["name"])
+        mid = r["mesh_id"] if r else ""
+        hs = alive.get(mid, 0) if mid else 0
+        v["estate"] = {
+            "registered": bool(r),
+            "role": r["role"] if r else "",
+            "cluster": r["cluster"] if r else "",
+            "mesh_id": mid,
+            "mesh_peer": mid in alive,
+            "mesh_alive": bool(hs) and now - hs < _MESH_ALIVE_S,
+            "scraped": v["name"] in scraped,
+        }
+
+
+async def _vm_enroll(websocket, msg):
+    """Put an existing VM into the estate: the same kldload-join-NAME unit a
+    clone gets, retrying kldload-enroll until the guest has an address."""
+    vm = (msg.get("vm") or "").strip()
+    if not _VM_NAME_RE.match(vm):
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid VM name: {vm!r}"}))
+        return
+    if _vm_join_later(vm):
+        await websocket.send(json.dumps({"type": "log_line", "target": "vm-log",
+                                         "line": f"[enrol] join queued: kldload-enroll {vm}"}))
+    else:
+        await websocket.send(json.dumps({"type": "error",
+                                         "msg": f"could not queue the join for {vm}"}))
+    await _list_vms(websocket)
+
+
 async def _list_vms(websocket):
     vms = []
     try:
@@ -4933,6 +5008,7 @@ async def _list_vms(websocket):
                         "joining": name in joining})
     except Exception as e:
         LOG.warning("virsh list failed: %s", e)
+    _estate_overlay(vms)
     await websocket.send(json.dumps({"type": "vm_list", "vms": vms}))
 
 async def _vm_op(websocket, msg):

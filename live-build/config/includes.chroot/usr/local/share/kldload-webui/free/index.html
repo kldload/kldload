@@ -1836,8 +1836,8 @@ $ kldload-netboot-server status</div>
           </div>
           <input class="ws-table-search" placeholder="Filter VMs…" oninput="vmTableFilter('vm-tbody', this.value)">
           <table>
-            <thead><tr><th style="width:28px"><input type="checkbox" onchange="vmSelectAll(this.checked)" title="Select all"></th><th>Name</th><th>State</th><th>vCPUs</th><th>RAM</th><th>Disk</th><th>IP</th><th style="text-align:right">Actions</th></tr></thead>
-            <tbody id="vm-tbody"><tr><td colspan="8" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
+            <thead><tr><th style="width:28px"><input type="checkbox" onchange="vmSelectAll(this.checked)" title="Select all"></th><th>Name</th><th>State</th><th>vCPUs</th><th>RAM</th><th>Disk</th><th>IP</th><th title="state DB · WireGuard mesh · Prometheus">Estate</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody id="vm-tbody"><tr><td colspan="9" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -7022,7 +7022,7 @@ function renderVMList(vms) {
   if (hdr) hdr.textContent = vms.length ? `${running} running · ${stopped} stopped · ${vms.length} total` : 'no VMs yet';
 
   if (!vms.length) {
-    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted);padding:1rem">No VMs found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted);padding:1rem">No VMs found</td></tr>';
     return;
   }
   tbody.innerHTML = vms.map(v => {
@@ -7052,6 +7052,7 @@ function renderVMList(vms) {
       <td style="color:var(--subtle)">${esc(v.ram || '—')}</td>
       <td style="color:var(--muted);font-size:0.78rem">${esc(v.disk || '—')}${v.disk_used ? ` · <span style="color:var(--accent2)">${esc(v.disk_used)}</span>` : ''}</td>
       <td style="font-family:monospace;font-size:0.82rem;color:${(v.ip && v.ip !== '—') ? 'var(--accent2)' : 'var(--muted)'}">${esc(v.ip || '—')}</td>
+      <td style="white-space:nowrap">${vmEstateChips(v)}</td>
       <td style="white-space:nowrap;text-align:right">
         ${isRunning
           ? `<button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')" title="Graceful ACPI shutdown">Stop</button>
@@ -7400,6 +7401,36 @@ function _handleVmSnaps(msg) {
       }
     });
   }, 50);
+}
+
+// ── Estate chips on a VM row: DB · mesh · prom ─────────────────────────────
+// Each chip is one join step the estate-lifecycle test checks, in its
+// order: registered in state.db, a live wg-mgmt peer, a Prometheus target.
+// A running VM in none of them gets an Enrol link (vm_enroll = the same
+// join unit a clone gets).
+function vmEstateChips(v) {
+  const e = v.estate;
+  if (!e) return '<span style="color:var(--muted)">—</span>';
+  const chip = (label, state, title) => {
+    const col = state === 'ok' ? 'var(--good)' : state === 'warn' ? 'var(--warn)' : 'var(--muted)';
+    return `<span class="badge" style="color:${col}" title="${esc(title)}">${esc(label)}</span>`;
+  };
+  if (!e.registered) {
+    return v.state === 'running'
+      ? `<span style="color:var(--muted);font-size:0.78rem">not in the estate</span> <button class="btn btn-ghost btn-sm" onclick="vmEnrol('${esc(v.name)}')" title="kldload-enroll: DB row, mesh peer, inventory, Prometheus">Enrol</button>`
+      : '<span style="color:var(--muted);font-size:0.78rem">not in the estate</span>';
+  }
+  const parts = [chip('DB', 'ok', `state.db: role ${e.role}${e.cluster ? ', cluster ' + e.cluster : ''}`)];
+  if (!e.mesh_id) parts.push(chip('mesh', 'off', 'no mesh id: not enrolled on wg-mgmt'));
+  else if (e.mesh_alive) parts.push(chip(`mesh ${e.mesh_id}`, 'ok', 'wg-mgmt peer with a handshake in the last 3 min'));
+  else if (e.mesh_peer) parts.push(chip(`mesh ${e.mesh_id}`, 'warn', 'wg-mgmt peer, no recent handshake (VM off, or the tunnel is idle)'));
+  else parts.push(chip(`mesh ${e.mesh_id}`, 'warn', 'mesh id recorded but wg-mgmt has no such peer'));
+  parts.push(chip('prom', e.scraped ? 'ok' : 'off', e.scraped ? 'in a Prometheus file_sd target' : 'no Prometheus target (klab-prom-targets writes enrolled VMs)'));
+  return parts.join(' ');
+}
+function vmEnrol(name) {
+  _busyShow(`enrolling ${name}…`, 5000);
+  send({ action: 'vm_enroll', vm: name });
 }
 
 function vmClone(name) {
