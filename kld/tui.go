@@ -1204,9 +1204,16 @@ func (m model) tableView(d *sectionData, w, h int) string {
 	if limit < 1 {
 		limit = 1
 	}
-	start := 0
-	if m.row >= limit {
-		start = m.row - limit + 1
+	// the cursor sits in the middle of the window, so the rows before and
+	// after it stay in view (vim's scrolloff; the operator's ask,
+	// 2026-09-26): the window follows the cursor, clamped so the table
+	// never shows blank rows at either end
+	start := m.row - limit/2
+	if start > len(rows)-limit {
+		start = len(rows) - limit
+	}
+	if start < 0 {
+		start = 0
 	}
 	n := 0
 	for i := start; i < len(rows) && i < start+limit; i++ {
