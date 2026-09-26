@@ -42,7 +42,7 @@ var sections = []section{
 	{"Helm", []string{"Releases", "Examples"}},
 	{"Metrics", []string{"Targets"}},
 	{"Estate", []string{"Drift", "Units", "Events"}},
-	{"Provision", []string{"Armed", "Goldens", "Answers"}},
+	{"Provision", []string{"Armed", "Feed", "Goldens", "Answers"}},
 }
 
 func sectionNames() []string {
@@ -151,6 +151,7 @@ var collectors = map[string]func(*sectionData){
 	"Estate/Units":        loadUnits,
 	"Estate/Events":       loadEvents,
 	"Provision/Armed":     loadProvision,
+	"Provision/Feed":      loadFeed,
 	"Provision/Goldens":   loadGoldens,
 	"Provision/Answers":   loadAnswers,
 }
@@ -1312,6 +1313,71 @@ func loadProvision(d *sectionData) {
 	for _, a := range st.Armed {
 		d.rows = append(d.rows, []string{str(a["mac"]), str(a["mode"]), orDash(str(a["golden"])), orDash(str(a["netdev"]))})
 	}
+}
+
+// loadFeed is the netboot server's nginx access log, newest first: which
+// machine fetched the kernel, the root image, its answers file — the same
+// feed the web console's Provision page shows while a rack installs.
+func loadFeed(d *sectionData) {
+	root := os.Getenv("NETBOOT_ROOT")
+	if root == "" {
+		root = "/var/lib/kldload/netboot-serve"
+	}
+	out, err := run(10*time.Second, "tail", "-n", "300", root+"/nginx-access.log")
+	if err != nil {
+		d.err = "no netboot feed: " + err.Error()
+		return
+	}
+	d.columns = []string{"when", "client", "request", "status", "bytes", "what"}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		// 10.100.10.142 - - [26/Sep/2026:09:01:17 -0700] "GET /kldload/squashfs.img HTTP/1.1" 200 16787533824 "-" "curl/8.18.0"
+		l := lines[i]
+		client, rest, ok := strings.Cut(l, " - - [")
+		if !ok {
+			continue
+		}
+		when, rest, ok := strings.Cut(rest, "] \"")
+		if !ok {
+			continue
+		}
+		req, rest, ok := strings.Cut(rest, "\" ")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(rest)
+		status, size := "", ""
+		if len(f) >= 2 {
+			status, size = f[0], f[1]
+		}
+		if n, err := strconv.ParseInt(size, 10, 64); err == nil {
+			size = human(n)
+		}
+		path := req
+		if p := strings.Fields(req); len(p) >= 2 {
+			path = p[0] + " " + p[1]
+		}
+		what := ""
+		switch {
+		case strings.Contains(path, "squashfs"):
+			what = "root image"
+		case strings.Contains(path, "vmlinuz"), strings.Contains(path, "initrd"):
+			what = "kernel/initrd"
+		case strings.Contains(path, "/answers/"):
+			what = "answers file"
+		case strings.Contains(path, "/armed/"):
+			what = "consent token"
+		case strings.Contains(path, ".ipxe"):
+			what = "boot menu"
+		case strings.Contains(path, "/golden/"):
+			what = "golden stream"
+		}
+		if t := strings.Fields(when); len(t) > 0 {
+			when = strings.TrimPrefix(t[0][strings.Index(t[0], ":")+1:], "")
+		}
+		d.rows = append(d.rows, []string{when, client, path, status, size, what})
+	}
+	d.headline = fmt.Sprintf("last %d requests to the netboot server, newest first", len(d.rows))
 }
 
 func loadGoldens(d *sectionData) {

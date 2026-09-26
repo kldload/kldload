@@ -176,10 +176,11 @@ estate drift
 estate units
 estate events
 provision armed
+provision feed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 32)) && _pass "every sub-tab tried (32/32)" || _fail "sub-tabs tried" "${_tabs} of 32"
+    ((_tabs == 33)) && _pass "every sub-tab tried (33/33)" || _fail "sub-tabs tried" "${_tabs} of 33"
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
