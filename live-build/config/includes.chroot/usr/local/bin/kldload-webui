@@ -1100,6 +1100,26 @@ def get_system_info():
     return info
 
 
+# ── Estate view: every machine any source knows about, and the drift ─────────
+# kldload-estate is the one place libvirt, the state DB, the leases, the mesh
+# and the cluster are compared; the console shows its answer as it is.
+def collect_estate_status():
+    try:
+        d = json.loads(subprocess.check_output(["kldload-estate"], text=True,
+                                               stderr=subprocess.DEVNULL, timeout=60))
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        return {"type": "estate_status", "machines": [], "drift": [], "sources": {},
+                "error": str(e)}
+    d["type"] = "estate_status"
+    d.setdefault("error", "")
+    return d
+
+
+async def _estate_status(websocket):
+    loop = asyncio.get_running_loop()
+    await websocket.send(json.dumps(await loop.run_in_executor(None, collect_estate_status)))
+
+
 # ── Overview: the estate at a glance ─────────────────────────────────────────
 # Four facts a hypervisor's operator wants first (console design,
 # 2026-09-26): machines, pool, mesh, cluster — each from the tool that owns
@@ -1908,6 +1928,8 @@ async def ws_handler(websocket):
                     await _network_status(websocket)
                 elif action == "overview_status":
                     await _overview_status(websocket)
+                elif action == "estate_status":
+                    await _estate_status(websocket)
                 elif action == "provision_status":
                     await _provision_status(websocket)
                 elif action == "provision_arm":

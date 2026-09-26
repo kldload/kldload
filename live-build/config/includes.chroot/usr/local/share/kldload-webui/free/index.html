@@ -454,6 +454,9 @@ html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background
 
   <div class="nav-section">Estate</div>
   <ul>
+    <li data-view="estate">
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 21h18M5 21V9l7-5 7 5v12"/><path d="M9 21v-6h6v6"/></svg></span> Machines and health
+    </li>
     <li data-view="ansible">
       <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span> Inventory and plays
     </li>
@@ -2035,6 +2038,43 @@ $ kldload-netboot-server status</div>
           <thead><tr><th>time</th><th>client</th><th>request</th><th>status</th><th style="text-align:right">bytes</th></tr></thead>
           <tbody id="prov-feed"><tr><td colspan="5" style="color:var(--muted)">Loading…</td></tr></tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- ── Estate: kldload-estate's table, its drift, and the doctor ─────────
+         (console design, 2026-09-26). -->
+    <div class="view" id="view-estate">
+      <div class="ws-header">
+        <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+          <div style="font-size:1.15rem;font-weight:700">Machines and health</div>
+          <span id="est-header-status" style="font-size:0.78rem;color:var(--muted)">kldload-estate · every source compared</span>
+          <span style="flex:1"></span>
+          <button class="btn btn-ghost btn-sm" onclick="estateRefresh()" title="Reload">↻</button>
+        </div>
+      </div>
+      <div class="stat-grid" style="margin-bottom:0.9rem">
+        <div class="stat-card"><div class="stat-label">Machines</div><div class="stat-value" id="est-count">—</div></div>
+        <div class="stat-card"><div class="stat-label">Running</div><div class="stat-value" id="est-running">—</div></div>
+        <div class="stat-card"><div class="stat-label">On the mesh</div><div class="stat-value" id="est-mesh">—</div></div>
+        <div class="stat-card"><div class="stat-label">Drift</div><div class="stat-value" id="est-drift-count">—</div></div>
+      </div>
+      <div class="ws-panel" style="margin-bottom:0.9rem">
+        <div class="ws-panel-hdr"><span>Inventory — libvirt, state DB, leases, mesh, cluster</span><span id="est-sources" style="color:var(--muted);font-size:0.78rem"></span></div>
+        <table class="data-table">
+          <thead><tr><th></th><th>machine</th><th>class</th><th>address</th><th>network</th><th>mesh</th><th>k8s</th><th>DB status</th></tr></thead>
+          <tbody id="est-rows"><tr><td colspan="8" style="color:var(--muted)">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="ws-panel" style="margin-bottom:0.9rem">
+        <div class="ws-panel-hdr"><span>Drift — where two sources disagree</span></div>
+        <div id="est-drift" style="padding:0.7rem 1rem;color:var(--muted)">Loading…</div>
+      </div>
+      <div class="ws-panel">
+        <div class="ws-panel-hdr">
+          <span>Health — kldload-doctor</span>
+          <span style="display:flex;align-items:center;gap:0.5rem"><span id="doctor-summary-estate" style="font-size:0.75rem;color:var(--muted)">—</span><button class="btn btn-ghost btn-sm" onclick="send({action:'doctor_run'})">↻ Run</button></span>
+        </div>
+        <div id="doctor-report-estate" style="padding:0.7rem 1rem;font-size:0.82rem;color:var(--muted)">Run the doctor to see every check, grouped by subsystem.</div>
       </div>
     </div>
 
@@ -4210,6 +4250,7 @@ function _refreshActiveView() {
            since_lines: (window._logLines && window._logLines['k8s']) || 0 });
   }
   if (isActive('view-network')) send({ action: 'network_status' });
+  if (isActive('view-estate')) send({ action: 'estate_status' });
   if (isActive('view-provision')) send({ action: 'provision_status' });
   if (isActive('view-klab')) {
     send({ action: 'klab_status' });
@@ -5230,6 +5271,7 @@ function handle(msg) {
     case 'helm_status':    { renderHelmStatus(msg);    break; }
     case 'helm_repo_list': { renderHelmRepos(msg);     break; }
     case 'overview_status': { renderOverview(msg);     break; }
+    case 'estate_status':  { renderEstate(msg);        break; }
     case 'network_status': { renderNetwork(msg);       break; }
     case 'provision_status': { renderProvision(msg);   break; }
     case 'provision_result': { renderProvisionResult(msg); break; }
@@ -5598,6 +5640,7 @@ document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
     }
     if (li.dataset.view === 'ansible')      { ansibleRefresh(); _ansibleRestoreTab(); }
     if (li.dataset.view === 'network')      networkRefresh();
+    if (li.dataset.view === 'estate')       estateRefresh();
     if (li.dataset.view === 'provision')    provisionRefresh();
     if (li.dataset.view === 'helm')         { helmRefresh(); _helmRestoreTab(); }
     if (li.dataset.view === 'metrics')        metricsRefreshList();
@@ -9771,17 +9814,19 @@ function renderDoctorReport(msg) {
     `<span style="color:#c9a04a">! ${counts.warn||0}</span>  ` +
     `<span style="color:var(--muted)">∅ ${counts.skip||0}</span>`;
   // Update BOTH places: dashboard (#doctor-report) and klab (#doctor-report-klab)
-  ['doctor-summary', 'doctor-summary-klab'].forEach(id => {
+  ['doctor-summary', 'doctor-summary-klab', 'doctor-summary-estate'].forEach(id => {
     const e = document.getElementById(id);
     if (e) e.innerHTML = summaryHtml;
   });
   const el    = document.getElementById('doctor-report');
   const elKl  = document.getElementById('doctor-report-klab');
-  if (!el && !elKl) return;
+  const elEs  = document.getElementById('doctor-report-estate');
+  if (!el && !elKl && !elEs) return;
   if (!results.length) {
     const empty = '<div style="color:var(--muted)">No results. Is kldload-doctor installed?</div>';
     if (el)   el.innerHTML   = empty;
     if (elKl) elKl.innerHTML = empty;
+    if (elEs) elEs.innerHTML = empty;
     return;
   }
   // Group by subsystem
@@ -9848,6 +9893,7 @@ function renderDoctorReport(msg) {
     </div>`;
   if (el)   el.innerHTML   = toolbar;
   if (elKl) elKl.innerHTML = toolbar;
+  if (elEs) elEs.innerHTML = toolbar;
 }
 
 // ── Ansible ──────────────────────────────────────────────────────────────────
@@ -10230,6 +10276,41 @@ function renderHelmRepos(msg) {
     <td style="color:var(--muted);font-size:0.82rem">${esc(r.url)}</td>
     <td><button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="helmRepoRemove('${esc(r.name)}')">Remove</button></td>
   </tr>`).join('');
+}
+
+// ── Estate view ─────────────────────────────────────────────────────────────
+function estateRefresh() { send({ action: 'estate_status' }); }
+function renderEstate(msg) {
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  const ms = msg.machines || [];
+  set('est-count', ms.length);
+  set('est-running', ms.filter(m => m.power === 'running').length);
+  set('est-mesh', ms.filter(m => m.in_mesh).length);
+  set('est-drift-count', (msg.drift || []).length);
+  const src = msg.sources || {};
+  set('est-sources', Object.keys(src).map(k => `${k}: ${src[k] ? 'yes' : 'no'}`).join(' · '));
+  set('est-header-status', msg.error ? msg.error : `kldload-estate · ${ms.length} machines`);
+  const powerColor = { running: 'var(--good)', 'shut off': 'var(--muted)', absent: 'var(--danger)' };
+  const rows = document.getElementById('est-rows');
+  if (rows) {
+    rows.innerHTML = ms.length ? ms.map(m => `<tr>
+      <td><span style="display:inline-block;width:8px;height:8px;border-radius:4px;background:${powerColor[m.power] || 'var(--warn)'}" title="${esc(m.power)}"></span></td>
+      <td style="font-family:var(--font-mono)">${esc(m.name)}</td>
+      <td style="color:var(--muted)">${esc(m.class || '')}</td>
+      <td style="font-family:var(--font-mono);color:var(--muted)">${esc(m.ip || '—')}</td>
+      <td style="color:var(--muted)">${esc(m.network || '—')}</td>
+      <td style="font-family:var(--font-mono)">${m.in_mesh ? `<span style="color:var(--good)">${esc(m.mesh_id || 'yes')}</span> <span style="color:var(--muted);font-size:0.72rem">${esc(m.mesh_ifaces || '')}</span>` : '<span style="color:var(--muted)">—</span>'}</td>
+      <td style="color:var(--muted)">${esc(m.k8s || '—')}</td>
+      <td style="color:var(--muted)">${esc(m.db_status || '—')}</td>
+    </tr>`).join('') : '<tr><td colspan="8" style="color:var(--muted)">No machines known to any source.</td></tr>';
+  }
+  const dr = document.getElementById('est-drift');
+  if (dr) {
+    const d = msg.drift || [];
+    dr.innerHTML = d.length
+      ? d.map(x => `<div style="padding:0.3rem 0;border-bottom:1px solid var(--border)"><span class="badge badge-yellow">${esc(x.kind)}</span> <span style="font-family:var(--font-mono)">${esc(x.machine)}</span> <span style="color:var(--muted)">${esc(x.detail || '')}</span>${x.repair ? ` <code>${esc(x.repair)}</code>` : ''}</div>`).join('')
+      : 'No drift: every source agrees about every machine.';
+  }
 }
 
 // ── Overview strip ──────────────────────────────────────────────────────────
