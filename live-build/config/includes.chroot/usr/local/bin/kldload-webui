@@ -1364,6 +1364,21 @@ def collect_overview_status():
         out["events"] = recent
     except (ValueError, TypeError):
         pass
+    # The doctor's summary: two seconds since its apiserver port probe, and
+    # the one number an operator wants before any table (2026-09-26).
+    try:
+        # exit 1 means "a check failed", with the JSON still on stdout;
+        # sh() would read that as no output and the tile would say healthy.
+        doc = subprocess.run(["kldload-doctor", "--json"], text=True, capture_output=True,
+                             timeout=120, check=False)
+        rep = json.loads(doc.stdout or "{}")
+        summ = rep.get("summary") or {}
+        out["health"] = {"ok": summ.get("ok", 0), "warn": summ.get("warn", 0),
+                         "fail": summ.get("fail", 0), "skip": summ.get("skip", 0),
+                         "failing": [c.get("name", "") for c in rep.get("results", [])
+                                     if c.get("status") == "fail"][:3]}
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        out["health"] = {}
     return out
 
 

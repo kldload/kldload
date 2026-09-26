@@ -511,6 +511,7 @@ html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background
         <div class="stat-card"><div class="stat-label">Storage</div><div class="stat-value" id="ov-storage">—</div><div class="stat-sub" id="ov-storage-sub">root pool</div></div>
         <div class="stat-card"><div class="stat-label">Mesh</div><div class="stat-value" id="ov-mesh">—</div><div class="stat-sub" id="ov-mesh-sub">peers with a handshake in the last 3 min</div></div>
         <div class="stat-card"><div class="stat-label">Cluster</div><div class="stat-value" id="ov-cluster">—</div><div class="stat-sub" id="ov-cluster-sub">Kubernetes nodes Ready</div></div>
+        <div class="stat-card" style="cursor:pointer" onclick="_kldSwitchView('estate')" title="Open Machines and health"><div class="stat-label">Health</div><div class="stat-value" id="ov-health">—</div><div class="stat-sub" id="ov-health-sub">kldload-doctor</div></div>
       </div>
       <div class="ws-panel" style="margin-bottom:0.9rem">
         <div class="ws-panel-hdr"><span>Activity — the state DB's last events</span><button class="btn btn-ghost btn-sm" onclick="overviewRefresh()" title="Reload">↻</button></div>
@@ -10517,6 +10518,17 @@ function renderOverview(msg) {
     set('ov-cluster', c.unreachable ? 'unreachable' : `${c.ready} / ${c.nodes}`);
     set('ov-cluster-sub', c.unreachable ? `no apiserver at ${c.server}` : `Ready of nodes · ${c.version}`);
   } else { set('ov-cluster', '—'); set('ov-cluster-sub', 'no kubeconfig on this host'); }
+  const hl = msg.health || {};
+  if (hl.ok !== undefined) {
+    const v = document.getElementById('ov-health');
+    if (v) {
+      v.textContent = hl.fail ? `${hl.fail} failing` : hl.warn ? `${hl.warn} warning${hl.warn > 1 ? 's' : ''}` : 'healthy';
+      v.style.color = hl.fail ? 'var(--danger)' : hl.warn ? 'var(--warn)' : 'var(--good)';
+    }
+    set('ov-health-sub', hl.fail && hl.failing && hl.failing.length
+      ? hl.failing.join(', ')
+      : `${hl.ok} ok · ${hl.warn} warn · ${hl.fail} fail · ${hl.skip} skipped`);
+  } else { set('ov-health', '—'); set('ov-health-sub', 'kldload-doctor did not answer'); }
   const ev = document.getElementById('ov-events');
   if (ev) {
     const rows = msg.events || [];
