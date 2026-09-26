@@ -184,6 +184,8 @@ if ! ((RELEASED)); then
     skip "R2 -latest keys (pass --released once published)"
 elif ! command -v rclone >/dev/null 2>&1; then
     skip "R2 -latest keys — rclone is not installed"
+elif [[ -z "${R2_ACCOUNT_ID:-}" || -z "${R2_ACCESS_KEY_ID:-}" || -z "${R2_SECRET_ACCESS_KEY:-}" ]]; then
+    skip "R2 -latest keys — R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY not in the environment"
 elif [[ -z "${R2_ACCESS_KEY_ID:-}" ]]; then
     skip "R2 -latest keys — R2 credentials are not in the environment"
 else
@@ -197,7 +199,16 @@ else
         # swallow: a key with no sidecar is exactly what this loop reports as
         # BAD two lines down; rclone's own exit status would abort the loop
         # before the other three keys were ever looked at.
-        sum="$(rclone cat "r2:kldload-releases/${key}.sha256" 2>/dev/null || true)"
+        # the same remote r2-publish.sh uses: rclone configured from the
+        # R2_* environment, no named remote to set up. The named "r2:"
+        # remote existed on one machine only, so the check said "no
+        # readable sidecar" for a release the public URL served fine
+        # (2026-09-26).
+        sum="$(RCLONE_S3_PROVIDER=Cloudflare RCLONE_S3_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:-}" \
+            RCLONE_S3_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:-}" \
+            RCLONE_S3_ENDPOINT="https://${R2_ACCOUNT_ID:-}.r2.cloudflarestorage.com" \
+            RCLONE_S3_NO_CHECK_BUCKET=true \
+            rclone cat ":s3:${R2_BUCKET:-kldload-releases}/${key}.sha256" 2>/dev/null || true)"
         _want_re="[[:space:]]\\*?${R2NAME[$key]//./\\.}[[:space:]]*$"
         if [[ -z "$sum" ]]; then
             bad "R2 $key has no readable .sha256 sidecar"
