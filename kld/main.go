@@ -6,18 +6,18 @@
 // fifth console: the deep views stay in vmxplore, zxplore and wgx, and this
 // tool opens them on Enter and comes back when they exit.
 //
-//	kld                      the console: a window under a display, the
-//	                         terminal console otherwise
-//	kld <section>            open on that section (overview, machines, storage,
-//	                         network, cluster, metrics, estate, provision)
-//	kld --tui [section]      the terminal console even under a display
-//	kld <section> --print    print that section once and exit (no TUI)
+//	kld                      the terminal console
+//	kld <section> [sub]      open on that section and sub-tab
+//	kld --gui [section]      the web console in a standalone app window
+//	kld <section> --print    print that sub-tab once and exit (no TUI)
 //	kld --version
 //
 // One app for both a window manager and a headless box (operator,
-// 2026-09-26): under a display the window IS the web console, hosted by
-// kldload-chrome-app as a standalone app window, so a desktop and a browser
-// see the same console from one codebase; the terminal gets this TUI. A
+// 2026-09-26): the terminal console is the console, everywhere, and is the
+// default even under a display — the operator typed `kld` on a desktop and
+// got a Chrome window when they wanted the TUI (10:20 that day). --gui opens
+// the web console, hosted by kldload-chrome-app as a standalone app window,
+// for the things only a browser does (Grafana, the install show, Bob). A
 // second native copy of every view would drift from the web console within
 // a week, so there is none.
 //
@@ -60,12 +60,12 @@ func versionFull() string {
 func usage() {
 	fmt.Print(`kld ` + versionFull() + ` — the kldload operator console (terminal)
 
-  kld                       open the console: a window under a display,
-                            the terminal console otherwise
+  kld                       open the terminal console
   kld <section> [<sub-tab>] open on a section: overview machines storage
                             network cluster ansible helm metrics estate
                             provision — and one of its sub-tabs
-  kld --tui [section]       the terminal console even under a display
+  kld --gui [section]       the web console in a standalone app window
+                            (kldload-chrome-app; needs a display)
   kld <section> [<sub-tab>] --print
                             print that sub-tab once and exit
   kld --version
@@ -92,14 +92,16 @@ func main() {
 		}
 	}
 	start, sub := 0, 0
-	print, tui := false, false
+	print, gui := false, false
 	for _, a := range args {
-		if a == "--print" {
+		switch a {
+		case "--print":
 			print = true
 			continue
-		}
-		if a == "--tui" {
-			tui = true
+		case "--gui":
+			gui = true
+			continue
+		case "--tui": // the old default's opt-out, kept as a no-op alias
 			continue
 		}
 		if i := sectionIndex(a); i >= 0 {
@@ -123,11 +125,11 @@ func main() {
 		fmt.Print(m.body())
 		return
 	}
-	if !tui && !print {
-		if err := openWindow(start); err == nil {
-			return
-		} else if err != errNoDisplay {
+	if gui && !print {
+		if err := openWindow(start); err != nil {
 			fmt.Fprintln(os.Stderr, "kld:", err, "— starting the terminal console")
+		} else {
+			return
 		}
 	}
 	if _, err := tea.NewProgram(newModel(start, sub, 0), tea.WithAltScreen()).Run(); err != nil {
@@ -160,7 +162,10 @@ func openWindow(section int) error {
 		return errors.New("kldload-chrome-app is not installed (desktop profile only)")
 	}
 	url := "https://localhost:8443/?app=1#" + spaView[sections[section].name]
+	// Chrome's stderr (GTK property warnings, Vulkan-vs-Wayland notes) is
+	// noise on the operator's terminal; the wrapper's own errors go to its
+	// log. Exit status still reaches the caller.
 	c := exec.Command(wrapper, "com.kldload.console", url)
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	c.Stdin = os.Stdin
 	return c.Run()
 }
