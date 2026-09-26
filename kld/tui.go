@@ -357,6 +357,23 @@ func (m model) drill() (tea.Model, tea.Cmd) {
 		target = "Snapshots"
 	case "Storage/Datasets":
 		target = "Snapshots"
+	case "Cluster/Pods":
+		r := m.selectedRow()
+		m.switchTo(m.active, subIndex(m.active, "Logs"))
+		m.ctx[m.key()] = col(r, 1) + "/" + col(r, 0)
+		m.loading[m.key()] = true
+		return m, m.reload()
+	case "Cluster/Nodes", "Cluster/Deployments", "Cluster/Services":
+		r := m.selectedRow()
+		kind := map[string]string{"Cluster/Nodes": "node", "Cluster/Deployments": "deployment", "Cluster/Services": "service"}[sections[m.active].name+"/"+m.subName()]
+		ref := col(r, 0)
+		if kind != "node" {
+			ref = col(r, 1) + "/" + col(r, 0)
+		}
+		m.switchTo(m.active, subIndex(m.active, "Describe"))
+		m.ctx[m.key()] = kind + " " + ref
+		m.loading[m.key()] = true
+		return m, m.reload()
 	case "Ansible/Groups":
 		m.switchTo(m.active, subIndex(m.active, "Hosts"))
 		m.filter.SetValue(name)
@@ -522,7 +539,7 @@ func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
 	// A batch: the verb runs once per marked row, in table order, one
 	// after another; a destructive batch asks for the count to be typed.
 	// Verbs that ask or take the terminal run on the selection only.
-	if marked := m.markedRows(); len(marked) > 1 && !v.noRow && !v.inter && v.prompt == "" {
+	if marked := m.markedRows(); len(marked) > 1 && !v.noRow && !v.inter && v.prompt == "" && v.argv != nil {
 		if v.confirm {
 			m.prompt = fmt.Sprintf("%s %d marked rows — type %d to confirm: ", v.label, len(marked), len(marked))
 			m.pending = func(typed string) tea.Cmd {
@@ -586,7 +603,13 @@ func (m model) execBatch(v verb, rows [][]string) tea.Cmd {
 }
 
 func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
-	argv, err := v.argv(row, in)
+	var argv []string
+	var err error
+	if v.argv == nil && v.ctxArgv != nil {
+		argv, err = v.ctxArgv(m.ctx[m.key()])
+	} else {
+		argv, err = v.argv(row, in)
+	}
 	if err != nil {
 		return func() tea.Msg { return doneMsg{v.label, err} }
 	}
@@ -736,6 +759,10 @@ func (m model) keyHints() string {
 	switch sections[m.active].name + "/" + m.subName() {
 	case "Machines/VMs", "Storage/Datasets":
 		parts = append(parts, k("enter", "snapshots"))
+	case "Cluster/Pods":
+		parts = append(parts, k("enter", "logs"))
+	case "Cluster/Nodes", "Cluster/Deployments", "Cluster/Services":
+		parts = append(parts, k("enter", "describe"))
 	}
 	for _, v := range m.verbsHere() {
 		parts = append(parts, k(v.key, v.label))
@@ -863,7 +890,7 @@ func (m model) detailView(d *sectionData, w, h int) string {
 	}
 	lines = append(lines, "")
 	for _, v := range m.verbsHere() {
-		if v.noRow {
+		if v.noRow || v.argv == nil {
 			continue
 		}
 		if argv, err := v.argv(r, "…"); err == nil {

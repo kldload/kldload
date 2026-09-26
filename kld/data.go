@@ -37,7 +37,7 @@ var sections = []section{
 	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Networks", "Pools"}},
 	{"Storage", []string{"Pools", "Topology", "Datasets", "Snapshots", "Boot envs", "ARC"}},
 	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet"}},
-	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services"}},
+	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services", "Events", "Logs", "Describe"}},
 	{"Ansible", []string{"Hosts", "Groups", "Plays"}},
 	{"Helm", []string{"Releases", "Examples"}},
 	{"Metrics", []string{"Host", "Storage", "Machines", "Mesh", "Targets"}},
@@ -141,6 +141,9 @@ var collectors = map[string]func(*sectionData){
 	"Cluster/Pods":        loadPods,
 	"Cluster/Deployments": loadDeployments,
 	"Cluster/Services":    loadServices,
+	"Cluster/Events":      loadKubeEvents,
+	"Cluster/Logs":        loadPodLogs,
+	"Cluster/Describe":    loadDescribe,
 	"Ansible/Hosts":       loadAnsibleHosts,
 	"Ansible/Groups":      loadAnsibleGroups,
 	"Ansible/Plays":       loadPlays,
@@ -874,14 +877,62 @@ func tableRows(d *sectionData, out string, n int) {
 }
 
 func loadNodes(d *sectionData) {
-	out, ok := kube(d, "get", "nodes", "--no-headers", "-o",
-		"custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type,ROLE:.metadata.labels.node-role\\.kubernetes\\.io/control-plane,VERSION:.status.nodeInfo.kubeletVersion,IP:.status.addresses[0].address,OS:.status.nodeInfo.osImage")
+	// JSON, not custom-columns: the control-plane label is present with an
+	// EMPTY value, which custom-columns printed as nothing and the row's
+	// fields then shifted left by one (onyx, 2026-09-26).
+	out, ok := kube(d, "get", "nodes", "-o", "json")
 	if !ok {
 		return
 	}
-	d.columns = []string{"node", "status", "control-plane", "kubelet", "address", "os"}
-	tableRows(d, out, 6)
-	d.headline = fmt.Sprintf("%d node(s)", len(d.rows))
+	var rep struct {
+		Items []struct {
+			Metadata struct {
+				Name   string            `json:"name"`
+				Labels map[string]string `json:"labels"`
+			} `json:"metadata"`
+			Spec struct {
+				Unschedulable bool `json:"unschedulable"`
+			} `json:"spec"`
+			Status struct {
+				Conditions []struct{ Type, Status string }  `json:"conditions"`
+				Addresses  []struct{ Type, Address string } `json:"addresses"`
+				NodeInfo   struct {
+					KubeletVersion string `json:"kubeletVersion"`
+					OSImage        string `json:"osImage"`
+				} `json:"nodeInfo"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		d.err = "kubectl get nodes: " + err.Error()
+		return
+	}
+	d.columns = []string{"node", "status", "role", "kubelet", "address", "os"}
+	ready := 0
+	for _, n := range rep.Items {
+		status := "NotReady"
+		for _, c := range n.Status.Conditions {
+			if c.Type == "Ready" && c.Status == "True" {
+				status = "Ready"
+				ready++
+			}
+		}
+		if n.Spec.Unschedulable {
+			status += ",SchedulingDisabled"
+		}
+		role := "worker"
+		if _, ok := n.Metadata.Labels["node-role.kubernetes.io/control-plane"]; ok {
+			role = "control-plane"
+		}
+		addr := "-"
+		for _, a := range n.Status.Addresses {
+			if a.Type == "InternalIP" {
+				addr = a.Address
+			}
+		}
+		d.rows = append(d.rows, []string{n.Metadata.Name, status, role, n.Status.NodeInfo.KubeletVersion, addr, n.Status.NodeInfo.OSImage})
+	}
+	d.headline = fmt.Sprintf("%d node(s), %d Ready", len(d.rows), ready)
 }
 
 func loadPods(d *sectionData) {
@@ -927,6 +978,72 @@ func loadServices(d *sectionData) {
 		}
 	}
 	d.headline = fmt.Sprintf("%d service(s)", len(d.rows))
+}
+
+func loadKubeEvents(d *sectionData) {
+	out, ok := kube(d, "get", "events", "-A", "--sort-by=.lastTimestamp", "--no-headers", "-o",
+		"custom-columns=T:.lastTimestamp,NS:.metadata.namespace,TYPE:.type,REASON:.reason,OBJ:.involvedObject.name,MSG:.message")
+	if !ok {
+		return
+	}
+	d.columns = []string{"when", "namespace", "type", "reason", "object", "message"}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		f := strings.Fields(lines[i])
+		if len(f) < 6 {
+			continue
+		}
+		when := f[0]
+		if t, err := time.Parse(time.RFC3339, when); err == nil {
+			when = t.Local().Format("15:04:05")
+		}
+		d.rows = append(d.rows, []string{when, f[1], f[2], f[3], f[4], strings.Join(f[5:], " ")})
+	}
+	d.headline = fmt.Sprintf("%d events, newest first", len(d.rows))
+}
+
+// loadPodLogs shows the last 300 lines of a pod (the context is "namespace/pod",
+// set by Enter on the Pods tab); the L verb follows them in the terminal.
+func loadPodLogs(d *sectionData) {
+	ns, pod, ok := strings.Cut(d.ctx, "/")
+	if !ok || pod == "" {
+		d.headline = "open a pod on the Pods tab (enter) to read its logs here"
+		return
+	}
+	out, ok := kube(d, "logs", "-n", ns, pod, "--tail=300", "--all-containers=true", "--prefix=true")
+	if !ok {
+		return
+	}
+	d.columns = []string{"log"}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		d.rows = append(d.rows, []string{line})
+	}
+	d.headline = fmt.Sprintf("%s/%s — last %d lines (L follows in the terminal)", ns, pod, len(d.rows))
+}
+
+// loadDescribe is kubectl describe of whatever Enter was pressed on: the
+// context is "kind namespace/name" or "kind name".
+func loadDescribe(d *sectionData) {
+	f := strings.Fields(d.ctx)
+	if len(f) != 2 {
+		d.headline = "press enter on a node, deployment or service to describe it here"
+		return
+	}
+	args := []string{"describe", f[0]}
+	if ns, name, ok := strings.Cut(f[1], "/"); ok {
+		args = append(args, "-n", ns, name)
+	} else {
+		args = append(args, f[1])
+	}
+	out, ok := kube(d, args...)
+	if !ok {
+		return
+	}
+	d.columns = []string{"kubectl describe " + d.ctx}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		d.rows = append(d.rows, []string{line})
+	}
+	d.headline = fmt.Sprintf("%s — %d lines", d.ctx, len(d.rows))
 }
 
 // ── Ansible: kldload-inventory and the playbook library ────────────────────

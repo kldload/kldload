@@ -27,6 +27,9 @@ type verb struct {
 	// argv builds the command; row is the selected row (nil when noRow),
 	// input is what the prompt collected. A returned error is shown as is.
 	argv func(row []string, input string) ([]string, error)
+	// ctxArgv builds it from the tab's context instead (a pod's logs on
+	// the Logs tab, where the context is "namespace/pod").
+	ctxArgv func(ctx string) ([]string, error)
 }
 
 // col returns column i of a row, or "".
@@ -269,6 +272,15 @@ var verbs = map[string][]verb{
 			return []string{"kubectl", "delete", "pod", "-n", col(row, 1), col(row, 0), "--request-timeout=60s"}, nil
 		}},
 		{key: "k", label: "k9s", noRow: true, inter: true, argv: fixed("k9s")},
+	},
+	"Cluster/Logs": {
+		{key: "L", label: "follow in the terminal", noRow: true, inter: true, ctxArgv: func(ctx string) ([]string, error) {
+			ns, pod, ok := strings.Cut(ctx, "/")
+			if !ok || pod == "" {
+				return nil, errors.New("no pod is open — press enter on one in Pods")
+			}
+			return []string{"kubectl", "logs", "-f", "-n", ns, pod, "--all-containers=true", "--prefix=true", "--tail=100"}, nil
+		}},
 	},
 	"Cluster/Deployments": {
 		{key: "R", label: "rollout restart", argv: func(row []string, _ string) ([]string, error) {

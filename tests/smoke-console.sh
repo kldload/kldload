@@ -166,6 +166,9 @@ cluster nodes
 cluster pods
 cluster deployments
 cluster services
+cluster events
+cluster logs
+cluster describe
 ansible hosts
 ansible groups
 ansible plays
@@ -184,7 +187,7 @@ provision feed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 37)) && _pass "every sub-tab tried (37/37)" || _fail "sub-tabs tried" "${_tabs} of 37"
+    ((_tabs == 40)) && _pass "every sub-tab tried (40/40)" || _fail "sub-tabs tried" "${_tabs} of 40"
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
