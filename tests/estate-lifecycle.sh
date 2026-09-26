@@ -239,6 +239,16 @@ _check() {
 # ate four of the operator's rollback points.
 cleanup() {
     ((KEEP == 1)) && return 0
+    # Only the script itself removes the probe. bash runs this EXIT trap in a
+    # PIPELINE SUBSHELL too when one dies under set -u, and that deleted the
+    # probe seconds after it joined: `on_mesh` was called with no argument,
+    # its `kldload-estate | python3 ... "$1"` died on the unbound $1, the
+    # subshell ran cleanup, kvm-delete destroyed the clone, and every later
+    # join check failed against a VM that no longer existed while the main
+    # script carried on (deb-3-kvm, build 70, fiend 2026-09-26 01:06 --
+    # every golden, 11 passed 4 FAILED; found with bash -x, the enroller had
+    # reported "1 on the mesh" each time).
+    [[ "${BASHPID}" == "$$" ]] || return 0
     if virsh dominfo "$PROBE" >/dev/null 2>&1 || has_zvol "$PROBE"; then
         echo "  cleanup: removing ${PROBE}"
         timeout 300 kvm-delete "$PROBE" --force >/dev/null 2>&1 ||
@@ -319,7 +329,7 @@ if systemctl cat kldload-enroll-sweep.service >/dev/null 2>&1; then
     # again after a minute and once more after two; a clone that is still not
     # enrolled after three sweeps has a real problem.
     for _t in 60 60; do
-        on_mesh && break
+        on_mesh "$PROBE" && break
         sleep "$_t"
         timeout 600 systemctl start kldload-enroll-sweep.service >/dev/null 2>&1 || true # the warning above already covers a failing sweep
     done
