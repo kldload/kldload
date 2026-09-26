@@ -100,6 +100,8 @@ type model struct {
 	// refreshing is a background reload of the visible table (the live
 	// Machines view every 3 s): no spinner, the rows stay until replaced
 	refreshing bool
+	armed      string // a running machine whose delete was pressed once
+	armedAt    time.Time
 }
 
 // navFrame is one place the operator drilled from: section, sub-tab, its
@@ -829,6 +831,17 @@ func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
 	name := col(row, 0)
 	if v.console != conNone {
 		return m.openConsole(v.console, name, m.colNamed(row, "address"))
+	}
+	// a delete on a RUNNING machine takes the key twice within three
+	// seconds; one stray d deleted a live control plane (onyx, 2026-09-26).
+	// A stopped machine still deletes on the single key.
+	if v.key == "d" && sections[m.active].name == "Machines" && m.colNamed(row, "state") == "running" {
+		if m.armed != name || time.Since(m.armedAt) > 3*time.Second {
+			m.armed, m.armedAt = name, time.Now()
+			m.say(stWarn.Render(name + " is running — d again within 3 s deletes it, T shuts it down"))
+			return m, nil
+		}
+		m.armed = ""
 	}
 	if v.prompt != "" {
 		m.prompt = strings.ReplaceAll(v.prompt, "{}", name)
