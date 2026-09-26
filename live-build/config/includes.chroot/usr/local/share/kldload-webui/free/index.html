@@ -9773,70 +9773,68 @@ function metricsLoadDashboard(uid) {
 // fixed strings set by the upstream authors and don't change between
 // dashboard versions, so they're safe to hardcode.
 const METRICS_CATALOG = [
-  // Order = the order they render in the left rail. Groups are headed
-  // by their group label. New eBPF section (2026-05-18) is the
-  // headline category — kldload's actual value-prop versus a vanilla
-  // RHEL / Fedora install.
-  { uid: 'kldload-estate',           title: '🏛 Estate',                    group: 'Overview' },
-  { uid: 'klab-vm-estate',           title: '🖧 Virtual Machines',          group: 'Overview' },
+  // Order = the order they render in the left rail, grouped by the same
+  // tasks as the sidebar (console design, 2026-09-26): the dashboard for a
+  // question lives under the section that owns the question. Titles carry
+  // no emoji (the operator's rule) and match Grafana's own, shortened.
+  // __wait_for: 'cluster' hides an entry until a cluster answers.
 
-  // ── eBPF — observability that names root cause, not symptoms ─────────
-  // Why-You-Need-It first: anyone landing on Metrics for the first time
-  // sees the case-study dashboard before they see any raw metrics.
-  { uid: 'kldload-ebpf-vs-traditional', title: '🧠 Why eBPF (case studies)',  group: '🧬 eBPF' },
-  { uid: 'kldload-distributions',    title: '📊 Distributions that matter',  group: '🧬 eBPF' },
-  { uid: 'kldload-k8s-lifecycle',    title: '💥 K8s — Die & Rebuild',        group: '🧬 eBPF' },
-  { uid: 'kldload-cilium-live',      title: '⌁ Cilium — Datapath Live',      group: '🧬 eBPF' },
-  { uid: 'kldload-tetragon-live',    title: '🔭 Tetragon — Syscall Watch',   group: '🧬 eBPF' },
-  { uid: 'kldload-network-live',     title: '🌐 Network — Traffic Microscope', group: '🧬 eBPF' },
-  { uid: 'kldload-memory-pressure',  title: '🧠 Memory — Pressure Story',    group: '🧬 eBPF' },
-  { uid: 'kldload-footprint',        title: '⚖ Platform Footprint (honest)', group: '🧬 eBPF' },
-  { uid: 'kldload-ebpf-deep',        title: '🧬 Deep Dive',                  group: '🧬 eBPF' },
-  { uid: 'kldload-live-matrix',      title: '⏱ Live Matrix',                 group: '🧬 eBPF' },
-  { uid: 'block-io-latency',         title: '⚡ Block I/O Latency (eBPF)',   group: '🧬 eBPF' },
+  // ── Overview ─────────────────────────────────────────────────────────
+  { uid: 'kldload-estate',              title: 'Estate',                          group: 'Overview' },
+  { uid: 'kldload-live-matrix',         title: 'Live matrix (system pulse)',      group: 'Overview' },
+  { uid: 'kldload-footprint',           title: 'Platform footprint',              group: 'Overview' },
 
-  // ── ZFS ───────────────────────────────────────────────────────────────
-  // The pool itself: what it is doing now. Split from the test lab below so
-  // "is my pool healthy" and "did the suite pass" are two glances, not one
-  // scavenger hunt. Pool health, scrub and compression used to sit under
-  // Storage while the kernel's own ZFS narration sat under eBPF, so answering
-  // either question meant knowing which of three groups to look in.
-  { uid: 'zfs-pool-health',          title: '🌊 Pool Health',                group: '🌊 ZFS' },
-  { uid: 'scrub-history',            title: '🧹 Scrub & Errors',             group: '🌊 ZFS' },
-  { uid: 'compression-trend',        title: '🗜 Compression Trends',         group: '🌊 ZFS' },
-  { uid: 'kldload-kernel-forensics', title: '🔍 Kernel Narration (dbgmsg)',  group: '🌊 ZFS' },
+  // ── Machines ─────────────────────────────────────────────────────────
+  { uid: 'klab-vm-estate',              title: 'Virtual machines',                group: 'Machines' },
+  { uid: 'klab-test-matrix',            title: 'ZFS test lab — run matrix',       group: 'Machines' },
+  { uid: 'klab-test-debug',             title: 'ZFS test lab — per-VM debug',     group: 'Machines' },
 
-  // ── ZFS Test Lab ──────────────────────────────────────────────────────
-  // What the suite found. These three were provisioned into Grafana and were
-  // reachable at /grafana/d/<uid>, but NONE of them was listed here — so the
-  // console showed a lab with no results, and the only way to reach the run
-  // matrix was to know its URL.
-  { uid: 'klab-test-matrix',         title: '🧪 Run Matrix',                 group: '🧪 ZFS Test Lab' },
-  { uid: 'ztxplore-metrics',         title: '📈 Lab Metrics',                group: '🧪 ZFS Test Lab' },
-  { uid: 'kldload-zfs-live',         title: '⚡ Live Test Bench',            group: '🧪 ZFS Test Lab' },
-  { uid: 'klab-test-debug',          title: '🔧 Per-VM Debug',               group: '🧪 ZFS Test Lab' },
+  // ── Storage ──────────────────────────────────────────────────────────
+  { uid: 'zfs-pool-health',             title: 'Pool health',                     group: 'Storage' },
+  { uid: 'scrub-history',               title: 'Scrub and errors',                group: 'Storage' },
+  { uid: 'compression-trend',           title: 'Compression trends',              group: 'Storage' },
+  { uid: 'kldload-kernel-forensics',    title: 'Kernel narration (dbgmsg)',       group: 'Storage' },
+  { uid: 'block-io-latency',            title: 'Block I/O latency (eBPF)',        group: 'Storage' },
+  { uid: 'disk-health-smart',           title: 'Disk health (SMART)',             group: 'Storage' },
+  { uid: 'ztxplore-metrics',            title: 'ZFS test lab — metrics',          group: 'Storage' },
+  { uid: 'kldload-zfs-live',            title: 'ZFS test lab — live bench',       group: 'Storage' },
 
-  // ── Storage ───────────────────────────────────────────────────────────
-  // What is about DISKS rather than ZFS.
-  { uid: 'disk-health-smart',        title: '💽 Disk Health (SMART)',        group: 'Storage' },
+  // ── Network ──────────────────────────────────────────────────────────
+  { uid: 'kldload-network-live',        title: 'Traffic microscope (Hubble)',     group: 'Network' },
+  { uid: '5HftnJAWz',                   title: 'Hubble L4-L7 flows',              group: 'Network', __wait_for: 'cluster' },
+  { uid: 'kldload-hubble-topology',     title: 'Hubble live topology',            group: 'Network', __wait_for: 'cluster' },
+  { uid: 'kldload-cilium-live',         title: 'Cilium datapath live',            group: 'Network', __wait_for: 'cluster' },
 
-  // ── Host ──────────────────────────────────────────────────────────────
-  { uid: 'rYdddlPWk',                title: '🖥 Host — Full',                group: 'Host' },  // 1860
-  { uid: 'kernel-messages',          title: '📜 Kernel & Logs',              group: 'Host' },
+  // ── Cluster ──────────────────────────────────────────────────────────
+  { uid: 'kldload-k8s-lifecycle',       title: 'Cluster lifecycle (die and rebuild)', group: 'Cluster' },
+  { uid: 'vtuWtdumz',                   title: 'Cilium agent',                    group: 'Cluster', __wait_for: 'cluster' }, // 16611
+  { uid: '1GC0TT4Wz',                   title: 'Cilium operator',                 group: 'Cluster', __wait_for: 'cluster' }, // 16612
 
-  // ── Kubernetes ────────────────────────────────────────────────────────
-  // Auto-provisioned by Cilium + Tetragon helm charts at bootstrap; hidden
-  // via __wait_for until the cluster is up to avoid "Dashboard not found"
-  // clicks. Reachable via /grafana/d/<uid> directly even when hidden.
-  { uid: 'vtuWtdumz',                title: '⌁ Cilium Agent',                group: 'Kubernetes', __wait_for: 'cluster' }, // 16611
-  { uid: '1GC0TT4Wz',                title: '⌁ Cilium Operator',             group: 'Kubernetes', __wait_for: 'cluster' }, // 16612
+  // ── Host ─────────────────────────────────────────────────────────────
+  { uid: 'rYdddlPWk',                   title: 'Host — every system metric',      group: 'Host' },  // 1860
+  { uid: 'kernel-messages',             title: 'Kernel and system logs',          group: 'Host' },
+  { uid: 'kldload-memory-pressure',     title: 'Memory pressure story',           group: 'Host' },
+  { uid: 'kldload-tetragon-live',       title: 'Tetragon syscall watch',          group: 'Host' },
+  { uid: 'tetragon-ebpf',               title: 'Tetragon security (process and policy)', group: 'Host' },
+
+  // ── eBPF: why it is here ─────────────────────────────────────────────
+  { uid: 'kldload-ebpf-vs-traditional', title: 'Why eBPF (case studies)',         group: 'eBPF' },
+  { uid: 'kldload-distributions',       title: 'Distributions that matter',       group: 'eBPF' },
+  { uid: 'kldload-ebpf-deep',           title: 'Deep dive',                       group: 'eBPF' },
 ];
 function metricsRefreshList() {
   const list = document.getElementById('metrics-list');
   if (!list) return;
-  // Group by folder
+  // Group by task. Entries marked __wait_for: 'cluster' are listed only
+  // once the Overview has seen a cluster answer (window._clusterUp); the
+  // flag was in the catalog for months and nothing read it, so a host
+  // with no cluster listed four dashboards that could never load
+  // (2026-09-26). Until the Overview has answered once, ask it.
+  if (window._clusterUp === undefined) send({ action: 'overview_status' });
   const groups = {};
+  let held = 0;
   METRICS_CATALOG.forEach(e => {
+    if (e.__wait_for === 'cluster' && !window._clusterUp) { held++; return; }
     (groups[e.group || ''] = groups[e.group || ''] || []).push(e);
   });
   let html = '';
@@ -9858,6 +9856,7 @@ function metricsRefreshList() {
         </li>`;
     });
   });
+  if (held) html += `<li style="padding:0.6rem 0.75rem;color:var(--muted);font-size:0.75rem">${held} cluster dashboards appear when a cluster answers</li>`;
   list.innerHTML = html;
   if (!_metricsActiveUid) metricsLoadDashboard('kldload-estate'); // Estate is the default landing — fleet overview
 }
@@ -10489,6 +10488,9 @@ function renderOverview(msg) {
   if (w.peers !== undefined) { set('ov-mesh', `${w.alive} / ${w.peers}`); set('ov-mesh-sub', `alive of peers on ${(w.planes || []).join(', ')}`); }
   else { set('ov-mesh', '—'); set('ov-mesh-sub', 'no WireGuard plane up'); }
   if (c.server) {
+    // The Metrics rail gates its cluster-only dashboards on this reading.
+    const clusterUp = !!c.server && !c.unreachable && (c.nodes || 0) > 0;
+    if (window._clusterUp !== clusterUp) { window._clusterUp = clusterUp; if (isActive('view-metrics')) metricsRefreshList(); }
     set('ov-cluster', c.unreachable ? 'unreachable' : `${c.ready} / ${c.nodes}`);
     set('ov-cluster-sub', c.unreachable ? `no apiserver at ${c.server}` : `Ready of nodes · ${c.version}`);
   } else { set('ov-cluster', '—'); set('ov-cluster-sub', 'no kubeconfig on this host'); }
