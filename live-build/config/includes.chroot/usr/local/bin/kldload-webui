@@ -4750,6 +4750,20 @@ async def _list_vms(websocket):
             ["virsh", "list", "--all", "--name"], text=True,
             stderr=subprocess.DEVNULL
         )
+        # Clones whose join unit (kldload-join-NAME, started by vm_clone) is
+        # still retrying kldload-enroll: one systemctl call for the whole
+        # list, not one per VM (2026-09-26).
+        joining = set()
+        try:
+            _ju = subprocess.check_output(
+                ["systemctl", "list-units", "--plain", "--no-legend", "kldload-join-*.service"],
+                text=True, stderr=subprocess.DEVNULL, timeout=5)
+            for _line in _ju.splitlines():
+                _f = _line.split()
+                if _f and _f[0].startswith("kldload-join-") and "active" in _f[2:4]:
+                    joining.add(_f[0][len("kldload-join-"):-len(".service")])
+        except (OSError, subprocess.SubprocessError):
+            pass  # no systemd answer: nothing is marked joining, nothing else changes
         for name in out.strip().splitlines():
             name = name.strip()
             if not name:
@@ -4915,7 +4929,8 @@ async def _list_vms(websocket):
                         _exp_mark.unlink()
                     except Exception:
                         pass
-            vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk, "disk_used": disk_used, "ip": ip, "ready": ready, "building": building})
+            vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk, "disk_used": disk_used, "ip": ip, "ready": ready, "building": building,
+                        "joining": name in joining})
     except Exception as e:
         LOG.warning("virsh list failed: %s", e)
     await websocket.send(json.dumps({"type": "vm_list", "vms": vms}))
