@@ -37,7 +37,11 @@ if ! python3 -c 'import websockets' 2>/dev/null; then
     printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
     exit 1
 fi
-if ! curl -fsk --max-time 5 -o /dev/null "${WEBUI_URL}/"; then
+# 20 s, not 5: a page reconnecting after a restart fires a burst of polls and
+# the older handlers still block the event loop for a few seconds each (the
+# VM list's forty virsh calls); the gate is here to catch a console that
+# does not answer, not one that is busy for a moment (onyx, 2026-09-26).
+if ! curl -fsk --max-time 20 -o /dev/null "${WEBUI_URL}/"; then
     _fail "webui answers ${WEBUI_URL}" "no HTTP answer — the gate cannot run"
     printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
     exit 1

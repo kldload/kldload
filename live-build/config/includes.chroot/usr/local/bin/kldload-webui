@@ -4926,7 +4926,11 @@ async def _vm_enroll(websocket, msg):
     await _list_vms(websocket)
 
 
-async def _list_vms(websocket):
+def _collect_vm_list():
+    """The VM list: forty virsh calls and a zfs get per VM, two seconds on
+    onyx. Runs in the executor (below) so a page's poll does not block the
+    event loop for that long — a reconnect burst after a restart used to
+    hold nginx past its timeout (2026-09-26)."""
     vms = []
     try:
         out = subprocess.check_output(
@@ -5117,6 +5121,12 @@ async def _list_vms(websocket):
     except Exception as e:
         LOG.warning("virsh list failed: %s", e)
     _estate_overlay(vms)
+    return vms
+
+
+async def _list_vms(websocket):
+    loop = asyncio.get_running_loop()
+    vms = await loop.run_in_executor(None, _collect_vm_list)
     await websocket.send(json.dumps({"type": "vm_list", "vms": vms}))
 
 async def _vm_op(websocket, msg):
