@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-vm-ip — THE address of a VM, resolved one way for every tool
+#
+# WHAT IT DOES, IN ORDER (for one domain)
+#   1. kfire: a microVM has no libvirt domain; its instance record carries the
+#      address kfire registered when the guest answered.
+#   2. the guest agent: `virsh domifaddr --source agent`, first IPv4 that is
+#      not loopback and not on a wg* interface — a meshed clone lists its
+#      10.250.x mesh address there too, and that is never the answer to
+#      "where do I ssh to it".
+#   3. DHCP leases on EVERY libvirt network, keyed by the MAC libvirt says the
+#      domain owns (a clone announces the golden's hostname, so the name column
+#      lies), latest expiry wins when two leases exist.
+#
+# --all prints "name ip" for every running domain and kfire instance in one
+# pass (the timers want the whole table, not N virsh calls); --json prints the
+# same as {"name": "ip"}.
+#
+# WHY: six tools each resolved addresses their own way — enroll read the
+# `default` network only, prom-targets too, estate keyed leases by hostname,
+# dash asked the agent alone — and they disagreed on the same machine within
+# the same minute (source audit, 2026-09-26). kldload-networks' reconcile is
+# the reference for the lease logic here; this is that logic, callable.
+#
+# USAGE   kldload-vm-ip <domain>          kldload-vm-ip --all [--json]
+# EXIT    0 an address was printed · 1 no address · 2 usage
+# NEEDS   virsh (read-only); jq for kfire records. Root is not required when
+#         the caller can read libvirt, which is why enroll and the timers, all
+#         root, and a plain-user console alike can call it.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kldload-vm-ip: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+usage() {
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit "${1:-2}"
+}
+case "${1:-}" in -h | --help | help) usage 0 ;; esac
+[[ $# -ge 1 ]] || usage 2
+
+# kfire_ip <name> — the address kfire registered for a microVM, if any.
+kfire_ip() {
+    local rec="/var/lib/kfire/instances/$1/instance.json"
+    [[ -r "$rec" ]] && command -v jq >/dev/null 2>&1 || return 1
+    local ip
+    ip="$(jq -r '.registered_ip // ""' "$rec" 2>/dev/null)"
+    [[ -n "$ip" ]] || return 1
+    printf '%s\n' "$ip"
+}
+
+# agent_ip <domain> — first usable IPv4 the guest agent reports. Bounded: an
+# agent that is installed but wedged must not stall a timer.
+agent_ip() {
+    local ip
+    ip="$(timeout 5 virsh domifaddr "$1" --source agent 2>/dev/null |
+        awk 'NR > 2 && $1 != "lo" && $1 !~ /^wg/ && $3 == "ipv4" && $4 !~ /^127\./ {split($4, a, "/"); print a[1]; exit}')" || ip=""
+    [[ -n "$ip" ]] || return 1
+    printf '%s\n' "$ip"
+}
+
+# lease_table — "domain ip" for every lease on every network, MAC-owned,
+# latest expiry per domain. Built once per run.
+declare -A DOM_IP=() DOM_EXP=()
+lease_table() {
+    local -A mac_owner=()
+    local dom m net d t mac ip name exp
+    while read -r dom; do
+        [[ -z "$dom" ]] && continue
+        while read -r m; do
+            [[ -n "$m" ]] && mac_owner["${m,,}"]="$dom"
+        done < <(virsh domiflist "$dom" 2>/dev/null | awk 'NR>2 && NF {print $5}')
+    done < <(virsh list --all --name 2>/dev/null)
+    while read -r net; do
+        [[ -z "$net" ]] && continue
+        # Expiry is two tokens (date, time); the layout kldload-networks reads.
+        while read -r d t mac _ ip name _; do
+            [[ -z "${ip:-}" ]] && continue
+            ip="${ip%%/*}"
+            local owner="${mac_owner[${mac,,}]:-}"
+            [[ -n "$owner" ]] && name="$owner"
+            [[ -z "${name:-}" || "$name" == "-" ]] && continue
+            exp="${d} ${t}"
+            if [[ -n "${DOM_EXP[$name]:-}" && "${DOM_EXP[$name]}" > "$exp" ]]; then
+                continue
+            fi
+            DOM_EXP["$name"]="$exp"
+            DOM_IP["$name"]="$ip"
+        done < <(virsh net-dhcp-leases "$net" 2>/dev/null | tail -n +3)
+    done < <(virsh net-list --name 2>/dev/null)
+}
+
+resolve_one() { # resolve_one <name> — prints the address or returns 1
+    local name="$1" ip
+    if ip="$(kfire_ip "$name")"; then
+        printf '%s\n' "$ip"
+        return 0
+    fi
+    if ip="$(agent_ip "$name")"; then
+        printf '%s\n' "$ip"
+        return 0
+    fi
+    ((${#DOM_IP[@]})) || lease_table
+    ip="${DOM_IP[$name]:-}"
+    [[ -n "$ip" ]] || return 1
+    printf '%s\n' "$ip"
+}
+
+case "$1" in
+--all)
+    json=0
+    [[ "${2:-}" == --json ]] && json=1
+    command -v virsh >/dev/null 2>&1 || {
+        echo "kldload-vm-ip: virsh is not installed — this is not a hypervisor" >&2
+        exit 1
+    }
+    lease_table
+    declare -A OUT=()
+    while read -r dom; do
+        [[ -z "$dom" ]] && continue
+        ip="$(resolve_one "$dom" || true)"
+        [[ -n "$ip" ]] && OUT["$dom"]="$ip"
+    done < <(virsh list --state-running --name 2>/dev/null)
+    if [[ -d /var/lib/kfire/instances ]]; then
+        for rec in /var/lib/kfire/instances/*/instance.json; do
+            [[ -r "$rec" ]] || continue
+            n="${rec%/instance.json}"
+            n="${n##*/}"
+            ip="$(kfire_ip "$n" || true)"
+            [[ -n "$ip" ]] && OUT["$n"]="$ip"
+        done
+    fi
+    if ((json)); then
+        printf '{'
+        first=1
+        for n in $(printf '%s\n' "${!OUT[@]}" | sort); do
+            ((first)) || printf ','
+            first=0
+            printf '"%s":"%s"' "$n" "${OUT[$n]}"
+        done
+        printf '}\n'
+    else
+        for n in $(printf '%s\n' "${!OUT[@]}" | sort); do
+            printf '%s %s\n' "$n" "${OUT[$n]}"
+        done
+    fi
+    ((${#OUT[@]})) || exit 1
+    ;;
+-*) usage 2 ;;
+*)
+    [[ $# -eq 1 ]] || usage 2
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+        echo "kldload-vm-ip: '$1' is not a domain name" >&2
+        exit 2
+    }
+    command -v virsh >/dev/null 2>&1 || [[ -d /var/lib/kfire/instances ]] || {
+        echo "kldload-vm-ip: virsh is not installed — this is not a hypervisor" >&2
+        exit 1
+    }
+    resolve_one "$1" || exit 1
+    ;;
+esac

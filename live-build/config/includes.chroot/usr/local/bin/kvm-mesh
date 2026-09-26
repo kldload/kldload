@@ -70,6 +70,12 @@ kfire_ip() {
 
 vm_ip() {
     local vm="$1" ip
+    # The shared resolver first (same order as below, every network); the
+    # inline version stays for a host installed before it existed.
+    if command -v kldload-vm-ip >/dev/null 2>&1; then
+        kldload-vm-ip "$vm" 2>/dev/null
+        return
+    fi
     if ip="$(kfire_ip "$vm")" && [[ -n "$ip" ]]; then
         printf '%s' "$ip"
         return 0

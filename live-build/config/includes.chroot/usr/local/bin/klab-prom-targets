@@ -43,7 +43,14 @@ EMPTY='[]'
 #   kspawn-<cluster>-NN
 # Each gets labelled with site + distro (klab) or cluster (kspawn).
 declare -A DHCP=()
-if command -v virsh >/dev/null 2>&1; then
+if command -v kldload-vm-ip >/dev/null 2>&1; then
+    # The shared resolver: kfire records, guest agent, MAC-owned leases on
+    # every network, one pass. The block below is the pre-2026-09-26 inline
+    # version, kept for a host installed before the tool existed.
+    while read -r _n _ip; do
+        [[ -n "$_n" && -n "$_ip" ]] && DHCP["$_n"]="$_ip"
+    done < <(kldload-vm-ip --all 2>/dev/null || true) # no running guest is an ordinary empty table
+elif command -v virsh >/dev/null 2>&1; then
     # MAC -> domain, straight from libvirt.
     #
     # WHY: a lease whose guest announced no hostname is still a real lease. A

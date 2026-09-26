@@ -20,7 +20,7 @@
 # This is the missing view: not another list of VMs, but the one place the
 # layers are put side by side so drift cannot hide.
 #
-# Inputs:  virsh, wg, kubectl, kldload-db — whichever are present.
+# Inputs:  virsh, wg, kubectl, kldload-db, kldload-vm-ip — whichever are present.
 # Outputs: JSON on stdout (the contract). --table renders the same data for a
 #          terminal; nothing else in this program formats anything.
 #
@@ -123,6 +123,20 @@ def src_leases() -> dict[str, dict[str, str]]:
             if len(f) >= 6 and f[5] != "-":
                 leases[f[5]] = {"ip": f[4].split("/")[0], "network": net}
     return leases
+
+
+def src_vmip() -> dict[str, str]:
+    """Addresses from the one resolver every tool shares (kldload-vm-ip --all:
+    kfire records, guest agent, MAC-owned leases on every network). Empty on
+    a host without it; the lease table below is then the fallback."""
+    out = _run(["kldload-vm-ip", "--all", "--json"])
+    if not out:
+        return {}
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str) and v}
 
 
 def src_wireguard() -> dict[str, str]:
@@ -232,6 +246,7 @@ def collect(probe: bool = False) -> dict[str, Any]:
     libvirt = src_libvirt()
     db = src_db()
     leases = src_leases()
+    vmip = src_vmip()
     wg = src_wireguard()
     k8s = src_kubernetes()
 
@@ -246,8 +261,9 @@ def collect(probe: bool = False) -> dict[str, Any]:
         power = libvirt.get(name, "")
         running = power == "running"
 
-        # Prefer the address kubelet publishes, then the DB, then the lease.
-        ip = knode.get("node_ip") or d.get("ip") or lease.get("ip") or ""
+        # Prefer the address kubelet publishes, then the shared resolver (what
+        # the guest answers on right now), then the DB, then the raw lease.
+        ip = knode.get("node_ip") or vmip.get(name) or d.get("ip") or lease.get("ip") or ""
 
         m: dict[str, Any] = {
             "name": name,

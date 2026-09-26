@@ -296,7 +296,16 @@ done
 # Two sources because neither is reliable alone: domifaddr needs a guest agent,
 # and the DHCP lease needs the guest to have asked. A VM that has one but not
 # the other is normal, not broken.
+# One resolver for every tool (kldload-vm-ip: kfire record, guest agent minus
+# wg*/lo, then MAC-owned leases on EVERY network). The inline version this
+# replaces read the `default` network only, so a guest on kld-vms or kld-klab
+# was "no address yet" forever (source audit, 2026-09-26). The fallback is
+# that old shape, for a host whose install predates the tool.
 _resolve_ip() {
+    if command -v kldload-vm-ip >/dev/null 2>&1; then
+        kldload-vm-ip "$VM" 2>/dev/null
+        return
+    fi
     local ip mac
     ip="$(virsh domifaddr "$VM" 2>/dev/null | awk '/ipv4/{split($4,a,"/");print a[1];exit}')"
     [[ -n "$ip" ]] && {
