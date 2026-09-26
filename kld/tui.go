@@ -93,7 +93,15 @@ type model struct {
 	sortDesc bool
 	spin     spinner.Model
 	now      time.Time
+	con      *console // an open in-TUI console (screen, serial, ssh); nil otherwise
 }
+
+// conBodyTop is the first row of a console's body: title, rail, sub-tabs.
+const conBodyTop = 3
+
+// conBodyH is how many rows the console gets: everything but the header
+// and the status line.
+func (m model) conBodyH() int { return max(m.height-conBodyTop-1, 1) }
 
 // newModel with a width is the --print form: no terminal, so no paging (a
 // height of 0 lists every row); the TUI learns its real size from the first
@@ -176,6 +184,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.con != nil {
+			m.con.resize(m.width, m.conBodyH())
+		}
+	case conTickMsg:
+		if m.con != nil {
+			return m, conTick()
+		}
+		return m, nil
+	case tea.MouseMsg:
+		if m.con != nil {
+			m.con.mouse(msg, conBodyTop)
+		}
 		return m, nil
 	case tickMsg:
 		m.now = time.Time(msg)
@@ -203,6 +223,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading[m.key()] = true
 		return m, m.reload()
 	case tea.KeyMsg:
+		if m.con != nil {
+			return m.updateConsole(msg)
+		}
 		if m.prompt != "" {
 			return m.updatePrompt(msg)
 		}
@@ -627,6 +650,9 @@ func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	name := col(row, 0)
+	if v.console != conNone {
+		return m.openConsole(v.console, name, m.colNamed(row, "address"))
+	}
 	if v.prompt != "" {
 		m.prompt = strings.ReplaceAll(v.prompt, "{}", name)
 		m.secret = v.secret
@@ -755,6 +781,19 @@ func (m model) View() string {
 		}
 	}
 	subline := strings.Join(subs, "")
+	if m.con != nil {
+		// a console owns the body: header, the machine's screen or
+		// terminal, its own status line
+		b.WriteString(subline + "\n")
+		body := m.con.view(w, m.conBodyH())
+		lines := strings.Split(body, "\n")
+		for len(lines) < m.conBodyH() {
+			lines = append(lines, "")
+		}
+		b.WriteString(strings.Join(lines[:m.conBodyH()], "\n") + "\n")
+		b.WriteString(truncate(m.con.status(), w))
+		return b.String()
+	}
 	if c := m.ctx[m.key()]; c != "" {
 		subline += stDim.Render("  › ") + stTitle.Render(c) + stDim.Render("  (esc: all)")
 	}
@@ -1203,4 +1242,97 @@ func colourCell(rendered, raw string) string {
 		return stWarn.Render(rendered)
 	}
 	return rendered
+}
+
+// ─── in-TUI consoles ───────────────────────────────────────────────────────
+// openConsole starts a console on the selected VM and hands it the keys and
+// the mouse; updateConsole routes them until ctrl+] d detaches. The screen
+// needs the mouse, so cell-motion reporting is on only while one is open:
+// with it on, the terminal's own text selection is gone.
+
+func (m model) openConsole(kind consoleKind, vm, addr string) (tea.Model, tea.Cmd) {
+	c, err := openConsole(kind, vm, addr, m.width, m.conBodyH())
+	if err != nil {
+		m.say(stWarn.Render(kind.String() + " " + vm + ": " + err.Error()))
+		return m, nil
+	}
+	if m.con != nil {
+		m.con.close()
+	}
+	m.con = c
+	c.resize(m.width, m.conBodyH())
+	return m, tea.Batch(conTick(), tea.EnableMouseCellMotion)
+}
+
+func (m model) closeConsole() (tea.Model, tea.Cmd) {
+	if m.con != nil {
+		m.con.close()
+		m.say(stDim.Render(m.con.kind.String() + " " + m.con.vm + " detached"))
+		m.con = nil
+	}
+	return m, tea.DisableMouse
+}
+
+func (m model) updateConsole(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	c := m.con
+	if c.menu {
+		c.menu = false
+		c.seq.Add(1)
+		switch msg.String() {
+		case "d", "q":
+			return m.closeConsole()
+		case "1", "2", "3":
+			kind := consoleKind(msg.String()[0] - '0')
+			if kind == c.kind {
+				return m, nil
+			}
+			return m.openConsole(kind, c.vm, c.addr)
+		case "x":
+			c.ctrlAltDel()
+		case "r":
+			c.cache.s = ""
+			c.resize(m.width, m.conBodyH())
+			if c.rfb != nil {
+				c.rfb.requestUpdate(false)
+			}
+		case "ctrl+]":
+			if c.pty != nil {
+				// error ignored: a dead child is reported by its reader
+				_, _ = c.pty.Write([]byte{0x1d})
+			} else {
+				c.rfb.key(ksControlL, true)
+				c.rfb.tap(']')
+				c.rfb.key(ksControlL, false)
+			}
+		}
+		return m, nil
+	}
+	if msg.String() == "ctrl+]" {
+		c.menu = true
+		c.seq.Add(1)
+		return m, nil
+	}
+	if p := c.exit.Load(); p != nil && msg.String() == "enter" {
+		// the session is over: Enter leaves, the way a closed ssh does
+		return m.closeConsole()
+	}
+	c.key(msg)
+	return m, nil
+}
+
+// colNamed reads the row's value under the named column of the current
+// table, so a verb never depends on a column's position (the ssh verb read
+// column 4 as the address and got the vCPU count after the group column
+// was added, 2026-09-26).
+func (m model) colNamed(row []string, name string) string {
+	d := m.cur()
+	if d == nil {
+		return ""
+	}
+	for i, c := range d.columns {
+		if c == name {
+			return col(row, i)
+		}
+	}
+	return ""
 }

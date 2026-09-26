@@ -195,6 +195,72 @@ provision goldens
 provision answers
 TABS
     ((_tabs == 47)) && _pass "every sub-tab tried (47/47)" || _fail "sub-tabs tried" "${_tabs} of 47"
+
+    # ── the video console, against a running VM's display ─────────────────
+    # The wire client (vnc.go) is exercised by its live test: it dials the
+    # first running domain's VNC port, taps Shift (harmless at any prompt,
+    # and it wakes a blanked console) and wants a lit pixel back. Then the
+    # TUI's screen on that VM must draw more than one colour: the first
+    # cut cached the first frame and drew black forever (2026-09-26).
+    # View-only apart from the Shift tap; the VM is selected by NAME.
+    _live_vm=""
+    while read -r _d; do
+        [[ -n "$_d" ]] || continue
+        if sudo -n virsh dumpxml "$_d" 2>/dev/null | grep -q "<graphics type='vnc' port='[0-9]"; then
+            _live_vm="$_d"
+            break
+        fi
+    done < <(sudo -n virsh list --name 2>/dev/null)
+    if [[ -z "$_live_vm" ]]; then
+        _warn "video console" "no running VM with a VNC display: the console checks DID NOT RUN"
+    elif ! command -v go >/dev/null || ! command -v tmux >/dev/null; then
+        _warn "video console" "go or tmux missing: the console checks DID NOT RUN"
+    else
+        # the digits alone: a "[0-9]*$" after the closing quote matched empty
+        _port="$(sudo -n virsh dumpxml "$_live_vm" | grep -o "<graphics type='vnc' port='[0-9]*'" | head -1 | tr -dc '0-9')"
+        if (cd "${SCRIPT_DIR}/../kld" && KLD_VNC_LIVE="127.0.0.1:${_port}" GOTMPDIR="${SCRIPT_DIR}/../kld/.gotmp" go test -run TestRFBLive . >/dev/null 2>&1); then
+            _pass "vnc wire client: lit frame from ${_live_vm} :${_port}"
+        else
+            _fail "vnc wire client" "no lit frame from ${_live_vm} :${_port}"
+        fi
+        _t="console-probe-$$"
+        tmux new-session -d -s "$_t" -x 160 -y 45 "kld machines vms --tui"
+        for _i in $(seq 40); do
+            tmux capture-pane -t "$_t" -p | grep -q -- "$_live_vm" && break
+            sleep 0.5
+        done
+        tmux send-keys -t "$_t" '/'
+        sleep 0.3
+        tmux send-keys -t "$_t" -l "$_live_vm"
+        sleep 0.3
+        tmux send-keys -t "$_t" Enter
+        sleep 2
+        _sel="$(tmux capture-pane -t "$_t" -p | grep -c -- "$_live_vm" || true)"
+        if ((_sel == 0)); then
+            _fail "video console" "could not select ${_live_vm} in the VMs table"
+        else
+            tmux send-keys -t "$_t" w
+            sleep 5
+            _cap="$(tmux capture-pane -t "$_t" -p -e)"
+            _blocks="$(grep -o '▀' <<<"$_cap" | wc -l)"
+            _colours="$(grep -o '38;2;[0-9;]*m' <<<"$_cap" | sort -u | wc -l)"
+            if ((_blocks > 100 && _colours > 1)); then
+                _pass "video console in the TUI: ${_blocks} cells, ${_colours} colours from ${_live_vm}"
+            else
+                _fail "video console in the TUI" "${_blocks} cells, ${_colours} colours from ${_live_vm}"
+            fi
+            tmux send-keys -t "$_t" C-]
+            sleep 0.3
+            tmux send-keys -t "$_t" d
+            sleep 1
+            if tmux capture-pane -t "$_t" -p | grep -q 'screen .* detached'; then
+                _pass "video console detaches on ctrl+] d"
+            else
+                _fail "video console" "ctrl+] d did not return to the table"
+            fi
+        fi
+        tmux kill-session -t "$_t" 2>/dev/null || true # already gone if kld exited
+    fi
 fi
 
 printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"

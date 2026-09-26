@@ -35,6 +35,9 @@ type verb struct {
 	// rowCtxArgv builds the command from the row AND the tab's context (a
 	// snapshot row under a file's Versions).
 	rowCtxArgv func(row []string, ctx string) ([]string, error)
+	// console opens an in-TUI console of this kind on the row's VM instead
+	// of running a command (console.go)
+	console consoleKind
 }
 
 // col returns column i of a row, or "".
@@ -110,16 +113,11 @@ var verbs = map[string][]verb{
 			}
 			return []string{"kldload-db", "vm-delete", "--name", col(row, 0)}, nil
 		}},
-		{key: "C", label: "serial console (ctrl+] leaves)", inter: true, argv: onRow("virsh", "console", "{}")},
-		{key: "H", label: "ssh", inter: true, argv: func(row []string, _ string) ([]string, error) {
-			ip := col(row, 4)
-			if ip == "" || ip == "-" {
-				return nil, errors.New("no address for " + col(row, 0) + " yet")
-			}
-			// the host's root key is what kldload-enroll used; the guest
-			// changes every rebuild, so its host key is not pinned
-			return []string{"ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "root@" + ip}, nil
-		}},
+		// the three consoles open inside the TUI (console.go); ctrl+] is
+		// the menu that detaches or switches between them
+		{key: "w", label: "screen (video console)", console: conScreen},
+		{key: "C", label: "serial console", console: conSerial},
+		{key: "H", label: "ssh terminal", console: conSSH},
 		{key: "V", label: "vmxplore", noRow: true, inter: true, argv: fixed("vmxplore", "--tui")},
 		{key: "n", label: "new VM", noRow: true, prompt: "kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]: ", argv: func(_ []string, in string) ([]string, error) {
 			f := strings.Fields(in)

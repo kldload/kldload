@@ -207,12 +207,16 @@ grow the root disk through all three layers
 .Ic X
 reconcile an unreconciled row (a zvol with no domain, a DB row with no
 domain),
+.Ic w
+the machine's screen (its VNC display drawn in the body of the console),
 .Ic C
-serial console,
+its serial console,
 .Ic H
-ssh,
-.Ic v
+an ssh terminal on it as root,
+.Ic V
 vmxplore.
+The three consoles open inside kld, see
+.Sx CONSOLES .
 .It Machines / Appliances
 .Ic b
 build one as a VM (asks for the VM name and the KEY=VALUE settings),
@@ -437,6 +441,40 @@ arm-deploy a machine with the selected golden.
 .Ic a
 arm a machine with the selected file.
 .El
+.Sh CONSOLES
+On a VM row,
+.Ic w ,
+.Ic C
+and
+.Ic H
+open the machine's screen, serial line or an ssh terminal in the body of
+kld, under the rail, so a headless host or a Sway session never needs a
+window to reach a machine.
+While one is open every key and, for the screen, every mouse event goes to
+the machine, with one exception:
+.Ic ctrl+\&]
+opens a one-line menu.
+.Bl -tag -width "ctrl+]" -compact
+.It Ic d
+detach and return to the table
+.Pq Ic q No does the same .
+.It Ic 1 , 2 , 3
+switch to the screen, the serial console or ssh on the same machine.
+.It Ic x
+send ctrl+alt+del to the screen.
+.It Ic r
+redraw, and ask the guest to match the pane's size again.
+.It Ic \&]
+send a literal ctrl+] (it is also the escape of
+.Xr virsh 1 Ns 's console).
+.El
+Any other key closes the menu and goes back to the machine.
+The screen is drawn as half-block cells, two guest pixels per cell in
+truecolour, so it works in tmux and on a text console; the guest is asked
+to adopt the pane's pixel size, which a virtio-gpu guest honours and a
+legacy VGA guest ignores.
+The serial console and ssh run in a pty behind a terminal emulator sized
+like the pane; when the session ends, Enter returns to the table.
 .Sh EXIT STATUS
 .Ex -std
 The exit status is 2 for a section that does not exist.
