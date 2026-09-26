@@ -344,8 +344,9 @@ func loadAppliances(d *sectionData) {
 // ideally via smaller buttons — build all the goldens, build klab, etc."
 
 type buildRow struct {
-	name, kind, what, cmd, arg string // arg: distro | format | deploy | ""
+	name, kind, what, cmd, arg string // arg: distro | format | deploy | workers | … | ""
 	have                       func(g map[string]bool, apps int) string
+	danger                     bool // destroys images: D with the row's name typed, never x
 }
 
 var klabDistros = []string{"centos", "rocky", "fedora", "debian", "ubuntu"}
@@ -389,37 +390,70 @@ func buildRows() []buildRow {
 		}
 		return fmt.Sprintf("%d/%d", n, len(klabKinds)*len(klabDistros))
 	}
+	appsHave := func(_ map[string]bool, apps int) string { return strconv.Itoa(apps) + " built" }
 	rows := []buildRow{
-		{"EVERYTHING", "everything", "every klab golden, the Kubernetes golden, every appliance", allKlab + " ; kube-cluster golden ; vmxplore --build-all", "", func(g map[string]bool, apps int) string {
-			k := sumKlab(g, 0)
-			n, _, _ := strings.Cut(k, "/")
+		{name: "EVERYTHING", kind: "everything", what: "every klab golden, the Kubernetes golden, every appliance", cmd: allKlab + " ; kube-cluster golden ; vmxplore --build-all", have: func(g map[string]bool, apps int) string {
+			n, _, _ := strings.Cut(sumKlab(g, 0), "/")
 			kn, _ := strconv.Atoi(n)
 			if g["k8s-golden"] {
 				kn++
 			}
 			return fmt.Sprintf("%d/%d + %d apps", kn, len(klabKinds)*len(klabDistros)+1, apps)
 		}},
-		{"all klab goldens", "goldens", "the six kinds for the five distros (30 images)", allKlab, "", sumKlab},
+		{name: "all klab goldens", kind: "goldens", what: "the six kinds for the five distros (30 images)", cmd: allKlab, have: sumKlab},
 	}
 	for _, k := range klabKinds {
-		rows = append(rows, buildRow{"klab " + k.verb, "goldens", k.what + " for every distro (X: one distro)", "klab " + k.verb + " all", "distro", klabHave(k.prefix)})
+		rows = append(rows, buildRow{name: "klab " + k.verb, kind: "goldens", what: k.what + " for every distro (X: one distro)", cmd: "klab " + k.verb + " all", arg: "distro", have: klabHave(k.prefix)})
 	}
 	rows = append(rows,
-		buildRow{"kubernetes golden", "kubernetes", "the node image kube-cluster clones control planes and workers from", "kube-cluster golden", "", func(g map[string]bool, _ int) string { return yesNo(g["k8s-golden"]) }},
-		buildRow{"windows 11 golden", "windows", "unattended Win11 eval golden (fetched on demand, q35 + TPM)", "kvm-win golden win11", "", nil},
-		buildRow{"windows server golden", "windows", "unattended Windows Server golden", "kvm-win golden server", "", nil},
-		buildRow{"all appliances", "appliances", "every catalogue appliance as a VM (app-*), sealed as Firecracker goldens where kfire is", "vmxplore --build-all", "", func(_ map[string]bool, apps int) string { return strconv.Itoa(apps) + " built" }},
-		buildRow{"appliance self-test", "appliances", "build every tile as a VM and audit it (st-*), tear down the passing ones", "vmxplore --selftest", "", nil},
-		buildRow{"one appliance", "appliances", "b on the Appliances tab: pick the tile, name the VM, set its KEY=VALUE fields", "", "", nil},
-		buildRow{"this host as a cloud image", "images", "kimage build: prep this system as a cloud-init golden", "kimage build", "", nil},
-		buildRow{"export this host's image", "images", "kimage export (X: qcow2 raw vhd vmdk all) to /srv/images", "kimage export qcow2", "format", nil},
-		buildRow{"deploy VMs from an image", "images", "kimage deploy (X: <image> <count>)", "", "deploy", nil},
-		buildRow{"custom golden from a VM", "custom", "n makes a VM, its screen/serial/ssh customise it, M on its row seals it as @golden; c then clones it", "", "", nil},
-		buildRow{"verify the goldens", "tests", "klab verify all: boot a clone of each golden and check it", "klab verify all", "distro", nil},
-		buildRow{"kubernetes smoke test", "tests", "the cluster's smoke test", "kube-smoke-test", "", nil},
-		buildRow{"kldload suite", "tests", "the kldload test suite", "kldload-test", "", nil},
+		buildRow{name: "kubernetes golden", kind: "kubernetes", what: "the node image kube-cluster clones control planes and workers from", cmd: "kube-cluster golden", have: func(g map[string]bool, _ int) string { return yesNo(g["k8s-golden"]) }},
+		buildRow{name: "kubernetes: build the HA cluster", kind: "kubernetes", what: "kube-cluster bootstrap --control-planes 3 --workers N (X: N, default 3) — the golden first if it is missing", cmd: "kube-cluster bootstrap --control-planes 3 --workers 3", arg: "workers", have: nodesHave},
+		buildRow{name: "kubernetes: add workers", kind: "kubernetes", what: "kube-cluster scale N (X: how many more)", arg: "moreworkers", have: nodesHave},
+		buildRow{name: "kubernetes: set the control planes", kind: "kubernetes", what: "kube-cluster scale --control-planes N (X: 1, 3 or 5; grows or shrinks the HA set)", arg: "cps", have: nodesHave},
+		buildRow{name: "windows 11 golden", kind: "windows", what: "unattended Win11 eval golden (fetched on demand, q35 + TPM)", cmd: "kvm-win golden win11"},
+		buildRow{name: "windows server golden", kind: "windows", what: "unattended Windows Server golden", cmd: "kvm-win golden server"},
+		buildRow{name: "all appliances", kind: "appliances", what: "every catalogue appliance as a VM (app-*), sealed as Firecracker goldens where kfire is", cmd: "vmxplore --build-all", have: appsHave},
+		buildRow{name: "appliance self-test", kind: "appliances", what: "build every tile as a VM and audit it (st-*), tear down the passing ones", cmd: "vmxplore --selftest"},
+		buildRow{name: "one appliance", kind: "appliances", what: "b on the Appliances tab: pick the tile, name the VM, set its KEY=VALUE fields"},
+		buildRow{name: "this host as a cloud image", kind: "images", what: "kimage build: prep this system as a cloud-init golden", cmd: "kimage build"},
+		buildRow{name: "export this host's image", kind: "images", what: "kimage export (X: qcow2 raw vhd vmdk all) to /srv/images", cmd: "kimage export qcow2", arg: "format"},
+		buildRow{name: "deploy VMs from an image", kind: "images", what: "kimage deploy (X: <image> <count>)", arg: "deploy"},
+		buildRow{name: "build your own golden", kind: "custom", what: "kvm-golden: clone a base (X: <name> <distro|vm> [post-install file or a command]), boot, run your post-install as root, shut down, seal, @golden", arg: "golden"},
+		buildRow{name: "build your own VM", kind: "custom", what: "the same, left running and not sealed (X: <name> <distro|vm> [post-install file or a command])", arg: "vm"},
+		buildRow{name: "custom golden from a VM", kind: "custom", what: "n makes a VM, its screen/serial/ssh customise it, M on its row seals it as @golden; c then clones it"},
+		buildRow{name: "verify the goldens", kind: "tests", what: "klab verify all: boot a clone of each golden and check it", cmd: "klab verify all", arg: "distro"},
+		buildRow{name: "kubernetes smoke test", kind: "tests", what: "the cluster's smoke test", cmd: "kube-smoke-test"},
+		buildRow{name: "kldload suite", kind: "tests", what: "the kldload test suite", cmd: "kldload-test"},
+		// the way back: a minimal install builds all of this after the fact,
+		// and takes it down again (the operator's ask, 2026-09-26)
+		buildRow{name: "DESTROY-klab-goldens", kind: "remove", what: "klab destroy goldens: every klab golden (clones of them refuse it; delete those first)", cmd: "klab destroy goldens", have: sumKlab, danger: true},
+		buildRow{name: "DESTROY-appliances", kind: "remove", what: "vmxplore --destroy-all --yes: every app-* and st-* VM, their zvols, seeds, Firecracker goldens and mesh peers", cmd: "vmxplore --destroy-all --yes", have: appsHave, danger: true},
+		buildRow{name: "DESTROY-the-cluster", kind: "remove", what: "kube-cluster destroy: every control plane and worker VM and zvol", cmd: "kube-cluster destroy", have: nodesHave, danger: true},
+		buildRow{name: "remove one golden or node", kind: "remove", what: "d on its row in VMs (kvm-delete): a golden with clones refuses; a cluster node's peers are dropped on the next scale"},
 	)
 	return rows
+}
+
+// nodesHave counts the cluster's domains on this host: control planes and
+// workers, by the names kube-cluster gives them.
+func nodesHave(_ map[string]bool, _ int) string {
+	out, err := run(10*time.Second, "virsh", "list", "--all", "--name")
+	if err != nil {
+		return "-"
+	}
+	cps, ws := 0, 0
+	for _, n := range strings.Fields(out) {
+		switch {
+		case n == "kldload-cp" || strings.HasPrefix(n, "kldload-cp-"):
+			cps++
+		case strings.HasPrefix(n, "kldload-w-"):
+			ws++
+		}
+	}
+	if cps+ws == 0 {
+		return "no cluster"
+	}
+	return fmt.Sprintf("%d cp, %d workers", cps, ws)
 }
 
 func yesNo(b bool) string {
@@ -452,7 +486,11 @@ func loadBuild(d *sectionData) {
 		if r.have != nil {
 			have = r.have(goldens, apps)
 		}
-		d.rows = append(d.rows, []string{r.name, r.kind, have, r.what, r.cmd, r.arg})
+		danger := ""
+		if r.danger {
+			danger = "typed"
+		}
+		d.rows = append(d.rows, []string{r.name, r.kind, have, r.what, r.cmd, r.arg, danger})
 	}
 	d.headline = fmt.Sprintf("%d goldens on this host — x builds the row (a job pane), X asks for its argument (a distro, a format); rows with several commands run them in order", len(goldens))
 }

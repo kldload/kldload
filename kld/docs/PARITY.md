@@ -55,12 +55,16 @@ never a second implementation of them.
   (vmxplore GUI does reseed → retarget logs → start → enrol). Decide: a
   `--start` flag on the clone prompt running `virsh start` per clone in the
   same job, then `kldload-enroll`.
-- todo — Make Golden: shut down, seal (kldload-seal /dev/zvol/…, fallback
-  virt-sysprep), @golden on every zvol disk. Verb G on Machines/VMs as a job.
+- done — M make golden on a VM row: shut down, seal (kldload-seal,
+  virt-sysprep fallback), @golden. Only the root zvol (kldload has no
+  -data disks on goldens today).
 - todo — clone from @golden when the source has one (planCloneFrom's rule).
   Check whether kvm-clone --snap @golden is the equivalent; document.
-- todo — EZ Fleet: new golden from a cloud distro then N clones. Compose
-  from kimage/klab goldens rather than vmxplore's BuildNewVM.
+- done — build your own golden / VM: kvm-golden clones a klab golden (or
+  any VM), boots, runs a post-install file or command as root, seals and
+  takes @golden (or --keep leaves the VM). Then c clones N. Machines / Build
+  rows "build your own golden|VM". Run on onyx 2026-09-26: fedora base,
+  marker file written, sealed, @golden in 3m47.
 - done — F seal as a Firecracker golden (kfire golden).
 
 ### Consoles

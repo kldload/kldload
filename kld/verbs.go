@@ -13,6 +13,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -204,6 +205,15 @@ var verbs = map[string][]verb{
 	},
 	"Machines/Build": {
 		{key: "x", label: "build it", job: true, argvs: func(row []string, _ string) ([][]string, error) {
+			if col(row, 6) == "typed" {
+				return nil, errors.New("this row destroys: D, with its name typed")
+			}
+			return buildArgvs(col(row, 4), "")
+		}},
+		{key: "D", label: "destroy what the row names (type its name)", job: true, confirm: true, argvs: func(row []string, _ string) ([][]string, error) {
+			if col(row, 6) != "typed" {
+				return nil, errors.New("only the DESTROY rows; x builds this one")
+			}
 			return buildArgvs(col(row, 4), "")
 		}},
 		{key: "X", label: "build it with an argument (a distro, a format, an image and a count)", job: true, prompt: "argument for {}: ", argvs: func(row []string, in string) ([][]string, error) {
@@ -228,6 +238,46 @@ var verbs = map[string][]verb{
 					return nil, errors.New("a count from 1 to 64")
 				}
 				return [][]string{{"kimage", "deploy", f[0], f[1]}}, nil
+			case "workers":
+				n, err := strconv.Atoi(in)
+				if in == "" {
+					n, err = 3, nil
+				}
+				if err != nil || n < 0 || n > 64 {
+					return nil, errors.New("how many workers, 0 to 64 (blank = 3)")
+				}
+				return [][]string{{"kube-cluster", "bootstrap", "--control-planes", "3", "--workers", strconv.Itoa(n)}}, nil
+			case "moreworkers":
+				n, err := strconv.Atoi(in)
+				if err != nil || n < 1 || n > 64 {
+					return nil, errors.New("how many more workers, 1 to 64")
+				}
+				return [][]string{{"kube-cluster", "scale", strconv.Itoa(n)}}, nil
+			case "cps":
+				if in != "1" && in != "3" && in != "5" {
+					return nil, errors.New("1, 3 or 5 control planes")
+				}
+				return [][]string{{"kube-cluster", "scale", "--control-planes", in}}, nil
+			case "golden", "vm":
+				// <name> <distro|vm> [post-install: a readable file, else a command line]
+				f := strings.Fields(in)
+				if len(f) < 2 || !nameOK(f[0]) || !nameOK(f[1]) {
+					return nil, errors.New("<name> <distro or base VM> [post-install file, or a command to run as root]")
+				}
+				argv := []string{"kvm-golden", f[0], "--from", f[1]}
+				if col(row, 5) == "vm" {
+					argv = append(argv, "--keep")
+				}
+				if len(f) > 2 {
+					rest := strings.TrimSpace(strings.TrimPrefix(in, f[0]))
+					rest = strings.TrimSpace(strings.TrimPrefix(rest, f[1]))
+					if st, err := os.Stat(rest); err == nil && !st.IsDir() {
+						argv = append(argv, "--post", rest)
+					} else {
+						argv = append(argv, "--run", rest)
+					}
+				}
+				return [][]string{argv}, nil
 			}
 			return nil, errors.New(col(row, 0) + " takes no argument; x builds it")
 		}},

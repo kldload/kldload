@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kvm-golden — build your own golden (or VM) from a base golden plus a
+#              post-install of your own.
+#
+# What it does, in order:
+#   1. clones the base (a klab golden by distro name, or any VM/golden by
+#      name) as <name> with kvm-clone — seed ISO, root's ssh key, guest agent;
+#   2. boots it and waits for an address and for root ssh to answer;
+#   3. runs the post-install in the guest as root: a file streamed to
+#      `bash -s`, or a --run command line, or nothing;
+#   4. with --keep: leaves the machine running — that is "build your own VM";
+#      otherwise shuts it down, waits, seals the zvol with kldload-seal and
+#      takes <name>@golden — that is "build your own golden", which kvm-clone
+#      (and kld's c) clones from.
+#
+# Why: the platform had thirty goldens it knew how to build and no button for
+# "one like that, plus my script" — the operator's ask, 2026-09-26. Nothing
+# here is new machinery: kvm-clone, kldload-vm-ip, ssh, kldload-seal, zfs.
+#
+# Inputs:   <name> --from <distro|vm>  [--post FILE] [--run 'cmd'] [--keep]
+#           [--ram MB] [--cpus N]  (applied for the next boot via virsh)
+# Outputs:  rpool/vms/<name> (+ @golden unless --keep), the domain <name>
+# Exit:     0 built; 1 a step failed (the machine is left for inspection,
+#           the log says which step); 2 usage
+# Notes:    the base for a distro is klab-golden-<distro>, built by
+#           `klab golden <distro>`. A seal needs partitions: a blank disk
+#           fails it, which is what kldload-seal reports.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kvm-golden: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"; }
+case "${1:-}" in -h | --help | "")
+    usage
+    [[ -n "${1:-}" ]]
+    exit $?
+    ;;
+esac
+
+NAME="$1"
+shift
+FROM="" POST="" RUN="" KEEP=0 RAM="" CPUS=""
+while (($#)); do
+    case "$1" in
+    --from)
+        FROM="${2:?--from needs a distro or a VM}"
+        shift 2
+        ;;
+    --post)
+        POST="${2:?--post needs a file}"
+        shift 2
+        ;;
+    --run)
+        RUN="${2:?--run needs a command}"
+        shift 2
+        ;;
+    --keep)
+        KEEP=1
+        shift
+        ;;
+    --ram)
+        RAM="${2:?}"
+        shift 2
+        ;;
+    --cpus)
+        CPUS="${2:?}"
+        shift 2
+        ;;
+    *)
+        echo "kvm-golden: unknown option $1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+done
+[[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || {
+    echo "kvm-golden: '$NAME' is not a VM name" >&2
+    exit 2
+}
+[[ -n "$FROM" ]] || {
+    echo "kvm-golden: --from <distro|vm> is required" >&2
+    exit 2
+}
+[[ -z "$POST" || -r "$POST" ]] || {
+    echo "kvm-golden: cannot read --post $POST" >&2
+    exit 2
+}
+if ((EUID != 0)); then exec sudo -n -- "$0" "$NAME" "$@"; fi
+
+# the base: a distro names its klab golden; anything else must be a VM
+case "$FROM" in
+centos | rocky | fedora | debian | ubuntu) BASE="klab-golden-$FROM" ;;
+*) BASE="$FROM" ;;
+esac
+virsh dominfo "$BASE" >/dev/null 2>&1 || {
+    echo "kvm-golden: no base VM '$BASE' (klab golden $FROM builds it)" >&2
+    exit 1
+}
+if virsh dominfo "$NAME" >/dev/null 2>&1 || zfs list -H "rpool/vms/$NAME" >/dev/null 2>&1; then
+    echo "kvm-golden: '$NAME' already exists" >&2
+    exit 1
+fi
+
+echo "== clone $BASE -> $NAME"
+kvm-clone "$BASE" "$NAME"
+if [[ -n "$RAM" ]]; then virsh setmaxmem "$NAME" "${RAM}M" --config && virsh setmem "$NAME" "${RAM}M" --config; fi
+if [[ -n "$CPUS" ]]; then virsh setvcpus "$NAME" "$CPUS" --config --maximum && virsh setvcpus "$NAME" "$CPUS" --config; fi
+
+echo "== boot $NAME"
+virsh start "$NAME" >/dev/null
+IP=""
+for _ in $(seq 1 120); do
+    IP="$(kldload-vm-ip "$NAME" 2>/dev/null || true)"
+    [[ -n "$IP" ]] && break
+    sleep 2
+done
+[[ -n "$IP" ]] || {
+    echo "kvm-golden: $NAME got no address in 4 minutes" >&2
+    exit 1
+}
+echo "   address $IP"
+SSH=(ssh -i /root/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
+# a clone's host key is new every time, hence no pinning (the same choice
+# kldload-enroll and the doctor make for guests)
+for _ in $(seq 1 60); do
+    "${SSH[@]}" "root@$IP" true 2>/dev/null && break
+    sleep 3
+done
+"${SSH[@]}" "root@$IP" true 2>/dev/null || {
+    echo "kvm-golden: root ssh to $IP never answered" >&2
+    exit 1
+}
+"${SSH[@]}" "root@$IP" 'command -v cloud-init >/dev/null && cloud-init status --wait >/dev/null 2>&1 || true' # a base without cloud-init has nothing to wait for
+
+if [[ -n "$POST" ]]; then
+    echo "== post-install: $POST (as root in $NAME)"
+    "${SSH[@]}" "root@$IP" 'bash -s' <"$POST"
+fi
+if [[ -n "$RUN" ]]; then
+    echo "== run: $RUN"
+    # the command goes down stdin to bash -s, never onto a remote argv
+    printf '%s\n' "$RUN" | "${SSH[@]}" "root@$IP" 'bash -s'
+fi
+
+if ((KEEP)); then
+    echo "== $NAME is running at $IP (--keep: not sealed)"
+    exit 0
+fi
+
+echo "== shut $NAME down"
+virsh shutdown "$NAME" >/dev/null
+for _ in $(seq 1 180); do
+    virsh domstate "$NAME" | grep -q 'shut off' && break
+    sleep 1
+done
+virsh domstate "$NAME" | grep -q 'shut off' || {
+    echo "kvm-golden: $NAME did not shut down in 3 minutes" >&2
+    exit 1
+}
+echo "== seal /dev/zvol/rpool/vms/$NAME"
+kldload-seal "/dev/zvol/rpool/vms/$NAME"
+echo "== snapshot rpool/vms/$NAME@golden"
+zfs snapshot "rpool/vms/$NAME@golden"
+zfs list -H "rpool/vms/$NAME@golden" >/dev/null # outcome, not exit code
+echo "== $NAME@golden is a golden: kvm-clone $NAME <new> (kld: c on its row)"
