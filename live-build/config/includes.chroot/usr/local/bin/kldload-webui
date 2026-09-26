@@ -1099,6 +1099,128 @@ def get_system_info():
     return info
 
 
+# ── Network view: the planes as they are, joined to the estate ───────────────
+# `wg show all dump` is the truth about who is a peer; kldload-db names the
+# keys (kldload-enroll records each VM's key and mesh id since 2026-09-26);
+# kldload-estate says which machines SHOULD be peers and are not (drift).
+# The older get_wg_status() below still describes the wg0..wg3 declaration
+# model that was retired in August; this is what the console's Network
+# section reads (console design, 2026-09-26).
+def _plane_kind(iface):
+    if iface == "wg-mgmt":
+        return "management"
+    if iface == "wg-k8s":
+        return "kubernetes"
+    if iface.startswith("ap-"):
+        return "appliance"
+    if iface.startswith("wg-lab") or iface.startswith("klab-"):
+        return "lab"
+    return "other"
+
+
+def _handshake_health(age):
+    if age is None:
+        return "never"
+    if age < 180:
+        return "alive"
+    if age < 1800:
+        return "quiet"
+    return "stale"
+
+
+def collect_network_status():
+    """The data the Network view renders; pure collection, no websocket."""
+    import time
+    now = int(time.time())
+    names = {}
+    try:
+        dump = json.loads(subprocess.check_output(["kldload-db", "dump"], text=True,
+                                                  stderr=subprocess.DEVNULL, timeout=15))
+        for v in dump.get("vms", []):
+            if v.get("wg_pubkey") and not v.get("deleted_at"):
+                names[v["wg_pubkey"]] = v["name"]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass  # no database yet: peers are shown by key alone
+    estate = {"machines": [], "drift": [], "sources": {}}
+    try:
+        estate = json.loads(subprocess.check_output(["kldload-estate"], text=True,
+                                                    stderr=subprocess.DEVNULL, timeout=30))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass  # the drift panel says the source is missing
+    by_ip = {m.get("ip"): m.get("name") for m in estate.get("machines", []) if m.get("ip")}
+    planes = []
+    try:
+        ifaces = subprocess.check_output(["wg", "show", "interfaces"], text=True,
+                                         stderr=subprocess.DEVNULL, timeout=10).split()
+    except (OSError, subprocess.SubprocessError):
+        ifaces = []
+    for iface in ifaces:
+        try:
+            lines = subprocess.check_output(["wg", "show", iface, "dump"], text=True,
+                                            stderr=subprocess.DEVNULL, timeout=10).splitlines()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if not lines:
+            continue
+        head = lines[0].split("\t")
+        addr = ""
+        try:
+            out = subprocess.check_output(["ip", "-o", "-4", "addr", "show", iface], text=True,
+                                          stderr=subprocess.DEVNULL, timeout=5)
+            m = re.search(r"inet (\S+)", out)
+            addr = m.group(1) if m else ""
+        except (OSError, subprocess.SubprocessError):
+            pass
+        peers = []
+        for line in lines[1:]:
+            p = line.split("\t")
+            if len(p) < 7:
+                continue
+            pub, endpoint, allowed, hs, rx, tx = p[0], p[2], p[3], p[4], p[5], p[6]
+            hs_i = int(hs) if hs.isdigit() else 0
+            age = (now - hs_i) if hs_i else None
+            first_ip = ""
+            if allowed and allowed != "(none)":
+                first_ip = allowed.split(",")[0].split("/")[0]
+            peers.append({
+                "pubkey": pub,
+                "name": names.get(pub) or by_ip.get(first_ip) or "",
+                "address": first_ip,
+                "allowed_ips": allowed,
+                "endpoint": "" if endpoint == "(none)" else endpoint,
+                "handshake_age": age,
+                "health": _handshake_health(age),
+                "rx": int(rx) if rx.isdigit() else 0,
+                "tx": int(tx) if tx.isdigit() else 0,
+            })
+        planes.append({
+            "iface": iface,
+            "kind": _plane_kind(iface),
+            "address": addr,
+            "port": int(head[2]) if len(head) > 2 and head[2].isdigit() else 0,
+            "pubkey": head[1] if len(head) > 1 else "",
+            "peers": peers,
+            "alive": sum(1 for q in peers if q["health"] == "alive"),
+        })
+    return {
+        "type": "network_status",
+        "host": os.uname().nodename,
+        "planes": planes,
+        "drift": estate.get("drift", []),
+        "sources": estate.get("sources", {}),
+        "machines_in_mesh": sum(1 for m in estate.get("machines", []) if m.get("in_mesh")),
+    }
+
+
+async def _network_status(websocket):
+    # In a thread: the collector shells out to kldload-estate, which takes
+    # ten seconds and more on a host with no cluster (kubectl's connect
+    # timeout), and a blocking call here stalls every other client.
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, collect_network_status)
+    await websocket.send(json.dumps(data))
+
+
 def get_wg_status():
     """Return detailed WireGuard status for all four planes."""
     data = {}
@@ -1575,6 +1697,8 @@ async def ws_handler(websocket):
                     await _k8s_nodes(websocket)
                 elif action == "salt_status":
                     await _salt_status(websocket)
+                elif action == "network_status":
+                    await _network_status(websocket)
                 elif action == "wg_status":
                     await websocket.send(json.dumps({
                         "type": "wg_data",

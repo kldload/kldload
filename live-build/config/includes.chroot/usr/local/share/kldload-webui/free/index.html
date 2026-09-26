@@ -428,6 +428,13 @@ html.ishow-boot::after{content:"";position:fixed;inset:0;z-index:8999;background
     </li>
   </ul>
 
+  <div class="nav-section">Network</div>
+  <ul>
+    <li data-view="network">
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 7v5M12 12l-6 5M12 12l6 5"/></svg></span> Mesh and peers
+    </li>
+  </ul>
+
   <div class="nav-section">Cluster</div>
   <ul>
     <li data-view="k8s">
@@ -1942,6 +1949,32 @@ $ kldload-netboot-server status</div>
       .ws-dropdown-sep{height:1px;background:var(--border);margin:0.25rem 0}
       .ws-dropdown-label{padding:0.4rem 0.9rem 0.15rem;font-size:0.66rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);font-weight:600}
     </style>
+
+    <!-- ── Network: the WireGuard planes joined to the estate ──────────────
+         wg show is the truth about peers; the state DB names them; the
+         drift list is kldload-estate's. Read-only (console design,
+         2026-09-26). -->
+    <div class="view" id="view-network">
+      <div class="ws-header">
+        <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+          <div style="font-size:1.15rem;font-weight:700">Mesh and peers</div>
+          <span id="net-header-status" style="font-size:0.78rem;color:var(--muted)">wg show all dump, named by the state DB</span>
+          <span style="flex:1"></span>
+          <button class="btn btn-ghost btn-sm" onclick="networkRefresh()" title="Reload">↻</button>
+        </div>
+      </div>
+      <div class="stat-grid" style="margin-bottom:0.9rem">
+        <div class="stat-card"><div class="stat-label">Planes</div><div class="stat-value" id="net-planes">—</div></div>
+        <div class="stat-card"><div class="stat-label">Peers</div><div class="stat-value" id="net-peers">—</div></div>
+        <div class="stat-card"><div class="stat-label">Alive (handshake &lt; 3 min)</div><div class="stat-value" id="net-alive">—</div></div>
+        <div class="stat-card"><div class="stat-label">Drift</div><div class="stat-value" id="net-drift-count">—</div></div>
+      </div>
+      <div id="net-planes-panels"><div style="color:var(--muted);padding:1rem">Loading…</div></div>
+      <div class="ws-panel" style="margin-top:0.9rem">
+        <div class="ws-panel-hdr"><span>Drift — kldload-estate</span></div>
+        <div id="net-drift" style="padding:0.7rem 1rem;color:var(--muted)">Loading…</div>
+      </div>
+    </div>
 
     <div class="view" id="view-k8s">
       <style>
@@ -4113,6 +4146,7 @@ function _refreshActiveView() {
     send({ action: 'detached_reattach', target: 'k8s',
            since_lines: (window._logLines && window._logLines['k8s']) || 0 });
   }
+  if (isActive('view-network')) send({ action: 'network_status' });
   if (isActive('view-klab')) {
     send({ action: 'klab_status' });
     // Re-attach to any in-flight klab golden/ztest/deploy/destroy build
@@ -5131,6 +5165,7 @@ function handle(msg) {
     case 'secret_deleted':   { send({action:'secret_list'}); break; }
     case 'helm_status':    { renderHelmStatus(msg);    break; }
     case 'helm_repo_list': { renderHelmRepos(msg);     break; }
+    case 'network_status': { renderNetwork(msg);       break; }
     case 'helm_list':      { renderHelmReleases(msg);  break; }
 
     case 'snapshot_done': { refreshSnapshots(); break; }
@@ -5494,6 +5529,7 @@ document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
       send({ action: 'kube_bootstrap_tail', follow: true });
     }
     if (li.dataset.view === 'ansible')      { ansibleRefresh(); _ansibleRestoreTab(); }
+    if (li.dataset.view === 'network')      networkRefresh();
     if (li.dataset.view === 'helm')         { helmRefresh(); _helmRestoreTab(); }
     if (li.dataset.view === 'metrics')        metricsRefreshList();
     if (li.dataset.view === 'bob')           bobInit();
@@ -10125,6 +10161,68 @@ function renderHelmRepos(msg) {
     <td style="color:var(--muted);font-size:0.82rem">${esc(r.url)}</td>
     <td><button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="helmRepoRemove('${esc(r.name)}')">Remove</button></td>
   </tr>`).join('');
+}
+
+// ── Network view ────────────────────────────────────────────────────────────
+function networkRefresh() { send({ action: 'network_status' }); }
+function _netAge(s) {
+  if (s === null || s === undefined) return 'never';
+  if (s < 60) return s + ' s';
+  if (s < 3600) return Math.floor(s / 60) + ' m ' + (s % 60) + ' s';
+  return Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' m';
+}
+function _netBytes(n) {
+  if (!n) return '0';
+  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + ' ' + u[i];
+}
+function renderNetwork(msg) {
+  const planes = msg.planes || [];
+  const peers = planes.reduce((a, p) => a + p.peers.length, 0);
+  const alive = planes.reduce((a, p) => a + p.alive, 0);
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  set('net-planes', planes.length);
+  set('net-peers', peers);
+  set('net-alive', alive);
+  set('net-drift-count', (msg.drift || []).length);
+  set('net-header-status', `${esc(msg.host || '')} · ${msg.machines_in_mesh || 0} machines on the mesh`);
+  const healthColor = { alive: 'var(--good)', quiet: 'var(--warn)', stale: 'var(--danger)', never: 'var(--muted)' };
+  const box = document.getElementById('net-planes-panels');
+  if (box) {
+    if (!planes.length) {
+      box.innerHTML = '<div class="ws-panel"><div style="padding:1rem;color:var(--muted)">No WireGuard interface is up on this host. A hypervisor joins the mesh with <code>kube-network init 100</code>; clones are enrolled by <code>kldload-enroll</code>.</div></div>';
+    } else {
+      box.innerHTML = planes.map(p => `
+        <div class="ws-panel" style="margin-bottom:0.9rem">
+          <div class="ws-panel-hdr">
+            <span style="font-family:var(--font-mono)">${esc(p.iface)}</span>
+            <span style="color:var(--muted);font-size:0.78rem">${esc(p.kind)} · ${esc(p.address || 'no address')} · udp ${p.port || '?'} · ${p.alive}/${p.peers.length} alive</span>
+          </div>
+          <table class="data-table">
+            <thead><tr><th></th><th>machine</th><th>address</th><th>endpoint</th><th>handshake</th><th>rx / tx</th><th>key</th></tr></thead>
+            <tbody>${p.peers.length ? p.peers.map(q => `<tr>
+              <td><span style="display:inline-block;width:8px;height:8px;border-radius:4px;background:${healthColor[q.health] || 'var(--muted)'}"></span></td>
+              <td style="font-family:var(--font-mono)">${esc(q.name || '—')}</td>
+              <td style="font-family:var(--font-mono);color:var(--muted)">${esc(q.address || '—')}</td>
+              <td style="font-family:var(--font-mono);color:var(--muted)">${esc(q.endpoint || '—')}</td>
+              <td style="font-family:var(--font-mono);color:${healthColor[q.health] || 'var(--muted)'}">${esc(_netAge(q.handshake_age))}</td>
+              <td style="font-family:var(--font-mono);color:var(--muted)">${esc(_netBytes(q.rx))} / ${esc(_netBytes(q.tx))}</td>
+              <td style="font-family:var(--font-mono);color:var(--muted);font-size:0.72rem" title="${esc(q.pubkey)}">${esc(q.pubkey.slice(0, 10))}…</td>
+            </tr>`).join('') : '<tr><td colspan="7" style="color:var(--muted)">no peers</td></tr>'}</tbody>
+          </table>
+        </div>`).join('');
+    }
+  }
+  const dr = document.getElementById('net-drift');
+  if (dr) {
+    const d = msg.drift || [];
+    dr.innerHTML = d.length
+      ? d.map(x => `<div style="padding:0.3rem 0;border-bottom:1px solid var(--border)"><span class="badge badge-yellow">${esc(x.kind)}</span> <span style="font-family:var(--font-mono)">${esc(x.machine)}</span> <span style="color:var(--muted)">${esc(x.detail || '')}</span>${x.repair ? ` <code>${esc(x.repair)}</code>` : ''}</div>`).join('')
+      : (msg.sources && msg.sources.libvirt === undefined
+          ? 'kldload-estate is not installed — drift cannot be judged'
+          : 'No drift: every machine that should be a peer is one, and every address the estate holds is current.');
+  }
 }
 
 function renderHelmReleases(msg) {

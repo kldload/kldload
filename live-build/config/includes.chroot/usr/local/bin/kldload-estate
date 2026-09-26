@@ -39,8 +39,10 @@ import argparse
 import json
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import urllib.parse
 from typing import Any
 
 TIMEOUT = 8  # seconds; every external call is bounded
@@ -180,9 +182,24 @@ def src_kubernetes() -> dict[str, dict[str, str]]:
     That advertised address is the interesting part: a node can be Ready while
     the address it publishes is unreachable from the hypervisor.
     """
+    # Ask the apiserver's port BEFORE asking kubectl: a kubeconfig whose
+    # cluster is gone (onyx keeps one from an earlier lab) made kubectl sit in
+    # TCP connect until the subprocess timeout on every run, and the console's
+    # Network view waited 13 s for the estate behind it (2026-09-26).
+    # --request-timeout does not cover the connect, so it did not help.
+    server = _run(["kubectl", "config", "view", "--minify", "-o",
+                   "jsonpath={.clusters[0].cluster.server}"], timeout=5).strip()
+    if not server:
+        return {}
+    try:
+        u = urllib.parse.urlsplit(server)
+        with socket.create_connection((u.hostname, u.port or 443), timeout=1.5):
+            pass
+    except (OSError, ValueError):
+        return {}  # no apiserver at the recorded address: not a cluster host right now
     out = _run(
-        ["kubectl", "get", "nodes", "-o", "json"],
-        timeout=12,
+        ["kubectl", "get", "nodes", "-o", "json", "--request-timeout=3s"],
+        timeout=6,
     )
     if not out:
         return {}
