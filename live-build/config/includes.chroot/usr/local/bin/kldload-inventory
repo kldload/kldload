@@ -115,9 +115,12 @@ def _fetch_vms(con):
     belong in the inventory so Ansible can reach them by IP."""
     cols = {r["name"] for r in con.execute("PRAGMA table_info(vms)").fetchall()}
     del_clause = "AND (deleted_at IS NULL OR deleted_at = '')" if "deleted_at" in cols else ""
+    # mesh_id exists on databases kldload-db has touched since 2026-09-26; an
+    # older one gets '' so the hostvar is always present.
+    mesh_col = "mesh_id" if "mesh_id" in cols else "'' AS mesh_id"
     try:
         rows = con.execute(
-            "SELECT name, role, cluster_id, ip_addr, status FROM vms "
+            f"SELECT name, role, cluster_id, ip_addr, status, {mesh_col} FROM vms "
             f"WHERE ip_addr != '' AND ip_addr IS NOT NULL {del_clause}"
         ).fetchall()
     except sqlite3.Error:
@@ -216,6 +219,7 @@ def build_inventory():
             "kldload_role":   v["role"] or "",
             "kldload_cluster": cluster_names.get(v["cluster_id"], v["cluster_id"] or ""),
             "kldload_status": v["status"] or "",
+            "kldload_mesh_id": v["mesh_id"] or "",
         }
         if Path(SSH_KEY).exists():
             hv["ansible_ssh_private_key_file"] = SSH_KEY

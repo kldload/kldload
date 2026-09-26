@@ -101,6 +101,10 @@ def src_db() -> dict[str, dict[str, Any]]:
             "ip": v.get("ip_addr") or "",
             "cluster": v.get("cluster_id") or "",
             "golden_src": v.get("golden_src") or "",
+            # kldload-enroll records these since 2026-09-26; empty on a machine
+            # that was never enrolled or was enrolled before then.
+            "mesh_id": v.get("mesh_id") or "",
+            "wg_pubkey": v.get("wg_pubkey") or "",
         }
     return vms
 
@@ -136,12 +140,18 @@ def src_wireguard() -> dict[str, str]:
     """
     peers: dict[str, str] = {}
 
-    def add(ip: str, iface: str) -> None:
-        peers.setdefault(ip, "")
-        peers[ip] = (peers[ip] + " " + iface).strip()
+    def add(key: str, iface: str) -> None:
+        peers.setdefault(key, "")
+        if iface not in peers[key].split():
+            peers[key] = (peers[key] + " " + iface).strip()
 
     for iface in _run(["wg", "show", "interfaces"]).split():
         for line in _run(["wg", "show", iface, "allowed-ips"]).splitlines():
+            # "<pubkey>\t<allowed-ips>": the key is the identity kldload-db
+            # records, so a peer is also findable when its address moved.
+            parts = line.split()
+            if parts:
+                add(parts[0], iface)
             for ip in re.findall(r"(\d+\.\d+\.\d+\.\d+)/\d+", line):
                 add(ip, iface)
         for line in _run(["wg", "show", iface, "endpoints"]).splitlines():
@@ -192,14 +202,20 @@ def probe_ssh(host: str, ip: str) -> bool:
     # StrictHostKeyChecking=no on purpose: the targets are VM clones whose
     # host keys change at every seal and re-clone, on reused addresses. This
     # probe only asks "does root SSH answer"; nothing secret crosses it.
-    out = _run(
-        [
-            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-            "-o", "ConnectTimeout=3", f"root@{ip}", "true",
-        ],
-        timeout=6,
-    )
-    return out is not None and out == ""  # empty stdout + rc 0 == reachable
+    # Not _run(): that helper returns "" for success AND for every failure, so
+    # this probe answered True for a machine that refused the connection
+    # (source audit, 2026-09-26). The exit status is the answer here.
+    try:
+        p = subprocess.run(
+            [
+                "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=3", f"root@{ip}", "true",
+            ],
+            capture_output=True, text=True, timeout=6,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return p.returncode == 0
 
 
 # ── Merge ────────────────────────────────────────────────────────────────────
@@ -240,8 +256,11 @@ def collect(probe: bool = False) -> dict[str, Any]:
             "db_status": d.get("status", ""),
             "ip": ip,
             "network": lease.get("network", ""),
-            "in_mesh": bool(ip and ip in wg),
-            "mesh_ifaces": wg.get(ip, ""),
+            # On the mesh if its address is a peer's, OR its recorded key is:
+            # the key survives an address change, the address does not.
+            "in_mesh": bool((ip and ip in wg) or (d.get("wg_pubkey") and d["wg_pubkey"] in wg)),
+            "mesh_ifaces": wg.get(ip, "") or wg.get(d.get("wg_pubkey", ""), ""),
+            "mesh_id": d.get("mesh_id", ""),
             "k8s": knode.get("ready", ""),
             "golden_src": d.get("golden_src", ""),
             "targetable": bool(running and ip),

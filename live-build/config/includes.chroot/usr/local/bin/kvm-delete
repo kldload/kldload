@@ -171,6 +171,19 @@ else
     echo "Deleted '${NAME}'"
 fi
 
+# The mesh identity is read from the state DB BEFORE the soft delete below
+# hides the row (vm-show returns live rows only). kldload-enroll writes it there
+# since 2026-09-26; the file under mesh/enrolled/ is the fallback for machines
+# enrolled before that. Both are asked for, so a mismatch is visible.
+_db_mesh_id=""
+_db_mesh_pub=""
+if command -v kldload-db >/dev/null 2>&1; then
+    # swallow: an unregistered VM has no row, and that is answered by the file below
+    _db_row="$(kldload-db vm-show --name "${NAME}" 2>/dev/null || true)"
+    _db_mesh_id="$(sed -n 's/^  "mesh_id": "\([^"]*\)",\{0,1\}$/\1/p' <<<"$_db_row")"
+    _db_mesh_pub="$(sed -n 's/^  "wg_pubkey": "\([^"]*\)",\{0,1\}$/\1/p' <<<"$_db_row")"
+fi
+
 # Soft-delete from the state DB — history survives, dynamic inventory drops it.
 if command -v kldload-db >/dev/null 2>&1; then
     kldload-db vm-delete --name "${NAME}" 2>/dev/null || true
@@ -191,14 +204,24 @@ fi
 # then cut the wrong machine off. A VM enrolled before the record existed has
 # no file; say so rather than pretend it was clean.
 _mesh_rec="/var/lib/kldload/mesh/enrolled/${NAME}"
-if [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -r "$_mesh_rec" ]]; then
+_m_id=""
+_m_pub=""
+_m_src=""
+if [[ -n "$_db_mesh_id" && -n "$_db_mesh_pub" ]]; then
+    _m_id="$_db_mesh_id"
+    _m_pub="$_db_mesh_pub"
+    _m_src="state DB"
+elif [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -r "$_mesh_rec" ]]; then
     _m_id="$(sed -n 's/^node_id=//p' "$_mesh_rec")"
     _m_pub="$(sed -n 's/^guest_pub=//p' "$_mesh_rec")"
+    _m_src="$_mesh_rec"
+fi
+if [[ -n "$_m_src" ]]; then
     # swallow: no wg-mgmt.conf, or no block for the id, both mean "nothing to remove"
     _m_have="$(awk -v id="$_m_id" '$0 ~ "^# Node " id "([[:space:]]|$)" {f=1; next} f && /^PublicKey/ {print $3; exit}' \
         /etc/wireguard/wg-mgmt.conf 2>/dev/null || true)"
     if [[ ! "$_m_id" =~ ^[0-9]+$ || -z "$_m_pub" ]]; then
-        echo "WARNING: ${_mesh_rec} is malformed — check 'wg show' for a leftover peer by hand" >&2
+        echo "WARNING: mesh record in ${_m_src} is malformed — check 'wg show' for a leftover peer by hand" >&2
         _mesh_left=1
     elif [[ "$_m_have" == "$_m_pub" ]]; then
         kube-network remove-peer "$_m_id" </dev/null >/dev/null 2>&1 ||
@@ -208,7 +231,7 @@ if [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -r "$_mesh_rec" ]]; then
             echo "WARNING: ${NAME} is still a mesh peer (id ${_m_id}) — remove it: kube-network remove-peer ${_m_id}" >&2
             _mesh_left=1
         else
-            echo "Removed from the mesh (peer ${_m_id})"
+            echo "Removed from the mesh (peer ${_m_id}, identity from ${_m_src})"
             rm -f "$_mesh_rec"
         fi
     elif wg show wg-mgmt peers 2>/dev/null | grep -qxF "$_m_pub"; then

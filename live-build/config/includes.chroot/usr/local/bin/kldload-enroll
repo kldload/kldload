@@ -624,6 +624,14 @@ if install -d -m 0755 "$_mesh_dir" &&
 else
     warn "${VM}: could not record the enrolment in ${_mesh_dir} — kvm-delete will not remove peer ${node_id}"
 fi
+# The same identity into the state DB, so the inventory, kldload-estate and
+# the console can say who is on the mesh without parsing that directory. The
+# file stays: kvm-delete reads the DB first and falls back to it, and hosts
+# whose database predates mesh_id still have the file (2026-09-26).
+if command -v kldload-db >/dev/null 2>&1; then
+    kldload-db vm-mesh --name "$VM" --mesh-id "$node_id" --wg-pubkey "$guest_pub" 2>/dev/null ||
+        warn "${VM}: kldload-db vm-mesh failed — the estate view will not show mesh id ${node_id}"
+fi
 
 # swallow: same as above — the inventory timer picks this up within 60s
 # regardless, so a failed immediate sync is a delay and not a defect.

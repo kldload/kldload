@@ -92,7 +92,10 @@ if command -v virsh >/dev/null 2>&1; then
         [[ -n "$_owner" ]] && DHCP["$_owner"]="$_ip"
         # No leases at all is an ordinary state on a host whose guests are shut
         # off, and virsh exits non-zero when the network is not up.
-    done < <(virsh -q net-dhcp-leases default 2>/dev/null || true)
+        # EVERY network, not `default` alone: firstboot defines kld-klab,
+        # kld-vms and kld-zfslab beside it, and a VM on any of those never got a
+        # target while this read one network (source audit, 2026-09-26).
+    done < <(while read -r _net; do [[ -n "$_net" ]] && virsh -q net-dhcp-leases "$_net" 2>/dev/null; done < <(virsh net-list --name 2>/dev/null) || true)
 fi
 
 blue_json='['
@@ -151,9 +154,22 @@ fi
 # the tunnel being up.
 vms_json='['
 _first_vm=1
-for _rec in /var/lib/kldload/mesh/enrolled/*; do
-    [[ -f "$_rec" ]] || continue
-    vm="${_rec##*/}"
+# The set of enrolled machines: the record files, plus every live DB row that
+# carries a mesh_id (kldload-enroll writes both since 2026-09-26). Union, so a
+# host with only one of the two still scrapes everything it enrolled.
+_enrolled="$( (
+    for _rec in /var/lib/kldload/mesh/enrolled/*; do [[ -f "$_rec" ]] && echo "${_rec##*/}"; done
+    command -v kldload-db >/dev/null 2>&1 && kldload-db dump 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for v in d.get("vms", []):
+    if v.get("mesh_id") and not v.get("deleted_at"):
+        print(v["name"])' 2>/dev/null
+) | sort -u)"
+for vm in $_enrolled; do
     case "$vm" in
     klab-blue-* | klab-green-* | kspawn-*) continue ;; # already a target above
     esac
