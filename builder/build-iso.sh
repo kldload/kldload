@@ -1526,10 +1526,6 @@ grep -q '^PermitRootLogin prohibit-password$' "${ROOTFS}/etc/ssh/sshd_config.d/5
 
 # Enable services
 enable_live_unit NetworkManager.service sshd.service
-# The rack entry's server. Inert unless the cmdline says kldload.netboot=1
-# (ConditionKernelCommandLine), so enabling it on every live boot costs
-# nothing and the GRUB entry alone decides (2026-09-25).
-enable_live_unit kldload-netboot-live.service
 if [[ "$EDITION" != "core" ]]; then
     # qemu-guest-agent is installed (PKGS above) and was never enabled: a
     # hypervisor could not read a live guest's address. Its only enabler was a
@@ -3350,7 +3346,7 @@ ALPEOF
         kldload-snapshot.service kldload-snapshot.timer \
         ttyd-k9s.service zexplore-api.service \
         klab-prom-targets.service klab-prom-targets.timer \
-        kldload-netboot.service; do
+        kldload-netboot.service kldload-netboot-live.service; do
         _src="/build/live-build/config/includes.chroot/usr/lib/systemd/system/${_svc}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/lib/systemd/system/${_svc}"
     done
@@ -3367,6 +3363,13 @@ ALPEOF
     # 9455); on a KVM host it lets guest VMs snapshot/roll back their own zvols,
     # scoped per-VM. Not a boot dependency, so a bind failure never blocks boot.
     enable_live_unit zexplore-api.service
+    # The live USB as the rack's PXE server. Inert unless the cmdline says
+    # kldload.netboot=1 (ConditionKernelCommandLine), so enabling it on every
+    # live boot costs nothing and the GRUB entry alone decides. Here, after the
+    # copy loop: build 70's first run enabled it beside NetworkManager, 1,800
+    # lines before the unit file existed in the rootfs, and enable_live_unit
+    # killed the build as designed (2026-09-25 21:08).
+    enable_live_unit kldload-netboot-live.service
 
     # kldload-firstboot to sbin (kldload-export-deferred used to ride along;
     # the deferred export path was dead end to end and is gone, 2026-09-23)
