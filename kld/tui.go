@@ -96,12 +96,65 @@ type model struct {
 	now      time.Time
 	con      *console   // an open in-TUI console (screen, serial, ssh, job); nil otherwise
 	jobs     []*console // every job started this session, oldest first
+	nav      []navFrame // where Enter came from: Backspace (or Esc with nothing to clear) pops
+	// refreshing is a background reload of the visible table (the live
+	// Machines view every 3 s): no spinner, the rows stay until replaced
+	refreshing bool
+}
+
+// navFrame is one place the operator drilled from: section, sub-tab, its
+// context, the row and the filter, so going back lands exactly there.
+type navFrame struct {
+	active, sub int
+	ctx         string
+	hasCtx      bool
+	row         int
+	filter      string
+}
+
+// push records the current view before a drill; pop restores the last one.
+func (m *model) push() {
+	c, ok := m.ctx[m.key()]
+	m.nav = append(m.nav, navFrame{active: m.active, sub: m.sub[m.active], ctx: c, hasCtx: ok, row: m.row, filter: m.filter.Value()})
+	if len(m.nav) > 64 {
+		m.nav = m.nav[1:]
+	}
+}
+
+// afterPop reloads when the cached table was built for another context:
+// the data cache is per tab, so /etc's listing sat under the Explorer key
+// after Backspace restored the context to / (caught on the first run).
+func (m *model) afterPop() tea.Cmd {
+	d := m.cur()
+	if d == nil || d.ctx != m.ctx[m.key()] {
+		m.loading[m.key()] = true
+		return m.reload()
+	}
+	return nil
+}
+
+func (m *model) pop() bool {
+	if len(m.nav) == 0 {
+		return false
+	}
+	f := m.nav[len(m.nav)-1]
+	m.nav = m.nav[:len(m.nav)-1]
+	m.switchTo(f.active, f.sub)
+	if f.hasCtx {
+		m.ctx[m.key()] = f.ctx
+	} else {
+		delete(m.ctx, m.key())
+	}
+	m.filter.SetValue(f.filter)
+	m.row = f.row
+	return true
 }
 
 // jobStartMsg asks Update to open a job pane for a verb's command.
 type jobStartMsg struct {
 	label string
-	argv  []string
+	argv  []string   // one command …
+	argvs [][]string // … or several, run in order in one pane
 }
 
 // conBodyTop is the first row of a console's body: title, rail, sub-tabs.
@@ -142,10 +195,28 @@ func (m model) verbsHere() []verb { return verbs[sections[m.active].name+"/"+m.s
 func (m *model) apply(d sectionData) {
 	dd := d
 	k := fmt.Sprintf("%d/%d", d.section, d.sub)
+	was := ""
+	if k == m.key() {
+		was = m.selected()
+	}
 	m.data[k] = &dd
 	m.loading[k] = false
-	if k == m.key() && m.row >= len(m.rows()) {
-		m.row = 0
+	m.refreshing = false
+	if k == m.key() {
+		// the cursor follows the row's name across a reload, not its index:
+		// a VM that started moves within its group and the cursor went with
+		// the index, onto the neighbour
+		if was != "" {
+			for i, r := range m.rows() {
+				if col(r, 0) == was {
+					m.row = i
+					break
+				}
+			}
+		}
+		if m.row >= len(m.rows()) {
+			m.row = 0
+		}
 	}
 }
 
@@ -195,6 +266,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.con != nil {
 			m.con.resize(m.width, m.conBodyH())
 		}
+	case activityMsg:
+		m.loading[m.key()] = true
+		return m, m.reload()
 	case conTickMsg:
 		// jobs that finished since the last tick are reported once and the
 		// table reloaded, whether or not their pane is showing
@@ -211,12 +285,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.reload())
 			}
 		}
+		// a job that succeeded while its pane was showing gives the operator
+		// a moment to read the tail, then returns to the table on its own;
+		// the output stays under ctrl+j. A failed job keeps its pane until
+		// it is read. (The first clone batch left the operator staring at
+		// a finished pane wondering how to get back, 2026-09-26.)
+		if c := m.con; c != nil && c.kind == conJob && !c.follow && !c.running() && jobSucceeded(c) && time.Since(c.finished) > 1500*time.Millisecond {
+			m.con = nil
+			m.say(stGood.Render(c.vm + ": done in " + c.finished.Sub(c.started).Truncate(time.Second).String() + " (ctrl+j shows the output)"))
+		}
 		if m.con != nil || m.runningJobs() > 0 {
 			cmds = append(cmds, conTick())
 		}
 		return m, tea.Batch(cmds...)
 	case jobStartMsg:
-		c, err := openJob(msg.label, msg.argv, m.width, m.conBodyH())
+		argvs := msg.argvs
+		if len(argvs) == 0 {
+			argvs = [][]string{msg.argv}
+		}
+		c, err := openJobSeq(msg.label, argvs, m.width, m.conBodyH())
 		if err != nil {
 			m.say(stBad.Render(msg.label + ": " + err.Error()))
 			return m, nil
@@ -247,18 +334,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.status != "" && time.Since(m.statusAt) > 8*time.Second {
 			m.status = ""
 		}
+		// the live views: Machines/VMs refreshes itself every 3 s (CPU%,
+		// state) while it is on screen and nothing else is going on; the
+		// Overview picks up the doctor's result when it lands
+		if m.con == nil && m.prompt == "" && !m.filterOn && !m.loading[m.key()] && !m.refreshing {
+			if d := m.cur(); d != nil {
+				here := sections[m.active].name + "/" + m.subName()
+				switch {
+				case here == "Machines/VMs" && time.Since(d.loadedAt) >= 3*time.Second,
+					here == "Overview/Summary" && doctorFresherThan(d.loadedAt):
+					m.refreshing = true
+					return m, tea.Batch(tickEvery(), m.reload())
+				}
+			}
+		}
 		return m, tickEvery()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 	case loadedMsg:
+		if msg.section == 0 && msg.sub == subIndex(0, "Activity") {
+			d := &msg
+			// the kld jobs of this session sit above the host's units
+			var rows [][]string
+			for i := len(m.jobs) - 1; i >= 0; i-- {
+				j := m.jobs[i]
+				state, since := "running", time.Since(j.started).Truncate(time.Second).String()
+				if !j.running() {
+					state, since = "done", j.finished.Sub(j.started).Truncate(time.Second).String()
+					if p := j.exit.Load(); p != nil && !strings.HasSuffix((*p).Error(), " ended") {
+						state = "failed"
+					}
+				}
+				rows = append(rows, []string{j.vm, "job", state, since, strings.Join(j.argv, " ")})
+			}
+			d.rows = append(rows, d.rows...)
+		}
 		m.apply(sectionData(msg))
 		return m, m.detailCmd()
 	case detailMsg:
 		m.details[msg.key+"\x00"+msg.name] = msg.lines
 		return m, nil
 	case doneMsg:
+		invalidateSnapCounts()
 		if msg.err != nil {
 			m.say(stBad.Render(msg.what + ": " + msg.err.Error()))
 		} else {
@@ -367,21 +486,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "backspace":
-			// Explorer: up one directory; Versions: back to the file's directory
-			if sections[m.active].name == "Storage" && (m.subName() == "Explorer" || m.subName() == "Versions") && m.ctx[m.key()] != "" {
-				ds, rel := splitExplorerCtx(m.ctx[m.key()])
-				if m.subName() == "Versions" {
-					m.switchTo(m.active, subIndex(m.active, "Explorer"))
-				}
-				if rel != "/" {
-					m.ctx[m.key()] = ds + ":" + path.Dir(rel)
-				} else {
-					m.ctx[m.key()] = ds + ":/"
-				}
-				m.filter.SetValue("")
-				m.loading[m.key()] = true
-				m.row = 0
-				return m, m.reload()
+			// back to where Enter (or x) came from; nothing to go back to
+			// means nothing happens, on every tab the same way
+			if m.pop() {
+				return m, m.afterPop()
 			}
 		case "esc":
 			// esc clears the marks first, then leaves a context
@@ -393,12 +501,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			// then an applied filter: "(esc: all)" promises that, and it
+			// then an applied filter: "(backspace: back)" promises that, and it
 			// used to jump straight to leaving the context instead
 			if m.filter.Value() != "" {
 				m.filter.SetValue("")
 				m.row = 0
 				return m, nil
+			}
+			// then back to where the drill came from
+			if m.pop() {
+				return m, m.afterPop()
 			}
 			// esc leaves a context: the VM's snapshots become every VM's
 			if m.ctx[m.key()] != "" {
@@ -407,6 +519,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.row = 0
 				return m, m.reload()
 			}
+		case "ctrl+t":
+			// a terminal on this host, inside the TUI (ctrl+] d comes back)
+			return m.openConsole(conShell, "host", "")
 		case "ctrl+j":
 			// the job panes: newest first
 			if len(m.jobs) == 0 {
@@ -422,6 +537,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// explore a dataset's files (Datasets) — a drill, not a verb
 			if sections[m.active].name+"/"+m.subName() == "Storage/Datasets" && m.selected() != "" {
 				ds := m.selected()
+				m.push()
 				m.switchTo(m.active, subIndex(m.active, "Explorer"))
 				m.ctx[m.key()] = ds + ":/"
 				m.loading[m.key()] = true
@@ -477,7 +593,14 @@ func (m model) drill() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	target := ""
-	switch sections[m.active].name + "/" + m.subName() {
+	here := sections[m.active].name + "/" + m.subName()
+	if here == "Overview/Activity" {
+		return m.openActivity()
+	}
+	if here != "Machines/Snapshots" {
+		m.push()
+	}
+	switch here {
 	case "Machines/VMs":
 		target = "Snapshots"
 	case "Storage/Datasets":
@@ -525,6 +648,7 @@ func (m model) drill() (tea.Model, tea.Cmd) {
 		return m, m.loadIfEmpty()
 	}
 	if target == "" {
+		m.nav = m.nav[:len(m.nav)-1] // nothing was left; the detail pane is not a place
 		m.detail = true
 		return m, nil
 	}
@@ -684,7 +808,7 @@ func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
 	// A batch: the verb runs once per marked row, in table order, one
 	// after another; a destructive batch asks for the count to be typed.
 	// Verbs that ask or take the terminal run on the selection only.
-	if marked := m.markedRows(); len(marked) > 1 && !v.noRow && !v.inter && v.prompt == "" && v.argv != nil {
+	if marked := m.markedRows(); len(marked) > 1 && !v.noRow && !v.inter && v.prompt == "" && v.argv != nil && v.console == conNone {
 		if v.confirm {
 			m.prompt = fmt.Sprintf("%s %d marked rows — type %d to confirm: ", v.label, len(marked), len(marked))
 			m.pending = func(typed string) tea.Cmd {
@@ -724,12 +848,27 @@ func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	m.say(stDim.Render(v.label + ": running"))
 	return m, m.execVerb(v, row, "")
 }
 
 // execBatch runs one verb over marked rows sequentially and reports how
 // many succeeded and which failed — a count against what it was given.
 func (m model) execBatch(v verb, rows [][]string) tea.Cmd {
+	if v.job {
+		// every marked row's command in one pane, in order, stopping at
+		// the first failure: fifteen clones are one job, not fifteen
+		var cmds [][]string
+		for _, r := range rows {
+			argv, err := v.argv(r, "")
+			if err != nil {
+				return func() tea.Msg { return doneMsg{v.label + " " + col(r, 0), err} }
+			}
+			cmds = append(cmds, argv)
+		}
+		label := fmt.Sprintf("%s x%d", v.label, len(cmds))
+		return func() tea.Msg { return jobStartMsg{label: label, argvs: cmds} }
+	}
 	return func() tea.Msg {
 		ok, failed := 0, []string{}
 		for _, r := range rows {
@@ -743,7 +882,7 @@ func (m model) execBatch(v verb, rows [][]string) tea.Cmd {
 				ok++
 			}
 		}
-		what := fmt.Sprintf("%s: %d of %d done", v.label, ok, len(rows))
+		what := fmt.Sprintf("%s: %d of %d", v.label, ok, len(rows))
 		if len(failed) > 0 {
 			return doneMsg{what, fmt.Errorf("%s", strings.Join(failed, "; "))}
 		}
@@ -814,7 +953,7 @@ func (m model) View() string {
 	// title bar: brand · host on the left, the clock and a spinner on the right
 	left := stBrand.Render("kldload") + stDim.Render("  operator console · "+hostname())
 	right := stDim.Render(m.now.Format("15:04:05"))
-	if m.loading[m.key()] {
+	if m.loading[m.key()] && !m.refreshing {
 		right = m.spin.View() + " " + stDim.Render("loading") + "  " + right
 	}
 	b.WriteString(padBetween(left, right, w) + "\n")
@@ -857,7 +996,7 @@ func (m model) View() string {
 		return b.String()
 	}
 	if c := m.ctx[m.key()]; c != "" {
-		subline += stDim.Render("  › ") + stTitle.Render(c) + stDim.Render("  (esc: all)")
+		subline += stDim.Render("  › ") + stTitle.Render(c) + stDim.Render("  (backspace: back)")
 	}
 	b.WriteString(subline + "\n")
 	b.WriteString(stDim.Render(strings.Repeat("─", w)) + "\n")
@@ -953,9 +1092,9 @@ func (m model) keyHints() string {
 	case "Storage/Pools":
 		parts = append(parts, k("enter", "open the pool"))
 	case "Storage/Explorer":
-		parts = append(parts, k("enter", "open"), k("v", "versions"), k("backspace", "up"))
-	case "Storage/Versions":
-		parts = append(parts, k("backspace", "back"))
+		parts = append(parts, k("enter", "open"), k("v", "versions"))
+	case "Overview/Activity":
+		parts = append(parts, k("enter", "watch"))
 	case "Cluster/Pods":
 		parts = append(parts, k("enter", "logs"))
 	case "Cluster/Nodes", "Cluster/Deployments", "Cluster/Services":
@@ -964,6 +1103,10 @@ func (m model) keyHints() string {
 	for _, v := range m.verbsHere() {
 		parts = append(parts, k(v.key, v.label))
 	}
+	if len(m.nav) > 0 {
+		parts = append(parts, k("backspace", "back"))
+	}
+	parts = append(parts, k("ctrl+t", "terminal"))
 	if len(m.jobs) > 0 {
 		parts = append(parts, k("ctrl+j", "jobs"))
 	}
@@ -1345,8 +1488,19 @@ func (m model) runningJobs() int {
 	return n
 }
 
-// leaveJob hides a job's pane; the job itself keeps running.
+// leaveJob hides a job's pane; the job itself keeps running — except a
+// follow (a journal), which has no work to finish and is ended, and
+// removed from the jobs, when its pane is left.
 func (m model) leaveJob() (tea.Model, tea.Cmd) {
+	if c := m.con; c != nil && c.follow {
+		c.close()
+		for i, j := range m.jobs {
+			if j == c {
+				m.jobs = append(m.jobs[:i], m.jobs[i+1:]...)
+				break
+			}
+		}
+	}
 	m.con = nil
 	return m, conTick()
 }
@@ -1463,4 +1617,60 @@ func (m model) updateJob(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	c.key(msg)
 	return m, nil
+}
+
+// activityMsg asks for the Activity tab to reload.
+type activityMsg struct{}
+
+// openActivity is Enter on the Activity tab: a kld job's pane, or a live
+// journal of a unit in a pane that ends when it is left.
+func (m model) openActivity() (tea.Model, tea.Cmd) {
+	r := m.selectedRow()
+	if r == nil {
+		return m, nil
+	}
+	if col(r, 1) == "job" {
+		for _, j := range m.jobs {
+			if j.vm == col(r, 0) {
+				m.con = j
+				j.resize(m.width, m.conBodyH())
+				return m, conTick()
+			}
+		}
+		return m, nil
+	}
+	unit := col(r, 0)
+	if !unitOK(unit) {
+		m.say(stWarn.Render("not a unit name: " + unit))
+		return m, nil
+	}
+	c, err := openJob("journal "+unit, []string{"journalctl", "-o", "short", "--no-hostname", "-n", "200", "-fu", unit}, m.width, m.conBodyH())
+	if err != nil {
+		m.say(stBad.Render(err.Error()))
+		return m, nil
+	}
+	c.follow = true
+	m.jobs = append(m.jobs, c)
+	m.con = c
+	c.resize(m.width, m.conBodyH())
+	return m, conTick()
+}
+
+// unitOK admits systemd unit names and nothing shell-shaped.
+func unitOK(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.' || c == '@' || c == ':' || c == '\\') {
+			return false
+		}
+	}
+	return true
+}
+
+// jobSucceeded is true once a job has ended with exit status 0.
+func jobSucceeded(c *console) bool {
+	p := c.exit.Load()
+	return p != nil && strings.HasSuffix((*p).Error(), " ended")
 }

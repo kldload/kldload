@@ -13,6 +13,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -72,17 +73,52 @@ var verbs = map[string][]verb{
 		{key: "S", label: "start", argv: onRow("virsh", "start", "{}")},
 		{key: "T", label: "shutdown", argv: onRow("virsh", "shutdown", "{}")},
 		{key: "R", label: "reboot", argv: onRow("virsh", "reboot", "{}")},
-		{key: "K", label: "force off", confirm: true, argv: onRow("virsh", "destroy", "{}")},
-		{key: "c", label: "clone", job: true, prompt: "clone {} as: ", argv: func(row []string, in string) ([]string, error) {
-			in = strings.TrimSpace(in)
-			if !nameOK(in) {
-				return nil, fmt.Errorf("%q is not a VM name", in)
+		{key: "K", label: "force off", argv: onRow("virsh", "destroy", "{}")},
+		{key: "c", label: "clone", job: true, prompt: "clone {} as <name> [count] [--snap @name]  (count > 1 makes name-1, name-2, …): ", argv: func(row []string, in string) ([]string, error) {
+			f := strings.Fields(in)
+			if len(f) == 0 || !nameOK(f[0]) {
+				return nil, errors.New("a name for the clone comes first")
 			}
-			return []string{"kvm-clone", col(row, 0), in}, nil
+			count, snap := 1, ""
+			for i := 1; i < len(f); i++ {
+				switch {
+				case f[i] == "--snap" && i+1 < len(f) && snapNameOK(strings.TrimPrefix(f[i+1], "@")):
+					snap = "@" + strings.TrimPrefix(f[i+1], "@")
+					i++
+				default:
+					n, err := strconv.Atoi(f[i])
+					if err != nil || n < 1 || n > 99 {
+						return nil, errors.New("after the name: a count from 1 to 99, or --snap @name")
+					}
+					count = n
+				}
+			}
+			names := []string{f[0]}
+			if count > 1 {
+				// the typed name is a base: fifteen clones used to be fifteen
+				// trips through the prompt (vmxplore's cloneqty round)
+				names = names[:0]
+				for i := 1; i <= count; i++ {
+					names = append(names, fmt.Sprintf("%s-%d", f[0], i))
+				}
+			}
+			for _, n := range names {
+				if !nameOK(n) {
+					return nil, fmt.Errorf("%q is not a VM name", n)
+				}
+			}
+			if len(names) == 1 && snap == "" {
+				return []string{"kvm-clone", col(row, 0), names[0]}, nil
+			}
+			// sequential, one shell with a fixed argv: clones of one source
+			// each snapshot the same zvol, and the first failure names its
+			// clone instead of leaving the operator to count what appeared
+			script := `src="$1"; snap="$2"; shift 2; for n in "$@"; do echo "== kvm-clone $src $n"; if [ -n "$snap" ]; then kvm-clone "$src" "$n" --snap "$snap" || exit 1; else kvm-clone "$src" "$n" || exit 1; fi; done`
+			return append([]string{"sh", "-c", script, "_", col(row, 0), snap}, names...), nil
 		}},
 		{key: "s", label: "snapshot", argv: onRow("kvm-snap", "{}")},
-		{key: "b", label: "rollback to the newest snapshot", confirm: true, argv: onRow("kvm-snap", "{}", "rollback")},
-		{key: "d", label: "delete VM + zvol", confirm: true, argv: onRow("kvm-delete", "{}", "--force")},
+		{key: "b", label: "rollback to the newest snapshot", argv: onRow("kvm-snap", "{}", "rollback")},
+		{key: "d", label: "delete VM + zvol", argv: onRow("kvm-delete", "{}", "--force")},
 		{key: "e", label: "enrol on the mesh", job: true, argv: onRow("kldload-enroll", "{}")},
 		{key: "z", label: "suspend", argv: onRow("virsh", "suspend", "{}")},
 		{key: "Z", label: "resume", argv: onRow("virsh", "resume", "{}")},
@@ -108,7 +144,7 @@ var verbs = map[string][]verb{
 			}
 			return []string{"kvm-grow", col(row, 0), in}, nil
 		}},
-		{key: "X", label: "reconcile an unreconciled row", confirm: true, argv: func(row []string, _ string) ([]string, error) {
+		{key: "X", label: "reconcile an unreconciled row", argv: func(row []string, _ string) ([]string, error) {
 			if col(row, 1) != "unreconciled" {
 				return nil, errors.New("only rows in the unreconciled group")
 			}
@@ -143,10 +179,10 @@ var verbs = map[string][]verb{
 		}},
 	},
 	"Machines/Snapshots": {
-		{key: "b", label: "roll the VM back to this snapshot", confirm: true, argv: func(row []string, _ string) ([]string, error) {
+		{key: "b", label: "roll the VM back to this snapshot", argv: func(row []string, _ string) ([]string, error) {
 			return []string{"kvm-snap", col(row, 0), "rollback", "@" + col(row, 1)}, nil
 		}},
-		{key: "d", label: "delete snapshot", confirm: true, argv: func(row []string, _ string) ([]string, error) {
+		{key: "d", label: "delete snapshot", argv: func(row []string, _ string) ([]string, error) {
 			return []string{"kvm-snap", col(row, 0), "delete", "@" + col(row, 1)}, nil
 		}},
 		{key: "s", label: "snapshot this VM now", argv: onRow("kvm-snap", "{}")},
@@ -202,14 +238,14 @@ var verbs = map[string][]verb{
 		}},
 		{key: "S", label: "start", argv: onRow("kfire", "start", "{}")},
 		{key: "T", label: "stop", argv: onRow("kfire", "stop", "{}")},
-		{key: "d", label: "destroy", confirm: true, argv: onRow("kfire", "destroy", "{}")},
+		{key: "d", label: "destroy", argv: onRow("kfire", "destroy", "{}")},
 		{key: "H", label: "ssh", inter: true, argv: onRow("kfire", "ssh", "{}")},
 		{key: "C", label: "serial console log", inter: true, argv: onRow("kfire", "console", "{}")},
 		{key: "!", label: "kfire status", noRow: true, job: true, argv: fixed("sh", "-c", `kfire status; echo; read -r -p "enter to return" _`)},
 	},
 	"Machines/Networks": {
 		{key: "S", label: "start", argv: onRow("virsh", "net-start", "{}")},
-		{key: "T", label: "stop", confirm: true, argv: onRow("virsh", "net-destroy", "{}")},
+		{key: "T", label: "stop", argv: onRow("virsh", "net-destroy", "{}")},
 	},
 	"Machines/Pools": {
 		{key: "R", label: "refresh", argv: onRow("virsh", "pool-refresh", "{}")},

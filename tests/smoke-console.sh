@@ -147,6 +147,7 @@ else
         fi
     done <<'TABS'
 overview summary
+overview activity
 machines vms
 machines snapshots
 machines microvms
@@ -194,7 +195,7 @@ provision feed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 47)) && _pass "every sub-tab tried (47/47)" || _fail "sub-tabs tried" "${_tabs} of 47"
+    ((_tabs == 48)) && _pass "every sub-tab tried (48/48)" || _fail "sub-tabs tried" "${_tabs} of 48"
 
     # ── the video console, against a running VM's display ─────────────────
     # The wire client (vnc.go) is exercised by its live test: it dials the
@@ -319,12 +320,15 @@ TABS
         else
             _fail "job pane" "kvm-create ${_pv} did not reach 'done in' in 120 s"
         fi
-        tmux -L "$_t3" send-keys -t "$_t3" C-]
-        sleep 0.4
-        tmux -L "$_t3" send-keys -t "$_t3" d
-        sleep 6
+        # a finished job returns to the table by itself; wait for the table,
+        # never send keys blind (a blind ctrl+] d here pressed delete on the
+        # first row of the table once, 2026-09-26; the typed name saved it)
+        for _i in $(seq 20); do
+            tmux -L "$_t3" capture-pane -t "$_t3" -p | grep -q 'machines,' && break
+            sleep 0.5
+        done
         if sudo -n virsh dominfo "$_pv" >/dev/null 2>&1; then
-            _pass "job pane: the probe VM exists after the pane was left"
+            _pass "job pane: the probe VM exists after the pane returned"
         else
             _fail "job pane" "${_pv} does not exist after the job reported done"
         fi
@@ -334,13 +338,16 @@ TABS
         sleep 0.3
         tmux -L "$_t3" send-keys -t "$_t3" Enter
         sleep 2
-        tmux -L "$_t3" send-keys -t "$_t3" d
-        sleep 0.5
-        tmux -L "$_t3" send-keys -t "$_t3" -l "$_pv"
-        sleep 0.3
-        tmux -L "$_t3" send-keys -t "$_t3" Enter
+        # the row under the cursor MUST be the probe before d: delete asks
+        # nothing on a VM row
+        if tmux -L "$_t3" capture-pane -t "$_t3" -p | grep -q "/${_pv} · 1 of "; then
+            tmux -L "$_t3" send-keys -t "$_t3" d
+        else
+            _fail "table delete" "the filter did not leave exactly ${_pv} selected; not pressing d"
+        fi
         _gone=0
-        for _i in $(seq 30); do
+        # kvm-delete waits for the domain to stop; 30 s was short under a build
+        for _i in $(seq 90); do
             if ! sudo -n virsh dominfo "$_pv" >/dev/null 2>&1 && ! sudo -n zfs list "rpool/vms/$_pv" >/dev/null 2>&1; then
                 _gone=1
                 break
@@ -348,9 +355,9 @@ TABS
             sleep 1
         done
         if ((_gone)); then
-            _pass "table delete by typed name removed ${_pv} (domain and zvol)"
+            _pass "table delete removed ${_pv} (domain and zvol), no confirmation asked"
         else
-            _fail "table delete" "${_pv} still present 30 s after the typed confirm"
+            _fail "table delete" "${_pv} still present 90 s after the typed confirm"
         fi
         _job_cleanup
     else

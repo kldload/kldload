@@ -52,11 +52,12 @@ const (
 	conScreen
 	conSerial
 	conSSH
-	conJob // a long-running verb, run in a pty so its output is a pane, not a wait
+	conJob   // a long-running verb, run in a pty so its output is a pane, not a wait
+	conShell // a shell on this host, as the operator, in the body of the TUI
 )
 
 func (k consoleKind) String() string {
-	return [...]string{"", "screen", "serial", "ssh", "job"}[k]
+	return [...]string{"", "screen", "serial", "ssh", "job", "shell"}[k]
 }
 
 // console is one open session. Exactly one is open at a time (model.con).
@@ -70,6 +71,8 @@ type console struct {
 	started  time.Time
 	finished time.Time
 	reported bool
+	follow   bool       // a journal follow: ends when its pane is left
+	seqMu    sync.Mutex // guards cmd while a sequence job swaps children
 	rfb      *rfbConn
 	pty      *os.File
 	cmd      *exec.Cmd
@@ -127,6 +130,16 @@ func openConsole(kind consoleKind, vm, addr string, cols, rows int) (*console, e
 		if err := c.spawn("sudo", "-n", "virsh", "console", vm); err != nil {
 			return nil, err
 		}
+	case conShell:
+		// the operator's own shell, not root: sudo is one keystroke away
+		// inside it, the way it is on any terminal
+		sh := os.Getenv("SHELL")
+		if sh == "" {
+			sh = "bash"
+		}
+		if err := c.spawn(sh, "-l"); err != nil {
+			return nil, err
+		}
 	case conSSH:
 		if addr == "" || addr == "-" {
 			return nil, errors.New("no address for " + vm + " yet")
@@ -155,6 +168,56 @@ func openJob(label string, argv []string, cols, rows int) (*console, error) {
 	return c, nil
 }
 
+// openJobSeq is openJob for several commands: they run one after another
+// in the same pty, each announced with a "== argv" line, the pane ending
+// with the first failure or the last exit. Sequential on purpose (clones
+// of one source each snapshot the same zvol), and without a shell: every
+// argv is exec'd as given.
+func openJobSeq(label string, argvs [][]string, cols, rows int) (*console, error) {
+	if len(argvs) == 1 {
+		return openJob(label, argvs[0], cols, rows)
+	}
+	c := &console{kind: conJob, vm: label, argv: argvs[0], started: time.Now(), cols: max(cols, 20), rows: max(rows, 5)}
+	master, slave, err := openPTY()
+	if err != nil {
+		return nil, err
+	}
+	c.pty = master
+	c.vt = vt.NewEmulator(c.cols, c.rows)
+	c.setWinsize()
+	c.startReaders(master)
+	go func() {
+		defer slave.Close()
+		for i, argv := range argvs {
+			fmt.Fprintf(slave, "== [%d/%d] %s\r\n", i+1, len(argvs), strings.Join(argv, " "))
+			cmd := exec.Command("sudo", append([]string{"-n"}, argv...)...)
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+			cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+			c.seqMu.Lock()
+			c.cmd = cmd
+			c.seqMu.Unlock()
+			if err := cmd.Start(); err != nil {
+				fmt.Fprintf(slave, "%s\r\n", err)
+				c.endWith(fmt.Errorf("%s ended: %v", argv[0], err))
+				return
+			}
+			if err := cmd.Wait(); err != nil {
+				c.endWith(fmt.Errorf("%s ended: %v (command %d of %d)", argv[0], err, i+1, len(argvs)))
+				return
+			}
+		}
+		c.endWith(fmt.Errorf("%s ended", label))
+	}()
+	return c, nil
+}
+
+// endWith records a job's end once.
+func (c *console) endWith(e error) {
+	c.finished = time.Now()
+	c.exit.CompareAndSwap(nil, &e)
+}
+
 // running reports whether a job's child is still alive.
 func (c *console) running() bool { return c.exit.Load() == nil }
 
@@ -177,6 +240,21 @@ func (c *console) spawn(argv ...string) error {
 	c.pty, c.cmd = master, cmd
 	c.vt = vt.NewEmulator(c.cols, c.rows)
 	c.setWinsize()
+	go func() { // the child's end is the session's end
+		_ = cmd.Wait()
+		e := fmt.Errorf("%s ended", argv[len(argv)-1])
+		if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
+			e = fmt.Errorf("%s ended: %s", argv[len(argv)-1], cmd.ProcessState)
+		}
+		c.endWith(e)
+	}()
+	c.startReaders(master)
+	return nil
+}
+
+// startReaders pumps the pty into the emulator and the emulator's replies
+// (DA, cursor reports) back into the pty.
+func (c *console) startReaders(master *os.File) {
 	go func() { // pty → emulator
 		buf := make([]byte, 32*1024)
 		for {
@@ -190,13 +268,8 @@ func (c *console) spawn(argv ...string) error {
 				c.seq.Add(1)
 			}
 			if err != nil {
-				_ = cmd.Wait()
-				e := fmt.Errorf("%s ended", argv[len(argv)-1])
-				if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
-					e = fmt.Errorf("%s ended: %s", argv[len(argv)-1], cmd.ProcessState)
-				}
-				c.finished = time.Now()
-				c.exit.Store(&e)
+				// EIO once every writer of the slave is gone; the session's
+				// end is recorded by whoever ran the child
 				return
 			}
 		}
@@ -218,7 +291,6 @@ func (c *console) spawn(argv ...string) error {
 			}
 		}
 	}()
-	return nil
 }
 
 // openPTY opens a master/slave pair by hand: /dev/ptmx, unlock, and the
@@ -277,9 +349,20 @@ func (c *console) close() {
 	if c.rfb != nil {
 		c.rfb.Close()
 	}
-	if c.cmd != nil && c.cmd.Process != nil {
-		// error ignored: the child may already have exited
-		_ = c.cmd.Process.Kill()
+	c.seqMu.Lock()
+	cmd := c.cmd
+	c.seqMu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		// the whole process group, not the leader alone: the leader is
+		// sudo, and a journalctl under it outlived a killed sudo until its
+		// next write (which a quiet unit never makes). Setsid made the
+		// child a group leader, so its pid names the group.
+		// errors ignored: the group may already be gone
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		go func(pid int) {
+			time.Sleep(2 * time.Second)
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}(cmd.Process.Pid)
 	}
 	if c.pty != nil {
 		c.pty.Close()
@@ -312,6 +395,9 @@ func (c *console) status() string {
 	}
 	if c.kind == conSSH {
 		what = "ssh root@" + c.addr
+	}
+	if c.kind == conShell {
+		what = "shell on " + hostname() + " as " + os.Getenv("USER")
 	}
 	ended := ""
 	if p := c.exit.Load(); p != nil {

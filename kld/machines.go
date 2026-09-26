@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -108,13 +109,38 @@ func loadVMsGrouped(d *sectionData) {
 	for _, n := range strings.Fields(names) {
 		domains[n] = true
 	}
-	ips := map[string]string{}
-	if out, err := run(20*time.Second, "kldload-vm-ip", "--all", "--json"); err == nil {
-		_ = jsonUnmarshal(out, &ips)
-	}
+	// the five host reads are independent: run them at once. In series they
+	// were 2.3 s; kldload-vm-ip alone is 1.5 s and is cached for 15 s.
 	type dbrow struct{ Role, Cluster, MeshID, Golden string }
-	db := map[string]dbrow{}
-	if out, err := run(15*time.Second, "kldload-db", "dump"); err == nil {
+	var (
+		ips     map[string]string
+		db      = map[string]dbrow{}
+		dbOut   string
+		zvolOut string
+		stats   map[string]domStat
+		auto    = map[string]bool{}
+		snaps   map[string]int
+		wg      sync.WaitGroup
+	)
+	wg.Add(5)
+	go func() { defer wg.Done(); ips = vmAddresses() }()
+	go func() { defer wg.Done(); dbOut, _ = run(15*time.Second, "kldload-db", "dump") }()
+	go func() {
+		defer wg.Done()
+		zvolOut, _ = run(15*time.Second, "zfs", "list", "-H", "-o", "name,origin", "-t", "volume", "-r", "rpool/vms")
+	}()
+	go func() {
+		defer wg.Done()
+		stats = domStats()
+		if out, err := run(10*time.Second, "virsh", "list", "--autostart", "--name"); err == nil {
+			for _, n := range strings.Fields(out) {
+				auto[n] = true
+			}
+		}
+	}()
+	go func() { defer wg.Done(); snaps = vmSnapCounts() }()
+	wg.Wait()
+	if out := dbOut; out != "" {
 		var dump struct {
 			// explicit tags: encoding/json does not match deleted_at to
 			// DeletedAt on its own, and without them every soft-deleted row
@@ -138,7 +164,7 @@ func loadVMsGrouped(d *sectionData) {
 	}
 	origins := map[string]string{}
 	zvols := map[string]bool{}
-	if out, err := run(15*time.Second, "zfs", "list", "-H", "-o", "name,origin", "-t", "volume", "-r", "rpool/vms"); err == nil {
+	if out := zvolOut; out != "" {
 		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 			f := strings.Split(line, "\t")
 			if len(f) == 2 && strings.Count(f[0], "/") == 2 {
@@ -146,14 +172,6 @@ func loadVMsGrouped(d *sectionData) {
 				if f[1] != "-" {
 					origins[filepath.Base(f[0])] = f[1]
 				}
-			}
-		}
-	}
-	snaps := map[string]int{}
-	if out, err := run(30*time.Second, "zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-r", "rpool/vms"); err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-			if ds, _, ok := strings.Cut(line, "@"); ok {
-				snaps[filepath.Base(ds)]++
 			}
 		}
 	}
@@ -166,34 +184,43 @@ func loadVMsGrouped(d *sectionData) {
 		}
 	}
 	rules := loadGroupRules()
-	d.columns = []string{"vm", "group", "state", "boot", "vcpus", "memory", "address", "clone of", "snaps", "mesh", "role", "notes"}
+	d.columns = []string{"vm", "group", "state", "cpu", "boot", "vcpus", "memory", "address", "clone of", "snaps", "mesh", "role", "notes"}
 	running := 0
 	var rows [][]string
+	// one virsh domstats for every domain (64 ms) where a dominfo per VM
+	// cost 56 ms each — 4.2 s for fifty machines, felt on every keypress
+	// that reloaded the table (2026-09-26). Autostart is one more call.
+	// a shut-off domain without balloon/vcpu lines still needs a dominfo;
+	// those run eight at a time rather than one after another
+	var need []string
 	for name := range domains {
-		info, _ := run(10*time.Second, "virsh", "dominfo", name)
-		state, cpus, mem, auto := "?", "-", "-", "-"
-		for _, line := range strings.Split(info, "\n") {
-			k, v, ok := strings.Cut(line, ":")
-			if !ok {
-				continue
+		if st := stats[name]; st.vcpus == 0 || st.memKiB == 0 {
+			need = append(need, name)
+		}
+	}
+	infos := dominfoAll(need)
+	for name := range domains {
+		st := stats[name]
+		state, cpus, mem, boot := st.state, "-", "-", "off"
+		if state == "" {
+			state = "?"
+		}
+		if st.vcpus > 0 {
+			cpus = strconv.Itoa(st.vcpus)
+		}
+		if st.memKiB > 0 {
+			mem = human(st.memKiB * 1024)
+		}
+		if info, ok := infos[name]; ok {
+			if info.cpus != "" && cpus == "-" {
+				cpus = info.cpus
 			}
-			v = strings.TrimSpace(v)
-			switch strings.TrimSpace(k) {
-			case "State":
-				state = v
-			case "CPU(s)":
-				cpus = v
-			case "Max memory":
-				if kib, err := strconv.ParseInt(strings.Fields(v)[0], 10, 64); err == nil {
-					mem = human(kib * 1024)
-				}
-			case "Autostart":
-				if v == "enable" {
-					auto = "on"
-				} else {
-					auto = "off"
-				}
+			if info.mem != "" && mem == "-" {
+				mem = info.mem
 			}
+		}
+		if auto[name] {
+			boot = "on"
 		}
 		if state == "running" {
 			running++
@@ -204,18 +231,18 @@ func loadVMsGrouped(d *sectionData) {
 			short = strings.TrimPrefix(origin, "rpool/vms/")
 		}
 		r := db[name]
-		rows = append(rows, []string{name, groupOf(rules, name, origin), state, auto, cpus, mem, orDash(ips[name]),
+		rows = append(rows, []string{name, groupOf(rules, name, origin), state, st.cpuPct, boot, cpus, mem, orDash(ips[name]),
 			short, strconv.Itoa(snaps[name]), orDash(r.MeshID), orDash(r.Role), orDash(notes[name])})
 	}
 	// unreconciled: the DB knows a VM libvirt does not; a zvol has no domain
 	for name := range db {
 		if !domains[name] {
-			rows = append(rows, []string{name, "unreconciled", "absent", "-", "-", "-", "-", "-", "-", orDash(db[name].MeshID), db[name].Role, "in state.db, not in libvirt"})
+			rows = append(rows, []string{name, "unreconciled", "absent", "-", "-", "-", "-", "-", "-", "-", orDash(db[name].MeshID), db[name].Role, "in state.db, not in libvirt"})
 		}
 	}
 	for z := range zvols {
 		if !domains[z] && !strings.HasSuffix(z, "-data") && z != "isos" && z != "images" {
-			rows = append(rows, []string{z, "unreconciled", "zvol", "-", "-", "-", "-", orDash(strings.TrimPrefix(origins[z], "rpool/vms/")), strconv.Itoa(snaps[z]), "-", "-", "zvol without a domain"})
+			rows = append(rows, []string{z, "unreconciled", "zvol", "-", "-", "-", "-", "-", orDash(strings.TrimPrefix(origins[z], "rpool/vms/")), strconv.Itoa(snaps[z]), "-", "-", "zvol without a domain"})
 		}
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
@@ -324,4 +351,199 @@ func loadFactory(d *sectionData) {
 		d.rows = append(d.rows, append([]string(nil), r...))
 	}
 	d.headline = "image sets — x runs the selected command in the terminal, X with a distro"
+}
+
+// ── the light VM stats path ─────────────────────────────────────────────
+// domStats reads every domain's state, cpu time, memory and vcpus in one
+// virsh call and turns two consecutive cpu times into a CPU percentage,
+// the way vmxplore's 2 s estate refresh does.
+
+type domStat struct {
+	state  string
+	vcpus  int
+	memKiB int64
+	cpuPct string
+	cpuNs  int64 // cpu.time as read; the percentage is computed once the row is complete
+}
+
+var (
+	cpuMu   sync.Mutex
+	cpuPrev = map[string]struct {
+		ns int64
+		at time.Time
+	}{}
+)
+
+var domStates = map[string]string{"1": "running", "2": "blocked", "3": "paused", "4": "in shutdown", "5": "shut off", "6": "crashed", "7": "pmsuspended"}
+
+func domStats() map[string]domStat {
+	out, err := run(15*time.Second, "virsh", "domstats", "--state", "--cpu-total", "--balloon", "--vcpu")
+	if err != nil {
+		return map[string]domStat{}
+	}
+	now := time.Now()
+	res := map[string]domStat{}
+	cpuMu.Lock()
+	defer cpuMu.Unlock()
+	cur, st := "", domStat{}
+	flush := func() {
+		if cur == "" {
+			return
+		}
+		// cpu.time arrives before the vcpu lines, so the percentage waits
+		// for the whole block (the first cut computed it on the cpu.time
+		// line, when vcpus was still 0, and every row read "-")
+		if st.cpuNs > 0 {
+			if p, ok := cpuPrev[cur]; ok && st.vcpus > 0 && now.After(p.at) && st.cpuNs >= p.ns {
+				pct := float64(st.cpuNs-p.ns) / float64(now.Sub(p.at).Nanoseconds()) / float64(st.vcpus) * 100
+				st.cpuPct = fmt.Sprintf("%.0f%%", min(pct, 100))
+			}
+			cpuPrev[cur] = struct {
+				ns int64
+				at time.Time
+			}{st.cpuNs, now}
+		}
+		res[cur] = st
+		cur, st = "", domStat{}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Domain: '") {
+			flush()
+			cur = strings.TrimSuffix(strings.TrimPrefix(line, "Domain: '"), "'")
+			st.cpuPct = "-"
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || cur == "" {
+			continue
+		}
+		switch k {
+		case "state.state":
+			st.state = domStates[v]
+		case "vcpu.current":
+			st.vcpus, _ = strconv.Atoi(v)
+		case "vcpu.maximum":
+			if st.vcpus == 0 {
+				st.vcpus, _ = strconv.Atoi(v)
+			}
+		case "balloon.maximum":
+			st.memKiB, _ = strconv.ParseInt(v, 10, 64)
+		case "cpu.time":
+			st.cpuNs, _ = strconv.ParseInt(v, 10, 64)
+		}
+	}
+	flush()
+	// a domain that is not running has no cpu.time line and no percentage
+	for n, s := range res {
+		if s.state != "running" {
+			s.cpuPct = "-"
+			res[n] = s
+		}
+	}
+	return res
+}
+
+// vmSnapCounts counts the snapshots under rpool/vms per zvol, cached for
+// 30 s: the listing is 700 ms and the count does not change under a
+// keypress (vmxplore refreshes ZFS every 30 s for the same reason).
+var (
+	snapMu    sync.Mutex
+	snapCache map[string]int
+	snapAt    time.Time
+)
+
+func vmSnapCounts() map[string]int {
+	snapMu.Lock()
+	defer snapMu.Unlock()
+	if snapCache != nil && time.Since(snapAt) < 30*time.Second {
+		return snapCache
+	}
+	snaps := map[string]int{}
+	if out, err := run(30*time.Second, "zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-r", "rpool/vms"); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			if ds, _, ok := strings.Cut(line, "@"); ok {
+				snaps[filepath.Base(ds)]++
+			}
+		}
+	}
+	snapCache, snapAt = snaps, time.Now()
+	return snaps
+}
+
+// invalidateSnapCounts is for the verbs that change them (snapshot,
+// rollback, delete): the next table load counts again.
+func invalidateSnapCounts() {
+	snapMu.Lock()
+	snapAt = time.Time{}
+	snapMu.Unlock()
+}
+
+// dominfoAll runs virsh dominfo for the named domains, eight at a time,
+// and returns their vcpu count and maximum memory.
+type domInfo struct{ cpus, mem string }
+
+func dominfoAll(names []string) map[string]domInfo {
+	res := map[string]domInfo{}
+	if len(names) == 0 {
+		return res
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for _, name := range names {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			info, _ := run(10*time.Second, "virsh", "dominfo", name)
+			var di domInfo
+			for _, line := range strings.Split(info, "\n") {
+				k, v, ok := strings.Cut(line, ":")
+				if !ok {
+					continue
+				}
+				v = strings.TrimSpace(v)
+				switch strings.TrimSpace(k) {
+				case "CPU(s)":
+					di.cpus = v
+				case "Max memory":
+					if f := strings.Fields(v); len(f) > 0 {
+						if kib, err := strconv.ParseInt(f[0], 10, 64); err == nil {
+							di.mem = human(kib * 1024)
+						}
+					}
+				}
+			}
+			mu.Lock()
+			res[name] = di
+			mu.Unlock()
+		}(name)
+	}
+	wg.Wait()
+	return res
+}
+
+// vmAddresses is kldload-vm-ip --all --json, cached for 15 s: it probes
+// lease, agent and ARP for every VM and costs 1.5 s, and an address does
+// not change under a keypress.
+var (
+	ipMu    sync.Mutex
+	ipCache map[string]string
+	ipAt    time.Time
+)
+
+func vmAddresses() map[string]string {
+	ipMu.Lock()
+	defer ipMu.Unlock()
+	if ipCache != nil && time.Since(ipAt) < 15*time.Second {
+		return ipCache
+	}
+	ips := map[string]string{}
+	if out, err := run(20*time.Second, "kldload-vm-ip", "--all", "--json"); err == nil {
+		_ = jsonUnmarshal(out, &ips)
+	}
+	ipCache, ipAt = ips, time.Now()
+	return ips
 }

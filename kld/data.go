@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,7 +34,7 @@ type section struct {
 
 // Section order is the sidebar order of the web console, and the number keys.
 var sections = []section{
-	{"Overview", []string{"Summary"}},
+	{"Overview", []string{"Summary", "Activity"}},
 	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Appliances", "Factory", "Networks", "Pools"}},
 	{"Storage", []string{"Pools", "Pool", "Topology", "Datasets", "Snapshots", "Explorer", "Versions", "Boot envs", "Shares", "ARC"}},
 	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet", "Check"}},
@@ -143,6 +144,7 @@ func loadSection(si, sub int, ctx string) sectionData {
 
 var collectors = map[string]func(*sectionData){
 	"Overview/Summary":    loadOverview,
+	"Overview/Activity":   loadActivity,
 	"Machines/VMs":        loadVMsGrouped,
 	"Machines/Appliances": loadAppliances,
 	"Machines/Factory":    loadFactory,
@@ -510,7 +512,9 @@ func loadSnapshots(d *sectionData) {
 	if d.ctx != "" {
 		d.headline = fmt.Sprintf("%d snapshots of %s", len(d.rows), d.ctx)
 	} else {
-		d.headline = fmt.Sprintf("%d snapshots on the host", len(d.rows))
+		// every snapshot on the host is stat-ed by zfs list: 11 s for
+		// 4,866 here; Enter on a dataset lists its own in an instant
+		d.headline = fmt.Sprintf("%d snapshots on the host (a full listing takes zfs a while; enter on a dataset is instant)", len(d.rows))
 	}
 }
 
@@ -1172,6 +1176,42 @@ type doctorCheck struct {
 	Remediation string `json:"remediation"`
 }
 
+// doctor results are cached for two minutes and refreshed in the
+// background: the doctor takes four seconds, and the Overview waited on
+// it at every start (2026-09-26). doctorCached returns what it has and
+// starts one refresh when stale; doctorFresh says when a new result landed.
+var (
+	docMu       sync.Mutex
+	docChecks   []doctorCheck
+	docSum      map[string]int
+	docErr      error
+	docAt       time.Time
+	docInflight bool
+)
+
+func doctorCached() ([]doctorCheck, map[string]int, error, bool) {
+	docMu.Lock()
+	defer docMu.Unlock()
+	stale := time.Since(docAt) > 120*time.Second
+	if stale && !docInflight {
+		docInflight = true
+		go func() {
+			c, s, e := readDoctor()
+			docMu.Lock()
+			docChecks, docSum, docErr, docAt, docInflight = c, s, e, time.Now(), false
+			docMu.Unlock()
+		}()
+	}
+	return docChecks, docSum, docErr, !docAt.IsZero()
+}
+
+// doctorFresherThan reports a doctor result newer than t.
+func doctorFresherThan(t time.Time) bool {
+	docMu.Lock()
+	defer docMu.Unlock()
+	return !docAt.IsZero() && docAt.After(t)
+}
+
 func readDoctor() ([]doctorCheck, map[string]int, error) {
 	out, err := run(120*time.Second, "kldload-doctor", "--json")
 	if err != nil && strings.TrimSpace(out) == "" {
@@ -1506,7 +1546,9 @@ func loadOverview(d *sectionData) {
 	} else {
 		d.rows = append(d.rows, []string{"cluster", server + " does not answer"})
 	}
-	if _, sum, err := readDoctor(); err == nil {
+	if _, sum, err, have := doctorCached(); !have {
+		d.rows = append(d.rows, []string{"doctor", "checking … (kldload-doctor runs in the background)"})
+	} else if err == nil {
 		d.rows = append(d.rows, []string{"doctor", fmt.Sprintf("%d ok, %d warn, %d fail, %d skipped", sum["ok"], sum["warn"], sum["fail"], sum["skip"])})
 	} else {
 		d.rows = append(d.rows, []string{"doctor", err.Error()})
@@ -1570,4 +1612,45 @@ func hostname() string {
 		return "localhost"
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// loadActivity lists what the host is doing: every unit of the kldload
+// family that is active, activating or failed (first boot, klab golden
+// builds, kube-cluster, the netboot server, exporters, kld's own release
+// builds). The TUI puts this session's jobs above them. Enter follows a
+// unit's journal in a pane — "what is it doing" without leaving kld.
+func loadActivity(d *sectionData) {
+	out, err := run(20*time.Second, "systemctl", "list-units", "--plain", "--no-legend", "--all",
+		"kldload-*", "klab*", "kube*", "kvm-*", "zxplore*", "kfire*")
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"name", "kind", "state", "since", "what"}
+	active := 0
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			continue
+		}
+		unit, act, sub := f[0], f[2], f[3]
+		if act == "inactive" && sub == "dead" {
+			continue // installed and idle: not activity
+		}
+		if strings.HasSuffix(unit, ".timer") || strings.HasSuffix(unit, ".path") || strings.HasSuffix(unit, ".socket") {
+			continue // the triggers, not the work
+		}
+		what := strings.Join(f[4:], " ")
+		since := "-"
+		if s, err := run(5*time.Second, "systemctl", "show", "-p", "ActiveEnterTimestamp", "--value", unit); err == nil {
+			if ts, err := time.Parse("Mon 2006-01-02 15:04:05 MST", strings.TrimSpace(s)); err == nil {
+				since = time.Since(ts).Truncate(time.Second).String()
+			}
+		}
+		if act == "active" || act == "activating" {
+			active++
+		}
+		d.rows = append(d.rows, []string{unit, "unit", act + "/" + sub, since, what})
+	}
+	d.headline = fmt.Sprintf("%d unit(s) of the kldload family active (enter: follow its journal · kld's own jobs are listed first)", active)
 }
