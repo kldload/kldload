@@ -159,6 +159,23 @@ check_feature "Kubernetes" KLDLOAD_ENABLE_K8S command -v kubectl
 # cluster: kubeconfig on the host, and the API answering.
 check_feature "K8s bootstrap" KLDLOAD_K8S_BOOTSTRAP \
     bash -c 'test -r /root/.kube/config && timeout 20 kubectl --kubeconfig /root/.kube/config get nodes >/dev/null 2>&1'
+# HA is the promise: a cluster the answers asked for ships THREE control
+# planes (KLDLOAD_K8S_CONTROL_PLANES, default 3; 1 is a deliberate opt-out).
+# kube-cluster's RAM preflight quietly built one on fiend's 4-k8s boot
+# (2026-09-26) and every report before this one called that ready. Count the
+# control-plane domains, not the API's node list: a cp that is defined and
+# off is still a cp the operator paid for.
+if [[ "$(mval KLDLOAD_K8S_BOOTSTRAP)" == 1 ]]; then
+    _cps_want="$(mval KLDLOAD_K8S_CONTROL_PLANES)"
+    [[ "$_cps_want" =~ ^[0-9]+$ ]] || _cps_want=3
+    _cps_have="$(S virsh list --all --name 2>/dev/null | grep -cE '^kldload-cp(-[0-9]+)?$' || true)"
+    [[ "$_cps_have" =~ ^[0-9]+$ ]] || _cps_have=0
+    printf '| %s | %s | %s | `%s` |\n' "K8s control planes" "$_cps_want" "$_cps_have" "virsh list --all --name | grep -c kldload-cp"
+    if ((_cps_have < _cps_want)); then
+        note_fail "cluster has ${_cps_have} control plane(s), ${_cps_want} asked — NOT HA (the RAM preflight capped it; kube-cluster scale --control-planes ${_cps_want})"
+    fi
+    [[ -e /var/lib/kldload/k8s-degraded ]] && note_fail "autodeploy marked the cluster degraded: it could not grow the control plane to ${_cps_want}"
+fi
 check_feature "AI (ollama)" KLDLOAD_ENABLE_AI command -v ollama
 check_feature "WireGuard" KLDLOAD_WIREGUARD command -v wg
 check_feature "eBPF tools" KLDLOAD_ENABLE_EBPF command -v bpftrace

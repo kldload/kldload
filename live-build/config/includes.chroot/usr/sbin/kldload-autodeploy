@@ -1336,14 +1336,48 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
             # WHY: the marker used to be set immediately after `kube-cluster
             # bootstrap` returned — before Tetragon, ArgoCD and the operator
             # charts were installed, which is another fifteen minutes of work.
-            # kldload-smoke-firstboot.service gates its start on this marker,
-            # so the post-install smoke test ran against a half-built cluster
-            # and reported failures for add-ons that had not been installed
-            # yet: "cilium scrape labels: no series" on a box that had 29 of
-            # them minutes later (fiend, 2026-08-19). The marker has to mean
-            # "done", or everything waiting on it starts too early.
-            mark "k8s"
-            log "[k8s] complete"
+            # HA IS THE PROMISE. kube-cluster's RAM preflight caps the
+            # control-plane count to what fits at that moment, and at first
+            # boot that moment is the worst one: fiend's 4-k8s boot on
+            # 2026-09-26 saw 3.8 GB available plus 12 GB of reclaimable ARC,
+            # subtracted three pending workers, and built ONE control plane
+            # of the three asked, with a warning in a log nobody reads. The
+            # sweep called it ready; the operator called it wrong. So count
+            # what was built against what was asked, and grow the control
+            # plane through `scale --control-planes` — the integrated path,
+            # untouched here — once the workers are up and RAM has settled.
+            # Six tries five minutes apart; a host that still cannot hold
+            # three is NOT marked ready, and the report says why.
+            _cps_want="$K8S_CONTROL_PLANES"
+            _cps_up="$(virsh list --name 2>/dev/null | grep -cE "^${CLUSTER_NAME:-kldload}-cp(-[0-9]+)?$")"
+            [[ "$_cps_up" =~ ^[0-9]+$ ]] || _cps_up=0
+            if ((_cps_up < _cps_want)); then
+                log "[k8s] ${_cps_up} control plane(s) up, ${_cps_want} asked — the RAM preflight capped it; growing the control plane"
+                for _try in 1 2 3 4 5 6; do
+                    log "[k8s] scale --control-planes ${_cps_want} (try ${_try}/6): $(free -m | awk '/^Mem:/ {print $7" MB available"}')"
+                    if kube-cluster scale --control-planes "$_cps_want" >>/var/log/kldload/kube-bootstrap.log 2>&1; then
+                        _cps_up="$(virsh list --name 2>/dev/null | grep -cE "^${CLUSTER_NAME:-kldload}-cp(-[0-9]+)?$")"
+                        ((_cps_up >= _cps_want)) && break
+                    fi
+                    sleep 300
+                done
+            fi
+            if ((_cps_up < _cps_want)); then
+                log "[k8s] FATAL: cluster has ${_cps_up} control plane(s), ${_cps_want} asked — NOT HA; not marking k8s ready. Free RAM and run: kube-cluster scale --control-planes ${_cps_want}"
+                touch "${STATE_DIR}/k8s-degraded"
+                phase_state "k8s-bootstrap" failed
+            else
+                rm -f "${STATE_DIR}/k8s-degraded"
+                log "[k8s] control planes: ${_cps_up} of ${_cps_want} asked"
+                # kldload-smoke-firstboot.service gates its start on this marker,
+                # so the post-install smoke test ran against a half-built cluster
+                # and reported failures for add-ons that had not been installed
+                # yet: "cilium scrape labels: no series" on a box that had 29 of
+                # them minutes later (fiend, 2026-08-19). The marker has to mean
+                # "done", or everything waiting on it starts too early.
+                mark "k8s"
+                log "[k8s] complete"
+            fi
         else
             phase_state "k8s-bootstrap" failed
             log "[k8s] FAILED — see /var/log/kldload/kube-bootstrap.log"
