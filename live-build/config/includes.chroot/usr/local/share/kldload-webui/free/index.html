@@ -5286,6 +5286,17 @@ function handle(msg) {
     case 'vm_log':       { appendLog(document.getElementById('vm-log'), msg.line); break; }
     case 'k8s_status': { renderK8sStatus(msg); break; }
     case 'k8s_stack':  { renderK8sStack(msg);  break; }
+    case 'k8s_unreachable': {
+      // one answer for every cluster action while the apiserver is down:
+      // mark the strip once, do not toast per poll
+      const el = id => document.getElementById(id);
+      if (el('k8s-api')) el('k8s-api').textContent = msg.server ? msg.server.replace(/^https?:\/\//, '') + ' · unreachable' : 'no kubeconfig';
+      if (el('k8s-node-count')) el('k8s-node-count').textContent = '—';
+      if (el('k8s-ready-count')) el('k8s-ready-count').textContent = '—';
+      const hdr = document.getElementById('k8s-header-status');
+      if (hdr) hdr.textContent = msg.server ? `apiserver ${msg.server} does not answer — the cluster is down or this host's kubeconfig is stale` : 'no kubeconfig on this host';
+      break;
+    }
     case 'k8s_pods': { renderK8sPods(msg.pods); break; }
     case 'k8s_top': { renderK8sTop(msg); break; }
     case 'k8s_inspect': { renderK8sInspect(msg); break; }

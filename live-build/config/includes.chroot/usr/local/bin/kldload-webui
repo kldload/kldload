@@ -1100,6 +1100,38 @@ def get_system_info():
     return info
 
 
+# ── the apiserver port probe every k8s_*/helm_* action waits behind ──────────
+_K8S_NO_CLUSTER = {"k8s_stack", "k8s_bootstrap", "k8s_destroy_cluster", "k8s_reset", "k8s_join",
+                   "k8s_cluster_scale"}
+_KUBE_PROBE = {"at": 0.0, "ok": False, "server": ""}
+
+
+def _kube_reachable():
+    """(ok, server): does the kubeconfig's apiserver accept a TCP connection?
+    Cached ten seconds so a page full of polls costs one probe. No kubeconfig
+    reads as unreachable with an empty server."""
+    now = time.time()
+    if now - _KUBE_PROBE["at"] < 10:
+        return _KUBE_PROBE["ok"], _KUBE_PROBE["server"]
+    ok, server = False, ""
+    try:
+        server = subprocess.check_output(
+            ["kubectl", "config", "view", "--minify", "-o",
+             "jsonpath={.clusters[0].cluster.server}"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+        if server:
+            host = server.split("://", 1)[-1]
+            if ":" not in host:
+                host += ":443"
+            h, _, p = host.rpartition(":")
+            with socket.create_connection((h, int(p)), timeout=1.5):
+                ok = True
+    except (OSError, ValueError, subprocess.SubprocessError):
+        ok = False
+    _KUBE_PROBE.update(at=now, ok=ok, server=server)
+    return ok, server
+
+
 # ── Cluster: the stack this image pins ───────────────────────────────────────
 # k8s-stack.lock is what one build resolved — kubeadm, the CLIs, every chart
 # and every image the offline installer carries. The console shows it so
@@ -2077,6 +2109,22 @@ async def ws_handler(websocket):
                 await websocket.send(json.dumps({"type": "auth_required"}))
                 continue
 
+            # ── CLUSTER GATE — every k8s_* and helm_* action needs an apiserver
+            # that answers. kubectl's --request-timeout does not cover TCP
+            # connect, and these handlers call it synchronously in the event
+            # loop: on a host whose kubeconfig points at a cluster that is gone,
+            # the Cluster page's polls stacked up, each blocked the loop for its
+            # timeout, and the whole console stopped answering nginx (onyx,
+            # 2026-09-26 10:24, the operator had just opened the window). One
+            # cached port probe answers all of them at once with k8s_unreachable;
+            # the actions that build or tear down a cluster are exempt.
+            _needs_cluster = action.startswith("k8s_") or action.startswith("helm_")
+            if _needs_cluster and action not in _K8S_NO_CLUSTER:
+                _ok, _server = _kube_reachable()
+                if not _ok:
+                    await websocket.send(json.dumps({"type": "k8s_unreachable", "action": action,
+                                                     "server": _server}))
+                    continue
             # Already authenticated. A stray "auth" frame here (live-mode probe,
             # or a reconnect re-sending its token) is a harmless no-op → ack it.
             if action == "auth":
