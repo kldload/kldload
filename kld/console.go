@@ -387,7 +387,7 @@ func (c *console) status() string {
 		return stKey.Render(c.vm) + stDim.Render("  "+truncate(cmd, 60)+"  ·  ") + state + stDim.Render("  ·  keys go to the job  ·  ") + stKey.Render("ctrl+]") + stDim.Render(" menu")
 	}
 	if c.menu {
-		return stKey.Render("ctrl+]") + stDim.Render("  d detach · 1 screen · 2 serial · 3 ssh · x ctrl+alt+del · r redraw · ] send ctrl+] · any other key back")
+		return stKey.Render("ctrl+]") + stDim.Render("  d detach · 1 screen · 2 serial · 3 ssh · f full window (pixels) · x ctrl+alt+del · r redraw · ] send ctrl+] · any other key back")
 	}
 	what := c.kind.String()
 	if c.kind == conScreen {

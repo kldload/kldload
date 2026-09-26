@@ -1587,6 +1587,22 @@ func (m model) updateConsole(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.openConsole(kind, c.vm, c.addr)
 		case "x":
 			c.ctrlAltDel()
+		case "f":
+			// the pane is a thumbnail at a hundred columns; the full window
+			// draws pixels where the terminal has sixels (kld screen)
+			if c.kind == conScreen {
+				vm := c.vm
+				c.close()
+				m.con = nil
+				cmd := exec.Command("kld", "screen", vm)
+				cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+				return m, tea.Sequence(tea.DisableMouse, tea.ExecProcess(cmd, func(err error) tea.Msg {
+					if err != nil {
+						return doneMsg{"screen " + vm, err}
+					}
+					return doneMsg{what: "screen " + vm + ": back"}
+				}))
+			}
 		case "r":
 			c.cache.s = ""
 			c.resize(m.width, m.conBodyH())
