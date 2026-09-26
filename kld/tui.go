@@ -76,6 +76,7 @@ type model struct {
 	pending  func(string) tea.Cmd
 	help     bool
 	detail   bool
+	marks    map[string]bool // marked row names, per section/sub key + name
 	filter   textinput.Model
 	filterOn bool
 	sortCol  int
@@ -97,7 +98,7 @@ func newModel(start, sub, width int) model {
 	sp.Style = lipgloss.NewStyle().Foreground(cAccent)
 	m := model{active: start, width: width, detail: true, sortCol: -1,
 		sub: make([]int, len(sections)), ctx: map[string]string{},
-		data: map[string]*sectionData{}, loading: map[string]bool{},
+		data: map[string]*sectionData{}, loading: map[string]bool{}, marks: map[string]bool{},
 		filter: f, spin: sp, now: time.Now()}
 	m.sub[start] = sub
 	return m
@@ -233,7 +234,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading[m.key()] = true
 			m.say(stDim.Render("reloading " + sections[m.active].name + " / " + m.subName()))
 			return m, m.reload()
+		case " ":
+			// marks: space toggles the row, verbs then act on every marked
+			// row of this tab (vmxplore's marks + batch, 2026-09-26)
+			if name := m.selected(); name != "" {
+				k := m.key() + "\x00" + name
+				if m.marks[k] {
+					delete(m.marks, k)
+				} else {
+					m.marks[k] = true
+				}
+				if m.row < len(m.rows())-1 {
+					m.row++
+				}
+			}
+		case "ctrl+a":
+			all := true
+			for _, r := range m.rows() {
+				if !m.marks[m.key()+"\x00"+col(r, 0)] {
+					all = false
+				}
+			}
+			for _, r := range m.rows() {
+				k := m.key() + "\x00" + col(r, 0)
+				if all {
+					delete(m.marks, k)
+				} else {
+					m.marks[k] = true
+				}
+			}
 		case "esc":
+			// esc clears the marks first, then leaves a context
+			if n := m.markedRows(); len(n) > 0 {
+				for k := range m.marks {
+					if strings.HasPrefix(k, m.key()+"\x00") {
+						delete(m.marks, k)
+					}
+				}
+				return m, nil
+			}
 			// esc leaves a context: the VM's snapshots become every VM's
 			if m.ctx[m.key()] != "" {
 				delete(m.ctx, m.key())
@@ -396,6 +435,17 @@ func (m model) selected() string {
 	return rows[m.row][0]
 }
 
+// markedRows are the marked rows of the current tab, in table order.
+func (m model) markedRows() [][]string {
+	var out [][]string
+	for _, r := range m.rows() {
+		if m.marks[m.key()+"\x00"+col(r, 0)] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func (m model) selectedRow() []string {
 	rows := m.rows()
 	if m.row >= len(rows) {
@@ -434,6 +484,22 @@ func (m model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // and then runs its argv in the background (a doneMsg follows) or in the
 // foreground (the terminal is handed over and comes back).
 func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
+	// A batch: the verb runs once per marked row, in table order, one
+	// after another; a destructive batch asks for the count to be typed.
+	// Verbs that ask or take the terminal run on the selection only.
+	if marked := m.markedRows(); len(marked) > 1 && !v.noRow && !v.inter && v.prompt == "" {
+		if v.confirm {
+			m.prompt = fmt.Sprintf("%s %d marked rows — type %d to confirm: ", v.label, len(marked), len(marked))
+			m.pending = func(typed string) tea.Cmd {
+				if strings.TrimSpace(typed) != strconv.Itoa(len(marked)) {
+					return func() tea.Msg { return doneMsg{v.label, fmt.Errorf("count did not match, nothing done")} }
+				}
+				return m.execBatch(v, marked)
+			}
+			return m, nil
+		}
+		return m, m.execBatch(v, marked)
+	}
 	row := m.selectedRow()
 	if !v.noRow && row == nil {
 		m.say(stWarn.Render(v.label + ": nothing is selected"))
@@ -458,6 +524,30 @@ func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, m.execVerb(v, row, "")
+}
+
+// execBatch runs one verb over marked rows sequentially and reports how
+// many succeeded and which failed — a count against what it was given.
+func (m model) execBatch(v verb, rows [][]string) tea.Cmd {
+	return func() tea.Msg {
+		ok, failed := 0, []string{}
+		for _, r := range rows {
+			argv, err := v.argv(r, "")
+			if err == nil {
+				_, err = run(600*time.Second, argv[0], argv[1:]...)
+			}
+			if err != nil {
+				failed = append(failed, col(r, 0)+": "+err.Error())
+			} else {
+				ok++
+			}
+		}
+		what := fmt.Sprintf("%s: %d of %d done", v.label, ok, len(rows))
+		if len(failed) > 0 {
+			return doneMsg{what, fmt.Errorf("%s", strings.Join(failed, "; "))}
+		}
+		return doneMsg{what: what}
+	}
 }
 
 func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
@@ -587,6 +677,9 @@ func (m model) View() string {
 		if q := m.filter.Value(); q != "" {
 			sr = fmt.Sprintf("/%s · %d of %d", q, len(rows), len(d.rows))
 		}
+		if n := len(m.markedRows()); n > 0 {
+			sr = fmt.Sprintf("%d marked · ", n) + sr
+		}
 		if m.sortCol >= 0 && m.sortCol < len(d.columns) {
 			arrow := "↑"
 			if m.sortDesc {
@@ -626,7 +719,8 @@ func (m model) tableView(d *sectionData, w, h int) string {
 	rows := m.rows()
 	widths := columnWidths(d.columns, rows, w-1)
 	numeric := numericColumns(rows, len(d.columns))
-	line := func(cells []string, sel bool) string {
+	widths = columnWidths(d.columns, rows, w-3) // two cells for the mark
+	line := func(cells []string, sel, header bool) string {
 		parts := make([]string, len(d.columns))
 		for i := range d.columns {
 			v := truncate(col(cells, i), widths[i])
@@ -639,14 +733,21 @@ func (m model) tableView(d *sectionData, w, h int) string {
 				parts[i] = colourCell(parts[i], v)
 			}
 		}
-		s := strings.Join(parts, "  ")
+		mark := "  "
+		if !header && m.marks[m.key()+"\x00"+col(cells, 0)] {
+			mark = stWarn.Render("▸ ")
+			if sel {
+				mark = "▸ "
+			}
+		}
+		s := mark + strings.Join(parts, "  ")
 		if sel {
 			return stSel.Render(fmt.Sprintf("%-*s", w-1, s))
 		}
 		return s
 	}
 	var b strings.Builder
-	b.WriteString(stHead.Render(line(d.columns, false)) + "\n")
+	b.WriteString(stHead.Render(line(d.columns, false, true)) + "\n")
 	limit := h - 1
 	if limit < 1 {
 		limit = 1
@@ -657,7 +758,7 @@ func (m model) tableView(d *sectionData, w, h int) string {
 	}
 	n := 0
 	for i := start; i < len(rows) && i < start+limit; i++ {
-		b.WriteString(line(rows[i], i == m.row) + "\n")
+		b.WriteString(line(rows[i], i == m.row, false) + "\n")
 		n++
 	}
 	if len(rows) == 0 {
@@ -734,7 +835,8 @@ func (m model) helpView() string {
 		k("tab, [ ]", "next / previous sub-tab of the section"),
 		k("j / k", "move down / up   (g, G first / last · ctrl+f, ctrl+b page)"),
 		k("enter", "drill in: a VM's or a dataset's snapshots, a group's hosts"),
-		k("esc", "leave a drill-in (back to every VM / dataset)"),
+		k("esc", "clear the marks, then leave a drill-in (back to every VM / dataset)"),
+		k("space", "mark the row (verbs then run on every marked row)   ·   ctrl+a all / none"),
 		k("/", "filter rows; enter keeps it, esc clears it"),
 		k("o", "sort: next column, then descending, then the tool's order"),
 		k("i", "show or hide the detail pane"),

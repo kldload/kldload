@@ -102,6 +102,20 @@ var verbs = map[string][]verb{
 		{key: "P", label: "stop scrub", argv: onRow("zpool", "scrub", "-s", "{}")},
 		{key: "z", label: "zxplore", noRow: true, inter: true, argv: fixed("zxplore", "--tui")},
 	},
+	"Storage/Topology": {
+		{key: "F", label: "offline the vdev", confirm: true, argv: func(row []string, _ string) ([]string, error) {
+			return []string{"zpool", "offline", col(row, 1), strings.TrimSpace(col(row, 0))}, nil
+		}},
+		{key: "O", label: "online the vdev", argv: func(row []string, _ string) ([]string, error) {
+			return []string{"zpool", "online", col(row, 1), strings.TrimSpace(col(row, 0))}, nil
+		}},
+		{key: "E", label: "clear the pool's error counters", argv: func(row []string, _ string) ([]string, error) {
+			return []string{"zpool", "clear", col(row, 1)}, nil
+		}},
+		{key: "S", label: "scrub the pool", argv: func(row []string, _ string) ([]string, error) {
+			return []string{"zpool", "scrub", col(row, 1)}, nil
+		}},
+	},
 	"Storage/Datasets": {
 		{key: "s", label: "snapshot", prompt: "snapshot {} as (blank = manual-<time>): ", argv: func(row []string, in string) ([]string, error) {
 			in = strings.TrimSpace(in)

@@ -35,7 +35,7 @@ type section struct {
 var sections = []section{
 	{"Overview", []string{"Summary"}},
 	{"Machines", []string{"VMs", "Snapshots", "Networks", "Pools"}},
-	{"Storage", []string{"Pools", "Datasets", "Snapshots", "Boot envs"}},
+	{"Storage", []string{"Pools", "Topology", "Datasets", "Snapshots", "Boot envs"}},
 	{"Network", []string{"Planes", "Peers", "Enrolled"}},
 	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services"}},
 	{"Ansible", []string{"Hosts", "Groups", "Plays"}},
@@ -127,6 +127,7 @@ var collectors = map[string]func(*sectionData){
 	"Machines/Networks":   loadVMNetworks,
 	"Machines/Pools":      loadVMPools,
 	"Storage/Pools":       loadPools,
+	"Storage/Topology":    loadTopology,
 	"Storage/Datasets":    loadDatasets,
 	"Storage/Snapshots":   loadSnapshots,
 	"Storage/Boot envs":   loadBootEnvs,
@@ -393,6 +394,61 @@ func loadPools(d *sectionData) {
 		}
 	}
 	d.headline = fmt.Sprintf("%d pool(s) · %s", len(d.rows), strings.Join(bits, " · "))
+}
+
+// loadTopology is `zpool status` as rows: every vdev with its state and
+// error counters, indented by depth the way zpool prints it, and the scrub
+// line as the headline — what zxplore's pool view shows first.
+func loadTopology(d *sectionData) {
+	out, err := run(30*time.Second, "zpool", "status", "-P")
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"vdev", "pool", "state", "read", "write", "cksum", "note"}
+	var pool string
+	var scrubs []string
+	inConfig := false
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimRight(raw, " ")
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "pool:"):
+			pool = strings.TrimSpace(strings.TrimPrefix(t, "pool:"))
+			inConfig = false
+		case strings.HasPrefix(t, "scan:"):
+			scrubs = append(scrubs, pool+": "+strings.TrimSpace(strings.TrimPrefix(t, "scan:")))
+		case strings.HasPrefix(t, "config:"):
+			inConfig = true
+		case strings.HasPrefix(t, "errors:"):
+			inConfig = false
+			if !strings.Contains(t, "No known data errors") {
+				d.rows = append(d.rows, []string{"errors", pool, "ERROR", "", "", "", strings.TrimSpace(strings.TrimPrefix(t, "errors:"))})
+			}
+		case inConfig && t != "":
+			f := strings.Fields(t)
+			if f[0] == "NAME" || len(f) < 2 {
+				continue
+			}
+			// depth from the indentation zpool prints (a tab, then two spaces per level)
+			depth := (len(line) - len(strings.TrimLeft(line, " \t")) - 1) / 2
+			if depth < 0 {
+				depth = 0
+			}
+			row := []string{strings.Repeat("  ", depth) + f[0], pool, f[1], "", "", "", ""}
+			if len(f) >= 5 {
+				row[3], row[4], row[5] = f[2], f[3], f[4]
+			}
+			if len(f) > 5 {
+				row[6] = strings.Join(f[5:], " ")
+			}
+			d.rows = append(d.rows, row)
+		}
+	}
+	d.headline = strings.Join(scrubs, " · ")
+	if d.headline == "" {
+		d.headline = fmt.Sprintf("%d vdev rows", len(d.rows))
+	}
 }
 
 func loadDatasets(d *sectionData) {
