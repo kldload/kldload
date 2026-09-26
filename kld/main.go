@@ -62,16 +62,20 @@ func usage() {
 
   kld                       open the console: a window under a display,
                             the terminal console otherwise
-  kld <section>             open on a section: overview machines storage
-                            network cluster metrics estate provision
+  kld <section> [<sub-tab>] open on a section: overview machines storage
+                            network cluster ansible helm metrics estate
+                            provision — and one of its sub-tabs
   kld --tui [section]       the terminal console even under a display
-  kld <section> --print     print that section once and exit
+  kld <section> [<sub-tab>] --print
+                            print that sub-tab once and exit
   kld --version
 
-Keys inside:  1-8 or Tab  section   j/k  move   r  reload   Enter  open the
-deep console for the section (vmxplore, zxplore, wgx, k9s)   c  clone the
-selected machine   s  snapshot it   d  delete it   a  arm a machine for a
-netboot install (Provision)   x  disarm the selected one   ?  help   q  quit
+Keys inside:  1-9, 0  section   tab  sub-tab   j/k  row   enter  drill in
+(a VM's or a dataset's snapshots)   /  filter   o  sort   i  detail pane
+r  reload   ?  the verbs of the current tab   q  quit
+Verbs run the shipped commands (virsh, kvm-*, zfs, kldload-rollback,
+kldload-enroll, kubectl, ansible, helm, kldload-netboot-server); the
+destructive ones ask for the name to be typed back.
 `)
 }
 
@@ -87,7 +91,7 @@ func main() {
 			return
 		}
 	}
-	start := 0
+	start, sub := 0, 0
 	print, tui := false, false
 	for _, a := range args {
 		if a == "--print" {
@@ -98,19 +102,24 @@ func main() {
 			tui = true
 			continue
 		}
-		i := sectionIndex(a)
-		if i < 0 {
-			fmt.Fprintf(os.Stderr, "kld: no section named %q (try: %s)\n", a, strings.Join(sectionNames(), " "))
-			os.Exit(2)
+		if i := sectionIndex(a); i >= 0 {
+			start, sub = i, 0
+			continue
 		}
-		start = i
+		if j := subIndex(start, a); j >= 0 {
+			sub = j
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "kld: no section or sub-tab named %q (sections: %s; sub-tabs of %s: %s)\n",
+			a, strings.Join(sectionNames(), " "), sections[start].name, strings.ToLower(strings.Join(sections[start].subs, " ")))
+		os.Exit(2)
 	}
 	if print {
-		// One section, rendered once, for scripts and for testing the
-		// renderers without a terminal: View() is pure, so what --print
+		// One sub-tab, rendered once, for scripts and for testing the
+		// renderers without a terminal: body() is pure, so what --print
 		// shows is what the TUI shows.
-		m := newModel(start, 120)
-		m.apply(loadSection(start))
+		m := newModel(start, sub, 120)
+		m.apply(loadSection(start, sub, ""))
 		fmt.Print(m.body())
 		return
 	}
@@ -121,7 +130,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "kld:", err, "— starting the terminal console")
 		}
 	}
-	if _, err := tea.NewProgram(newModel(start, 0), tea.WithAltScreen()).Run(); err != nil {
+	if _, err := tea.NewProgram(newModel(start, sub, 0), tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "kld:", err)
 		os.Exit(1)
 	}
@@ -150,7 +159,7 @@ func openWindow(section int) error {
 	if err != nil {
 		return errors.New("kldload-chrome-app is not installed (desktop profile only)")
 	}
-	url := "https://localhost:8443/?app=1#" + spaView[sections[section]]
+	url := "https://localhost:8443/?app=1#" + spaView[sections[section].name]
 	c := exec.Command(wrapper, "com.kldload.console", url)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return c.Run()

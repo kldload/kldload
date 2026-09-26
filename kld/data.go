@@ -1,10 +1,15 @@
 // data.go — what each section reads, and from which tool.
 //
-// Every collector shells out to the tool that owns the fact and parses its
-// output; none of them re-derives anything. Collectors run in a tea.Cmd, so
-// a slow one (kldload-estate ~3 s, kldload-doctor ~2 s since the apiserver
-// port probe) never freezes the keys. Each returns a sectionData with a
-// pre-rendered table and an error string; the model shows whichever it got.
+// A section has sub-tabs; each (section, sub) pair has one collector that
+// shells out to the tool that owns the fact and parses its output; none of
+// them re-derives anything. Collectors run in a tea.Cmd, so a slow one
+// (kldload-estate ~3 s, kldload-doctor ~2 s) never freezes the keys. Each
+// returns a sectionData: a headline, columns, rows, and the error the tool
+// gave, and the model shows whichever it got.
+//
+// A "context" narrows a sub to one thing chosen on another: Enter on a VM
+// opens Machines/Snapshots for that VM, Enter on a dataset opens
+// Storage/Snapshots for that dataset.
 package main
 
 import (
@@ -12,37 +17,67 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Section order is the sidebar order of the web console, and the 1-8 keys.
-var sections = []string{"Overview", "Machines", "Storage", "Network", "Cluster", "Metrics", "Estate", "Provision"}
+type section struct {
+	name string
+	subs []string
+}
+
+// Section order is the sidebar order of the web console, and the number keys.
+var sections = []section{
+	{"Overview", []string{"Summary"}},
+	{"Machines", []string{"VMs", "Snapshots", "Networks", "Pools"}},
+	{"Storage", []string{"Pools", "Datasets", "Snapshots", "Boot envs"}},
+	{"Network", []string{"Planes", "Peers", "Enrolled"}},
+	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services"}},
+	{"Ansible", []string{"Hosts", "Groups", "Plays"}},
+	{"Helm", []string{"Releases", "Examples"}},
+	{"Metrics", []string{"Targets"}},
+	{"Estate", []string{"Drift", "Events"}},
+	{"Provision", []string{"Armed", "Goldens", "Answers"}},
+}
 
 func sectionNames() []string {
 	out := make([]string, len(sections))
 	for i, s := range sections {
-		out[i] = strings.ToLower(s)
+		out[i] = strings.ToLower(s.name)
 	}
 	return out
 }
 
 func sectionIndex(name string) int {
 	for i, s := range sections {
-		if strings.EqualFold(s, name) {
+		if strings.EqualFold(s.name, name) {
 			return i
 		}
 	}
 	return -1
 }
 
-// sectionData is one loaded section: a headline, table rows (first column is
-// what verbs act on), and the tool that answered — or the error it gave.
+func subIndex(si int, name string) int {
+	for j, s := range sections[si].subs {
+		if strings.EqualFold(strings.ReplaceAll(s, " ", ""), strings.ReplaceAll(name, " ", "")) {
+			return j
+		}
+	}
+	return -1
+}
+
+// sectionData is one loaded (section, sub): a headline, table rows (the
+// first column is what verbs act on), and the tool that answered — or the
+// error it gave.
 type sectionData struct {
 	section  int
+	sub      int
+	ctx      string
 	headline string
 	columns  []string
 	rows     [][]string
@@ -74,27 +109,45 @@ func run(timeout time.Duration, name string, args ...string) (string, error) {
 	return string(out), nil
 }
 
-func loadSection(i int) sectionData {
-	d := sectionData{section: i, loadedAt: time.Now()}
-	switch sections[i] {
-	case "Overview":
-		loadOverview(&d)
-	case "Machines":
-		loadMachines(&d)
-	case "Storage":
-		loadStorage(&d)
-	case "Network":
-		loadNetwork(&d)
-	case "Cluster":
-		loadCluster(&d)
-	case "Metrics":
-		loadMetrics(&d)
-	case "Estate":
-		loadEstate(&d)
-	case "Provision":
-		loadProvision(&d)
+func loadSection(si, sub int, ctx string) sectionData {
+	d := sectionData{section: si, sub: sub, ctx: ctx, loadedAt: time.Now()}
+	key := sections[si].name + "/" + sections[si].subs[sub]
+	if f, ok := collectors[key]; ok {
+		f(&d)
+	} else {
+		d.err = "no collector for " + key
 	}
 	return d
+}
+
+var collectors = map[string]func(*sectionData){
+	"Overview/Summary":    loadOverview,
+	"Machines/VMs":        loadVMs,
+	"Machines/Snapshots":  loadVMSnapshots,
+	"Machines/Networks":   loadVMNetworks,
+	"Machines/Pools":      loadVMPools,
+	"Storage/Pools":       loadPools,
+	"Storage/Datasets":    loadDatasets,
+	"Storage/Snapshots":   loadSnapshots,
+	"Storage/Boot envs":   loadBootEnvs,
+	"Network/Planes":      loadPlanes,
+	"Network/Peers":       loadPeers,
+	"Network/Enrolled":    loadEnrolled,
+	"Cluster/Nodes":       loadNodes,
+	"Cluster/Pods":        loadPods,
+	"Cluster/Deployments": loadDeployments,
+	"Cluster/Services":    loadServices,
+	"Ansible/Hosts":       loadAnsibleHosts,
+	"Ansible/Groups":      loadAnsibleGroups,
+	"Ansible/Plays":       loadPlays,
+	"Helm/Releases":       loadReleases,
+	"Helm/Examples":       loadHelmExamples,
+	"Metrics/Targets":     loadMetrics,
+	"Estate/Drift":        loadEstate,
+	"Estate/Events":       loadEvents,
+	"Provision/Armed":     loadProvision,
+	"Provision/Goldens":   loadGoldens,
+	"Provision/Answers":   loadAnswers,
 }
 
 // ── kldload-estate ──────────────────────────────────────────────────────────
@@ -138,100 +191,188 @@ func readEstate() (estateReport, error) {
 	return r, nil
 }
 
-func loadMachines(d *sectionData) {
-	r, err := readEstate()
-	if err != nil {
-		d.err = err.Error()
-		return
-	}
-	d.columns = []string{"machine", "state", "class", "address", "network", "mesh", "k8s", "from"}
-	running, mesh := 0, 0
-	for _, m := range r.Machines {
-		if m.Power == "running" {
-			running++
-		}
-		if m.InMesh {
-			mesh++
-		}
-		meshCol := "-"
-		if m.InMesh {
-			meshCol = m.MeshID + " " + m.MeshIfaces
-		}
-		d.rows = append(d.rows, []string{m.Name, m.Power, m.Class, orDash(m.IP), orDash(m.Network), meshCol, orDash(m.K8s), orDash(m.GoldenSrc)})
-	}
-	d.headline = fmt.Sprintf("%d machines, %d running, %d on the mesh, %d drift", len(r.Machines), running, mesh, len(r.Drift))
-}
+// ── Machines ────────────────────────────────────────────────────────────────
 
-func loadEstate(d *sectionData) {
-	r, err := readEstate()
+// loadVMs is libvirt's own list with the address resolver and the state DB
+// on top: what vmxplore's estate shows, in the order it shows it. A per-VM
+// dominfo costs 50 ms; forty VMs is two seconds, which is why the address
+// and the DB row come from one call each.
+func loadVMs(d *sectionData) {
+	names, err := run(15*time.Second, "virsh", "list", "--all", "--name")
 	if err != nil {
 		d.err = err.Error()
 		return
 	}
-	d.columns = []string{"machine", "finding", "detail", "repair"}
-	for _, x := range r.Drift {
-		d.rows = append(d.rows, []string{x.Machine, x.Kind, x.Detail, x.Repair})
+	ips := map[string]string{}
+	if out, err := run(20*time.Second, "kldload-vm-ip", "--all", "--json"); err == nil {
+		_ = json.Unmarshal([]byte(out), &ips)
 	}
-	src := []string{}
-	for k, v := range r.Sources {
-		if v {
-			src = append(src, k)
+	type dbrow struct {
+		Name, Role, Cluster, Status, MeshID, Golden string
+	}
+	db := map[string]dbrow{}
+	if out, err := run(15*time.Second, "kldload-db", "dump"); err == nil {
+		var dump struct {
+			VMs []struct {
+				Name      string `json:"name"`
+				Role      string `json:"role"`
+				ClusterID string `json:"cluster_id"`
+				Status    string `json:"status"`
+				MeshID    string `json:"mesh_id"`
+				GoldenSrc string `json:"golden_src"`
+				DeletedAt string `json:"deleted_at"`
+			} `json:"vms"`
 		}
-	}
-	sort.Strings(src)
-	d.headline = fmt.Sprintf("%d machines across %s; %d drift", len(r.Machines), strings.Join(src, ", "), len(r.Drift))
-	// The doctor's failures and warnings belong on the same page: drift is
-	// where sources disagree, the doctor is where the host disagrees with
-	// its baseline.
-	if res, sum, err := readDoctor(); err != nil {
-		d.rows = append(d.rows, []string{"doctor", "did not run", err.Error(), ""})
-	} else {
-		d.headline += fmt.Sprintf("; doctor %d ok %d warn %d fail %d skip", sum["ok"], sum["warn"], sum["fail"], sum["skip"])
-		for _, c := range res {
-			if c.Status == "fail" || c.Status == "warn" {
-				d.rows = append(d.rows, []string{"doctor:" + c.Subsystem, c.Status + " " + c.Name, c.Actual, c.Remediation})
+		if json.Unmarshal([]byte(out), &dump) == nil {
+			for _, v := range dump.VMs {
+				if v.DeletedAt == "" {
+					db[v.Name] = dbrow{v.Name, v.Role, v.ClusterID, v.Status, v.MeshID, v.GoldenSrc}
+				}
 			}
 		}
 	}
+	d.columns = []string{"vm", "state", "vcpus", "memory", "address", "mesh", "role", "from"}
+	running := 0
+	for _, name := range strings.Fields(names) {
+		info, _ := run(10*time.Second, "virsh", "dominfo", name)
+		state, cpus, mem := "?", "-", "-"
+		for _, line := range strings.Split(info, "\n") {
+			k, v, ok := strings.Cut(line, ":")
+			if !ok {
+				continue
+			}
+			v = strings.TrimSpace(v)
+			switch strings.TrimSpace(k) {
+			case "State":
+				state = v
+			case "CPU(s)":
+				cpus = v
+			case "Max memory":
+				if kib, err := strconv.ParseInt(strings.Fields(v)[0], 10, 64); err == nil {
+					mem = human(kib * 1024)
+				}
+			}
+		}
+		if state == "running" {
+			running++
+		}
+		r := db[name]
+		d.rows = append(d.rows, []string{name, state, cpus, mem, orDash(ips[name]), orDash(r.MeshID), orDash(r.Role), orDash(r.Golden)})
+	}
+	d.headline = fmt.Sprintf("%d machines, %d running (libvirt · kldload-vm-ip · state.db)", len(d.rows), running)
 }
 
-// ── kldload-doctor ──────────────────────────────────────────────────────────
-
-type doctorCheck struct {
-	Name        string `json:"name"`
-	Subsystem   string `json:"subsystem"`
-	Status      string `json:"status"`
-	Actual      string `json:"actual"`
-	Remediation string `json:"remediation"`
-}
-
-func readDoctor() ([]doctorCheck, map[string]int, error) {
-	out, err := run(120*time.Second, "kldload-doctor", "--json")
-	if err != nil && strings.TrimSpace(out) == "" {
-		return nil, nil, err
-	}
-	var rep struct {
-		Results []doctorCheck  `json:"results"`
-		Summary map[string]int `json:"summary"`
-	}
-	if err := json.Unmarshal([]byte(out), &rep); err != nil {
-		return nil, nil, fmt.Errorf("kldload-doctor: %v", err)
-	}
-	return rep.Results, rep.Summary, nil
-}
-
-// ── storage: zpool + kldload-rollback ───────────────────────────────────────
-
-func loadStorage(d *sectionData) {
-	out, err := run(15*time.Second, "zpool", "list", "-H", "-o", "name,size,alloc,free,frag,cap,health")
+// loadVMSnapshots lists the zvol snapshots under rpool/vms — what kvm-snap
+// list shows per VM, for every VM at once (one zfs call, a second on onyx).
+// With a context it is that VM's snapshots alone.
+func loadVMSnapshots(d *sectionData) {
+	out, err := run(30*time.Second, "zfs", "list", "-H", "-p", "-t", "snapshot", "-o", "name,used,creation", "-S", "creation", "-r", "rpool/vms")
 	if err != nil {
 		d.err = err.Error()
 		return
 	}
-	d.columns = []string{"pool", "size", "alloc", "free", "frag", "cap", "health"}
+	d.columns = []string{"vm", "snapshot", "used", "created"}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if f := strings.Fields(line); len(f) >= 7 {
-			d.rows = append(d.rows, f[:7])
+		f := strings.Split(line, "\t")
+		if len(f) < 3 || !strings.Contains(f[0], "@") {
+			continue
+		}
+		ds, snap, _ := strings.Cut(f[0], "@")
+		vm := filepath.Base(ds)
+		if d.ctx != "" && vm != d.ctx {
+			continue
+		}
+		used, _ := strconv.ParseInt(f[1], 10, 64)
+		ts, _ := strconv.ParseInt(f[2], 10, 64)
+		d.rows = append(d.rows, []string{vm, snap, human(used), time.Unix(ts, 0).Format("2006-01-02 15:04")})
+	}
+	if d.ctx != "" {
+		d.headline = fmt.Sprintf("%d snapshots of %s (kvm-snap %s list)", len(d.rows), d.ctx, d.ctx)
+	} else {
+		d.headline = fmt.Sprintf("%d VM snapshots under rpool/vms", len(d.rows))
+	}
+}
+
+func loadVMNetworks(d *sectionData) {
+	out, err := run(15*time.Second, "virsh", "net-list", "--all")
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"network", "state", "autostart", "persistent", "bridge", "range"}
+	for _, line := range strings.Split(out, "\n")[2:] {
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			continue
+		}
+		bridge, rng := "-", "-"
+		if xml, err := run(10*time.Second, "virsh", "net-dumpxml", f[0]); err == nil {
+			bridge = attr(xml, "<bridge", "name")
+			if ip := attr(xml, "<ip", "address"); ip != "" {
+				rng = ip + "/" + orDash(attr(xml, "<ip", "netmask"))
+			}
+		}
+		d.rows = append(d.rows, []string{f[0], f[1], f[2], f[3], bridge, rng})
+	}
+	d.headline = fmt.Sprintf("%d libvirt networks", len(d.rows))
+}
+
+func loadVMPools(d *sectionData) {
+	out, err := run(15*time.Second, "virsh", "pool-list", "--all", "--details")
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"pool", "state", "autostart", "persistent", "capacity", "allocated", "available"}
+	for _, line := range strings.Split(out, "\n")[2:] {
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			continue
+		}
+		row := []string{f[0], f[1], f[2], f[3], "-", "-", "-"}
+		if len(f) >= 10 {
+			row[4], row[5], row[6] = f[4]+f[5], f[6]+f[7], f[8]+f[9]
+		}
+		d.rows = append(d.rows, row)
+	}
+	d.headline = fmt.Sprintf("%d libvirt storage pools", len(d.rows))
+}
+
+// attr pulls one attribute off the first element that starts with tag; the
+// libvirt XML here is small and regular enough that a parser would be more
+// code than certainty.
+func attr(xml, tag, name string) string {
+	i := strings.Index(xml, tag)
+	if i < 0 {
+		return ""
+	}
+	rest := xml[i:]
+	if j := strings.Index(rest, ">"); j >= 0 {
+		rest = rest[:j]
+	}
+	k := strings.Index(rest, name+"='")
+	if k < 0 {
+		return ""
+	}
+	rest = rest[k+len(name)+2:]
+	if e := strings.Index(rest, "'"); e >= 0 {
+		return rest[:e]
+	}
+	return ""
+}
+
+// ── Storage ─────────────────────────────────────────────────────────────────
+
+func loadPools(d *sectionData) {
+	out, err := run(15*time.Second, "zpool", "list", "-H", "-o", "name,size,alloc,free,frag,cap,dedup,health")
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"pool", "size", "alloc", "free", "frag", "cap", "dedup", "health"}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Fields(line); len(f) >= 8 {
+			d.rows = append(d.rows, f[:8])
 		}
 	}
 	st, err := run(30*time.Second, "kldload-rollback", "status")
@@ -239,7 +380,6 @@ func loadStorage(d *sectionData) {
 		d.headline = fmt.Sprintf("%d pool(s); rollback status: %v", len(d.rows), err)
 		return
 	}
-	// "Key : value" lines from the tool, kept in its own words.
 	var bits []string
 	for _, line := range strings.Split(st, "\n") {
 		k, v, ok := strings.Cut(line, ":")
@@ -248,53 +388,261 @@ func loadStorage(d *sectionData) {
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 		switch k {
-		case "Running from", "Next boot", "Boot path", "Newest pre-transaction snapshot":
+		case "Running from", "Next boot", "Boot path":
 			bits = append(bits, k+" "+v)
 		}
 	}
 	d.headline = fmt.Sprintf("%d pool(s) · %s", len(d.rows), strings.Join(bits, " · "))
 }
 
-// ── network: wg show dump ───────────────────────────────────────────────────
-
-func loadNetwork(d *sectionData) {
-	ifs, err := run(10*time.Second, "wg", "show", "interfaces")
+func loadDatasets(d *sectionData) {
+	out, err := run(30*time.Second, "zfs", "list", "-H", "-p", "-o", "name,type,used,avail,refer,mountpoint,compressratio", "-t", "filesystem,volume")
 	if err != nil {
 		d.err = err.Error()
 		return
 	}
-	d.columns = []string{"plane", "peer", "endpoint", "allowed", "handshake", "rx/tx"}
-	alive, total := 0, 0
-	for _, iface := range strings.Fields(ifs) {
-		dump, err := run(10*time.Second, "wg", "show", iface, "dump")
-		if err != nil {
-			d.rows = append(d.rows, []string{iface, "?", err.Error(), "", "", ""})
+	d.columns = []string{"dataset", "type", "used", "avail", "refer", "mountpoint", "ratio"}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) < 7 {
 			continue
 		}
-		lines := strings.Split(strings.TrimSpace(dump), "\n")
-		for i, line := range lines {
+		used, _ := strconv.ParseInt(f[2], 10, 64)
+		avail, _ := strconv.ParseInt(f[3], 10, 64)
+		refer, _ := strconv.ParseInt(f[4], 10, 64)
+		d.rows = append(d.rows, []string{f[0], f[1], human(used), human(avail), human(refer), f[5], f[6]})
+	}
+	d.headline = fmt.Sprintf("%d datasets and volumes (enter: a dataset's snapshots)", len(d.rows))
+}
+
+// loadSnapshots without a context reads every snapshot (eight to eleven
+// seconds on onyx's 4,800; the spinner covers it); with one, that dataset's
+// own in 75 ms.
+func loadSnapshots(d *sectionData) {
+	args := []string{"list", "-H", "-p", "-t", "snapshot", "-o", "name,used,refer,creation", "-S", "creation"}
+	if d.ctx != "" {
+		args = append(args, "-d1", d.ctx)
+	}
+	out, err := run(120*time.Second, "zfs", args...)
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"snapshot", "dataset", "used", "refer", "created"}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) < 4 || !strings.Contains(f[0], "@") {
+			continue
+		}
+		ds, snap, _ := strings.Cut(f[0], "@")
+		used, _ := strconv.ParseInt(f[1], 10, 64)
+		refer, _ := strconv.ParseInt(f[2], 10, 64)
+		ts, _ := strconv.ParseInt(f[3], 10, 64)
+		d.rows = append(d.rows, []string{f[0], ds, human(used), human(refer), time.Unix(ts, 0).Format("2006-01-02 15:04")})
+		_ = snap
+	}
+	if d.ctx != "" {
+		d.headline = fmt.Sprintf("%d snapshots of %s", len(d.rows), d.ctx)
+	} else {
+		d.headline = fmt.Sprintf("%d snapshots on the host", len(d.rows))
+	}
+}
+
+func loadBootEnvs(d *sectionData) {
+	st, err := run(30*time.Second, "kldload-rollback", "status")
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	status := map[string]string{}
+	for _, line := range strings.Split(st, "\n") {
+		if k, v, ok := strings.Cut(line, ":"); ok {
+			status[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	running := status["Running from"]
+	d.headline = fmt.Sprintf("running %s · next boot %s · %s", orDash(running), orDash(status["Next boot"]), orDash(status["Boot path"]))
+	if v := status["Staged rollback"]; v != "" {
+		d.headline += " · STAGED: " + v
+	}
+	// the environments, then the running one's snapshots (what `rollback
+	// to` takes)
+	d.columns = []string{"name", "kind", "created", "used", "source"}
+	if out, err := run(15*time.Second, "zfs", "list", "-H", "-p", "-o", "name,used,creation", "-r", "-d1", "-t", "filesystem", "rpool/ROOT"); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			f := strings.Split(line, "\t")
+			if len(f) < 3 || f[0] == "rpool/ROOT" {
+				continue
+			}
+			used, _ := strconv.ParseInt(f[1], 10, 64)
+			ts, _ := strconv.ParseInt(f[2], 10, 64)
+			kind := "environment"
+			if f[0] == running {
+				kind = "environment (running)"
+			}
+			if f[0] == status["Next boot"] {
+				kind += " (boots next)"
+			}
+			d.rows = append(d.rows, []string{f[0], kind, time.Unix(ts, 0).Format("2006-01-02 15:04"), human(used), "-"})
+		}
+	}
+	if running != "" {
+		if out, err := run(15*time.Second, "zfs", "list", "-H", "-p", "-t", "snapshot", "-o", "name,used,creation", "-S", "creation", "-d1", running); err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				f := strings.Split(line, "\t")
+				if len(f) < 3 {
+					continue
+				}
+				used, _ := strconv.ParseInt(f[1], 10, 64)
+				ts, _ := strconv.ParseInt(f[2], 10, 64)
+				_, snap, _ := strings.Cut(f[0], "@")
+				d.rows = append(d.rows, []string{f[0], "snapshot", time.Unix(ts, 0).Format("2006-01-02 15:04"), human(used), snapFamily(snap)})
+			}
+		}
+	}
+}
+
+func snapFamily(s string) string {
+	switch {
+	case strings.HasPrefix(s, "autosnap"):
+		return "sanoid"
+	case strings.HasPrefix(s, "dnf-pre"), strings.HasPrefix(s, "apt-pre"):
+		return "pre-transaction"
+	case strings.HasPrefix(s, "kpkg"):
+		return "kpkg"
+	case strings.HasPrefix(s, "install"):
+		return "install"
+	case strings.HasPrefix(s, "auto-"):
+		return "kldload-snapshot"
+	}
+	return "manual"
+}
+
+// ── Network: wg show dump ───────────────────────────────────────────────────
+
+type peer struct {
+	plane, key, endpoint, allowed string
+	handshake                     int64
+	rx, tx                        int64
+}
+
+func readPeers() ([]string, []peer, error) {
+	ifs, err := run(10*time.Second, "wg", "show", "interfaces")
+	if err != nil {
+		return nil, nil, err
+	}
+	planes := strings.Fields(ifs)
+	var peers []peer
+	for _, iface := range planes {
+		dump, err := run(10*time.Second, "wg", "show", iface, "dump")
+		if err != nil {
+			continue
+		}
+		for i, line := range strings.Split(strings.TrimSpace(dump), "\n") {
 			f := strings.Split(line, "\t")
 			if i == 0 || len(f) < 7 {
 				continue // the first line is this interface's own keys
 			}
-			total++
-			hs := "never"
-			if ts, _ := strconv.ParseInt(f[4], 10, 64); ts > 0 {
-				age := time.Since(time.Unix(ts, 0))
-				hs = age.Truncate(time.Second).String() + " ago"
-				if age < 3*time.Minute {
-					alive++
-				}
-			}
-			rx, _ := strconv.ParseInt(f[5], 10, 64)
-			tx, _ := strconv.ParseInt(f[6], 10, 64)
-			d.rows = append(d.rows, []string{iface, f[0][:12] + "…", orDash(strings.TrimPrefix(f[2], "(none)")), f[3], hs, human(rx) + "/" + human(tx)})
+			p := peer{plane: iface, key: f[0], endpoint: strings.TrimPrefix(f[2], "(none)"), allowed: f[3]}
+			p.handshake, _ = strconv.ParseInt(f[4], 10, 64)
+			p.rx, _ = strconv.ParseInt(f[5], 10, 64)
+			p.tx, _ = strconv.ParseInt(f[6], 10, 64)
+			peers = append(peers, p)
 		}
 	}
-	d.headline = fmt.Sprintf("%d plane(s), %d peers, %d with a handshake in the last 3 min", len(strings.Fields(ifs)), total, alive)
+	return planes, peers, nil
 }
 
-// ── cluster: kubectl, after a port probe ────────────────────────────────────
+func handshakeAge(ts int64) (string, bool) {
+	if ts == 0 {
+		return "never", false
+	}
+	age := time.Since(time.Unix(ts, 0))
+	return age.Truncate(time.Second).String() + " ago", age < 3*time.Minute
+}
+
+func loadPlanes(d *sectionData) {
+	planes, peers, err := readPeers()
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"plane", "purpose", "peers", "alive", "rx/tx"}
+	for _, p := range planes {
+		n, alive := 0, 0
+		var rx, tx int64
+		for _, q := range peers {
+			if q.plane != p {
+				continue
+			}
+			n++
+			if _, ok := handshakeAge(q.handshake); ok {
+				alive++
+			}
+			rx += q.rx
+			tx += q.tx
+		}
+		purpose := "-"
+		switch p {
+		case "wg-mgmt":
+			purpose = "management 10.250.0.0/24"
+		case "wg-k8s":
+			purpose = "cluster 10.251.0.0/24"
+		}
+		d.rows = append(d.rows, []string{p, purpose, strconv.Itoa(n), strconv.Itoa(alive), human(rx) + "/" + human(tx)})
+	}
+	d.headline = fmt.Sprintf("%d plane(s), %d peers", len(planes), len(peers))
+}
+
+func loadPeers(d *sectionData) {
+	_, peers, err := readPeers()
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"peer", "plane", "endpoint", "allowed", "handshake", "rx/tx"}
+	alive := 0
+	for _, p := range peers {
+		hs, ok := handshakeAge(p.handshake)
+		if ok {
+			alive++
+		}
+		id := p.allowed
+		if strings.HasPrefix(p.allowed, "10.25") {
+			id = "node " + strings.TrimSuffix(p.allowed[strings.LastIndex(p.allowed, ".")+1:], "/32")
+		}
+		d.rows = append(d.rows, []string{id, p.plane, orDash(p.endpoint), p.allowed, hs, human(p.rx) + "/" + human(p.tx)})
+	}
+	d.headline = fmt.Sprintf("%d peers, %d with a handshake in the last 3 min", len(peers), alive)
+}
+
+func loadEnrolled(d *sectionData) {
+	entries, err := os.ReadDir("/var/lib/kldload/mesh/enrolled")
+	if err != nil {
+		d.err = "no enrolment records: " + err.Error()
+		return
+	}
+	d.columns = []string{"vm", "mesh id", "public key"}
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		rec, _ := run(5*time.Second, "cat", "/var/lib/kldload/mesh/enrolled/"+e.Name())
+		id, pub := "-", "-"
+		for _, line := range strings.Split(rec, "\n") {
+			if v, ok := strings.CutPrefix(line, "node_id="); ok {
+				id = v
+			}
+			if v, ok := strings.CutPrefix(line, "guest_pub="); ok {
+				pub = v
+			}
+		}
+		d.rows = append(d.rows, []string{e.Name(), id, pub})
+	}
+	d.headline = fmt.Sprintf("%d enrolled machines (kldload-enroll records)", len(d.rows))
+}
+
+// ── Cluster: kubectl, after a port probe ────────────────────────────────────
 
 // apiserverReachable is the same trick kldload-doctor and kldload-estate use:
 // kubectl's --request-timeout does not cover TCP connect, so a stale
@@ -318,32 +666,256 @@ func apiserverReachable() (string, bool) {
 	return server, true
 }
 
-func loadCluster(d *sectionData) {
+// kube runs one kubectl listing if the apiserver answers, and sets the
+// section's headline to why not otherwise.
+func kube(d *sectionData, args ...string) (string, bool) {
 	server, ok := apiserverReachable()
 	if server == "" {
 		d.headline = "no kubeconfig on this host — this is not a cluster node"
+		return "", false
+	}
+	if !ok {
+		d.headline = "apiserver " + server + " does not answer (port probe)"
+		return "", false
+	}
+	out, err := run(30*time.Second, "kubectl", append(args, "--request-timeout=15s")...)
+	if err != nil {
+		d.err = err.Error()
+		return "", false
+	}
+	return out, true
+}
+
+func tableRows(d *sectionData, out string, n int) {
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Fields(line); len(f) >= n {
+			d.rows = append(d.rows, f[:n])
+		}
+	}
+}
+
+func loadNodes(d *sectionData) {
+	out, ok := kube(d, "get", "nodes", "--no-headers", "-o",
+		"custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type,ROLE:.metadata.labels.node-role\\.kubernetes\\.io/control-plane,VERSION:.status.nodeInfo.kubeletVersion,IP:.status.addresses[0].address,OS:.status.nodeInfo.osImage")
+	if !ok {
+		return
+	}
+	d.columns = []string{"node", "status", "control-plane", "kubelet", "address", "os"}
+	tableRows(d, out, 6)
+	d.headline = fmt.Sprintf("%d node(s)", len(d.rows))
+}
+
+func loadPods(d *sectionData) {
+	out, ok := kube(d, "get", "pods", "-A", "--no-headers", "-o",
+		"custom-columns=NS:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase,NODE:.spec.nodeName,RESTARTS:.status.containerStatuses[0].restartCount,IP:.status.podIP")
+	if !ok {
+		return
+	}
+	d.columns = []string{"pod", "namespace", "phase", "node", "restarts", "address"}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Fields(line); len(f) >= 6 {
+			d.rows = append(d.rows, []string{f[1], f[0], f[2], f[3], f[4], f[5]})
+		}
+	}
+	d.headline = fmt.Sprintf("%d pod(s) in every namespace", len(d.rows))
+}
+
+func loadDeployments(d *sectionData) {
+	out, ok := kube(d, "get", "deployments", "-A", "--no-headers", "-o",
+		"custom-columns=NS:.metadata.namespace,NAME:.metadata.name,READY:.status.readyReplicas,WANT:.spec.replicas,IMAGE:.spec.template.spec.containers[0].image")
+	if !ok {
+		return
+	}
+	d.columns = []string{"deployment", "namespace", "ready", "wanted", "image"}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Fields(line); len(f) >= 5 {
+			d.rows = append(d.rows, []string{f[1], f[0], f[2], f[3], f[4]})
+		}
+	}
+	d.headline = fmt.Sprintf("%d deployment(s)", len(d.rows))
+}
+
+func loadServices(d *sectionData) {
+	out, ok := kube(d, "get", "services", "-A", "--no-headers", "-o",
+		"custom-columns=NS:.metadata.namespace,NAME:.metadata.name,TYPE:.spec.type,CLUSTER-IP:.spec.clusterIP,EXTERNAL:.status.loadBalancer.ingress[0].ip,PORTS:.spec.ports[*].port")
+	if !ok {
+		return
+	}
+	d.columns = []string{"service", "namespace", "type", "cluster ip", "external ip", "ports"}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Fields(line); len(f) >= 6 {
+			d.rows = append(d.rows, []string{f[1], f[0], f[2], f[3], f[4], f[5]})
+		}
+	}
+	d.headline = fmt.Sprintf("%d service(s)", len(d.rows))
+}
+
+// ── Ansible: kldload-inventory and the playbook library ────────────────────
+
+const playbookDir = "/usr/local/share/kldload-ansible/playbooks"
+
+type inventory struct {
+	groups map[string][]string
+	hosts  map[string]map[string]any
+}
+
+func readInventory() (inventory, error) {
+	inv := inventory{groups: map[string][]string{}, hosts: map[string]map[string]any{}}
+	out, err := run(30*time.Second, "kldload-inventory", "--list")
+	if err != nil {
+		return inv, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return inv, fmt.Errorf("kldload-inventory: %v", err)
+	}
+	for k, v := range raw {
+		if k == "_meta" {
+			var meta struct {
+				Hostvars map[string]map[string]any `json:"hostvars"`
+			}
+			_ = json.Unmarshal(v, &meta)
+			inv.hosts = meta.Hostvars
+			continue
+		}
+		var g struct {
+			Hosts []string `json:"hosts"`
+		}
+		if json.Unmarshal(v, &g) == nil {
+			inv.groups[k] = g.Hosts
+		}
+	}
+	return inv, nil
+}
+
+func loadAnsibleHosts(d *sectionData) {
+	inv, err := readInventory()
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"host", "address", "user", "role", "cluster", "status", "mesh id"}
+	names := make([]string, 0, len(inv.hosts))
+	for n := range inv.hosts {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		h := inv.hosts[n]
+		d.rows = append(d.rows, []string{n, str(h["ansible_host"]), str(h["ansible_user"]), str(h["kldload_role"]), orDash(str(h["kldload_cluster"])), str(h["kldload_status"]), orDash(str(h["kldload_mesh_id"]))})
+	}
+	d.headline = fmt.Sprintf("%d hosts in the dynamic inventory (kldload-inventory --list)", len(d.rows))
+}
+
+func loadAnsibleGroups(d *sectionData) {
+	inv, err := readInventory()
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"group", "hosts", "members"}
+	names := make([]string, 0, len(inv.groups))
+	for n := range inv.groups {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		hs := inv.groups[n]
+		d.rows = append(d.rows, []string{n, strconv.Itoa(len(hs)), truncateList(hs, 6)})
+	}
+	d.headline = fmt.Sprintf("%d groups", len(d.rows))
+}
+
+func truncateList(xs []string, n int) string {
+	if len(xs) <= n {
+		return strings.Join(xs, " ")
+	}
+	return strings.Join(xs[:n], " ") + fmt.Sprintf(" … +%d", len(xs)-n)
+}
+
+func loadPlays(d *sectionData) {
+	entries, err := os.ReadDir(playbookDir)
+	if err != nil {
+		d.err = "no playbook library: " + err.Error()
+		return
+	}
+	d.columns = []string{"playbook", "hosts", "about"}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yml") {
+			continue
+		}
+		hosts, about := "-", ""
+		if b, err := os.ReadFile(filepath.Join(playbookDir, e.Name())); err == nil {
+			for _, line := range strings.Split(string(b), "\n") {
+				t := strings.TrimSpace(line)
+				if v, ok := strings.CutPrefix(t, "hosts:"); ok && hosts == "-" {
+					hosts = strings.TrimSpace(v)
+				}
+				if v, ok := strings.CutPrefix(t, "- name:"); ok && about == "" {
+					about = strings.Trim(strings.TrimSpace(v), `"'`)
+				}
+			}
+		}
+		d.rows = append(d.rows, []string{e.Name(), hosts, about})
+	}
+	d.headline = fmt.Sprintf("%d playbooks in %s", len(d.rows), playbookDir)
+}
+
+// ── Helm ────────────────────────────────────────────────────────────────────
+
+const helmExamples = "/usr/local/share/kldload-examples/helm"
+
+func loadReleases(d *sectionData) {
+	server, ok := apiserverReachable()
+	if server == "" {
+		d.headline = "no kubeconfig on this host — helm has no cluster to ask"
 		return
 	}
 	if !ok {
 		d.headline = "apiserver " + server + " does not answer (port probe)"
 		return
 	}
-	out, err := run(20*time.Second, "kubectl", "get", "nodes", "--no-headers", "--request-timeout=10s",
-		"-o", "custom-columns=NAME:.metadata.name,READY:.status.conditions[-1].type,ROLE:.metadata.labels.node-role\\.kubernetes\\.io/control-plane,VER:.status.nodeInfo.kubeletVersion,IP:.status.addresses[0].address")
+	out, err := run(30*time.Second, "helm", "list", "-A", "-o", "json")
 	if err != nil {
 		d.err = err.Error()
 		return
 	}
-	d.columns = []string{"node", "ready", "control-plane", "kubelet", "address"}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if f := strings.Fields(line); len(f) >= 5 {
-			d.rows = append(d.rows, f[:5])
-		}
+	var raw []map[string]any
+	_ = json.Unmarshal([]byte(out), &raw)
+	d.columns = []string{"release", "namespace", "revision", "status", "chart", "app version", "updated"}
+	for _, r := range raw {
+		d.rows = append(d.rows, []string{str(r["name"]), str(r["namespace"]), str(r["revision"]), str(r["status"]), str(r["chart"]), str(r["app_version"]), str(r["updated"])})
 	}
-	d.headline = fmt.Sprintf("%s · %d node(s)", server, len(d.rows))
+	d.headline = fmt.Sprintf("%d release(s) in every namespace", len(d.rows))
 }
 
-// ── metrics: Prometheus targets ─────────────────────────────────────────────
+func loadHelmExamples(d *sectionData) {
+	entries, err := os.ReadDir(helmExamples)
+	if err != nil {
+		d.err = "no helm examples: " + err.Error()
+		return
+	}
+	d.columns = []string{"example", "kind", "about"}
+	for _, e := range entries {
+		kind, about := "file", ""
+		if e.IsDir() {
+			kind = "chart"
+			if b, err := os.ReadFile(filepath.Join(helmExamples, e.Name(), "Chart.yaml")); err == nil {
+				for _, line := range strings.Split(string(b), "\n") {
+					if v, ok := strings.CutPrefix(strings.TrimSpace(line), "description:"); ok {
+						about = strings.TrimSpace(v)
+					}
+				}
+			}
+		} else if strings.HasPrefix(e.Name(), "values-") {
+			kind = "values"
+		}
+		d.rows = append(d.rows, []string{e.Name(), kind, about})
+	}
+	d.headline = fmt.Sprintf("%d entries in %s", len(d.rows), helmExamples)
+}
+
+// ── Metrics: Prometheus targets ─────────────────────────────────────────────
 
 func loadMetrics(d *sectionData) {
 	client := http.Client{Timeout: 4 * time.Second}
@@ -379,42 +951,128 @@ func loadMetrics(d *sectionData) {
 		}
 		d.rows = append(d.rows, []string{name, t.Labels["job"], t.Health, t.ScrapeURL, t.LastError})
 	}
-	sort.Slice(d.rows, func(i, j int) bool { return d.rows[i][2] != "up" && d.rows[j][2] == "up" })
+	sort.SliceStable(d.rows, func(i, j int) bool { return d.rows[i][2] != "up" && d.rows[j][2] == "up" })
 	d.headline = fmt.Sprintf("%d/%d targets up · dashboards: https://%s:8443/grafana/", up, len(rep.Data.Active), hostname())
 }
 
-// ── provision: kldload-netboot-server status --json ─────────────────────────
+// ── Estate ──────────────────────────────────────────────────────────────────
 
-func loadProvision(d *sectionData) {
-	out, err := run(20*time.Second, "kldload-netboot-server", "status", "--json")
+type doctorCheck struct {
+	Name        string `json:"name"`
+	Subsystem   string `json:"subsystem"`
+	Status      string `json:"status"`
+	Actual      string `json:"actual"`
+	Remediation string `json:"remediation"`
+}
+
+func readDoctor() ([]doctorCheck, map[string]int, error) {
+	out, err := run(120*time.Second, "kldload-doctor", "--json")
+	if err != nil && strings.TrimSpace(out) == "" {
+		return nil, nil, err
+	}
+	var rep struct {
+		Results []doctorCheck  `json:"results"`
+		Summary map[string]int `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		return nil, nil, fmt.Errorf("kldload-doctor: %v", err)
+	}
+	return rep.Results, rep.Summary, nil
+}
+
+func loadEstate(d *sectionData) {
+	r, err := readEstate()
 	if err != nil {
 		d.err = err.Error()
 		return
 	}
-	// The shape kldload-netboot-server status --json prints (2026-09-26):
-	// payload {present, source, version, commit}, net {configured, used,
-	// commit, distros, why}, service, open, goldens [{name, size}],
-	// armed [{mac, mode, golden, netdev}].
-	var st struct {
-		Service string `json:"service"`
-		Open    bool   `json:"open"`
-		Payload struct {
-			Present bool   `json:"present"`
-			Source  string `json:"source"`
-			Version string `json:"version"`
-			Commit  string `json:"commit"`
-		} `json:"payload"`
-		Net struct {
-			Configured bool   `json:"configured"`
-			Used       bool   `json:"used"`
-			Distros    string `json:"distros"`
-			Why        string `json:"why"`
-		} `json:"net"`
-		Armed   []map[string]any `json:"armed"`
-		Goldens []map[string]any `json:"goldens"`
+	d.columns = []string{"machine", "finding", "detail", "repair"}
+	for _, x := range r.Drift {
+		d.rows = append(d.rows, []string{x.Machine, x.Kind, x.Detail, x.Repair})
+	}
+	src := []string{}
+	for k, v := range r.Sources {
+		if v {
+			src = append(src, k)
+		}
+	}
+	sort.Strings(src)
+	d.headline = fmt.Sprintf("%d machines across %s; %d drift", len(r.Machines), strings.Join(src, ", "), len(r.Drift))
+	// The doctor's failures and warnings belong on the same page: drift is
+	// where sources disagree, the doctor is where the host disagrees with
+	// its baseline.
+	if res, sum, err := readDoctor(); err != nil {
+		d.rows = append(d.rows, []string{"doctor", "did not run", err.Error(), ""})
+	} else {
+		d.headline += fmt.Sprintf("; doctor %d ok %d warn %d fail %d skip", sum["ok"], sum["warn"], sum["fail"], sum["skip"])
+		for _, c := range res {
+			if c.Status == "fail" || c.Status == "warn" {
+				d.rows = append(d.rows, []string{"doctor:" + c.Subsystem, c.Status + " " + c.Name, c.Actual, c.Remediation})
+			}
+		}
+	}
+}
+
+func loadEvents(d *sectionData) {
+	out, err := run(15*time.Second, "kldload-db", "dump")
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	var dump struct {
+		Events []struct {
+			TS, Type, Subject, Message string
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(out), &dump); err != nil {
+		d.err = "kldload-db dump: " + err.Error()
+		return
+	}
+	d.columns = []string{"when", "type", "subject", "message"}
+	ev := dump.Events
+	for i := len(ev) - 1; i >= 0 && len(d.rows) < 200; i-- {
+		d.rows = append(d.rows, []string{ev[i].TS, ev[i].Type, ev[i].Subject, ev[i].Message})
+	}
+	d.headline = fmt.Sprintf("last %d of %d events in state.db", len(d.rows), len(ev))
+}
+
+// ── Provision: kldload-netboot-server status --json ─────────────────────────
+
+type netbootStatus struct {
+	Service string `json:"service"`
+	Open    bool   `json:"open"`
+	Payload struct {
+		Present bool   `json:"present"`
+		Source  string `json:"source"`
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+	} `json:"payload"`
+	Net struct {
+		Configured bool   `json:"configured"`
+		Used       bool   `json:"used"`
+		Distros    string `json:"distros"`
+		Why        string `json:"why"`
+	} `json:"net"`
+	Armed   []map[string]any `json:"armed"`
+	Goldens []map[string]any `json:"goldens"`
+}
+
+func readNetboot() (netbootStatus, error) {
+	var st netbootStatus
+	out, err := run(20*time.Second, "kldload-netboot-server", "status", "--json")
+	if err != nil {
+		return st, err
 	}
 	if err := json.Unmarshal([]byte(out), &st); err != nil {
-		d.err = "kldload-netboot-server: " + err.Error()
+		return st, fmt.Errorf("kldload-netboot-server: %v", err)
+	}
+	return st, nil
+}
+
+func loadProvision(d *sectionData) {
+	st, err := readNetboot()
+	if err != nil {
+		d.err = err.Error()
 		return
 	}
 	mode := "armed machines only"
@@ -432,14 +1090,68 @@ func loadProvision(d *sectionData) {
 			netiso += " (unused: " + st.Net.Why + ")"
 		}
 	}
-	d.headline = fmt.Sprintf("service %s · %s · %s · %s · %d golden(s)", st.Service, mode, payload, netiso, len(st.Goldens))
+	d.headline = fmt.Sprintf("service %s · %s · %s · %s", st.Service, mode, payload, netiso)
 	d.columns = []string{"armed", "mode", "golden", "download nic"}
 	for _, a := range st.Armed {
 		d.rows = append(d.rows, []string{str(a["mac"]), str(a["mode"]), orDash(str(a["golden"])), orDash(str(a["netdev"]))})
 	}
-	if len(d.rows) == 0 {
-		d.rows = append(d.rows, []string{"(nothing armed)", "", "", ""})
+}
+
+func loadGoldens(d *sectionData) {
+	st, err := readNetboot()
+	if err != nil {
+		d.err = err.Error()
+		return
 	}
+	d.columns = []string{"golden", "size"}
+	for _, g := range st.Goldens {
+		size := str(g["size"])
+		if n, err := strconv.ParseInt(size, 10, 64); err == nil {
+			size = human(n)
+		}
+		d.rows = append(d.rows, []string{str(g["name"]), size})
+	}
+	d.headline = fmt.Sprintf("%d golden image(s) the netboot server can deploy (arm-deploy)", len(d.rows))
+}
+
+// answersDirs are where answers files live on a host: the netboot tree, and
+// the matrix a workstation keeps for its benches.
+var answersDirs = []string{"/var/lib/kldload/netboot-serve/answers", "/var/lib/kldload/netboot/answers", "/etc/kldload/answers"}
+
+func loadAnswers(d *sectionData) {
+	d.columns = []string{"answers file", "profile", "distro", "hostname"}
+	for _, dir := range answersDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".env") {
+				continue
+			}
+			p := filepath.Join(dir, e.Name())
+			profile, distro, host := "-", "-", "-"
+			if b, err := os.ReadFile(p); err == nil {
+				for _, line := range strings.Split(string(b), "\n") {
+					k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+					if !ok {
+						continue
+					}
+					v = strings.Trim(v, `"'`)
+					switch k {
+					case "PROFILE", "KLDLOAD_PROFILE":
+						profile = v
+					case "DISTRO", "KLDLOAD_DISTRO":
+						distro = v
+					case "HOSTNAME", "KLDLOAD_HOSTNAME":
+						host = v
+					}
+				}
+			}
+			d.rows = append(d.rows, []string{p, profile, distro, host})
+		}
+	}
+	d.headline = fmt.Sprintf("%d answers file(s) (a: arm a machine with the selected one)", len(d.rows))
 }
 
 // ── overview: one line per section, from the same collectors ───────────────
@@ -496,6 +1208,12 @@ func orDash(s string) string {
 func str(v any) string {
 	if v == nil {
 		return ""
+	}
+	switch x := v.(type) {
+	case float64:
+		if x == float64(int64(x)) {
+			return strconv.FormatInt(int64(x), 10)
+		}
 	}
 	return fmt.Sprint(v)
 }

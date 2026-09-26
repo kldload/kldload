@@ -1,9 +1,10 @@
-// tui.go — the bubbletea model: a rail of eight sections, a table with a
-// filter and a sort, a detail pane for the selected row, a status bar with
-// the keys, and the verbs that act on the selected row.
+// tui.go — the bubbletea model: a rail of sections, each with sub-tabs; a
+// table with a filter and a sort; a detail pane for the selected row; a
+// status bar with the keys; a help overlay; and the verbs of verbs.go acting
+// on the selected row.
 //
-// Rendering is a pure function of the model. `kld <section> --print` uses
-// body(), the plain table with no borders or colour, so scripts and the
+// Rendering is a pure function of the model. `kld <section> [sub] --print`
+// uses body(), the plain table with no borders or colour, so scripts and the
 // smoke gate read the same text the console shows; View() lays the same
 // table out for a terminal.
 package main
@@ -38,6 +39,8 @@ var (
 	stDim    = lipgloss.NewStyle().Foreground(cMuted)
 	stRail   = lipgloss.NewStyle().Foreground(cMuted).Padding(0, 1)
 	stRailA  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(cAccent).Padding(0, 1)
+	stSub    = lipgloss.NewStyle().Foreground(cMuted).Padding(0, 1)
+	stSubA   = lipgloss.NewStyle().Bold(true).Foreground(cAccent).Underline(true).Padding(0, 1)
 	stHead   = lipgloss.NewStyle().Bold(true).Foreground(cBright)
 	stSel    = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("250"))
 	stGood   = lipgloss.NewStyle().Foreground(cGood)
@@ -59,11 +62,13 @@ type tickMsg time.Time
 
 type model struct {
 	active   int
+	sub      []int             // current sub-tab per section
+	ctx      map[string]string // "si/sub" -> context (a VM, a dataset)
 	row      int
 	width    int
 	height   int
-	data     []*sectionData
-	loading  []bool
+	data     map[string]*sectionData
+	loading  map[string]bool
 	status   string
 	statusAt time.Time
 	prompt   string // non-empty while a verb waits for typed input
@@ -82,7 +87,7 @@ type model struct {
 // newModel with a width is the --print form: no terminal, so no paging (a
 // height of 0 lists every row); the TUI learns its real size from the first
 // WindowSizeMsg.
-func newModel(start, width int) model {
+func newModel(start, sub, width int) model {
 	f := textinput.New()
 	f.Prompt = "/"
 	f.Placeholder = "filter rows"
@@ -90,16 +95,28 @@ func newModel(start, width int) model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(cAccent)
-	return model{active: start, width: width, detail: true, sortCol: -1,
-		data: make([]*sectionData, len(sections)), loading: make([]bool, len(sections)),
+	m := model{active: start, width: width, detail: true, sortCol: -1,
+		sub: make([]int, len(sections)), ctx: map[string]string{},
+		data: map[string]*sectionData{}, loading: map[string]bool{},
 		filter: f, spin: sp, now: time.Now()}
+	m.sub[start] = sub
+	return m
 }
+
+func (m model) key() string { return fmt.Sprintf("%d/%d", m.active, m.sub[m.active]) }
+
+func (m model) cur() *sectionData { return m.data[m.key()] }
+
+func (m model) subName() string { return sections[m.active].subs[m.sub[m.active]] }
+
+func (m model) verbsHere() []verb { return verbs[sections[m.active].name+"/"+m.subName()] }
 
 func (m *model) apply(d sectionData) {
 	dd := d
-	m.data[d.section] = &dd
-	m.loading[d.section] = false
-	if m.row >= len(m.rows()) {
+	k := fmt.Sprintf("%d/%d", d.section, d.sub)
+	m.data[k] = &dd
+	m.loading[k] = false
+	if k == m.key() && m.row >= len(m.rows()) {
 		m.row = 0
 	}
 }
@@ -113,8 +130,8 @@ func tickEvery() tea.Cmd {
 }
 
 func (m model) reload() tea.Cmd {
-	i := m.active
-	return func() tea.Msg { return loadedMsg(loadSection(i)) }
+	si, sub, ctx := m.active, m.sub[m.active], m.ctx[m.key()]
+	return func() tea.Msg { return loadedMsg(loadSection(si, sub, ctx)) }
 }
 
 func (m *model) say(s string) {
@@ -146,7 +163,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.say(stGood.Render(msg.what + ": done"))
 		}
-		m.loading[m.active] = true
+		m.loading[m.key()] = true
 		return m, m.reload()
 	case tea.KeyMsg:
 		if m.prompt != "" {
@@ -164,15 +181,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "?":
 			m.help = true
-		case "tab", "l", "right":
-			m.switchTo((m.active + 1) % len(sections))
+		case "l", "right":
+			m.switchTo((m.active+1)%len(sections), -1)
 			return m, m.loadIfEmpty()
-		case "shift+tab", "h", "left":
-			m.switchTo((m.active + len(sections) - 1) % len(sections))
+		case "h", "left":
+			m.switchTo((m.active+len(sections)-1)%len(sections), -1)
 			return m, m.loadIfEmpty()
-		case "1", "2", "3", "4", "5", "6", "7", "8":
-			m.switchTo(int(msg.String()[0] - '1'))
+		case "tab", "]":
+			m.switchTo(m.active, (m.sub[m.active]+1)%len(sections[m.active].subs))
 			return m, m.loadIfEmpty()
+		case "shift+tab", "[":
+			n := len(sections[m.active].subs)
+			m.switchTo(m.active, (m.sub[m.active]+n-1)%n)
+			return m, m.loadIfEmpty()
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "0":
+			i := int(msg.String()[0] - '1')
+			if msg.String() == "0" {
+				i = 9
+			}
+			if i < len(sections) {
+				m.switchTo(i, -1)
+				return m, m.loadIfEmpty()
+			}
 		case "j", "down":
 			if m.row < len(m.rows())-1 {
 				m.row++
@@ -200,37 +230,72 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "i":
 			m.detail = !m.detail
 		case "r":
-			m.loading[m.active] = true
-			m.say(stDim.Render("reloading " + sections[m.active]))
+			m.loading[m.key()] = true
+			m.say(stDim.Render("reloading " + sections[m.active].name + " / " + m.subName()))
 			return m, m.reload()
+		case "esc":
+			// esc leaves a context: the VM's snapshots become every VM's
+			if m.ctx[m.key()] != "" {
+				delete(m.ctx, m.key())
+				m.loading[m.key()] = true
+				m.row = 0
+				return m, m.reload()
+			}
 		case "enter":
-			return m.openDeep()
-		case "c":
-			return m.verbClone()
-		case "s":
-			return m.verbSnap()
-		case "d":
-			return m.verbDelete()
-		case "a":
-			return m.verbArm()
-		case "x":
-			return m.verbDisarm()
+			return m.drill()
+		default:
+			for _, v := range m.verbsHere() {
+				if v.key == msg.String() {
+					return m.runVerb(v)
+				}
+			}
 		}
 	}
 	return m, nil
 }
 
-func (m *model) switchTo(i int) {
-	m.active, m.row, m.status, m.sortCol = i, 0, "", -1
+func (m *model) switchTo(si, sub int) {
+	if sub >= 0 {
+		m.sub[si] = sub
+	}
+	m.active, m.row, m.status, m.sortCol = si, 0, "", -1
 	m.filter.SetValue("")
 }
 
 func (m *model) loadIfEmpty() tea.Cmd {
-	if m.data[m.active] == nil && !m.loading[m.active] {
-		m.loading[m.active] = true
+	if m.cur() == nil && !m.loading[m.key()] {
+		m.loading[m.key()] = true
 		return m.reload()
 	}
 	return nil
+}
+
+// drill is Enter: on a VM its snapshots, on a dataset its snapshots, on a
+// pod its logs would be a verb; anything else opens the detail pane.
+func (m model) drill() (tea.Model, tea.Cmd) {
+	name := m.selected()
+	if name == "" {
+		return m, nil
+	}
+	target := ""
+	switch sections[m.active].name + "/" + m.subName() {
+	case "Machines/VMs":
+		target = "Snapshots"
+	case "Storage/Datasets":
+		target = "Snapshots"
+	case "Ansible/Groups":
+		m.switchTo(m.active, subIndex(m.active, "Hosts"))
+		m.filter.SetValue(name)
+		return m, m.loadIfEmpty()
+	}
+	if target == "" {
+		m.detail = true
+		return m, nil
+	}
+	m.switchTo(m.active, subIndex(m.active, target))
+	m.ctx[m.key()] = name
+	m.loading[m.key()] = true
+	return m, m.reload()
 }
 
 func (m model) updateFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -253,7 +318,7 @@ func (m model) updateFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // cycleSort moves the sort through the columns and back to the tool's own
 // order: unsorted -> col 0 asc -> col 0 desc -> col 1 asc -> … -> unsorted.
 func (m *model) cycleSort() {
-	d := m.data[m.active]
+	d := m.cur()
 	if d == nil || len(d.columns) == 0 {
 		return
 	}
@@ -273,7 +338,7 @@ func (m *model) cycleSort() {
 // rows is what the table shows: the section's rows through the filter and
 // the sort. Numeric-looking cells sort as numbers so "9" sits before "10".
 func (m model) rows() [][]string {
-	d := m.data[m.active]
+	d := m.cur()
 	if d == nil {
 		return nil
 	}
@@ -290,17 +355,18 @@ func (m model) rows() [][]string {
 		c := m.sortCol
 		sorted := append([][]string(nil), out...)
 		sort.SliceStable(sorted, func(i, j int) bool {
-			a, b := cell(sorted[i], c), cell(sorted[j], c)
+			a, b := col(sorted[i], c), col(sorted[j], c)
 			less := false
-			if fa, ea := strconv.ParseFloat(a, 64); ea == nil {
-				if fb, eb := strconv.ParseFloat(b, 64); eb == nil {
-					less = fa < fb
-				} else {
-					less = true
-				}
-			} else if _, eb := strconv.ParseFloat(b, 64); eb == nil {
+			fa, ea := strconv.ParseFloat(strings.TrimRight(a, "%BKMGT"), 64)
+			fb, eb := strconv.ParseFloat(strings.TrimRight(b, "%BKMGT"), 64)
+			switch {
+			case ea == nil && eb == nil:
+				less = fa < fb
+			case ea == nil:
+				less = true
+			case eb == nil:
 				less = false
-			} else {
+			default:
 				less = a < b
 			}
 			if m.sortDesc {
@@ -313,15 +379,8 @@ func (m model) rows() [][]string {
 	return out
 }
 
-func cell(r []string, i int) string {
-	if i < len(r) {
-		return r[i]
-	}
-	return ""
-}
-
 func (m model) pageSize() int {
-	if n := m.height - 9; n > 3 {
+	if n := m.height - 10; n > 3 {
 		return n
 	}
 	return 10
@@ -337,7 +396,15 @@ func (m model) selected() string {
 	return rows[m.row][0]
 }
 
-// ── verbs: the shipped bash verbs, never a re-implementation ────────────────
+func (m model) selectedRow() []string {
+	rows := m.rows()
+	if m.row >= len(rows) {
+		return nil
+	}
+	return rows[m.row]
+}
+
+// ── verbs ───────────────────────────────────────────────────────────────────
 
 func (m model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -363,172 +430,60 @@ func (m model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func runVerb(what string, args ...string) tea.Cmd {
+// runVerb resolves what a verb needs — a row, typed input, typed consent —
+// and then runs its argv in the background (a doneMsg follows) or in the
+// foreground (the terminal is handed over and comes back).
+func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
+	row := m.selectedRow()
+	if !v.noRow && row == nil {
+		m.say(stWarn.Render(v.label + ": nothing is selected"))
+		return m, nil
+	}
+	name := col(row, 0)
+	if v.prompt != "" {
+		m.prompt = strings.ReplaceAll(v.prompt, "{}", name)
+		m.pending = func(in string) tea.Cmd { return m.execVerb(v, row, in) }
+		return m, nil
+	}
+	if v.confirm {
+		// the one kind of verb that asks: typing the name is the consent, the
+		// way kfire and kvm-delete's own --force gate mean it
+		m.prompt = v.label + " " + name + " — type its name to confirm: "
+		m.pending = func(typed string) tea.Cmd {
+			if strings.TrimSpace(typed) != name {
+				return func() tea.Msg { return doneMsg{v.label, fmt.Errorf("name did not match, nothing done")} }
+			}
+			return m.execVerb(v, row, "")
+		}
+		return m, nil
+	}
+	return m, m.execVerb(v, row, "")
+}
+
+func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
+	argv, err := v.argv(row, in)
+	if err != nil {
+		return func() tea.Msg { return doneMsg{v.label, err} }
+	}
+	what := strings.Join(argv, " ")
+	if len(what) > 60 {
+		what = what[:57] + "…"
+	}
+	if v.inter {
+		if _, err := exec.LookPath(argv[0]); err != nil {
+			return func() tea.Msg { return doneMsg{argv[0], fmt.Errorf("not installed on this host")} }
+		}
+		c := exec.Command("sudo", append([]string{"-n"}, argv...)...)
+		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+		return tea.ExecProcess(c, func(err error) tea.Msg { return doneMsg{what: what, err: err} })
+	}
 	return func() tea.Msg {
-		_, err := run(600e9, args[0], args[1:]...)
+		_, err := run(600*time.Second, argv[0], argv[1:]...)
 		return doneMsg{what: what, err: err}
 	}
 }
 
-func (m model) verbClone() (tea.Model, tea.Cmd) {
-	src := m.selected()
-	if sections[m.active] != "Machines" || src == "" {
-		m.say(stWarn.Render("clone: pick a machine in Machines first"))
-		return m, nil
-	}
-	m.prompt = "clone " + src + " as: "
-	m.pending = func(name string) tea.Cmd {
-		name = strings.TrimSpace(name)
-		if !nameOK(name) {
-			return func() tea.Msg { return doneMsg{"clone", fmt.Errorf("%q is not a VM name", name)} }
-		}
-		// kvm-clone registers the clone; the enrol sweep (or `kldload-enroll
-		// NAME`) puts it on the mesh once it has an address.
-		return runVerb("kvm-clone "+src+" "+name, "kvm-clone", src, name)
-	}
-	return m, nil
-}
-
-func (m model) verbSnap() (tea.Model, tea.Cmd) {
-	vm := m.selected()
-	if sections[m.active] != "Machines" || vm == "" {
-		m.say(stWarn.Render("snapshot: pick a machine in Machines first"))
-		return m, nil
-	}
-	return m, runVerb("kvm-snap "+vm, "kvm-snap", vm)
-}
-
-func (m model) verbDelete() (tea.Model, tea.Cmd) {
-	vm := m.selected()
-	if sections[m.active] != "Machines" || vm == "" {
-		m.say(stWarn.Render("delete: pick a machine in Machines first"))
-		return m, nil
-	}
-	// The one verb that asks: typing the name is the confirmation, the way
-	// kfire and kvm-delete's own --force gate mean it.
-	m.prompt = "delete " + vm + " and its zvol — type its name to confirm: "
-	m.pending = func(typed string) tea.Cmd {
-		if strings.TrimSpace(typed) != vm {
-			return func() tea.Msg { return doneMsg{"delete", fmt.Errorf("name did not match, nothing deleted")} }
-		}
-		return runVerb("kvm-delete "+vm, "kvm-delete", vm, "--force")
-	}
-	return m, nil
-}
-
-// Provision verbs: the consent tokens kldload-netboot-server keeps per MAC.
-// `a` arms one machine (or "any" for open mode) with an answers file; `x`
-// removes the selected machine's token so it boots its own disk again.
-func (m model) verbArm() (tea.Model, tea.Cmd) {
-	if sections[m.active] != "Provision" {
-		m.say(stWarn.Render("arm: open Provision first"))
-		return m, nil
-	}
-	m.prompt = "arm-install <mac|any> <answers.env>: "
-	m.pending = func(typed string) tea.Cmd {
-		f := strings.Fields(typed)
-		if len(f) != 2 || !macOrAny(f[0]) || strings.HasPrefix(f[1], "-") {
-			return func() tea.Msg { return doneMsg{"arm-install", fmt.Errorf("need a MAC (or any) and an answers file")} }
-		}
-		return runVerb("arm-install "+f[0], "kldload-netboot-server", "arm-install", f[0], f[1])
-	}
-	return m, nil
-}
-
-func (m model) verbDisarm() (tea.Model, tea.Cmd) {
-	mac := m.selected()
-	if sections[m.active] != "Provision" || !macOrAny(mac) {
-		m.say(stWarn.Render("disarm: pick an armed machine in Provision first"))
-		return m, nil
-	}
-	return m, runVerb("disarm "+mac, "kldload-netboot-server", "disarm", mac)
-}
-
-// macOrAny accepts aa:bb:cc:dd:ee:ff, the aa-bb-… form the token files use,
-// or the word any; nothing else reaches the tool's argv.
-func macOrAny(s string) bool {
-	if s == "any" {
-		return true
-	}
-	if len(s) != 17 {
-		return false
-	}
-	for i, c := range s {
-		if i%3 == 2 {
-			if c != ':' && c != '-' {
-				return false
-			}
-		} else if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
-			return false
-		}
-	}
-	return true
-}
-
-func nameOK(s string) bool {
-	if s == "" || len(s) > 63 || s[0] == '-' {
-		return false
-	}
-	for _, c := range s {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-			return false
-		}
-	}
-	return true
-}
-
-// openDeep hands the terminal to the section's own console and reloads
-// when it returns. Each is looked up on PATH first so a missing one is a
-// status line, not a crash.
-func (m model) openDeep() (tea.Model, tea.Cmd) {
-	var argv []string
-	switch sections[m.active] {
-	case "Machines", "Overview":
-		argv = []string{"vmxplore", "--tui"}
-	case "Storage":
-		argv = []string{"zxplore", "--tui"}
-	case "Network":
-		argv = []string{"wgx", "tui"}
-	case "Cluster":
-		argv = []string{"k9s"}
-	case "Estate":
-		argv = []string{"kldload-doctor"}
-	case "Provision":
-		argv = []string{"kldload-netboot-server", "status"}
-	case "Metrics":
-		m.say("dashboards live in the web console: https://" + hostname() + ":8443/grafana/")
-		return m, nil
-	}
-	if _, err := exec.LookPath(argv[0]); err != nil {
-		m.say(stWarn.Render(argv[0] + " is not installed on this host"))
-		return m, nil
-	}
-	c := exec.Command("sudo", append([]string{"-n"}, argv...)...)
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-	what := strings.Join(argv, " ")
-	return m, tea.ExecProcess(c, func(err error) tea.Msg { return doneMsg{what: what, err: err} })
-}
-
 // ── view ────────────────────────────────────────────────────────────────────
-
-// deepFor names the console Enter opens, for the detail pane and the help.
-func deepFor(section string) string {
-	switch section {
-	case "Machines", "Overview":
-		return "vmxplore"
-	case "Storage":
-		return "zxplore"
-	case "Network":
-		return "wgx"
-	case "Cluster":
-		return "k9s"
-	case "Estate":
-		return "kldload-doctor"
-	case "Provision":
-		return "kldload-netboot-server status"
-	}
-	return ""
-}
 
 func (m model) View() string {
 	if m.width == 0 {
@@ -542,14 +497,18 @@ func (m model) View() string {
 	// title bar: brand · host on the left, the clock and a spinner on the right
 	left := stBrand.Render("kldload") + stDim.Render("  operator console · "+hostname())
 	right := stDim.Render(m.now.Format("15:04:05"))
-	if m.loading[m.active] {
+	if m.loading[m.key()] {
 		right = m.spin.View() + " " + stDim.Render("loading") + "  " + right
 	}
 	b.WriteString(padBetween(left, right, w) + "\n")
 	// rail
 	var rail []string
 	for i, s := range sections {
-		label := fmt.Sprintf("%d %s", i+1, s)
+		n := i + 1
+		if n == 10 {
+			n = 0
+		}
+		label := fmt.Sprintf("%d %s", n, s.name)
 		if i == m.active {
 			rail = append(rail, stRailA.Render(label))
 		} else {
@@ -557,24 +516,39 @@ func (m model) View() string {
 		}
 	}
 	b.WriteString(strings.Join(rail, "") + "\n")
+	// sub-tabs, with the context when one is set
+	var subs []string
+	for j, s := range sections[m.active].subs {
+		if j == m.sub[m.active] {
+			subs = append(subs, stSubA.Render(s))
+		} else {
+			subs = append(subs, stSub.Render(s))
+		}
+	}
+	subline := strings.Join(subs, "")
+	if c := m.ctx[m.key()]; c != "" {
+		subline += stDim.Render("  › ") + stTitle.Render(c) + stDim.Render("  (esc: all)")
+	}
+	b.WriteString(subline + "\n")
 	b.WriteString(stDim.Render(strings.Repeat("─", w)) + "\n")
-	d := m.data[m.active]
+	d := m.cur()
 	// headline (the tool's summary, or its error)
 	switch {
-	case d == nil && m.loading[m.active]:
-		b.WriteString(stDim.Render("loading "+sections[m.active]+"…") + "\n")
+	case d == nil && m.loading[m.key()]:
+		b.WriteString(stDim.Render("loading "+sections[m.active].name+" / "+m.subName()+"…") + "\n")
 	case d == nil:
 		b.WriteString(stDim.Render("press r to load") + "\n")
 	default:
 		if d.err != "" {
-			b.WriteString(stBad.Render(d.err) + "\n")
-		}
-		if d.headline != "" {
+			b.WriteString(stBad.Render(truncate(d.err, w)) + "\n")
+		} else if d.headline != "" {
 			b.WriteString(stTitle.Render(truncate(d.headline, w)) + "\n")
+		} else {
+			b.WriteString("\n")
 		}
 	}
 	// table + detail
-	bodyH := m.height - 6 // title, rail, rule, headline, status, one spare
+	bodyH := m.height - 7 // title, rail, subs, rule, headline, status, one spare
 	if bodyH < 4 {
 		bodyH = 4
 	}
@@ -604,7 +578,7 @@ func (m model) View() string {
 	case m.status != "":
 		sl = m.status
 	default:
-		sl = keyHints(sections[m.active])
+		sl = m.keyHints()
 	}
 	rows := m.rows()
 	var sr string
@@ -624,21 +598,19 @@ func (m model) View() string {
 			sr += " · " + d.loadedAt.Format("15:04:05")
 		}
 	}
-	b.WriteString(padBetween(sl, stDim.Render(sr), w))
+	b.WriteString(padBetween(truncate(sl, w-lipgloss.Width(sr)-2), stDim.Render(sr), w))
 	return b.String()
 }
 
-func keyHints(section string) string {
+func (m model) keyHints() string {
 	k := func(key, what string) string { return stKey.Render(key) + stDim.Render(" "+what) }
-	parts := []string{k("1-8", "section"), k("j/k", "row"), k("/", "filter"), k("o", "sort"), k("r", "reload")}
-	if deep := deepFor(section); deep != "" {
-		parts = append(parts, k("enter", deep))
+	parts := []string{k("1-0", "section"), k("tab", m.subName()), k("j/k", "row"), k("/", "filter"), k("o", "sort")}
+	switch sections[m.active].name + "/" + m.subName() {
+	case "Machines/VMs", "Storage/Datasets":
+		parts = append(parts, k("enter", "snapshots"))
 	}
-	switch section {
-	case "Machines":
-		parts = append(parts, k("c", "clone"), k("s", "snapshot"), k("d", "delete"))
-	case "Provision":
-		parts = append(parts, k("a", "arm"), k("x", "disarm"))
+	for _, v := range m.verbsHere() {
+		parts = append(parts, k(v.key, v.label))
 	}
 	parts = append(parts, k("?", "help"), k("q", "quit"))
 	return strings.Join(parts, "  ")
@@ -646,7 +618,7 @@ func keyHints(section string) string {
 
 // tableView lays the rows out in width w and height h: header, then the page
 // that holds the selection. Numeric columns are right-aligned; the state
-// word in a row is coloured, the rest of the row is not.
+// word in a cell is coloured, the rest of the row is not.
 func (m model) tableView(d *sectionData, w, h int) string {
 	if d == nil || len(d.columns) == 0 {
 		return strings.Repeat("\n", max(h-1, 0))
@@ -657,7 +629,7 @@ func (m model) tableView(d *sectionData, w, h int) string {
 	line := func(cells []string, sel bool) string {
 		parts := make([]string, len(d.columns))
 		for i := range d.columns {
-			v := truncate(cell(cells, i), widths[i])
+			v := truncate(col(cells, i), widths[i])
 			if numeric[i] {
 				parts[i] = fmt.Sprintf("%*s", widths[i], v)
 			} else {
@@ -689,7 +661,7 @@ func (m model) tableView(d *sectionData, w, h int) string {
 		n++
 	}
 	if len(rows) == 0 {
-		b.WriteString(stDim.Render("nothing matches") + "\n")
+		b.WriteString(stDim.Render("nothing here") + "\n")
 		n++
 	}
 	for ; n < limit; n++ {
@@ -704,19 +676,18 @@ func (m model) detailView(d *sectionData, w, h int) string {
 	if d == nil || len(d.columns) == 0 {
 		return stDim.Render("no row")
 	}
-	rows := m.rows()
-	if m.row >= len(rows) {
+	r := m.selectedRow()
+	if r == nil {
 		return stDim.Render("no row")
 	}
-	r := rows[m.row]
 	kw := 0
 	for _, c := range d.columns {
 		kw = max(kw, len(c))
 	}
 	var lines []string
-	lines = append(lines, stTitle.Render(truncate(cell(r, 0), w)), "")
+	lines = append(lines, stTitle.Render(truncate(col(r, 0), w)), "")
 	for i, c := range d.columns {
-		v := cell(r, i)
+		v := col(r, i)
 		if v == "" || v == "-" {
 			continue
 		}
@@ -734,16 +705,19 @@ func (m model) detailView(d *sectionData, w, h int) string {
 		}
 	}
 	lines = append(lines, "")
-	if deep := deepFor(sections[m.active]); deep != "" {
-		lines = append(lines, stKey.Render("enter")+stDim.Render("  open in "+deep))
-	}
-	switch sections[m.active] {
-	case "Machines":
-		lines = append(lines, stKey.Render("c")+stDim.Render("  kvm-clone "+cell(r, 0)+" <name>"),
-			stKey.Render("s")+stDim.Render("  kvm-snap "+cell(r, 0)),
-			stKey.Render("d")+stDim.Render("  kvm-delete "+cell(r, 0)+" --force"))
-	case "Provision":
-		lines = append(lines, stKey.Render("x")+stDim.Render("  disarm "+cell(r, 0)))
+	for _, v := range m.verbsHere() {
+		if v.noRow {
+			continue
+		}
+		if argv, err := v.argv(r, "…"); err == nil {
+			cmd := strings.Join(argv, " ")
+			if v.inter {
+				cmd = "(terminal) " + cmd
+			}
+			lines = append(lines, stKey.Render(v.key)+"  "+stDim.Render(truncate(cmd, w-3)))
+		} else {
+			lines = append(lines, stKey.Render(v.key)+"  "+stDim.Render(v.label))
+		}
 	}
 	if len(lines) > h {
 		lines = lines[:h]
@@ -753,27 +727,40 @@ func (m model) detailView(d *sectionData, w, h int) string {
 
 func (m model) helpView() string {
 	k := func(key, what string) string { return "  " + stKey.Render(fmt.Sprintf("%-10s", key)) + what }
-	body := strings.Join([]string{
+	lines := []string{
 		stTitle.Render("kld " + versionFull() + " — keys"),
 		"",
-		k("1-8, tab", "switch section"),
+		k("1-9, 0", "switch section   ·   h / l previous / next section"),
+		k("tab, [ ]", "next / previous sub-tab of the section"),
 		k("j / k", "move down / up   (g, G first / last · ctrl+f, ctrl+b page)"),
+		k("enter", "drill in: a VM's or a dataset's snapshots, a group's hosts"),
+		k("esc", "leave a drill-in (back to every VM / dataset)"),
 		k("/", "filter rows; enter keeps it, esc clears it"),
 		k("o", "sort: next column, then descending, then the tool's order"),
 		k("i", "show or hide the detail pane"),
-		k("r", "reload the section"),
-		k("enter", "open the deep console: vmxplore, zxplore, wgx, k9s"),
+		k("r", "reload the sub-tab"),
 		"",
-		k("c", "Machines: clone the selected machine (kvm-clone)"),
-		k("s", "Machines: snapshot it (kvm-snap)"),
-		k("d", "Machines: delete it and its zvol; type its name to confirm"),
-		k("a", "Provision: arm a MAC (or any) with an answers file"),
-		k("x", "Provision: disarm the selected machine"),
-		"",
-		k("?", "this help   ·   any key closes it"),
-		k("q", "quit"),
-	}, "\n")
-	box := stHelpBx.Render(body)
+		stTitle.Render(sections[m.active].name + " / " + m.subName()),
+	}
+	vs := m.verbsHere()
+	if len(vs) == 0 {
+		lines = append(lines, stDim.Render("  no verbs here — this tab is read-only"))
+	}
+	for _, v := range vs {
+		what := v.label
+		switch {
+		case v.confirm:
+			what += "   (asks for the name to be typed)"
+		case v.prompt != "":
+			what += "   (asks)"
+		}
+		if v.inter {
+			what += "   (takes the terminal)"
+		}
+		lines = append(lines, k(v.key, what))
+	}
+	lines = append(lines, "", k("?", "this help   ·   any key closes it"), k("q", "quit"))
+	box := stHelpBx.Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -783,16 +770,25 @@ func (m model) body() string {
 	b.WriteString("kldload  operator console · " + hostname() + "\n")
 	var rail []string
 	for i, s := range sections {
+		n := i + 1
+		if n == 10 {
+			n = 0
+		}
 		// the active section in brackets, every name still framed by spaces
 		// so a script (and tests/smoke-console.sh) can grep " Provision "
 		if i == m.active {
-			rail = append(rail, fmt.Sprintf("[ %d %s ]", i+1, s))
+			rail = append(rail, fmt.Sprintf("[ %d %s ]", n, s.name))
 		} else {
-			rail = append(rail, fmt.Sprintf(" %d %s ", i+1, s))
+			rail = append(rail, fmt.Sprintf(" %d %s ", n, s.name))
 		}
 	}
-	b.WriteString(strings.Join(rail, " ") + "\n\n")
-	d := m.data[m.active]
+	b.WriteString(strings.Join(rail, " ") + "\n")
+	b.WriteString("  " + sections[m.active].name + " / " + m.subName())
+	if c := m.ctx[m.key()]; c != "" {
+		b.WriteString(" › " + c)
+	}
+	b.WriteString("\n\n")
+	d := m.cur()
 	if d == nil {
 		return b.String()
 	}
@@ -809,7 +805,7 @@ func (m model) body() string {
 	line := func(cells []string) string {
 		parts := make([]string, len(d.columns))
 		for i := range d.columns {
-			parts[i] = fmt.Sprintf("%-*s", widths[i], cell(cells, i))
+			parts[i] = fmt.Sprintf("%-*s", widths[i], col(cells, i))
 		}
 		return strings.TrimRight(strings.Join(parts, "  "), " ")
 	}
@@ -832,7 +828,7 @@ func columnWidths(cols []string, rows [][]string, total int) []int {
 	}
 	for _, r := range rows {
 		for i := range cols {
-			w[i] = max(w[i], lipgloss.Width(cell(r, i)))
+			w[i] = max(w[i], lipgloss.Width(col(r, i)))
 		}
 	}
 	if total <= 0 {
@@ -864,7 +860,7 @@ func numericColumns(rows [][]string, n int) []bool {
 		seen := false
 		num[i] = true
 		for _, r := range rows {
-			v := cell(r, i)
+			v := col(r, i)
 			if v == "" || v == "-" {
 				continue
 			}
@@ -898,6 +894,9 @@ func truncate(s string, w int) string {
 	if w == 1 {
 		return "…"
 	}
+	if len(r) <= w {
+		return s
+	}
 	return string(r[:w-1]) + "…"
 }
 
@@ -913,11 +912,11 @@ func padBetween(left, right string, w int) string {
 // plain. State is the only thing that gets a colour.
 func colourCell(rendered, raw string) string {
 	switch strings.ToLower(strings.Fields(raw + " x")[0]) {
-	case "running", "up", "online", "ok", "active", "ready", "true", "install":
+	case "running", "up", "online", "ok", "active", "ready", "true", "install", "deployed", "succeeded":
 		return stGood.Render(rendered)
-	case "fail", "down", "degraded", "faulted", "absent", "unavailable", "failed", "unreachable":
+	case "fail", "down", "degraded", "faulted", "absent", "unavailable", "failed", "unreachable", "crashloopbackoff", "error":
 		return stBad.Render(rendered)
-	case "warn", "unregistered", "stale", "never", "open":
+	case "warn", "unregistered", "stale", "never", "open", "pending", "inactive", "paused":
 		return stWarn.Render(rendered)
 	}
 	return rendered
