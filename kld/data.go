@@ -34,7 +34,7 @@ type section struct {
 // Section order is the sidebar order of the web console, and the number keys.
 var sections = []section{
 	{"Overview", []string{"Summary"}},
-	{"Machines", []string{"VMs", "Snapshots", "Networks", "Pools"}},
+	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Networks", "Pools"}},
 	{"Storage", []string{"Pools", "Topology", "Datasets", "Snapshots", "Boot envs", "ARC"}},
 	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet"}},
 	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services"}},
@@ -124,6 +124,7 @@ var collectors = map[string]func(*sectionData){
 	"Overview/Summary":    loadOverview,
 	"Machines/VMs":        loadVMs,
 	"Machines/Snapshots":  loadVMSnapshots,
+	"Machines/microVMs":   loadMicroVMs,
 	"Machines/Networks":   loadVMNetworks,
 	"Machines/Pools":      loadVMPools,
 	"Storage/Pools":       loadPools,
@@ -294,6 +295,45 @@ func loadVMSnapshots(d *sectionData) {
 		d.headline = fmt.Sprintf("%d snapshots of %s (kvm-snap %s list)", len(d.rows), d.ctx, d.ctx)
 	} else {
 		d.headline = fmt.Sprintf("%d VM snapshots under rpool/vms", len(d.rows))
+	}
+}
+
+// loadMicroVMs is kfire's listing: Firecracker instances cloned from
+// appliance goldens, each with its state, address and sizes. kfire prints
+// one JSON object per line between brackets; each line is parsed on its own.
+func loadMicroVMs(d *sectionData) {
+	if _, err := exec.LookPath("kfire"); err != nil {
+		d.err = "kfire is not installed on this host"
+		return
+	}
+	out, err := run(30*time.Second, "kfire", "list", "--json")
+	if err != nil && strings.TrimSpace(out) == "" {
+		d.err = err.Error()
+		return
+	}
+	d.columns = []string{"microvm", "state", "address", "golden", "vcpus", "ram", "tap"}
+	running := 0
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSuffix(strings.TrimSpace(line), ",")
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) != nil {
+			continue
+		}
+		if str(m["state"]) == "running" {
+			running++
+		}
+		ram := str(m["ram_mb"])
+		if n, err := strconv.ParseInt(ram, 10, 64); err == nil {
+			ram = human(n * 1024 * 1024)
+		}
+		d.rows = append(d.rows, []string{str(m["name"]), orDash(str(m["state"])), orDash(str(m["ip"])), orDash(str(m["golden"])), orDash(str(m["vcpus"])), orDash(ram), orDash(str(m["tap"]))})
+	}
+	d.headline = fmt.Sprintf("%d Firecracker microVMs, %d running (kfire list)", len(d.rows), running)
+	if len(d.rows) == 0 {
+		d.headline = "no Firecracker microVMs — clone one from an appliance golden (c)"
 	}
 }
 

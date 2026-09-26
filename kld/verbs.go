@@ -108,6 +108,26 @@ var verbs = map[string][]verb{
 		}},
 		{key: "s", label: "snapshot this VM now", argv: onRow("kvm-snap", "{}")},
 	},
+	"Machines/microVMs": {
+		{key: "c", label: "clone microVMs from a golden", noRow: true, prompt: "kfire clone <golden> [options]: ", argv: func(_ []string, in string) ([]string, error) {
+			f := strings.Fields(in)
+			if len(f) == 0 || !nameOK(f[0]) {
+				return nil, errors.New("a golden name comes first")
+			}
+			for _, a := range f[1:] {
+				if strings.HasPrefix(a, "--") && (a == "--all") {
+					return nil, errors.New("--all is not a clone option")
+				}
+			}
+			return append([]string{"kfire", "clone"}, f...), nil
+		}},
+		{key: "S", label: "start", argv: onRow("kfire", "start", "{}")},
+		{key: "T", label: "stop", argv: onRow("kfire", "stop", "{}")},
+		{key: "d", label: "destroy", confirm: true, argv: onRow("kfire", "destroy", "{}")},
+		{key: "H", label: "ssh", inter: true, argv: onRow("kfire", "ssh", "{}")},
+		{key: "C", label: "serial console log", inter: true, argv: onRow("kfire", "console", "{}")},
+		{key: "!", label: "kfire status", noRow: true, inter: true, argv: fixed("sh", "-c", `kfire status; echo; read -r -p "enter to return" _`)},
+	},
 	"Machines/Networks": {
 		{key: "S", label: "start", argv: onRow("virsh", "net-start", "{}")},
 		{key: "T", label: "stop", confirm: true, argv: onRow("virsh", "net-destroy", "{}")},
