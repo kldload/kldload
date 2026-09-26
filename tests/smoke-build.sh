@@ -290,6 +290,29 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
         # the first machine that netboots from the key (2026-09-18).
         declare -a NB_FILES=(usr/share/kldload-netboot/ipxe.efi
             usr/share/kldload-netboot/menu.png etc/kldload/ipxe-commit)
+        # ── The live USB as the rack's PXE server ───────────────────────────
+        # Three pieces, and the feature is the three together: the unit that
+        # serves, the answers file it arms for any machine, and the GRUB entry
+        # whose kldload.netboot=1 is the unit's start condition. A missing
+        # piece is a rack entry that boots a plain desktop and serves nothing,
+        # with no error anywhere (2026-09-25).
+        declare -a RACK_FILES=(usr/lib/systemd/system/kldload-netboot-live.service
+            usr/share/kldload-netboot/rack.env)
+        _rack_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${RACK_FILES[@]}" 2>/dev/null)" || _rack_list="" # absent paths make unsquashfs exit non-zero; the loop names them
+        _rack_bad=""
+        for _df in "${RACK_FILES[@]}"; do
+            awk -v p="squashfs-root/$_df" '$NF == p && $1 ~ /^-/ {f = 1} END {exit !f}' <<<"$_rack_list" ||
+                _rack_bad+=" $_df"
+        done
+        # Enabled, not just present (core rule 2c): the wants link is in the image.
+        unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" etc/systemd/system/multi-user.target.wants/kldload-netboot-live.service 2>/dev/null |
+            grep -q 'kldload-netboot-live.service' || _rack_bad+=" (not enabled: no multi-user.target.wants link)"
+        grep -q 'kldload.netboot=1' "$MOUNTPOINT/EFI/BOOT/grub.cfg" 2>/dev/null || _rack_bad+=" (no GRUB entry carries kldload.netboot=1)"
+        if [[ -z "$_rack_bad" ]]; then
+            _pass "live USB rack mode in the image (unit enabled, rack.env, GRUB entry with kldload.netboot=1)"
+        else
+            _fail "live USB rack mode in the image" "missing:${_rack_bad} — the 'provision the rack' entry would boot a plain desktop and serve nothing"
+        fi
         _nb_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${NB_FILES[@]}" 2>/dev/null)" || _nb_list="" # absent paths make unsquashfs exit non-zero; the loop below names them
         _nb_bad=""
         for _df in "${NB_FILES[@]}"; do

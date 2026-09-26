@@ -1526,6 +1526,10 @@ grep -q '^PermitRootLogin prohibit-password$' "${ROOTFS}/etc/ssh/sshd_config.d/5
 
 # Enable services
 enable_live_unit NetworkManager.service sshd.service
+# The rack entry's server. Inert unless the cmdline says kldload.netboot=1
+# (ConditionKernelCommandLine), so enabling it on every live boot costs
+# nothing and the GRUB entry alone decides (2026-09-25).
+enable_live_unit kldload-netboot-live.service
 if [[ "$EDITION" != "core" ]]; then
     # qemu-guest-agent is installed (PKGS above) and was never enabled: a
     # hypervisor could not read a live guest's address. Its only enabler was a
@@ -4128,6 +4132,18 @@ search --no-floppy --set=root --label 'KLDLOAD'
 # "dracut-initqueue: timeout, still waiting for /dev/disk/by-label/KLDLOAD".
 menuentry "kldloadOS Live (Fedora 44 + ZFS)" --hotkey=l {
     linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1
+    initrdefi /images/pxeboot/initrd.img
+}
+
+# Provision the rack from this USB. The same live session, plus
+# kldload.netboot=1, which starts kldload-netboot-live.service: a PXE server
+# serving THIS medium's kernel, initramfs and root image to every machine that
+# network-boots on the wire, in open mode (a key at the target installs; the
+# countdown boots its own disk). No install on this machine, nothing copied.
+# Everything else about the entry is the default one, so it boots wherever
+# the default does.
+menuentry "kldloadOS Live — provision the rack from this USB (PXE server)" --hotkey=p {
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1 kldload.netboot=1
     initrdefi /images/pxeboot/initrd.img
 }
 

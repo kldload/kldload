@@ -1,0 +1,40 @@
+# kldload-netboot-live.service — the live USB as the rack's PXE server.
+#
+# Boot the USB with kldload.netboot=1 on the cmdline (the GRUB entry
+# "provision the rack from this USB") and this unit turns the live session into
+# a netboot server for every other machine on the wire: kldload-netboot-server
+# serves the kernel, initramfs and root image straight off the mounted medium
+# (no copy, no install), in OPEN mode — every machine that netboots gets the
+# install menu, a key installs, the countdown boots its own disk.
+#
+# Read by systemd on the live system only in practice: the condition is false
+# on an installed machine, whose server is kldload-netboot.service and whose
+# payload is the one KLDLOAD_KEEP_NETBOOT=1 retained. Absent, the rack entry
+# boots a plain live desktop and nothing serves.
+[Unit]
+Description=kldload — provision the rack from this live USB (open PXE menu)
+Documentation=https://kldload.com/
+# The GRUB entry is the operator's consent to answer PXE on this network. A
+# false condition is SKIPPED silently by systemd, which is the wanted outcome
+# here: the normal live entries must never start a DHCP proxy.
+ConditionKernelCommandLine=kldload.netboot=1
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# Both offline, matrix-verified distros are offered (the USB carries no net
+# image, so RHEL and Arch are not). An operator's /etc/kldload/netboot.env
+# still wins, for a port or interface the site needs.
+Environment=NETBOOT_DISTROS="fedora debian"
+EnvironmentFile=-/etc/kldload/netboot.env
+# Arm first: the token has to exist before the first machine asks. The rack
+# answers file carries no password and no disk — the target's own screen asks.
+ExecStartPre=/usr/local/sbin/kldload-netboot-server arm-install any /usr/share/kldload-netboot/rack.env
+ExecStart=/usr/local/sbin/kldload-netboot-server serve
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

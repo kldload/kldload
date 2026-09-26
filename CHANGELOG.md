@@ -36,6 +36,16 @@ and it is only findable by standing the whole estate up and using it.
 
 ### One key provisions the rack
 
+**The USB is the server.** Boot it with the *provision the rack from this USB*
+entry and the live session serves its own kernel, initramfs and root image to
+every machine that network-boots on the wire, straight off the stick. Nothing is
+installed or copied on the machine running it. Each target gets the install
+menu on its own screen: a key installs, and the countdown boots that machine's
+own disk, so a box that merely network-boots first is left alone. Password and
+disk are asked on the target. The installed-machine server below is still there
+for a rack that keeps growing; the USB is how it starts.
+
+
 The live USB used to install one machine. It now serves the next one.
 
 An installed machine can retain the netboot payload it was built from, so

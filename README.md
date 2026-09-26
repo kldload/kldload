@@ -368,9 +368,21 @@ klab run-playbook ./my-test.sh       # run a script on every VM of the blue site
 
 ## One machine, or the whole rack
 
-The USB installs one machine. The same image, served over the network, installs
-as many as you point at it — and the per-machine work is inventorying a MAC
-address.
+The USB installs one machine. The same USB, booted with its **provision the
+rack** entry (`p` at the boot menu), is the network server for every other
+machine on the wire: it serves the kernel, initramfs and root image straight
+off the stick, nothing is installed or copied on the machine running it, and
+any box that network-boots gets the install menu on its own screen. A key
+there installs; left alone, the countdown boots that machine's own disk, so a
+stranger that happens to network-boot first loses nothing. The menu asks for
+the password, and the disk, on the target itself — nothing secret is ever on
+the wire. Fedora and Debian are offered from the USB (RHEL needs the separate
+net image).
+
+An installed machine can be the permanent server instead — install it with
+`KLDLOAD_KEEP_NETBOOT=1`, `systemctl enable --now kldload-netboot` — and arm
+machines one at a time, which is how a rack is rebuilt from a directory of
+answers files:
 
 ```
 kldload-netboot-server arm-install <mac> <answers>.env   # one machine

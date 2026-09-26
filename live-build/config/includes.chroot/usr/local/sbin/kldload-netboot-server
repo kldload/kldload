@@ -89,6 +89,48 @@ fi
 PAYLOAD="${NETBOOT_PAYLOAD:-/var/lib/kldload-netboot}"
 ROOT="${NETBOOT_ROOT:-/var/lib/kldload/netboot-serve}"
 
+# ── The live USB is a payload too ────────────────────────────────────────────
+# With no retained payload, serve from the medium this live system booted
+# from: the USB carries the same vmlinuz, initrd.img and squashfs.img that
+# KLDLOAD_KEEP_NETBOOT=1 would have copied, already mounted read-only by
+# dracut. So "burn one USB, provision the rack" needs no install on the
+# server side at all (operator, 2026-09-25: "the only USB image you need").
+# The four names the staged layout uses are symlinked under one directory in
+# /run, and everything below treats that directory as the payload. Nothing is
+# copied: the stick is read at serve time, 15 GB per target, at USB speed.
+# NETBOOT_LIVE_MEDIA and NETBOOT_LIVE_LINK are overridable so this can be
+# exercised on a fake tree.
+LIVE_MEDIA="${NETBOOT_LIVE_MEDIA:-/run/initramfs/live /run/live/medium /lib/live/mount/medium}"
+_live_payload() {
+    local d link="${NETBOOT_LIVE_LINK:-/run/kldload-netboot-live}"
+    for d in $LIVE_MEDIA; do
+        [[ -s "$d/LiveOS/squashfs.img" && -s "$d/images/pxeboot/vmlinuz" && -s "$d/images/pxeboot/initrd.img" ]] || continue
+        # Unprivileged callers (status by a user) cannot create the link
+        # directory; the absent payload is then reported as absent, which is
+        # true from where they stand.
+        install -d -m 0755 "$link" 2>/dev/null || return 1
+        ln -sfn "$d/images/pxeboot/vmlinuz" "$link/vmlinuz"
+        ln -sfn "$d/images/pxeboot/initrd.img" "$link/initrd.img"
+        ln -sfn "$d/LiveOS/squashfs.img" "$link/squashfs.img"
+        # The commit stamp: the ISO root carries VERSION (build-iso.sh); the
+        # running live system carries the same file under /etc/kldload.
+        if [[ -s "$d/VERSION" ]]; then
+            ln -sfn "$d/VERSION" "$link/VERSION"
+        elif [[ -s /etc/kldload/VERSION ]]; then
+            ln -sfn /etc/kldload/VERSION "$link/VERSION"
+        fi
+        printf '%s' "$link"
+        return 0
+    done
+    return 1
+}
+PAYLOAD_FROM="retained (${PAYLOAD})"
+if [[ ! -s "$PAYLOAD/squashfs.img" ]] && _lp="$(_live_payload)"; then
+    PAYLOAD="$_lp"
+    PAYLOAD_FROM="the live medium ($(readlink -f "$PAYLOAD/squashfs.img" 2>/dev/null | sed 's|/LiveOS/squashfs.img$||'))"
+fi
+unset _lp
+
 # Overridable, because the defaults encode a guess about somebody else's
 # network. The unit reads /etc/kldload/netboot.env, so these persist without
 # editing a shipped script.
@@ -328,7 +370,7 @@ _has_default_route() {
 # ── serve ────────────────────────────────────────────────────────────────────
 cmd_serve() {
     [[ -s "$PAYLOAD/vmlinuz" && -s "$PAYLOAD/initrd.img" && -s "$PAYLOAD/squashfs.img" ]] ||
-        die "no retained payload in $PAYLOAD — install with KLDLOAD_KEEP_NETBOOT=1 first"
+        die "no payload: nothing retained in $PAYLOAD (install with KLDLOAD_KEEP_NETBOOT=1) and no live medium mounted (boot the kldload USB)"
     [[ "$(head -c 4 "$PAYLOAD/squashfs.img")" == "hsqs" ]] ||
         die "$PAYLOAD/squashfs.img is not a squashfs (bad magic) — refusing to serve a brick"
 
@@ -394,7 +436,9 @@ cmd_serve() {
     esac
     local base="http://${ip}:${PORT}"
 
-    log "payload  $PAYLOAD ($(numfmt --to=iec "$(stat -c%s "$PAYLOAD/squashfs.img")") rootfs, version $(cat "$PAYLOAD/VERSION" 2>/dev/null || echo '?'))"
+    log "payload  $PAYLOAD ($(numfmt --to=iec "$(stat -Lc%s "$PAYLOAD/squashfs.img")") rootfs, commit $(_payload_commit "$PAYLOAD" || echo '?')) from ${PAYLOAD_FROM}"
+    [[ -f "$ROOT/armed/any.ipxe" ]] &&
+        log "OPEN     armed/any.ipxe exists: EVERY machine that netboots here gets the install menu (a key installs; the countdown boots its own disk)"
     log "serving  $base on $iface${IFACE:+ (NETBOOT_IFACE)}"
     if [[ "$DHCP_MODE" == standalone ]]; then
         log "dhcp     STANDALONE — this server hands out addresses: $DHCP_RANGE"
@@ -422,7 +466,7 @@ cmd_serve() {
     if _why="$(_net_payload_ok)"; then
         install -d -m 0755 "$ROOT/kldload-net"
         _link_payload "$PAYLOAD_NET" kldload-net
-        log "net      $PAYLOAD_NET ($(numfmt --to=iec "$(stat -c%s "$PAYLOAD_NET/squashfs.img")"), commit $(_payload_commit "$PAYLOAD_NET")) for: $NB_NET_DISTROS"
+        log "net      $PAYLOAD_NET ($(numfmt --to=iec "$(stat -Lc%s "$PAYLOAD_NET/squashfs.img")"), commit $(_payload_commit "$PAYLOAD_NET")) for: $NB_NET_DISTROS"
     elif [[ -n "$PAYLOAD_NET" ]]; then
         log "WARN: net image NOT served: ${_why}. ${NB_NET_DISTROS} netboot the full image."
     fi
@@ -536,7 +580,14 @@ isset \${net3/mac} || goto notarmed
 chain \${base}/armed/\${net3/mac:hexhyp}.ipxe && goto chosen || goto notarmed
 goto notarmed
 
+# OPEN MODE: armed/any.ipxe exists only after arm-install any FILE (the live
+# USB's rack mode). Its menu never installs on the countdown, a key is the
+# consent, so trying it for a machine with no token of its own is safe.
+# Absent, the 404 falls through to the boot order exactly as before.
 :notarmed
+chain \${base}/armed/any.ipxe && goto chosen || goto unarmed
+
+:unarmed
 echo kldload: no interface of this machine is armed — continuing boot order
 exit
 
@@ -952,6 +1003,8 @@ _nb_write_profile_answers() {
 _write_armed_install() {
     local m="$1" mac="$2" answers="$3" key prefix="$5" netarg="$6" netdev="$7"
     local tok="$ROOT/armed/$1.ipxe" host distro disk user tz kb title tlen p desc f i=0 d
+    local open=0
+    [[ "$m" == any ]] && open=1
     key="$(_ipxe_text "$4")"
     host="$(_ipxe_text "$(_answer_val "$answers" KLDLOAD_HOSTNAME)")"
     distro="$(_ipxe_text "$(_answer_val "$answers" KLDLOAD_DISTRO)")"
@@ -1006,7 +1059,9 @@ _write_armed_install() {
     {
         printf '#!ipxe\n'
         printf '# kldload armed %s: %s/%s. ${base} comes from boot.ipxe.\n' "$mac" "$key" "$distro"
-        ((MENU_TIMEOUT > 0)) || printf 'goto armed\n'
+        # Open mode always shows the menu: a timeout of 0 (straight to the
+        # armed action) would install on whoever netbooted first.
+        ((MENU_TIMEOUT > 0 || open)) || printf 'goto armed\n'
         printf '%s\n' "console ${NB_CONSOLE} --picture \${base}/ipxe/menu.png || goto plain" \
             'colour --rgb 0xd0d8e8 7 || goto plain' 'colour --rgb 0xf0f4fa 3 || goto plain' \
             'colour --rgb 0x326ce5 4 || goto plain' 'colour --rgb 0x5a6a85 6 || goto plain' \
@@ -1034,7 +1089,13 @@ _write_armed_install() {
         printf 'echo ${s3:string}host${s3:string}%s${s3:string}user${s3:string}%s\n' "${host:-auto}" "${user:-admin}"
         printf 'echo ${s3:string}tz${s3:string}%s\n' "${tz:-UTC}"
         printf 'echo\n'
-        printf 'prompt --timeout %d ${s3:string}Installing in %d s. Press any key to change it. && goto top || goto armed\n' "$ms" "$MENU_TIMEOUT"
+        if ((open)); then
+            # The countdown's default is the machine's OWN disk. Installing
+            # takes a key: that key is the consent the per-MAC token gives.
+            printf 'prompt --timeout %d ${s3:string}Press any key to install. Booting from local disk in %d s. && goto top || goto local\n' "$((MENU_TIMEOUT > 0 ? ms : 30000))" "$((MENU_TIMEOUT > 0 ? MENU_TIMEOUT : 30))"
+        else
+            printf 'prompt --timeout %d ${s3:string}Installing in %d s. Press any key to change it. && goto top || goto armed\n' "$ms" "$MENU_TIMEOUT"
+        fi
 
         # ── the manual override: profile ────────────────────────────────────
         printf '\n:top\nmenu %s${tp:string}\n' "$title"
@@ -1212,7 +1273,12 @@ _write_armed_install() {
     } >"$tok"
     # The vitals start from the answers file; set them before the first use.
     local pre
-    pre="$(printf 'set host %s\nset user %s\nset tz %s\nset kb %s\n' "${host:-kldload}" "${user:-admin}" "${tz:-UTC}" "${kb:-us}")"
+    # Open mode with no hostname in the file: one per machine, from the MAC
+    # it booted on (${mac} is iPXE's boot NIC), or a rack of "kldload"s
+    # collides in DNS and the inventory.
+    local _hostdef="${host:-kldload}"
+    ((open)) && [[ -z "$host" ]] && _hostdef='kldload-${mac:hexhyp}'
+    pre="$(printf 'set host %s\nset user %s\nset tz %s\nset kb %s\n' "$_hostdef" "${user:-admin}" "${tz:-UTC}" "${kb:-us}")"
     sed -i "/^:plain\$/r /dev/stdin" "$tok" <<<"$pre"
     [[ -s "$tok" ]] || die "$tok did not land"
     grep -q "^:m_${key}\$" "$tok" || die "$tok has no entry for the armed profile $key"
@@ -1233,10 +1299,19 @@ cmd_arm_install() {
         *) die "arm-install: unknown argument: $1" ;;
         esac
     done
+    # "any" is OPEN MODE: one token every machine falls back to. Its menu
+    # defaults to the local disk, so a passer-by that netboots first loses
+    # nothing; a human at its console presses a key and chooses. No --netdev:
+    # there is no one machine whose second NIC this could name.
+    local open=0
+    if [[ "${mac,,}" == any ]]; then
+        open=1
+        [[ -z "$netdev" ]] || die "arm-install any: --netdev names one machine's NIC; open mode has no one machine"
+    fi
     _check_answers "$answers" || die "refusing to arm $mac"
     _nb_check_distros
     # The flag wins over the file, so a one-off arm can override an estate file.
-    if [[ -z "$netdev" ]]; then
+    if [[ -z "$netdev" && "$open" == 0 ]]; then
         netdev="$(_answers_netdev "$answers")"
         netdev_from="KLDLOAD_NETBOOT_NETDEV"
     fi
@@ -1245,14 +1320,23 @@ cmd_arm_install() {
     netarg="$(_netdev_arg "$netdev")"
     install -d -m 0755 "$ROOT/answers" "$ROOT/armed"
     local m
-    m="$(_mac_norm "$mac")"
+    if ((open)); then
+        m=any
+        mac="any machine that asks"
+    else
+        m="$(_mac_norm "$mac")"
+    fi
     install -m 0644 "$answers" "$ROOT/answers/${m}.env"
     [[ -s "$ROOT/answers/${m}.env" ]] || die "$ROOT/answers/${m}.env did not land"
     local key
     key="$(_nb_menu_key "$answers")"
     _nb_write_profile_answers "$m" "$answers" "$key"
     _write_armed_install "$m" "$mac" "$answers" "$key" "${ISO_ARGS} ${KIOSK_ARGS}" "$netarg" "$netdev"
-    log "ARMED-INSTALL $mac — next netboot shows the install menu; default $(_answer_val "$answers" KLDLOAD_DISTRO)/${key}"
+    if ((open)); then
+        log "ARMED-INSTALL OPEN — every machine that netboots here gets the install menu ($(_answer_val "$answers" KLDLOAD_DISTRO)/${key} preselected); nothing installs without a key"
+    else
+        log "ARMED-INSTALL $mac — next netboot shows the install menu; default $(_answer_val "$answers" KLDLOAD_DISTRO)/${key}"
+    fi
     [[ -n "$netdev" ]] && log "  root image and seed download over ${netdev} (${netdev_from}); ${mac} only starts the boot"
     k_audit "ARMED-INSTALL $mac by uid=$(id -u) ($(logname 2>/dev/null || echo "?")) from $answers${netdev:+ netdev=$netdev}"
     if grep -qE '^KLDLOAD_(PASSWORD|ZFS_PASSPHRASE)=.+' "$answers"; then
@@ -1351,7 +1435,7 @@ cmd_golden() {
 # ── disarm / status ──────────────────────────────────────────────────────────
 cmd_disarm() {
     local mac="${1:?usage: disarm <mac>}" m
-    m="$(_mac_norm "$mac")"
+    if [[ "${mac,,}" == any ]]; then m=any; else m="$(_mac_norm "$mac")"; fi
     local gone=0
     [[ -f "$ROOT/armed/${m}.ipxe" ]] && {
         rm -f "$ROOT/armed/${m}.ipxe"
@@ -1527,7 +1611,7 @@ cmd_status() {
     # The tree may not exist before `serve` has run: a bare `find` on a missing
     # dir exits non-zero and trips set -e, so every listing is guarded on the
     # directory existing first. "no tree yet" is the normal pre-serve state.
-    printf 'payload : %s\n' "$([[ -s "$PAYLOAD/squashfs.img" ]] && echo "$PAYLOAD ($(cat "$PAYLOAD/VERSION" 2>/dev/null || echo '?'))" || echo 'ABSENT — install with KLDLOAD_KEEP_NETBOOT=1')"
+    printf 'payload : %s\n' "$([[ -s "$PAYLOAD/squashfs.img" ]] && echo "${PAYLOAD_FROM}: $(cat "$PAYLOAD/VERSION" 2>/dev/null || echo '?')" || echo 'ABSENT — install with KLDLOAD_KEEP_NETBOOT=1')"
     if [[ -n "$PAYLOAD_NET" ]]; then
         local _nw
         if _nw="$(_net_payload_ok)"; then
@@ -1552,6 +1636,7 @@ cmd_status() {
             while read -r a; do
                 m="$(basename "$a" .ipxe)"
                 if grep -q 'kldload.action=deploy' "$a"; then mode="deploy ($(sed -nE 's#.*golden/([^ ]*)\.zfs.*#\1#p' "$a" | head -1))"; else mode="install"; fi
+                [[ "$m" == any ]] && mode="install menu for ANY machine (open mode: a key installs, the countdown boots its own disk)"
                 nd="$(sed -nE 's/.* BOOTIF=01-([0-9a-f-]+).*/\1/p' "$a" | head -1)"
                 printf '          %s -> %s%s\n' "$m" "$mode" "${nd:+, download over $nd}"
             done
@@ -1568,6 +1653,9 @@ usage: kldload-netboot-server <command>
   serve                      run the PXE server (HTTP + TFTP + proxyDHCP)
   arm-install <mac> <answers> [--netdev <mac2>]
                              next netboot of <mac> INSTALLS from the mirror
+  arm-install any <answers>  OPEN MODE: every machine that netboots gets the
+                             install menu; a key installs, the countdown boots
+                             its own disk. What the live USB's rack entry does.
   arm-all <dir> [--dry-run]  arm every <mac>.env in <dir>; refuses duplicate
                              MACs or hostnames; exit 1 unless all armed
   arm-deploy <mac> --golden <name> --disk <d> [--hostname <h>] [--netdev <mac2>]
