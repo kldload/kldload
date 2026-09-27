@@ -3290,6 +3290,55 @@ WPEOF
             k_log "WARN: no k8s-stack.lock in the live darksite — kube-init will not know which Cilium this image carries"
         fi
 
+        # ── The golden bundle, on a machine that can build VMs ─────────────
+        # Every golden -- the Kubernetes one every node is cloned from, and
+        # klab's five -- is built on THIS machine from what is here. The
+        # installer used to copy only the charts and the lock, and first boot
+        # then deleted the package mirror, so a golden fetched its packages,
+        # CLIs, images and base image from the internet (fiend, 2026-09-27:
+        # /root/darksite held helm-charts and the lock, nothing else).
+        #
+        # WHY libvirt as the test, not a profile flag: fiend was installed as
+        # desktop + klab and built VMs all the same. Anything with virsh can
+        # run kube-cluster or klab, and first boot keeps the bundle by the
+        # same test. The mirror is Fedora's for every RPM host, because that
+        # is what kube-cluster builds the golden from there.
+        if [[ -x "${target}/usr/bin/virsh" ]]; then
+            local _gm _d
+            case "$_distro" in
+            debian | ubuntu) _gm="$_distro" ;;
+            *) _gm="fedora" ;;
+            esac
+            if [[ -d "/root/darksite/${_gm}" && ! -d "${darksite_tgt}/${_gm}" ]]; then
+                rsync -a --exclude='*.lock' "/root/darksite/${_gm}/" "${darksite_tgt}/${_gm}/"
+            fi
+            [[ -d "${darksite_tgt}/${_gm}" ]] ||
+                k_log "WARN: no ${_gm} mirror on this ISO — goldens on this machine will install packages from the internet"
+            for _d in k8s-images k8s-manifests bin; do
+                if [[ -d "/root/darksite/${_d}" ]]; then
+                    rsync -a "/root/darksite/${_d}/" "${darksite_tgt}/${_d}/"
+                else
+                    k_log "WARN: no /root/darksite/${_d} on this ISO — goldens will fetch it from the internet"
+                fi
+            done
+            # Cloud images go where klab already looks, and kube-cluster checks
+            # there first. Re-verified after the copy: 2 GB onto a new disk.
+            if [[ -s /root/darksite/cloud-images/SHA256SUMS ]]; then
+                install -d -m 0755 "${target}/var/lib/kldload/cloud-init"
+                rsync -a /root/darksite/cloud-images/ "${target}/var/lib/kldload/cloud-init/"
+                if (cd "${target}/var/lib/kldload/cloud-init" && sha256sum --quiet -c SHA256SUMS); then
+                    k_log "Cloud images installed and verified: $(wc -l </root/darksite/cloud-images/SHA256SUMS)"
+                else
+                    k_log "WARN: cloud images did not verify after the copy — klab and kube-cluster will download fresh ones"
+                    (cd "${target}/var/lib/kldload/cloud-init" && sha256sum -c SHA256SUMS 2>&1 | grep -v ': OK$') |
+                        while IFS= read -r _l; do k_log "  ${_l}"; done
+                fi
+            else
+                k_log "WARN: no cloud images on this ISO — the first golden of each distro downloads its base image"
+            fi
+            k_log "Golden bundle installed: ${_gm} mirror, $(find "${darksite_tgt}/k8s-images" -name '*.tar' 2>/dev/null | wc -l) images, $(du -sh "$darksite_tgt" 2>/dev/null | cut -f1) under /root/darksite"
+        fi
+
         # VERSION: the build this machine came from.
         #
         # build-iso writes it into the LIVE rootfs so the installer can read

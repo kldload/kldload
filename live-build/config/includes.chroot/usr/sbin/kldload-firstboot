@@ -1615,7 +1615,11 @@ WPEOF
 # What goes: the distro package mirrors — ~1.8G, already consumed by the
 # installer before this runs.
 # What stays: helm-charts/ (a few MB, needed by autodeploy at first boot AND by
-# the operator afterwards for their own workloads).
+# the operator afterwards for their own workloads), and on a machine that can
+# build VMs, the golden bundle: the mirror its goldens install from, the
+# container images, manifests and CLI tarballs. Deleting that mirror here is
+# why fiend's Kubernetes golden installed every package from the internet
+# (2026-09-27). Same test as the installer's copy: virsh is present.
 #
 # Args: none.  Returns: 0 always — reclaiming disk must never fail a boot.
 _darksite_reclaim() {
@@ -1626,10 +1630,21 @@ _darksite_reclaim() {
             log "WARNING: kldload-apt-mirror not enabled — the darksite mirror will not be served"
         return 0
     fi
-    local before after d
+    local before after d keep=""
     before="$(du -sh /root/darksite 2>/dev/null | cut -f1)"
+    if command -v virsh >/dev/null 2>&1; then
+        # kube-cluster builds the golden from Fedora on every RPM host
+        case "$(. /etc/os-release && echo "${ID:-}")" in
+        debian | ubuntu) keep="$(. /etc/os-release && echo "$ID")" ;;
+        *) keep=fedora ;;
+        esac
+        log "  KEEPING /root/darksite/${keep} — this machine builds goldens from it"
+    fi
     for d in debian ubuntu rpm fedora arch alpine; do
-        [[ -d "/root/darksite/${d}" ]] && rm -rf "/root/darksite/${d}"
+        [[ "$d" == "$keep" ]] && continue
+        if [[ -d "/root/darksite/${d}" ]]; then
+            rm -rf "/root/darksite/${d}"
+        fi
     done
 
     # The Ollama payload is 3.3G and is CONSUMED earlier in this same run: the
@@ -1655,7 +1670,7 @@ _darksite_reclaim() {
     # swallow: disabling a unit this image never installed
     systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
     after="$(du -sh /root/darksite 2>/dev/null | cut -f1)"
-    log "Darksite package mirrors removed (${before} → ${after}); helm charts kept for offline k8s deploys"
+    log "Darksite package mirrors removed (${before} → ${after}); helm charts kept for offline k8s deploys${keep:+, ${keep} mirror kept for goldens}"
     return 0
 }
 
