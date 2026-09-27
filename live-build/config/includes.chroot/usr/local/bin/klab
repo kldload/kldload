@@ -629,6 +629,18 @@ timer_elapsed_ms() {
     echo $(((now - start) / 1000000))
 }
 
+# _golden_volblock — the volblocksize a golden is built with; its clones
+# inherit it. 64K for every OS golden (compression, a quarter of the
+# metadata, cheap clones), 16K for the PostgreSQL goldens: PostgreSQL
+# writes 8K pages, and a 64K block rewrites 64K to change 8K. golden-db was
+# built at 64K like the rest until 2026-09-27.
+_golden_volblock() {
+    case "${KLAB_GOLDEN_KIND:-regular}" in
+    db) echo 16k ;;
+    *) echo 64k ;;
+    esac
+}
+
 # Golden naming honors KLAB_GOLDEN_KIND env:
 #   unset / "regular" → klab-golden-<distro>   (lean, blue-green)
 #   "ztest"           → klab-ztest-<distro>    (full ZFS test deps)
@@ -2721,7 +2733,7 @@ build_golden_single() {
         fi
 
         log "  Creating zvol (${DISK}G, sparse, lz4)..."
-        zfs create -V "${DISK}G" -s -o volblocksize=64k -o compression=lz4 "$zpath"
+        zfs create -V "${DISK}G" -s -o volblocksize="$(_golden_volblock)" -o compression=lz4 "$zpath"
         for _ in $(seq 1 15); do
             [[ -b "$zdev" ]] && break
             sleep 1
@@ -2884,7 +2896,7 @@ build_golden_single() {
     fi
 
     log "  Creating zvol (${DISK}G, sparse, lz4)..."
-    zfs create -V "${DISK}G" -s -o volblocksize=64k -o compression=lz4 "$zpath"
+    zfs create -V "${DISK}G" -s -o volblocksize="$(_golden_volblock)" -o compression=lz4 "$zpath"
     for _ in $(seq 1 15); do
         [[ -b "$zdev" ]] && break
         sleep 1
