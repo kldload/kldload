@@ -345,17 +345,29 @@ A GUI-first workstation that looks like stock RHEL 10: expert operations — ZFS
 
 ---
 
-## Profiles &mdash; examples, not the menu
+## Profiles
 
-| Profile | What gets assembled on first boot |
+Seven profiles, the seven the netboot menu offers. A
+profile is a starting point, not a cage: every one of them is an answers file,
+and any key it sets can be changed per machine.
+
+| Profile | What you get |
 |---|---|
-| **Desktop** | GNOME + ZFS root + Firefox + GPU drivers + Ollama + full `k*` tool suite + native app windows + the Console cockpit + offline darksites |
-| **Server** | Headless SSH + ZFS root + full `k*` tools + sanoid + WireGuard + eBPF + offline darksites |
-| **KVM Host** | libvirt + qemu-kvm + virtio, every VM on a ZFS zvol, `~100`&nbsp;ms COW clones, atomic snapshots, `zfs send` replication |
-| **AI** | KVM Host + Ollama + Open WebUI + RAG on the local GPU |
-| **klab** | KVM Host + golden VMs per supported distro, blue/green via ZFS instant clone, fault injection, Distro Matrix Runner, live Hubble traffic map |
-| **OpenZFS Suite** | KVM Host + dedicated test goldens wired into `ztest`/`zloop` for upstream OpenZFS regression hunting |
-| **Core** | ZFS on root only. Stock distro. No `k*` tools, no web UI, no darksites. ~200 MB beyond the vendor's base install |
+| **Core** | ZFS on root and nothing else. Stock distro, no `k*` tools, no web UI, no darksites &mdash; about 200 MB beyond the vendor's base install |
+| **Server** | Headless: SSH, ZFS root, the full `k*` tool suite, the web console, sanoid snapshots, WireGuard, eBPF tooling, offline darksites |
+| **Desktop** | GNOME on ZFS root, GPU drivers, Firefox, native app windows for every tool, the Console cockpit, Ollama, offline darksites |
+| **KVM host** | A hypervisor: libvirt + qemu-kvm, every VM on a ZFS zvol, ~100&nbsp;ms copy-on-write clones, golden images, `zfs send` replication |
+| **Kubernetes** | KVM host plus a highly available cluster in VMs &mdash; 3 control planes and 3 workers, Cilium + Hubble + Tetragon |
+| **Storage** | A ZFS file server: NFS, SMB and iSCSI, shares as datasets, snapshots and replication underneath |
+| **AI** | KVM host plus Ollama and Open WebUI on the local GPU, RAG and voice, no cloud |
+
+KVM is on for every profile except Core. Two **templates** build on the KVM
+host rather than being profiles of their own:
+
+| Template | What it adds |
+|---|---|
+| **klab** | Golden VMs for every supported distro, blue/green sites from ZFS instant clones, fault injection, the distro matrix runner, a live Hubble traffic map |
+| **OpenZFS suite** | Dedicated test goldens wired into `ztest`/`zloop` for upstream OpenZFS regression hunting |
 
 ```bash
 kube-cluster bootstrap --workers 3   # golden image, then 3 control planes + 3 workers
@@ -720,8 +732,8 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-Current release: **1.5.0** (September 2026). 514 commits since 1.4.2:
-88 features, 326 fixes, 359 files changed. In operator terms:
+Current release: **1.5.0** (26 September 2026). 582 commits since 1.4.2,
+455 files changed, 47,421 lines added. In operator terms:
 
 - **One key provisions the rack.** An installed machine can keep the netboot
   payload it was built from and serve the next one: proxyDHCP beside your
@@ -739,6 +751,7 @@ Current release: **1.5.0** (September 2026). 514 commits since 1.4.2:
   shipped answer templates carry no default password. KVM is on for every
   profile but core.
 
+- GitHub release: [v1.5.0](https://github.com/kldload/kldload/releases/tag/v1.5.0)
 - Full changelog: [`CHANGELOG.md`](live-build/config/includes.chroot/usr/local/share/kldload/CHANGELOG.md)
 - Release notes, with screenshots: [kldload.com/releases/1.5.0.html](https://kldload.com/releases/1.5.0.html)
 - History back to 1.0: [kldload.com/release-notes.html](https://kldload.com/release-notes.html)
