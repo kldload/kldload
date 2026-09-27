@@ -22,7 +22,7 @@ import (
 
 type verb struct {
 	key     string
-	label   string // shown in the status bar and the detail pane
+	label   string // the menu shows it short ((S)tart), the help and palette in full
 	prompt  string // when set, the verb asks for this before running
 	confirm bool   // the row's name must be typed back (destructive verbs)
 	noRow   bool   // the verb needs no selection

@@ -78,7 +78,7 @@ func usage() {
   kld --version
 
 Keys inside:  1-9, 0  section   tab  sub-tab   j/k  row   enter  drill in
-(a VM's or a dataset's snapshots)   /  filter   o  sort   i  detail pane
+(a VM's or a dataset's snapshots)   /  filter   o  sort   i  vitals pane
 r  reload   ?  the verbs of the current tab   q  quit
 Verbs run the shipped commands (virsh, kvm-*, zfs, kldload-rollback,
 kldload-enroll, kubectl, ansible, helm, kldload-netboot-server); the
