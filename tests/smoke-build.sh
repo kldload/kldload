@@ -2138,7 +2138,7 @@ cloud-init.target|live-build/config/includes.chroot/usr/local/bin/klab|disabled 
 cloud-init.target|live-build/config/includes.chroot/usr/local/share/kldload-ansible/playbooks/seal-golden.yml|same, on the k8s golden path
 kldload-collect.timer|live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh|copied to the target but never enabled means it never runs
 sanoid-prune|live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh|nothing prunes snapshots without it
-qemu-guest-agent|live-build/config/includes.chroot/usr/local/share/kldload-ansible/playbooks/provision-golden.yml|k8s nodes report no-agent without it
+qemu-guest-agent|live-build/config/includes.chroot/usr/local/bin/kube-setup|k8s nodes report no-agent without it (kube-setup installs it from the darksite; it moved out of provision-golden.yml 2026-09-27)
 ENABLES
 
 # Per-family package names must BRANCH, not be hardcoded. The pam module is

@@ -44,16 +44,16 @@ _kvm_pkgs() {
     debian | ubuntu)
         echo "qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst" \
             "bridge-utils ovmf dnsmasq-base sshpass qemu-utils cloud-image-utils" \
-            "genisoimage jq ksmtuned"
+            "genisoimage jq ksmtuned tuned"
         ;;
     arch)
-        echo "qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq sshpass cdrtools jq"
+        echo "qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq sshpass cdrtools jq tuned"
         ;;
     *)
         echo "qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu" \
             "libvirt-daemon-driver-storage libvirt-daemon-config-network" \
             "libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq sshpass" \
-            "xorriso jq ksmtuned"
+            "xorriso jq ksmtuned tuned"
         ;;
     esac
 }
@@ -103,6 +103,14 @@ component_install() {
             return 1
         }
         echo "virt stack installed: $(virsh --version 2>/dev/null || echo 'version unknown')"
+    fi
+    # tuned virtual-host, as the installer sets on a KVM install (profiles.sh):
+    # the performance governor and the host-side scheduler and dirty-page
+    # settings. A machine that becomes a KVM host later gets the same host.
+    if command -v tuned-adm >/dev/null 2>&1; then
+        systemctl enable --now tuned >/dev/null 2>&1 || echo "WARNING: tuned did not start" >&2
+        tuned-adm profile virtual-host 2>/dev/null ||
+            echo "WARNING: tuned-adm could not set virtual-host" >&2
     fi
     # MODULAR sockets first. libvirtd.socket is the MONOLITHIC daemon's socket and
     # CONFLICTS with virtqemud.socket, so enabling it on a modular host (Fedora 44,
