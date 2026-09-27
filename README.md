@@ -463,6 +463,8 @@ six-node HA Kubernetes cluster with all nodes `Ready`, landing on a usable
 desktop, with the six node clones taking **0 bytes** against one 2.32&nbsp;GB
 golden image.
 
+**Step by step — make the master USB, the air-gapped case, arming a rack, and
+the known issues:** [docs/NETBOOT.md](docs/NETBOOT.md) &middot;
 [Arming, the failure modes, and what to check &rarr;](docs/demo/arming-a-node.md)
 
 ---
