@@ -14,6 +14,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -1358,6 +1359,12 @@ func readNetboot() (netbootStatus, error) {
 		return st, err
 	}
 	if err := json.Unmarshal([]byte(out), &st); err != nil {
+		// a host with no payload answers --json in text (1.5.0's server on
+		// fiend, 2026-09-26: "payload : ABSENT"); say what it said, not
+		// "invalid character 'p'"
+		if first, _, _ := strings.Cut(strings.TrimSpace(out), "\n"); strings.Contains(first, "ABSENT") {
+			return st, errors.New("this host serves no netboot (" + strings.TrimSpace(first) + ")")
+		}
 		return st, fmt.Errorf("kldload-netboot-server: %v", err)
 	}
 	return st, nil
