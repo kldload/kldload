@@ -56,10 +56,12 @@ esac
 # ./deploy.sh menu writes these into kldload.env from a checklist.
 DARKSITES="${DARKSITES:-debian fedora el}" # offline mirrors to carry: any of debian fedora el
 K8S_IMAGES="${K8S_IMAGES:-yes}"            # bake the Kubernetes container images (yes/no)
+CLOUD_IMAGES="${CLOUD_IMAGES:-yes}"        # bake the cloud images every golden boots (yes/no)
 OLLAMA="${OLLAMA:-yes}"                    # bake the Ollama engine + Open WebUI (yes/no)
 if [[ "$PAYLOAD" == "net" ]]; then
     DARKSITES=""
     K8S_IMAGES=no
+    CLOUD_IMAGES=no
     OLLAMA=no
 fi
 for _ds in $DARKSITES; do
@@ -71,6 +73,11 @@ for _ds in $DARKSITES; do
 done
 case "$K8S_IMAGES$OLLAMA" in yesyes | yesno | noyes | nono) ;; *)
     echo "K8S_IMAGES and OLLAMA must be yes or no" >&2
+    exit 2
+    ;;
+esac
+case "$CLOUD_IMAGES" in yes | no) ;; *)
+    echo "CLOUD_IMAGES must be yes or no" >&2
     exit 2
     ;;
 esac
@@ -914,6 +921,19 @@ cmd_build() {
         fi
     fi
 
+    # ── Stage 2b: cloud images (the base every golden boots) ───────────────
+    # klab's five goldens and the Kubernetes golden each started by
+    # downloading a cloud image, so an ISO with every package and container
+    # image still needed the internet to build its first VM (2026-09-27).
+    # Cached outside includes.chroot on purpose: ~2 GB that build-iso copies
+    # in only when CLOUD_IMAGES=yes, rather than riding every rootfs copy.
+    # Verified against each vendor's checksum; a miss is fatal, as for images.
+    if [[ "$EDITION" != "core" && "$PAYLOAD" != "net" && "$CLOUD_IMAGES" == "yes" ]]; then
+        log "Caching the golden cloud images..."
+        bash "$ROOT/build/darksite/fetch-cloud-images.sh" "$ROOT/live-build/darksite-cloud-cache" ||
+            die "cloud images are missing or failed verification — refusing to build an ISO whose goldens need the internet"
+    fi
+
     # ── Stage 3: Helm charts + Grafana dashboards (all darksite-baked) ───
     # Every helm chart + dashboard the autodeploy path needs has to live
     # on the ISO so first boot works fully offline. Downloads happen HERE
@@ -923,15 +943,29 @@ cmd_build() {
     local k8s_manifests="$ROOT/live-build/config/includes.chroot/root/darksite/k8s-manifests"
     if [[ "$EDITION" != "core" ]]; then
         mkdir -p "$helm_cache" "$dash_cache" "$k8s_manifests"
-        # metrics-server YAML — feeds `kubectl top` and the web UI's
-        # live CPU/memory overlay on the K8s tab. kube-init applies this
-        # after Cilium is up. Offline-first; falls back to upstream URL.
-        if [[ ! -f "$k8s_manifests/metrics-server.yaml" ]] && command -v curl >/dev/null 2>&1; then
-            curl -fsSL "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml" \
-                -o "$k8s_manifests/metrics-server.yaml" 2>/dev/null &&
-                log "metrics-server manifest cached" ||
-                log "WARNING: could not cache metrics-server manifest"
-        fi
+        # Plain manifests from the lock: Gateway API (at the version the
+        # locked Cilium requires), metrics-server and local-path. kube-init
+        # applies them from here. This used to cache metrics-server alone,
+        # at "latest", and only when absent, so it never moved again; the
+        # other two came from GitHub on every cluster (2026-09-27).
+        # MANIFEST.txt records the version each file was fetched at, so a
+        # lock that moves re-fetches and one that does not costs nothing.
+        local _mname _murl _mver _mlist="$k8s_manifests/MANIFEST.txt"
+        touch "$_mlist"
+        while IFS='|' read -r _mname _murl _mver; do
+            [[ -n "$_mname" ]] || continue
+            if [[ -s "$k8s_manifests/${_mname}.yaml" ]] && grep -qxF "${_mname} ${_mver}" "$_mlist"; then
+                continue
+            fi
+            curl -fsSL --retry 3 --max-time 120 -o "$k8s_manifests/${_mname}.yaml.part" "$_murl" &&
+                grep -q '^kind:' "$k8s_manifests/${_mname}.yaml.part" ||
+                die "could not cache the ${_mname} ${_mver} manifest from ${_murl}"
+            mv -f "$k8s_manifests/${_mname}.yaml.part" "$k8s_manifests/${_mname}.yaml"
+            grep -vE "^${_mname} " "$_mlist" >"${_mlist}.new" || true # swallow: grep -v exits 1 when every line matched, which only means the list is now empty
+            echo "${_mname} ${_mver}" >>"${_mlist}.new"
+            mv -f "${_mlist}.new" "$_mlist"
+            log "manifest cached: ${_mname} ${_mver}"
+        done < <(sed -n 's/^MANIFEST=//p' "$ROOT/build/darksite/k8s-stack.lock")
         # Cilium chart
         if [[ ! -f "$helm_cache/cilium.tgz" ]]; then
             log "Caching Cilium Helm chart..."
@@ -1098,6 +1132,7 @@ cmd_build() {
         -e PAYLOAD="$PAYLOAD" \
         -e DARKSITES="$DARKSITES" \
         -e K8S_IMAGES="$K8S_IMAGES" \
+        -e CLOUD_IMAGES="$CLOUD_IMAGES" \
         -e OLLAMA="$OLLAMA" \
         -e ARCH="$ARCH" \
         -e RELEASE="$RELEASE" \
@@ -2539,6 +2574,9 @@ Environment (override via env vars or kldload.env):
   DARKSITES       which offline mirrors to carry, any of: debian fedora el
                   (default: all three; one alone names the ISO, e.g. -fedora)
   K8S_IMAGES      yes/no — bake the Kubernetes container images (~1.5 GB)
+  CLOUD_IMAGES    yes/no — bake the cloud images the klab and Kubernetes
+                  goldens boot from, CentOS, Rocky, Fedora, Debian, Ubuntu
+                  (~2.1 GB; default yes, no for PAYLOAD=net)
   OLLAMA          yes/no — bake the Ollama engine + Open WebUI (~3.4 GB)
                   ./deploy.sh menu picks all of these from a checklist.
   ARCH            Target architecture (default: x86_64)

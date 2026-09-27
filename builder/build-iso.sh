@@ -40,10 +40,12 @@ PAYLOAD="${PAYLOAD:-full}"
 # bare invocation): which offline mirrors, the k8s images, the AI stack.
 DARKSITES="${DARKSITES:-debian fedora el}"
 K8S_IMAGES="${K8S_IMAGES:-yes}"
+CLOUD_IMAGES="${CLOUD_IMAGES:-yes}"
 OLLAMA="${OLLAMA:-yes}"
 if [[ "$PAYLOAD" == "net" ]]; then
     DARKSITES=""
     K8S_IMAGES=no
+    CLOUD_IMAGES=no
     OLLAMA=no
 fi
 has_darksite() { [[ " $DARKSITES " == *" $1 "* ]]; }
@@ -1970,7 +1972,7 @@ if [[ "$EDITION" == "core" ]]; then
     # core carries no payload whatever the knobs say; the file must not claim otherwise
     echo "none (core edition)" >"${ROOTFS}/etc/kldload/payload"
 else
-    echo "$PAYLOAD mirrors=${DARKSITES:-none} k8s=$K8S_IMAGES ollama=$OLLAMA" >"${ROOTFS}/etc/kldload/payload"
+    echo "$PAYLOAD mirrors=${DARKSITES:-none} k8s=$K8S_IMAGES cloud=$CLOUD_IMAGES ollama=$OLLAMA" >"${ROOTFS}/etc/kldload/payload"
 fi
 
 # Build ID generation — produces a version string like "1.0.4-b47" where:
@@ -3674,12 +3676,27 @@ _bake_bin() {
     fi
 }
 
-# Versions are resolved at build time so the ISO records exactly what it
-# carries, rather than "whatever latest meant on the day it was installed".
-_HELM_V="$(curl -sL --max-time 20 https://api.github.com/repos/helm/helm/releases/latest 2>/dev/null |
+# The Kubernetes tools come at the versions the stack lock names, the same
+# numbers kube-setup installs. helm used to be "latest on the day of the build"
+# here while kube-setup asked for the lock's; and cilium-cli, hubble and k9s
+# were not baked at all, so every Kubernetes golden fetched them from GitHub
+# (found reading the golden build, 2026-09-27). Without a lock (a bare run)
+# only helm is baked, at latest, as before.
+_lockv() { sed -n "s/^$1=//p" /build/build/darksite/k8s-stack.lock 2>/dev/null | head -1; }
+_HELM_V="$(_lockv HELM_CLI_VERSION)"
+[[ -n "$_HELM_V" ]] || _HELM_V="$(curl -sL --max-time 20 https://api.github.com/repos/helm/helm/releases/latest 2>/dev/null |
     grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4)"
 [[ -n "$_HELM_V" ]] && _bake_bin "helm ${_HELM_V}" "helm-linux-amd64.tar.gz" \
     "https://get.helm.sh/helm-${_HELM_V}-linux-amd64.tar.gz"
+_CCLI_V="$(_lockv CILIUM_CLI_VERSION)"
+[[ -n "$_CCLI_V" ]] && _bake_bin "cilium-cli ${_CCLI_V}" "cilium-linux-amd64.tar.gz" \
+    "https://github.com/cilium/cilium-cli/releases/download/${_CCLI_V}/cilium-linux-amd64.tar.gz"
+_HUB_V="$(_lockv HUBBLE_CLI_VERSION)"
+[[ -n "$_HUB_V" ]] && _bake_bin "hubble ${_HUB_V}" "hubble-linux-amd64.tar.gz" \
+    "https://github.com/cilium/hubble/releases/download/${_HUB_V}/hubble-linux-amd64.tar.gz"
+_K9S_V="$(_lockv K9S_VERSION)"
+[[ -n "$_K9S_V" ]] && _bake_bin "k9s ${_K9S_V}" "k9s_Linux_amd64.tar.gz" \
+    "https://github.com/derailed/k9s/releases/download/${_K9S_V}/k9s_Linux_amd64.tar.gz"
 
 _FC_V="$(curl -sL --max-time 20 https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest 2>/dev/null |
     grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4)"
@@ -3720,6 +3737,23 @@ if [[ "$EDITION" != "core" && "$PAYLOAD" != "net" ]]; then
             rm -rf "${ROOTFS}/root/darksite/k8s-images"
             log "Kubernetes images dropped from the image (K8S_IMAGES=no)"
         }
+        # The cloud images every golden boots, cached and vendor-verified on the
+        # host by fetch-cloud-images.sh. Checked again after the copy, against
+        # the set's own SHA256SUMS: a truncated 700 MB copy is still a file.
+        if [[ "$CLOUD_IMAGES" == "yes" ]]; then
+            _cc=/build/live-build/darksite-cloud-cache
+            [[ -s "${_cc}/SHA256SUMS" ]] ||
+                die "CLOUD_IMAGES=yes but ${_cc}/SHA256SUMS is missing — deploy.sh's cloud image stage did not run"
+            mkdir -p "${ROOTFS}/root/darksite/cloud-images"
+            cp -f "${_cc}/SHA256SUMS" "${ROOTFS}/root/darksite/cloud-images/"
+            while read -r _sum _img; do
+                cp -f "${_cc}/${_img}" "${ROOTFS}/root/darksite/cloud-images/${_img}" ||
+                    die "copying cloud image ${_img} into the rootfs failed"
+            done <"${_cc}/SHA256SUMS"
+            (cd "${ROOTFS}/root/darksite/cloud-images" && sha256sum --quiet -c SHA256SUMS) ||
+                die "cloud images in the rootfs do not match SHA256SUMS"
+            log "cloud images baked: $(wc -l <"${_cc}/SHA256SUMS") ($(du -sh "${ROOTFS}/root/darksite/cloud-images" | cut -f1))"
+        fi
         log "RPM darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite" 2>/dev/null | cut -f1)"
     fi
 

@@ -179,8 +179,59 @@ HELM_CLI_VERSION="$(_gh_latest helm/helm)"
 CILIUM_CLI_VERSION="$(_gh_latest cilium/cilium-cli)"
 HUBBLE_CLI_VERSION="$(_gh_latest cilium/hubble)"
 K9S_VERSION="$(_gh_latest derailed/k9s)"
-for _v in HELM_CLI_VERSION CILIUM_CLI_VERSION HUBBLE_CLI_VERSION K9S_VERSION; do
+KUBE_VIP_VERSION="$(_gh_latest kube-vip/kube-vip)"
+for _v in HELM_CLI_VERSION CILIUM_CLI_VERSION HUBBLE_CLI_VERSION K9S_VERSION KUBE_VIP_VERSION; do
     [[ -n "${!_v}" ]] || die "could not resolve ${_v} from GitHub"
+done
+# kube-vip floats the HA API address. It was pinned in kube-cluster and
+# kube-init and never in this lock, so no image was baked for it and every HA
+# control plane pulled it from ghcr.io (found 2026-09-27; the tarball in the
+# cache was left over from an old hand-kept list).
+_all_images+=("ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION}")
+
+# ─── Plain manifests: Gateway API, metrics-server, local-path ────────────────
+# kube-init applied all three straight from GitHub, and their images were in no
+# list, so a cluster pulled them online even with every chart local.
+#
+# Gateway API is NOT "latest": it is the version the locked Cilium was built
+# against, read from Cilium's own go.mod at that tag. kube-init had v1.2.1 and
+# four CRDs; Cilium 1.20.2 requires v1.6.1 and seven, and turns its gateway
+# controller off when they are missing (docs.cilium.io, checked 2026-09-27).
+_cil_ver="$(printf '%s\n' "${_chart_lines[@]}" | awk -F'|' '$3=="cilium"{print $4; exit}')"
+[[ -n "$_cil_ver" ]] || die "no cilium chart resolved — cannot derive the Gateway API version"
+GATEWAY_API_VERSION="$(curl -fsSL --max-time 30 \
+    "https://raw.githubusercontent.com/cilium/cilium/v${_cil_ver}/go.mod" 2>/dev/null |
+    awk '$1=="sigs.k8s.io/gateway-api"{print $2; exit}' || true)"
+[[ "$GATEWAY_API_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "could not read the Gateway API version from cilium v${_cil_ver} go.mod (got '${GATEWAY_API_VERSION}')"
+say "gateway-api ${GATEWAY_API_VERSION} (from cilium v${_cil_ver})"
+METRICS_SERVER_VERSION="$(_gh_latest kubernetes-sigs/metrics-server)"
+LOCAL_PATH_VERSION="$(_gh_latest rancher/local-path-provisioner)"
+[[ -n "$METRICS_SERVER_VERSION" ]] || die "could not resolve metrics-server from GitHub"
+[[ -n "$LOCAL_PATH_VERSION" ]] || die "could not resolve local-path-provisioner from GitHub"
+
+# name|url|version — the build downloads each to k8s-manifests/<name>.yaml
+_manifest_lines=(
+    "gateway-api|https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml|${GATEWAY_API_VERSION}"
+    "metrics-server|https://github.com/kubernetes-sigs/metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml|${METRICS_SERVER_VERSION}"
+    "local-path|https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_VERSION}/deploy/local-path-storage.yaml|${LOCAL_PATH_VERSION}"
+)
+for _entry in "${_manifest_lines[@]}"; do
+    IFS='|' read -r _mname _murl _mver <<<"$_entry"
+    curl -fsSL --max-time 60 -o "$WORK/${_mname}.yaml" "$_murl" ||
+        die "could not fetch the ${_mname} ${_mver} manifest (${_murl})"
+    # A manifest with no kind: is an error page, not a manifest.
+    grep -q '^kind:' "$WORK/${_mname}.yaml" || die "${_mname} ${_mver}: the download is not a manifest"
+    mapfile -t _imgs < <(grep -oE '^[[:space:]]*image:[[:space:]]*"?[^"[:space:]]+' "$WORK/${_mname}.yaml" |
+        sed -E 's/^[[:space:]]*image:[[:space:]]*"?//' | sort -u || true)
+    # WHY: local-path names its helper as a bare "busybox"; containerd reads
+    # that as docker.io/library/busybox:latest, so bake it under that name.
+    for _i in "${!_imgs[@]}"; do
+        [[ "${_imgs[$_i]}" == */* ]] || _imgs[$_i]="docker.io/library/${_imgs[$_i]}"
+        [[ "${_imgs[$_i]}" == *[:@]* ]] || _imgs[$_i]="${_imgs[$_i]}:latest"
+    done
+    say "${_mname} ${_mver}: ${#_imgs[@]} image(s)"
+    _all_images+=("${_imgs[@]}")
 done
 
 # ── Write the lock ──────────────────────────────────────────────────────────
@@ -198,9 +249,14 @@ mapfile -t _uniq_images < <(printf '%s\n' "${_all_images[@]}" | grep -v '^$' | s
     echo "CILIUM_CLI_VERSION=${CILIUM_CLI_VERSION}"
     echo "HUBBLE_CLI_VERSION=${HUBBLE_CLI_VERSION}"
     echo "K9S_VERSION=${K9S_VERSION}"
+    echo "KUBE_VIP_VERSION=${KUBE_VIP_VERSION}"
+    echo "GATEWAY_API_VERSION=${GATEWAY_API_VERSION}"
     echo
     echo "# repo|url|chart|version"
     printf 'CHART=%s\n' "${_chart_lines[@]}"
+    echo
+    echo "# name|url|version — staged by build-iso.sh to k8s-manifests/<name>.yaml"
+    printf 'MANIFEST=%s\n' "${_manifest_lines[@]}"
     echo
     echo "# Every image the above will run, derived — never typed."
     printf 'IMAGE=%s\n' "${_uniq_images[@]}"
