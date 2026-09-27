@@ -3120,8 +3120,12 @@ cmd_destroy() {
     fi
     # Count the control planes for real: saying "Control plane: kldload-cp"
     # while three exist is how the HA members went unnoticed.
+    # grep inside { || true }: with no control planes (a golden-only state, as
+    # a stalled golden build leaves) grep exits 1, pipefail carried it out of
+    # the assignment, and set -e ended destroy silently right after its
+    # banner, so that state could never be cleaned up (fiend, 2026-09-27).
     _cp_list="$(virsh list --all --name 2>/dev/null |
-        grep -E "^${CP_NAME}(-[0-9]+)?$" | tr '\n' ' ' | sed 's/ $//')"
+        { grep -E "^${CP_NAME}(-[0-9]+)?$" || true; } | tr '\n' ' ' | sed 's/ $//')"
     echo "  Control plane(s): ${_cp_list:-${CP_NAME}}"
     echo "  Workers: ${WORKER_PREFIX}-1 through ${WORKER_PREFIX}-${WORKERS}"
     echo ""
