@@ -36,7 +36,7 @@ type section struct {
 var sections = []section{
 	{"Overview", []string{"Summary", "Activity"}},
 	{"Machines", []string{"VMs", "Snapshots", "microVMs", "Appliances", "Build", "Networks", "Pools"}},
-	{"Storage", []string{"Pools", "Pool", "Topology", "Datasets", "Snapshots", "Explorer", "Versions", "Boot envs", "Shares", "ARC"}},
+	{"Storage", []string{"Pools", "Pool", "Observe", "Topology", "Datasets", "Snapshots", "Explorer", "Versions", "Boot envs", "Shares", "ARC"}},
 	{"Network", []string{"Planes", "Peers", "Enrolled", "Fleet", "Check"}},
 	{"Cluster", []string{"Nodes", "Pods", "Deployments", "Services", "Events", "Logs", "Describe"}},
 	{"Ansible", []string{"Hosts", "Groups", "Plays"}},
@@ -153,6 +153,7 @@ var collectors = map[string]func(*sectionData){
 	"Machines/Networks":   loadVMNetworks,
 	"Machines/Pools":      loadVMPools,
 	"Storage/Pools":       loadPools,
+	"Storage/Observe":     loadObserve,
 	"Storage/Pool":        loadPoolDetail,
 	"Storage/Topology":    loadTopology,
 	"Storage/Shares":      loadShares,

@@ -157,6 +157,7 @@ machines networks
 machines pools
 storage pools
 storage pool
+storage observe
 storage topology
 storage datasets
 storage snapshots
@@ -195,7 +196,7 @@ provision feed
 provision goldens
 provision answers
 TABS
-    ((_tabs == 48)) && _pass "every sub-tab tried (48/48)" || _fail "sub-tabs tried" "${_tabs} of 48"
+    ((_tabs == 49)) && _pass "every sub-tab tried (49/49)" || _fail "sub-tabs tried" "${_tabs} of 49"
 
     # ── the video console, against a running VM's display ─────────────────
     # The wire client (vnc.go) is exercised by its live test: it dials the

@@ -102,6 +102,112 @@ type model struct {
 	refreshing bool
 	armed      string // a running machine whose delete was pressed once
 	armedAt    time.Time
+	// the command palette (:): a filter over every tab and every verb here
+	palette bool
+	palIn   textinput.Model
+	palRow  int
+}
+
+// palEntry is one line of the palette: what it says and what it does.
+type palEntry struct {
+	text string
+	run  func(m model) (tea.Model, tea.Cmd)
+}
+
+// palEntries lists the tabs of every section as "go" entries and the verbs
+// of the current tab, filtered by the typed text (every word must match).
+func (m model) palEntries() []palEntry {
+	var all []palEntry
+	for si, s := range sections {
+		for sj, sub := range s.subs {
+			si, sj := si, sj
+			all = append(all, palEntry{text: fmt.Sprintf("go   %s / %s", s.name, sub), run: func(m model) (tea.Model, tea.Cmd) {
+				m.switchTo(si, sj)
+				return m, m.loadIfEmpty()
+			}})
+		}
+	}
+	for _, v := range m.verbsHere() {
+		v := v
+		all = append(all, palEntry{text: fmt.Sprintf("%-4s %s", v.key, v.label), run: func(m model) (tea.Model, tea.Cmd) { return m.runVerb(v) }})
+	}
+	words := strings.Fields(strings.ToLower(m.palIn.Value()))
+	if len(words) == 0 {
+		return all
+	}
+	var out []palEntry
+	for _, e := range all {
+		lt := strings.ToLower(e.text)
+		ok := true
+		for _, w := range words {
+			if !strings.Contains(lt, w) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.palette = false
+		m.palIn.Blur()
+		return m, nil
+	case "enter":
+		es := m.palEntries()
+		m.palette = false
+		m.palIn.Blur()
+		if m.palRow < len(es) {
+			return es[m.palRow].run(m)
+		}
+		return m, nil
+	case "down", "ctrl+n", "tab":
+		if n := len(m.palEntries()); n > 0 {
+			m.palRow = (m.palRow + 1) % n
+		}
+		return m, nil
+	case "up", "ctrl+p", "shift+tab":
+		if n := len(m.palEntries()); n > 0 {
+			m.palRow = (m.palRow + n - 1) % n
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.palIn, cmd = m.palIn.Update(msg)
+	m.palRow = 0
+	return m, cmd
+}
+
+// paletteView is the overlay: the typed filter and up to fourteen matches,
+// the selected one highlighted.
+func (m model) paletteView() string {
+	es := m.palEntries()
+	var b strings.Builder
+	b.WriteString(stKey.Render(":") + " " + m.palIn.View() + "\n\n")
+	start := 0
+	if m.palRow >= 14 {
+		start = m.palRow - 13
+	}
+	for i := start; i < len(es) && i < start+14; i++ {
+		line := es[i].text
+		if i == m.palRow {
+			line = stSel.Render(" " + line + " ")
+		} else {
+			line = "  " + line
+		}
+		b.WriteString(line + "\n")
+	}
+	if len(es) == 0 {
+		b.WriteString(stDim.Render("  nothing matches") + "\n")
+	}
+	b.WriteString("\n" + stDim.Render(fmt.Sprintf("%d of %d · enter runs · esc closes · a tab is \"go section / tab\", a verb is its key and label", min(m.palRow+1, len(es)), len(es))))
+	box := stPane.Padding(1, 2).Render(b.String())
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // navFrame is one place the operator drilled from: section, sub-tab, its
@@ -174,6 +280,10 @@ func newModel(start, sub, width int) model {
 	f.Prompt = "/"
 	f.Placeholder = "filter rows"
 	f.CharLimit = 64
+	pi := textinput.New()
+	pi.Prompt = ""
+	pi.Placeholder = "type a tab or a verb"
+	pi.CharLimit = 64
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(cAccent)
@@ -181,7 +291,7 @@ func newModel(start, sub, width int) model {
 		sub: make([]int, len(sections)), ctx: map[string]string{},
 		data: map[string]*sectionData{}, loading: map[string]bool{}, marks: map[string]bool{},
 		details: map[string][]string{}, asked: map[string]bool{},
-		filter: f, spin: sp, now: time.Now()}
+		filter: f, spin: sp, now: time.Now(), palIn: pi}
 	m.sub[start] = sub
 	return m
 }
@@ -344,6 +454,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				here := sections[m.active].name + "/" + m.subName()
 				switch {
 				case here == "Machines/VMs" && time.Since(d.loadedAt) >= 3*time.Second,
+					here == "Storage/Observe" && time.Since(d.loadedAt) >= 3*time.Second,
 					here == "Overview/Summary" && doctorFresherThan(d.loadedAt):
 					m.refreshing = true
 					return m, tea.Batch(tickEvery(), m.reload())
@@ -390,6 +501,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.con != nil {
 			return m.updateConsole(msg)
+		}
+		if m.palette {
+			return m.updatePalette(msg)
 		}
 		if m.prompt != "" {
 			return m.updatePrompt(msg)
@@ -451,7 +565,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filter.Focus()
 			return m, textinput.Blink
 		case "o":
+			// on a pool row, observe it; everywhere else o cycles the sort
+			if sections[m.active].name+"/"+m.subName() == "Storage/Pools" && m.selected() != "" {
+				pool := m.selected()
+				m.push()
+				m.switchTo(m.active, subIndex(m.active, "Observe"))
+				m.ctx[m.key()] = pool
+				m.loading[m.key()] = true
+				return m, m.reload()
+			}
 			m.cycleSort()
+		case ":":
+			// the command palette: every tab and every verb here, by name
+			m.palette, m.palRow = true, 0
+			m.palIn.SetValue("")
+			m.palIn.Focus()
+			return m, nil
 		case "i":
 			m.detail = !m.detail
 		case "r":
@@ -1016,6 +1145,9 @@ func (m model) View() string {
 	if m.help {
 		return m.helpView()
 	}
+	if m.palette {
+		return m.paletteView()
+	}
 	w := m.width
 	var b strings.Builder
 	// title bar: brand · host on the left, the clock and a spinner on the right
@@ -1158,7 +1290,7 @@ func (m model) keyHints() string {
 	case "Storage/Datasets":
 		parts = append(parts, k("enter", "snapshots"), k("x", "explore"))
 	case "Storage/Pools":
-		parts = append(parts, k("enter", "open the pool"))
+		parts = append(parts, k("enter", "open the pool"), k("o", "observe"))
 	case "Storage/Explorer":
 		parts = append(parts, k("enter", "open"), k("v", "versions"))
 	case "Overview/Activity":
@@ -1174,7 +1306,7 @@ func (m model) keyHints() string {
 	if len(m.nav) > 0 {
 		parts = append(parts, k("backspace", "back"))
 	}
-	parts = append(parts, k("ctrl+t", "terminal"))
+	parts = append(parts, k(":", "palette"), k("ctrl+t", "terminal"))
 	if len(m.jobs) > 0 {
 		parts = append(parts, k("ctrl+j", "jobs"))
 	}
