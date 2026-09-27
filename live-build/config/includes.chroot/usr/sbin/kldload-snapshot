@@ -16,4 +16,11 @@ if [[ -n "$root_ds" && "$root_ds" != "-" ]]; then
         echo "[$(date '+%F %T')] creating snapshot ${snap}"
         zfs snapshot "$snap"
     } >>"$LOG" 2>&1 || true
+    # retention: the hourly @auto- snapshots of the root were never pruned
+    # and grew by 24 a day for the life of the machine (source audit
+    # 2026-09-26). Two days of them are kept (KLDLOAD_ROOT_SNAP_KEEP); a
+    # snapshot a boot environment was cloned from is kept by zfs itself,
+    # and snapshot-prune reports it instead of failing.
+    /usr/local/sbin/snapshot-prune.sh "$root_ds" auto- "${KLDLOAD_ROOT_SNAP_KEEP:-48}" >>"$LOG" 2>&1 ||
+        echo "[$(date '+%F %T')] WARNING: pruning ${root_ds}@auto- failed — see above" >>"$LOG"
 fi

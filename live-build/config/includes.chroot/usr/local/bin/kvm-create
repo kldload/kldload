@@ -138,6 +138,11 @@ fi
 
 # Snapshot before creating (safety net)
 zfs snapshot "rpool/vms@pre-create-${NAME}" 2>/dev/null || true
+# the last ten; one per VM ever created was kept (source audit 2026-09-26)
+if [[ -x /usr/local/sbin/snapshot-prune.sh ]]; then
+    /usr/local/sbin/snapshot-prune.sh rpool/vms pre-create- 10 >/dev/null 2>&1 ||
+        echo "kvm-create: could not prune rpool/vms@pre-create- snapshots" >&2
+fi
 
 # Create thin-provisioned zvol. Compression is inherited from rpool/vms
 # (lz4) — the old local compression=off contradicted the "compressed" promise

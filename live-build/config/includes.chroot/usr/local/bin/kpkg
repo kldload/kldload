@@ -20,6 +20,11 @@ _snap() {
         local ds
         ds=$(mount | awk '$3=="/" && /zfs/{print $1}')
         [[ -n "$ds" ]] && zfs snapshot "${ds}@kpkg-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+        # the last ten; every one ever taken was kept (source audit 2026-09-26)
+        if [[ -n "$ds" && -x /usr/local/sbin/snapshot-prune.sh ]]; then
+            /usr/local/sbin/snapshot-prune.sh "$ds" kpkg- 10 >/dev/null 2>&1 ||
+                echo "kpkg: could not prune ${ds}@kpkg- snapshots" >&2
+        fi
     fi
 }
 
