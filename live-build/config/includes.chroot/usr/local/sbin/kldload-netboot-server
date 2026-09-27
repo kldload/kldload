@@ -291,14 +291,35 @@ die() {
 # _lan_ip — the address to serve on. With NETBOOT_IFACE set it is that
 # interface's first global IPv4; otherwise it follows the default route, which
 # is only right when the provisioning LAN and the default route are the same
-# wire. Empty output means the caller must die: cmd_serve does.
+# wire. With NO default route it takes the one interface that has an address,
+# leaving out loopback and virtual bridges; with several it prints nothing,
+# because guessing which wire the rack is on is worse than asking.
+# Empty output means the caller must die: cmd_serve does.
+#
+# WHY the no-route case: an offline rack's provisioning switch has no gateway,
+# and that is the network a live USB is plugged into to provision it. The live
+# key on such a wire died "could not determine an address to serve on" and
+# restarted forever (rack-live VM on an isolated libvirt net, 2026-09-27).
+_lan_candidates() {
+    ip -o -4 addr show scope global 2>/dev/null |
+        awk '$2 !~ /^(lo|virbr|docker|podman|cni|flannel|cilium|wg|veth|br-|kube)/ {sub(/\/.*/, "", $4); print $2, $4}'
+}
 _lan_ip() {
     if [[ -n "$IFACE" ]]; then
         ip -o -4 addr show dev "$IFACE" scope global 2>/dev/null |
             awk '{sub(/\/.*/, "", $4); print $4; exit}'
         return 0
     fi
-    ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1
+    local via
+    via="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)"
+    if [[ -n "$via" ]]; then
+        printf '%s\n' "$via"
+        return 0
+    fi
+    local -a cand=()
+    mapfile -t cand < <(_lan_candidates)
+    ((${#cand[@]} == 1)) && printf '%s\n' "${cand[0]#* }"
+    return 0
 }
 
 _lan_iface() {
@@ -419,7 +440,7 @@ cmd_serve() {
             die "NETBOOT_IFACE=$IFACE is not an interface on this host"
     fi
     ip="$(_lan_ip)" || true
-    [[ -n "$ip" ]] || die "could not determine an address to serve on${IFACE:+ for NETBOOT_IFACE=$IFACE}"
+    [[ -n "$ip" ]] || die "could not determine an address to serve on${IFACE:+ for NETBOOT_IFACE=$IFACE}: no default route, and $(_lan_candidates | wc -l) interface(s) with an address ($(_lan_candidates | awk '{print $1}' | tr '\n' ' ')) -- set NETBOOT_IFACE in /etc/kldload/netboot.env to the rack's wire"
     iface="$(_lan_iface)"
     [[ -n "$iface" ]] || die "could not match $ip to an interface"
 
