@@ -1927,8 +1927,12 @@ _host_mesh_release_cluster() {
         [[ -f "$f" && "$(basename "$f")" =~ $re ]] && rm -f "$f"
     done
     if ((${#outside[@]} == 0)); then
-        ip link del wg-mgmt 2>/dev/null || true # absent on a host never meshed
-        ip link del wg-k8s 2>/dev/null || true  # same
+        # Stop the units, not just the links: a wg-quick@ unit stays "active"
+        # after its interface is deleted by hand, and the next init's enable
+        # --now then did nothing (kube-network _wg_up, fiend 2026-09-27).
+        systemctl stop wg-quick@wg-mgmt wg-quick@wg-k8s 2>/dev/null || true # not loaded on a host never meshed
+        ip link del wg-mgmt 2>/dev/null || true                             # gone already after the stop
+        ip link del wg-k8s 2>/dev/null || true                              # same
         rm -f /etc/wireguard/wg-mgmt.* /etc/wireguard/wg-k8s.* /etc/wireguard/.node-id
         log "host mesh: no other enrolled machine — both planes removed"
         return 0
