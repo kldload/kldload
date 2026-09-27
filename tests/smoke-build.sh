@@ -318,7 +318,10 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
         # kldload.tui=1 — the USB's default GRUB entry. All four pieces must
         # be in the sealed image and the default entry must carry the flag,
         # or the USB boots to a login prompt and the menu never appears.
-        declare -a TUI_FILES=(usr/local/sbin/kldload-tty1
+        # kldload-tty1 lands in usr/local/bin: the live rootfs has no
+        # usr/local/sbin (found with unsquashfs 2026-09-26; never assume the
+        # path — memory: squashfs-verify-usrmerge-path)
+        declare -a TUI_FILES=(usr/local/bin/kldload-tty1
             etc/systemd/system/getty@tty1.service.d/kldload-tty1.conf
             root/.bash_profile usr/local/bin/kld)
         _tui_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${TUI_FILES[@]}" 2>/dev/null)" || _tui_list="" # absent paths make unsquashfs exit non-zero
