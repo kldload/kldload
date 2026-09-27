@@ -579,7 +579,10 @@ install_zfs_csi() {
     # Create the K8s dataset if it doesn't exist
     zfs create -p -o mountpoint=none -o compression=lz4 "${pool}/k8s-volumes" 2>/dev/null || true
 
-    # Create default StorageClass
+    # The two classes follow the estate's one storage rule (docs/STORAGE.md):
+    # 128K for files and bulk data, 16K for databases. zfs-db was 8K while
+    # every other database disk on the estate is 16K (2026-09-27); a claim
+    # made before the change keeps its class's old value.
     kubectl apply -f - <<ZFSC 2>/dev/null
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -605,7 +608,7 @@ provisioner: zfs.csi.openebs.io
 parameters:
   poolname: "${pool}/k8s-volumes"
   compression: "lz4"
-  recordsize: "8k"
+  recordsize: "16k"
   fstype: "zfs"
 reclaimPolicy: Delete
 volumeBindingMode: WaitForFirstConsumer
@@ -624,7 +627,7 @@ driver: zfs.csi.openebs.io
 deletionPolicy: Delete
 SNAPC
 
-    log "ZFS CSI installed — StorageClasses: zfs (default, 128k), zfs-db (8k for databases)"
+    log "ZFS CSI installed — StorageClasses: zfs (default, 128k), zfs-db (16k for databases)"
 }
 
 # ── Generate join command ──────────────────────────────────────────────────

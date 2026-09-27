@@ -497,19 +497,36 @@ setup_zfs_for_k8s() {
 
     log "Setting up ZFS datasets for Kubernetes on pool: $pool"
 
-    # etcd data — small recordsize for random I/O
-    zfs create -p -o mountpoint=/var/lib/etcd -o recordsize=8K \
-        -o compression=lz4 -o atime=off "${pool}/var/lib/etcd" 2>/dev/null || true
-
-    # containerd — default recordsize, compression
-    zfs create -p -o mountpoint=/var/lib/containerd \
-        -o compression=lz4 -o atime=off "${pool}/var/lib/containerd" 2>/dev/null || true
-
-    # kubelet state
-    zfs create -p -o mountpoint=/var/lib/kubelet \
-        -o compression=lz4 -o atime=off "${pool}/var/lib/kubelet" 2>/dev/null || true
-
-    log "ZFS datasets created: etcd (8K recordsize), containerd, kubelet"
+    # the estate's one storage rule (docs/STORAGE.md): 16K for etcd, which
+    # writes small records and waits on each fsync, as for every database;
+    # 128K for the container and kubelet stores. Same values the installer
+    # gives a host that runs Kubernetes itself (profiles.sh).
+    # WHY: a dataset that already exists (a re-run, or a golden built while
+    # etcd was 8K) gets the size set, not skipped; recordsize applies to new
+    # writes, so it is safe on a live store. A failure warns and the node
+    # carries on sharing the root dataset, which works, only untuned.
+    local spec ds mnt rs made=0
+    for spec in etcd:16K containerd:128K kubelet:128K; do
+        ds="${pool}/var/lib/${spec%%:*}"
+        mnt="/var/lib/${spec%%:*}"
+        rs="${spec##*:}"
+        if zfs list -H -o name "$ds" >/dev/null 2>&1; then
+            zfs set recordsize="$rs" compression=lz4 atime=off "$ds" ||
+                {
+                    warn "could not set ${rs} on ${ds}"
+                    continue
+                }
+        else
+            zfs create -p -o mountpoint="$mnt" -o recordsize="$rs" \
+                -o compression=lz4 -o atime=off "$ds" ||
+                {
+                    warn "could not create ${ds}; ${mnt} stays on the root dataset"
+                    continue
+                }
+        fi
+        ((++made))
+    done
+    log "ZFS datasets for Kubernetes: ${made} of 3 at the estate sizes (etcd 16K, containerd and kubelet 128K)"
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────

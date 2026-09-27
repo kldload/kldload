@@ -3970,7 +3970,7 @@ fsname = "rpool/var/lib/containers/storage/zfs"
 STORAGE
 
         # Create the container storage dataset
-        chroot "${target}" bash -c 'zfs create -p -o mountpoint=/var/lib/containers/storage/zfs rpool/var/lib/containers/storage/zfs' 2>/dev/null || true
+        chroot "${target}" bash -c 'zfs create -p -o mountpoint=/var/lib/containers/storage/zfs -o recordsize=128K -o compression=lz4 -o atime=off rpool/var/lib/containers/storage/zfs' 2>/dev/null || true
 
         # ── Docker, on the same terms as podman ──────────────────────
         #
@@ -4003,7 +4003,7 @@ STORAGE
         # irrelevant, and ordering is what broke it.
         k_log_to "$log" "Configuring Docker for the ZFS storage driver"
         chroot "${target}" bash -c \
-            'zfs create -p -o mountpoint=/var/lib/docker rpool/var/lib/docker' \
+            'zfs create -p -o mountpoint=/var/lib/docker -o recordsize=128K -o compression=lz4 -o atime=off rpool/var/lib/docker' \
             >>"$log" 2>&1 ||
             k_log_to "$log" "WARNING: could not create rpool/var/lib/docker — Docker would fall back to overlay2"
         mkdir -p "${target}/etc/docker"
@@ -4398,13 +4398,13 @@ K8SSYS
         chroot "${target}" bash -c "
       # swallow: inside the chroot; an existing dataset is a re-run, and the loop
       # after this call reports any that are genuinely missing
-      zfs create -p -o mountpoint=/var/lib/etcd -o recordsize=8K -o compression=lz4 -o atime=off ${root_pool}/var/lib/etcd 2>/dev/null || true
+      zfs create -p -o mountpoint=/var/lib/etcd -o recordsize=16K -o compression=lz4 -o atime=off ${root_pool}/var/lib/etcd 2>/dev/null || true
       # swallow: inside the chroot; an existing dataset is a re-run, and the loop
       # after this call reports any that are genuinely missing
-      zfs create -p -o mountpoint=/var/lib/containerd -o compression=lz4 -o atime=off ${root_pool}/var/lib/containerd 2>/dev/null || true
+      zfs create -p -o mountpoint=/var/lib/containerd -o recordsize=128K -o compression=lz4 -o atime=off ${root_pool}/var/lib/containerd 2>/dev/null || true
       # swallow: inside the chroot; an existing dataset is a re-run, and the loop
       # after this call reports any that are genuinely missing
-      zfs create -p -o mountpoint=/var/lib/kubelet -o compression=lz4 -o atime=off ${root_pool}/var/lib/kubelet 2>/dev/null || true
+      zfs create -p -o mountpoint=/var/lib/kubelet -o recordsize=128K -o compression=lz4 -o atime=off ${root_pool}/var/lib/kubelet 2>/dev/null || true
     # swallow: as above — the verification loop below is the real check
     " 2>/dev/null || true
         # Verify the OUTCOME: a component whose dataset is missing silently shares

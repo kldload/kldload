@@ -172,7 +172,10 @@ _kvm_storage() {
     # and a storage.conf naming it, or it silently falls back to vfs and copies
     # every layer. Only written when podman is actually here.
     if command -v podman >/dev/null 2>&1 && [[ ! -f /etc/containers/storage.conf ]]; then
+        # 128K, lz4, no atime: the estate's rule for container layers, the same
+        # the installer sets (profiles.sh); layers are written once, read whole.
         zfs create -p -o mountpoint=/var/lib/containers/storage/zfs \
+            -o recordsize=128K -o compression=lz4 -o atime=off \
             rpool/var/lib/containers/storage/zfs 2>/dev/null || true # exists: fine
         mkdir -p /etc/containers
         cat >/etc/containers/storage.conf <<'STORAGE'

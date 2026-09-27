@@ -1282,6 +1282,49 @@ for _d in "${_dupes[@]}"; do
     fi
 done
 
+_section "Storage sizes match docs/STORAGE.md"
+
+# Each Kubernetes and container store is created in more than one place (the
+# installer for a host, kube-setup inside a node, kube-init for the classes,
+# the kvm component for podman). They agreed with nothing: etcd was 8K while
+# every other database disk was 16K, and the host layer stores had no size at
+# all (2026-09-27). Each line is a creator and the value it must carry.
+_ic="${ROOT}/live-build/config/includes.chroot"
+_sizes=(
+    "usr/local/bin/kube-setup|etcd:16K containerd:128K kubelet:128K"
+    "usr/local/bin/kube-init|recordsize: \"16k\""
+    "usr/local/bin/kube-init|recordsize: \"128k\""
+    "usr/lib/kldload-installer/lib/profiles.sh|var/lib/etcd -o recordsize=16K"
+    "usr/lib/kldload-installer/lib/profiles.sh|var/lib/containerd -o recordsize=128K"
+    "usr/lib/kldload-installer/lib/profiles.sh|var/lib/kubelet -o recordsize=128K"
+    "usr/lib/kldload-installer/lib/profiles.sh|storage/zfs -o recordsize=128K"
+    "usr/lib/kldload-installer/lib/profiles.sh|var/lib/docker -o recordsize=128K"
+    "usr/lib/kldload/components/kvm.component|-o recordsize=128K -o compression=lz4"
+)
+for _s in "${_sizes[@]}"; do
+    _f="${_s%%|*}"
+    _want="${_s#*|}"
+    if [[ ! -f "${_ic}/${_f}" ]]; then
+        _fail "$(basename "$_f")" "missing, so its storage size cannot be checked"
+    elif grep -qF -- "$_want" "${_ic}/${_f}"; then
+        _pass "$(basename "$_f") carries: ${_want}"
+    else
+        _fail "$(basename "$_f")" "no longer carries '${_want}' -- docs/STORAGE.md and the creators disagree"
+    fi
+done
+# and the old value may not come back anywhere a creator lives
+# grep: 0 found, 1 none (the pass), 2 could not read -- which must not pass
+_rc=0
+_old="$(grep -rlE 'var/lib/etcd -o recordsize=8K|recordsize: "8k"' "${_ic}/usr/local/bin" \
+    "${_ic}/usr/lib/kldload-installer/lib" "${_ic}/usr/lib/kldload/components")" || _rc=$?
+if ((_rc == 1)); then
+    _pass "no creator carries the old 8K etcd or 8k zfs-db"
+elif ((_rc == 0)); then
+    _fail "old 8K database size" "still in: ${_old//$'\n'/ }"
+else
+    _didnotrun "old 8K database size" "grep could not read the creators (rc ${_rc})"
+fi
+
 _section "Git State"
 
 cd "$ROOT"
