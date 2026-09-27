@@ -57,7 +57,7 @@ start)
     nft delete table inet "$TABLE" 2>/dev/null || : # absent on a first run
     nft -f - <<EOF
 table inet $TABLE {
-    chain fwd {
+    chain leave {
         type filter hook forward priority -10; policy accept;
         iifname "virbr*" oifname != "virbr*" counter log prefix "$PREFIX" level warn drop
     }
