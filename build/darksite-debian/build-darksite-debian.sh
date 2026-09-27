@@ -211,6 +211,34 @@ Pin-Priority: 990
 PREF
 fi
 
+# ─── Kubernetes: kubelet, kubeadm, kubectl from pkgs.k8s.io ──────────────────
+# The package set said "K8s from pkgs.k8s.io" and nothing ever added the repo,
+# so the Debian and Ubuntu mirrors carried containerd and no kubeadm. Every
+# Kubernetes golden built on a Debian host installed kubeadm over the internet
+# (found reading the golden build end to end, 2026-09-27). The Fedora and EL
+# mirrors have always added it; this is the same repo, same minor stream.
+#
+# K8S_MINOR comes from the stack lock through deploy.sh, as for the RPM
+# mirrors. No default: a guessed stream is how an ISO advertising v1.37 once
+# stocked v1.32 (fiend 2026-09-20).
+# Verified against the repo's own signing key (an armored .asc works in
+# signed-by on trixie's apt 3 and noble's apt 2.8, both checked 2026-09-27).
+# A key that will not download is fatal: an unsigned Kubernetes is not a
+# fallback worth having.
+[[ -n "${K8S_MINOR:-}" ]] || {
+    echo "FATAL: K8S_MINOR unset — deploy.sh passes it from build/darksite/k8s-stack.lock" >&2
+    exit 1
+}
+log "Adding Kubernetes ${K8S_MINOR} repo (pkgs.k8s.io)..."
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL --retry 3 --max-time 60 "https://pkgs.k8s.io/core:/stable:/${K8S_MINOR}/deb/Release.key" \
+    -o /etc/apt/keyrings/kldload-kubernetes.asc || {
+    echo "FATAL: could not fetch the pkgs.k8s.io ${K8S_MINOR} signing key" >&2
+    exit 1
+}
+printf 'deb [signed-by=/etc/apt/keyrings/kldload-kubernetes.asc] https://pkgs.k8s.io/core:/stable:/%s/deb/ /\n' \
+    "${K8S_MINOR}" >/etc/apt/sources.list.d/kldload-kubernetes.list
+
 # Update APT cache
 log "Updating APT package lists..."
 apt-get update -q 2>&1 | grep -v '^Get\|^Hit\|^Ign' || true

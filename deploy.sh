@@ -207,6 +207,7 @@ cmd_build_debian_darksite() {
         -e PROFILE="$PROFILE" \
         -e ARCH="${_deb_arch}" \
         -e SUITE="trixie" \
+        -e K8S_MINOR="${K8S_MINOR:-$(_k8s_minor_from_lock)}" \
         --name "kldload-darksite-deb-$$" \
         debian:trixie-slim \
         bash -c "apt-get update -qq && apt-get install -y -qq dpkg-dev curl >/dev/null 2>&1 && bash /darksite-build/build-darksite-debian.sh"
@@ -243,6 +244,7 @@ cmd_build_ubuntu_darksite() {
         -e PROFILE="$PROFILE" \
         -e ARCH="${_deb_arch}" \
         -e SUITE="noble" \
+        -e K8S_MINOR="${K8S_MINOR:-$(_k8s_minor_from_lock)}" \
         --name "kldload-darksite-ubuntu-$$" \
         ubuntu:noble \
         bash -c "apt-get update -qq && apt-get install -y -qq dpkg-dev curl >/dev/null 2>&1 && PKG_SETS_DIR=/darksite-ubuntu/config/package-sets bash /darksite-build/build-darksite-debian.sh"
