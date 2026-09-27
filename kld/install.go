@@ -119,6 +119,7 @@ const (
 	stPassword
 	stPassword2
 	stPassphrase
+	stPassphrase2
 	stSummary
 	stRunning
 	stDone
@@ -188,7 +189,7 @@ func (m installModel) choices() []choice {
 
 func (m installModel) textStep() bool {
 	switch m.step {
-	case stHostname, stUsername, stPassword, stPassword2, stPassphrase:
+	case stHostname, stUsername, stPassword, stPassword2, stPassphrase, stPassphrase2:
 		return true
 	}
 	return false
@@ -240,7 +241,7 @@ func (m installModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "esc", "left", "h":
 			if m.step > stMenu && m.step < stRunning {
-				m.step--
+				m.step = m.prev()
 				m.cursor = 0
 				m.err = ""
 				if m.textStep() {
@@ -259,6 +260,24 @@ func (m installModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// prev is the step esc goes back to. A second-entry step is never a
+// target: going back from the summary or from "again" re-asks the pair, and
+// an unencrypted install has no passphrase step to go back to.
+func (m installModel) prev() step {
+	switch m.step {
+	case stSummary:
+		if m.security == "encrypted" || m.security == "both" {
+			return stPassphrase
+		}
+		return stPassword
+	case stPassword2, stPassphrase2:
+		return m.step - 1
+	case stPassphrase:
+		return stPassword
+	}
+	return m.step - 1
+}
+
 func (m installModel) textValue() string {
 	switch m.step {
 	case stHostname:
@@ -272,12 +291,20 @@ func (m installModel) textValue() string {
 func (m installModel) updateText(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.step--
+		m.step = m.prev()
 		m.cursor = 0
 		m.err = ""
+		if m.textStep() {
+			return m, m.startText("", m.textValue(), m.step >= stPassword)
+		}
 		return m, nil
 	case "enter":
-		v := strings.TrimSpace(m.input.Value())
+		// WHY: secrets are taken as typed. Trimming a passphrase stored one
+		// that differed from what the ZFS prompt compares at every boot.
+		v := m.input.Value()
+		if m.step < stPassword {
+			v = strings.TrimSpace(v)
+		}
 		switch m.step {
 		case stHostname:
 			if !nameOK(v) {
@@ -322,6 +349,18 @@ func (m installModel) updateText(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.passph = v
+			m.err = ""
+			m.step = stPassphrase2
+			return m, m.startText("the same passphrase again", "", true)
+		case stPassphrase2:
+			// HISTORY: 2026-09-27, the passphrase was asked once. A typo there
+			// installs a pool nobody can unlock; the password always had this.
+			if v != m.passph {
+				m.passph = ""
+				m.err = "the passphrases differ"
+				m.step = stPassphrase
+				return m, m.startText("ZFS passphrase, asked at every boot", "", true)
+			}
 			m.err = ""
 			m.step = stSummary
 			return m, nil
@@ -388,7 +427,10 @@ func (m installModel) answers() string {
 	case "both":
 		enc, sb = "1", "1"
 	}
-	q := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, "") + `"` }
+	// The loader (answers.sh) reads line by line and strips only the OUTER
+	// quotes, so an inner " survives as typed. Deleting it here stored a
+	// password that differed from the one the operator typed twice.
+	q := func(s string) string { return `"` + s + `"` }
 	lines := []string{
 		"# written by kld install " + versionFull() + " — the console's install menu",
 		"KLDLOAD_PROFILE=" + q(m.profile),
@@ -442,7 +484,7 @@ func (m installModel) View() string {
 		stMenu: "What is this machine for?", stProfile: "Profile", stDistro: "Distribution",
 		stSecurity: "Security", stDisk: "Install to which disk? (everything on it is erased)",
 		stHostname: "Hostname", stUsername: "Admin user", stPassword: "Password", stPassword2: "Password, again",
-		stPassphrase: "ZFS encryption passphrase", stSummary: "Ready to install", stRunning: "Installing", stDone: "Done",
+		stPassphrase: "ZFS encryption passphrase", stPassphrase2: "Passphrase, again", stSummary: "Ready to install", stRunning: "Installing", stDone: "Done",
 	}[m.step]
 	b.WriteString(stTitle.Render(title) + "\n\n")
 	switch {
