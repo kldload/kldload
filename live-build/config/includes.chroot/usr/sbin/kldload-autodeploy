@@ -1083,9 +1083,18 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
         # to a third of host RAM each, hitting 30 vCPU / 51 GB on a 24-core
         # / 63 GB host. Fixed defaults in kube-cluster keep this bounded.
         log "[k8s] running kube-cluster bootstrap --control-planes ${K8S_CONTROL_PLANES} --workers ${K8S_WORKERS}"
-        if kube-cluster bootstrap --control-planes "${K8S_CONTROL_PLANES}" \
-            --workers "${K8S_WORKERS}" >>/var/log/kldload/kube-bootstrap.log 2>&1; then
-            log "[k8s] control plane and workers up — installing add-ons"
+        # exit 3 is "the cluster is up, but not as asked" (workers that did
+        # not join, nodes not Ready, a failed smoke test): finish setting it
+        # up, then report it degraded below instead of ready
+        _boot_rc=0
+        kube-cluster bootstrap --control-planes "${K8S_CONTROL_PLANES}" \
+            --workers "${K8S_WORKERS}" >>/var/log/kldload/kube-bootstrap.log 2>&1 || _boot_rc=$?
+        if ((_boot_rc == 0 || _boot_rc == 3)); then
+            if ((_boot_rc == 3)); then
+                log "[k8s] cluster up WITH PROBLEMS (see the end of kube-bootstrap.log) — installing add-ons, will report degraded"
+            else
+                log "[k8s] control plane and workers up — installing add-ons"
+            fi
 
             # After cluster up, install Tetragon for eBPF syscall/process/file
             # observability. Installs from the ISO-shipped chart tarball
@@ -1366,6 +1375,10 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                 log "[k8s] FATAL: cluster has ${_cps_up} control plane(s), ${_cps_want} asked — NOT HA; not marking k8s ready. Free RAM and run: kube-cluster scale --control-planes ${_cps_want}"
                 touch "${STATE_DIR}/k8s-degraded"
                 phase_state "k8s-bootstrap" failed
+            elif ((_boot_rc == 3)); then
+                log "[k8s] cluster is up but degraded (workers, readiness or the smoke test — kube-bootstrap.log names which); not marking k8s ready"
+                touch "${STATE_DIR}/k8s-degraded"
+                phase_state "k8s-bootstrap" failed
             else
                 rm -f "${STATE_DIR}/k8s-degraded"
                 log "[k8s] control planes: ${_cps_up} of ${_cps_want} asked"
@@ -1380,7 +1393,7 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
             fi
         else
             phase_state "k8s-bootstrap" failed
-            log "[k8s] FAILED — see /var/log/kldload/kube-bootstrap.log"
+            log "[k8s] FAILED (exit ${_boot_rc}) — see /var/log/kldload/kube-bootstrap.log"
         fi
     fi
 fi

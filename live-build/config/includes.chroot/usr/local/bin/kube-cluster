@@ -541,7 +541,9 @@ usage() {
 Usage: kube-cluster <command> [options]
 
 Commands:
-  bootstrap   Build golden image + deploy full cluster (one command)
+  bootstrap   Build golden image + deploy full cluster (one command);
+              exit 0 as asked, 3 up with problems (workers, readiness,
+              smoke test: named at the end), 1 no cluster
   golden      Build golden image only (for manual cluster creation)
   destroy     Tear down the cluster (VMs + zvols)
   status      Show cluster status
@@ -1447,7 +1449,13 @@ NETCFG
     # operations — they share all data blocks with the snapshot and only
     # allocate new blocks for writes (copy-on-write). This is why cloning
     # a 40GB VM takes <100ms and costs ~0 bytes until the clone diverges.
-    zfs snapshot "${POOL}/vms/${GOLDEN}@golden" 2>/dev/null || true
+    # the snapshot IS the golden: every node is cloned from it, so a failed
+    # snapshot is a failed golden, not a detail (it was swallowed here —
+    # source audit 2026-09-26). An existing @golden is fine.
+    if ! zfs snapshot "${POOL}/vms/${GOLDEN}@golden" 2>/dev/null &&
+        ! zfs list "${POOL}/vms/${GOLDEN}@golden" >/dev/null 2>&1; then
+        die "could not snapshot ${POOL}/vms/${GOLDEN}@golden — there is no golden to clone nodes from"
+    fi
 
     log "Golden image ready: ${GOLDEN}"
     log "  ZFS zvol: ${POOL}/vms/${GOLDEN}"
@@ -2037,6 +2045,10 @@ _vip_float() {
 #   7. Smoke test (deploy nginx, verify pod scheduling)
 #   8. Hubble eBPF flow dump (show what the kernel captured)
 cmd_bootstrap() {
+    # what went wrong on the way, for the summary and the exit status: the
+    # bootstrap printed BOOTSTRAP COMPLETE and exited 0 with workers that
+    # never joined and a failed smoke test (source audit 2026-09-26)
+    _BOOT_PROBLEMS=()
     _BOOT_START=$(date +%s)
 
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
@@ -2439,12 +2451,14 @@ cmd_bootstrap() {
         log "Waiting for ${#ready_names[@]} joined node(s) to report Ready..."
         if ! _kube_wait_ready "$cp_ip" "${ready_names[@]}"; then
             warn "Some nodes did not reach Ready within 4 minutes — kubectl get nodes below shows current state"
+            _BOOT_PROBLEMS+=("nodes not Ready within 4 minutes")
         fi
     fi
 
     if [[ ${#failed_workers[@]} -gt 0 ]]; then
         warn "Workers that failed to join: ${failed_workers[*]}"
         warn "Cluster came up with ${joined}/${WORKERS} workers."
+        _BOOT_PROBLEMS+=("${#failed_workers[@]} worker(s) did not join: ${failed_workers[*]}")
     fi
 
     # Step 6: Verify
@@ -2612,7 +2626,10 @@ KBYAML
     ) || warn "  Prometheus kubelet-scrape credentials step had issues (non-fatal)"
 
     step 8 "Smoke Test"
-    _ssh_cmd "$cp_ip" "kube-smoke-test" || warn "Smoke test had failures — check output above"
+    if ! _ssh_cmd "$cp_ip" "kube-smoke-test"; then
+        warn "Smoke test had failures — check output above"
+        _BOOT_PROBLEMS+=("the smoke test failed")
+    fi
 
     # Step 8: Hubble proof of life — show recent eBPF-captured flows
     echo ""
@@ -2929,6 +2946,19 @@ KBYAML
     local total_m=$((total_elapsed / 60))
     local total_s=$((total_elapsed % 60))
     echo ""
+    if ((${#_BOOT_PROBLEMS[@]} > 0)); then
+        # up, but not what was asked: exit 3, which callers (autodeploy)
+        # read as "the cluster exists, finish setting it up, report it
+        # degraded" — distinct from 1, "no cluster"
+        echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+        echo -e "${Y}  ! BOOTSTRAP FINISHED WITH PROBLEMS — ${total_m}m${total_s}s total${N}"
+        local _p
+        for _p in "${_BOOT_PROBLEMS[@]}"; do
+            echo -e "${Y}    - ${_p}${N}"
+        done
+        echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+        return 3
+    fi
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
     echo -e "${G}  ✓ BOOTSTRAP COMPLETE — ${total_m}m${total_s}s total                     ${N}"
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
