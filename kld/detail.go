@@ -1,4 +1,4 @@
-// detail.go — what the detail pane adds for a selected row, read lazily.
+// detail.go — what the vitals pane adds for a selected row, read lazily.
 //
 // A row is what a listing prints; the pane can afford one more call for
 // the thing under the cursor: a VM's disks, NICs and zvol facts, a

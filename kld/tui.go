@@ -1,7 +1,8 @@
 // tui.go — the bubbletea model: a rail of sections, each with sub-tabs; a
-// table with a filter and a sort; a detail pane for the selected row; a
-// status bar with the keys; a help overlay; and the verbs of verbs.go acting
-// on the selected row.
+// table with a filter and a sort; the vitals pane on its left for the
+// selected row; the menu of verbs and keys below it, then a status line; a
+// help overlay; and the verbs of verbs.go acting on the selected row. The
+// colours and the (S)tart spelling are theme.go's.
 //
 // Rendering is a pure function of the model. `kld <section> [sub] --print`
 // uses body(), the plain table with no borders or colour, so scripts and the
@@ -26,32 +27,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// The calm palette of the web console: one accent, colour only for state.
-var (
-	cAccent = lipgloss.Color("111")
-	cMuted  = lipgloss.Color("244")
-	cBright = lipgloss.Color("255")
-	cBorder = lipgloss.Color("238")
-	cGood   = lipgloss.Color("42")
-	cWarn   = lipgloss.Color("214")
-	cBad    = lipgloss.Color("203")
-
-	stBrand  = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
-	stTitle  = lipgloss.NewStyle().Bold(true).Foreground(cBright)
-	stDim    = lipgloss.NewStyle().Foreground(cMuted)
-	stRail   = lipgloss.NewStyle().Foreground(cMuted).Padding(0, 1)
-	stRailA  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(cAccent).Padding(0, 1)
-	stSub    = lipgloss.NewStyle().Foreground(cMuted).Padding(0, 1)
-	stSubA   = lipgloss.NewStyle().Bold(true).Foreground(cAccent).Underline(true).Padding(0, 1)
-	stHead   = lipgloss.NewStyle().Bold(true).Foreground(cBright)
-	stSel    = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("250"))
-	stGood   = lipgloss.NewStyle().Foreground(cGood)
-	stWarn   = lipgloss.NewStyle().Foreground(cWarn)
-	stBad    = lipgloss.NewStyle().Foreground(cBad)
-	stKey    = lipgloss.NewStyle().Bold(true).Foreground(cBright)
-	stPane   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBorder).Padding(0, 1)
-	stHelpBx = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).Padding(1, 2)
-)
+// Colours and styles live in theme.go.
 
 type loadedMsg sectionData
 
@@ -110,8 +86,9 @@ type model struct {
 
 // palEntry is one line of the palette: what it says and what it does.
 type palEntry struct {
-	text string
-	run  func(m model) (tea.Model, tea.Cmd)
+	text  string
+	run   func(m model) (tea.Model, tea.Cmd)
+	shown string // how the overlay draws it; text is what the filter matches
 }
 
 // palEntries lists the tabs of every section as "go" entries and the verbs
@@ -129,7 +106,8 @@ func (m model) palEntries() []palEntry {
 	}
 	for _, v := range m.verbsHere() {
 		v := v
-		all = append(all, palEntry{text: fmt.Sprintf("%-4s %s", v.key, v.label), run: func(m model) (tea.Model, tea.Cmd) { return m.runVerb(v) }})
+		all = append(all, palEntry{text: fmt.Sprintf("%-4s %s", v.key, v.label), shown: mnemonic(v.key, v.label, isDanger(v.label)),
+			run: func(m model) (tea.Model, tea.Cmd) { return m.runVerb(v) }})
 	}
 	words := strings.Fields(strings.ToLower(m.palIn.Value()))
 	if len(words) == 0 {
@@ -197,8 +175,10 @@ func (m model) paletteView() string {
 		line := es[i].text
 		if i == m.palRow {
 			line = stSel.Render(" " + line + " ")
+		} else if es[i].shown != "" {
+			line = "  " + es[i].shown
 		} else {
-			line = "  " + line
+			line = "  " + stText.Render(line)
 		}
 		b.WriteString(line + "\n")
 	}
@@ -717,7 +697,7 @@ func (m *model) loadIfEmpty() tea.Cmd {
 }
 
 // drill is Enter: on a VM its snapshots, on a dataset its snapshots, on a
-// pod its logs would be a verb; anything else opens the detail pane.
+// pod its logs would be a verb; anything else opens the vitals pane.
 func (m model) drill() (tea.Model, tea.Cmd) {
 	name := m.selected()
 	if name == "" {
@@ -779,7 +759,7 @@ func (m model) drill() (tea.Model, tea.Cmd) {
 		return m, m.loadIfEmpty()
 	}
 	if target == "" {
-		m.nav = m.nav[:len(m.nav)-1] // nothing was left; the detail pane is not a place
+		m.nav = m.nav[:len(m.nav)-1] // nothing was left; the vitals pane is not a place
 		m.detail = true
 		return m, nil
 	}
@@ -1166,6 +1146,9 @@ func (m model) View() string {
 		}
 		label := fmt.Sprintf("%d %s", n, s.name)
 		if i == m.active {
+			if noColor {
+				label = "[" + label + "]"
+			}
 			rail = append(rail, stRailA.Render(label))
 		} else {
 			rail = append(rail, stRail.Render(label))
@@ -1176,6 +1159,9 @@ func (m model) View() string {
 	var subs []string
 	for j, s := range sections[m.active].subs {
 		if j == m.sub[m.active] {
+			if noColor {
+				s = "[" + s + "]"
+			}
 			subs = append(subs, stSubA.Render(s))
 		} else {
 			subs = append(subs, stSub.Render(s))
@@ -1216,26 +1202,30 @@ func (m model) View() string {
 			b.WriteString("\n")
 		}
 	}
-	// table + detail
-	bodyH := m.height - 7 // title, rail, subs, rule, headline, status, one spare
-	if bodyH < 4 {
-		bodyH = 4
-	}
-	// The detail pane is a quarter of a wide terminal, never more than 44
-	// cells: at a third it squeezed the table until the first column — the
-	// machine name, the one thing a row is for — read as "app-adguard-…"
-	// (onyx, 150 columns, 2026-09-26).
-	detailW := 0
-	if m.detail && w >= 120 {
-		detailW = min(44, w/4)
-	}
-	tableW := w - detailW
-	table := m.tableView(d, tableW, bodyH)
-	if detailW > 0 {
-		det := m.detailView(d, detailW-4, bodyH-2)
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, table, stPane.Width(detailW-2).Height(bodyH-2).Render(det)) + "\n")
+	// Layout, top to bottom: five fixed lines above, the body, the menu,
+	// the status line. Every height here comes from the terminal size and
+	// the tab's verb set -- never from what a refresh brought -- so nothing
+	// moves while the 3 s refresh runs (the operator: "the menu part jumps
+	// around", 2026-09-27; the vitals pane wrapped its long values and grew).
+	menu := m.menuLines(w)
+	bodyH := max(m.height-6-len(menu), 3)
+	vitW := m.vitalsWidth(w)
+	table := m.tableView(d, w-vitW, bodyH)
+	if vitW > 0 {
+		vit := m.vitalsView(d, vitW, bodyH)
+		tl := strings.Split(table, "\n")
+		for i := 0; i < bodyH; i++ {
+			t := ""
+			if i < len(tl) {
+				t = tl[i]
+			}
+			b.WriteString(vit[i] + t + "\n")
+		}
 	} else {
 		b.WriteString(table + "\n")
+	}
+	for _, l := range menu {
+		b.WriteString(l + "\n")
 	}
 	// status bar
 	var sl string
@@ -1250,8 +1240,6 @@ func (m model) View() string {
 		sl = m.filter.View() + stDim.Render("   enter keep · esc clear")
 	case m.status != "":
 		sl = m.status
-	default:
-		sl = m.keyHints()
 	}
 	rows := m.rows()
 	var sr string
@@ -1281,18 +1269,109 @@ func (m model) View() string {
 	return b.String()
 }
 
-func (m model) keyHints() string {
-	k := func(key, what string) string { return stKey.Render(key) + stDim.Render(" "+what) }
-	parts := []string{k("1-0", "section"), k("tab", m.subName()), k("j/k", "row"), k("/", "filter"), k("o", "sort")}
+// menuTargetW is the fixed width of the name the verbs act on, at the start
+// of the menu: fixed so moving the cursor never reflows the verbs.
+const menuTargetW = 22
+
+// menuItems is this tab's verbs as the menu spells them.
+func (m model) menuItems() []string {
+	var items []string
+	for _, v := range m.verbsHere() {
+		items = append(items, mnemonic(v.key, shortLabel(v.label), isDanger(v.label)))
+	}
+	return items
+}
+
+// packMenu fills lines of width w with items two spaces apart, every line
+// starting after the name column.
+func packMenu(items []string, w int) [][]string {
+	var lines [][]string
+	var cur []string
+	used := menuTargetW + 2
+	for _, it := range items {
+		iw := lipgloss.Width(it)
+		if len(cur) > 0 && used+2+iw > w {
+			lines = append(lines, cur)
+			cur, used = nil, menuTargetW+2
+		}
+		if len(cur) > 0 {
+			used += 2
+		}
+		cur = append(cur, it)
+		used += iw
+	}
+	if len(cur) > 0 {
+		lines = append(lines, cur)
+	}
+	return lines
+}
+
+// menuHeight is how many verb lines the menu takes at width w: every verb,
+// capped at four lines (two on a short terminal). It depends on the tab and
+// the width only, so a refresh never changes it.
+func (m model) menuHeight(w int) int {
+	top := 4
+	if m.height < 35 {
+		top = 2
+	}
+	return min(max(len(packMenu(m.menuItems(), w)), 1), top)
+}
+
+// menuLines is the bottom menu: a rule, the verbs of this tab after the name
+// they act on ("app-jellyfin   (S)tart  shu(T)down  ..."), then the keys that
+// move around. Destructive verbs are red. What does not fit ends in
+// "(?) more", and ? lists everything.
+func (m model) menuLines(w int) []string {
+	out := []string{stRule.Render(strings.Repeat("─", w))}
+	vh := m.menuHeight(w)
+	target := ""
+	if r := m.selectedRow(); r != nil {
+		target = col(r, 0)
+	}
+	if n := len(m.markedRows()); n > 0 {
+		target = fmt.Sprintf("%d marked", n)
+	}
+	name := stTitle.Render(padRight(ansi.Truncate(target, menuTargetW, "…"), menuTargetW)) + "  "
+	indent := strings.Repeat(" ", menuTargetW+2)
+	packed := packMenu(m.menuItems(), w)
+	if len(packed) > vh {
+		last := packed[vh-1]
+		more := mnemonic("?", "more", false)
+		for len(last) > 1 && menuTargetW+2+lipgloss.Width(strings.Join(last, "  "))+2+lipgloss.Width(more) > w {
+			last = last[:len(last)-1]
+		}
+		packed = append(packed[:vh-1], append(last, more))
+	}
+	for i := 0; i < vh; i++ {
+		pre := indent
+		if i == 0 {
+			pre = name
+		}
+		line := pre
+		switch {
+		case i < len(packed):
+			line += strings.Join(packed[i], "  ")
+		case i == 0:
+			line += stDim.Render("nothing to run here: this tab only shows")
+		}
+		out = append(out, ansi.Truncate(line, w, ""))
+	}
+	return append(out, ansi.Truncate(m.navLine(), w, ""))
+}
+
+// navLine is the keys that move around, the same on every tab except for
+// what enter and backspace do here.
+func (m model) navLine() string {
+	k := func(key, what string) string { return mnemonic(key, what, false) }
+	// always shown: where tab goes, the filter, what enter and backspace do
+	parts := []string{k("tab", m.subName()), k("/", "filter")}
 	switch sections[m.active].name + "/" + m.subName() {
-	case "Machines/VMs":
+	case "Machines/VMs", "Storage/Datasets":
 		parts = append(parts, k("enter", "snapshots"))
-	case "Storage/Datasets":
-		parts = append(parts, k("enter", "snapshots"), k("x", "explore"))
 	case "Storage/Pools":
-		parts = append(parts, k("enter", "open the pool"), k("o", "observe"))
+		parts = append(parts, k("enter", "open the pool"))
 	case "Storage/Explorer":
-		parts = append(parts, k("enter", "open"), k("v", "versions"))
+		parts = append(parts, k("enter", "open"))
 	case "Overview/Activity":
 		parts = append(parts, k("enter", "watch"))
 	case "Cluster/Pods":
@@ -1300,18 +1379,25 @@ func (m model) keyHints() string {
 	case "Cluster/Nodes", "Cluster/Deployments", "Cluster/Services":
 		parts = append(parts, k("enter", "describe"))
 	}
-	for _, v := range m.verbsHere() {
-		parts = append(parts, k(v.key, v.label))
-	}
 	if len(m.nav) > 0 {
 		parts = append(parts, k("backspace", "back"))
 	}
-	parts = append(parts, k(":", "palette"), k("ctrl+t", "terminal"))
 	if len(m.jobs) > 0 {
 		parts = append(parts, k("ctrl+j", "jobs"))
 	}
-	parts = append(parts, k("?", "help"), k("q", "quit"))
-	return strings.Join(parts, "  ")
+	// then as many of these as fit, most useful first; ? and q never give
+	// way, and ? lists everything that did
+	extra := []string{k("1-0", "section"), k("j/k", "row"), k("o", "sort"), k(":", "palette"),
+		k("r", "reload"), k("i", "vitals"), k("space", "mark"), k("ctrl+t", "terminal")}
+	tail := []string{k("?", "help"), k("q", "quit")}
+	line := func(n int) string {
+		return strings.Join(append(append(append([]string{}, parts...), extra[:n]...), tail...), "  ")
+	}
+	n := len(extra)
+	for n > 0 && lipgloss.Width(line(n)) > m.width {
+		n--
+	}
+	return line(n)
 }
 
 // tableView lays the rows out in width w and height h: header, then the page
@@ -1322,21 +1408,29 @@ func (m model) tableView(d *sectionData, w, h int) string {
 		return strings.Repeat("\n", max(h-1, 0))
 	}
 	rows := m.rows()
-	widths := columnWidths(d.columns, rows, w-1)
 	numeric := numericColumns(rows, len(d.columns))
-	widths = columnWidths(d.columns, rows, w-3) // two cells for the mark
+	widths := columnWidths(d.columns, rows, w-3) // two cells for the mark
 	line := func(cells []string, sel, header bool) string {
-		parts := make([]string, len(d.columns))
+		parts := make([]string, 0, len(d.columns))
 		for i := range d.columns {
+			if widths[i] == 0 {
+				continue // dropped: no room at this width
+			}
 			v := truncate(col(cells, i), widths[i])
+			var p string
 			if numeric[i] {
-				parts[i] = fmt.Sprintf("%*s", widths[i], v)
+				p = fmt.Sprintf("%*s", widths[i], v)
 			} else {
-				parts[i] = fmt.Sprintf("%-*s", widths[i], v)
+				p = fmt.Sprintf("%-*s", widths[i], v)
 			}
-			if !sel {
-				parts[i] = colourCell(parts[i], v)
+			if !sel && !header {
+				c := colourCell(p, v)
+				if c == p {
+					c = stText.Render(p)
+				}
+				p = c
 			}
+			parts = append(parts, p)
 		}
 		mark := "  "
 		if !header && m.marks[m.key()+"\x00"+col(cells, 0)] {
@@ -1344,6 +1438,10 @@ func (m model) tableView(d *sectionData, w, h int) string {
 			if sel {
 				mark = "▸ "
 			}
+		}
+		if sel && noColor && mark == "  " {
+			// NO_COLOR draws no attributes at all, so the highlight is a mark
+			mark = "> "
 		}
 		s := mark + strings.Join(parts, "  ")
 		if sel {
@@ -1383,85 +1481,74 @@ func (m model) tableView(d *sectionData, w, h int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// detailView is the selected row as key/value, then what Enter and the
-// verbs would do to it.
-func (m model) detailView(d *sectionData, w, h int) string {
-	if d == nil || len(d.columns) == 0 {
-		return stDim.Render("no row")
+// vitalsWidth is the left pane's width at terminal width w, 0 when it is
+// hidden (i toggles it; below 100 columns the table needs the room).
+func (m model) vitalsWidth(w int) int {
+	if !m.detail || w < 100 {
+		return 0
 	}
-	r := m.selectedRow()
-	if r == nil {
-		return stDim.Render("no row")
-	}
-	kw := 0
-	for _, c := range d.columns {
-		kw = max(kw, len(c))
-	}
+	return min(max(w/4, 28), 44)
+}
+
+// vitalsView is the selected row as the left pane shows it: its name, every
+// column as a property, then what the tab's detailer adds (disks, NICs, the
+// zvol's properties). Exactly h lines, each exactly vw cells with the
+// separator, so a value that grows on refresh is cut, never wrapped: a
+// wrapped line is what made the old right-hand pane grow and push the menu
+// down (2026-09-27). The verbs are in the menu below, not here.
+func (m model) vitalsView(d *sectionData, vw, h int) []string {
+	cw := vw - 3
 	var lines []string
-	lines = append(lines, stTitle.Render(truncate(col(r, 0), w)), "")
-	for i, c := range d.columns {
-		v := col(r, i)
-		if v == "" || v == "-" {
-			continue
+	r := m.selectedRow()
+	switch {
+	case d == nil || len(d.columns) == 0 || r == nil:
+		lines = append(lines, stDim.Render("nothing selected"))
+	default:
+		lines = append(lines, stHead.Render(col(r, 0)), "")
+		kw := 0
+		for _, c := range d.columns[1:] {
+			kw = max(kw, min(len(c), 12))
 		}
-		// long values (a repair command, a scrape URL) wrap on their own lines
-		vw := w - kw - 2
-		if vw < 12 || len(v) <= vw {
-			lines = append(lines, stDim.Render(fmt.Sprintf("%-*s", kw, c))+"  "+colourCell(truncate(v, max(vw, 1)), v))
-		} else {
-			lines = append(lines, stDim.Render(c))
-			for len(v) > 0 {
-				n := min(len(v), w)
-				lines = append(lines, "  "+v[:n])
-				v = v[n:]
-			}
-		}
-	}
-	if extra, ok := m.details[m.key()+"\x00"+col(r, 0)]; ok {
-		// the detailer's keys (a property name, a MAC) size their own column
-		ekw := 0
-		for _, e := range extra {
-			if k, _, isKV := strings.Cut(e, "\t"); isKV {
-				ekw = max(ekw, min(len(k), 17))
-			}
-		}
-		lines = append(lines, "")
-		for _, e := range extra {
-			k, v, isKV := strings.Cut(e, "\t")
-			if !isKV {
-				lines = append(lines, stTitle.Render(truncate(e, w)))
+		for i := 1; i < len(d.columns); i++ {
+			v := col(r, i)
+			if v == "" || v == "-" {
 				continue
 			}
-			vw := w - ekw - 2
-			lines = append(lines, stDim.Render(fmt.Sprintf("%-*s", ekw, truncate(k, ekw)))+"  "+truncate(v, max(vw, 1)))
+			val := colourCell(v, v)
+			if val == v {
+				val = stPropV.Render(v)
+			}
+			lines = append(lines, prop(ansi.Truncate(d.columns[i], kw, ""), kw, val))
 		}
-	} else if _, ok := detailers[sections[m.active].name+"/"+m.subName()]; ok {
-		lines = append(lines, "", stDim.Render("…"))
-	}
-	lines = append(lines, "")
-	for _, v := range m.verbsHere() {
-		if v.noRow || v.argv == nil {
-			if v.rowCtxArgv != nil {
-				if argv, err := v.rowCtxArgv(r, m.ctx[m.key()]); err == nil {
-					lines = append(lines, stKey.Render(v.key)+"  "+stDim.Render(truncate(strings.Join(argv, " "), w-3)))
+		if extra, ok := m.details[m.key()+"\x00"+col(r, 0)]; ok {
+			ekw := 0
+			for _, e := range extra {
+				if k, _, isKV := strings.Cut(e, "\t"); isKV {
+					ekw = max(ekw, min(len(k), 14))
 				}
 			}
-			continue
-		}
-		if argv, err := v.argv(r, "…"); err == nil {
-			cmd := strings.Join(argv, " ")
-			if v.inter {
-				cmd = "(terminal) " + cmd
+			for _, e := range extra {
+				k, v, isKV := strings.Cut(e, "\t")
+				if !isKV {
+					lines = append(lines, "", stHead.Render(e))
+					continue
+				}
+				lines = append(lines, prop(ansi.Truncate(k, ekw, ""), ekw, stPropV.Render(v)))
 			}
-			lines = append(lines, stKey.Render(v.key)+"  "+stDim.Render(truncate(cmd, w-3)))
-		} else {
-			lines = append(lines, stKey.Render(v.key)+"  "+stDim.Render(v.label))
+		} else if _, ok := detailers[sections[m.active].name+"/"+m.subName()]; ok {
+			lines = append(lines, "", stDim.Render("…"))
 		}
 	}
-	if len(lines) > h {
-		lines = lines[:h]
+	out := make([]string, h)
+	sep := " " + stRule.Render("│") + " "
+	for i := range out {
+		l := ""
+		if i < len(lines) {
+			l = ansi.Truncate(lines[i], cw, "…")
+		}
+		out[i] = padRight(l, cw) + sep
 	}
-	return strings.Join(lines, "\n")
+	return out
 }
 
 func (m model) helpView() string {
@@ -1477,7 +1564,7 @@ func (m model) helpView() string {
 		k("space", "mark the row (verbs then run on every marked row)   ·   ctrl+a all / none"),
 		k("/", "filter rows; enter keeps it, esc clears it"),
 		k("o", "sort: next column, then descending, then the tool's order"),
-		k("i", "show or hide the detail pane"),
+		k("i", "show or hide the vitals pane (the selected row, on the left)"),
 		k("r", "reload the sub-tab"),
 		"",
 		stTitle.Render(sections[m.active].name + " / " + m.subName()),
@@ -1497,7 +1584,7 @@ func (m model) helpView() string {
 		if v.inter {
 			what += "   (takes the terminal)"
 		}
-		lines = append(lines, k(v.key, what))
+		lines = append(lines, "  "+mnemonic(v.key, v.label, isDanger(v.label))+stDim.Render(strings.TrimPrefix(what, v.label)))
 	}
 	lines = append(lines, "", k("?", "this help   ·   any key closes it"), k("q", "quit"))
 	box := stHelpBx.Render(strings.Join(lines, "\n"))
@@ -1574,22 +1661,61 @@ func columnWidths(cols []string, rows [][]string, total int) []int {
 	if total <= 0 {
 		return w
 	}
-	gaps := 2 * (len(cols) - 1)
-	for sum(w)+gaps > total {
-		// the first column is the row's name and gives way last
+	// The first column is the row's name and keeps up to 24 cells: it used to
+	// give way with the rest until every machine read "app-a…" (onyx, 120
+	// columns, 2026-09-27). The others shrink to 5; if that is still too
+	// wide, columns drop off the right (width 0, not drawn) rather than the
+	// name shrinking further.
+	nameMin := min(w[0], 24)
+	fits := func() bool {
+		t, n := 0, 0
+		for _, x := range w {
+			if x > 0 {
+				t += x
+				n++
+			}
+		}
+		return t+2*(n-1) <= total
+	}
+	// shrink the widest other column still above floor(i); false when none is
+	shrink := func(floor func(i int) int) bool {
 		widest := -1
 		for i := 1; i < len(w); i++ {
-			if w[i] > 6 && (widest < 0 || w[i] > w[widest]) {
+			if w[i] > floor(i) && (widest < 0 || w[i] > w[widest]) {
 				widest = i
 			}
 		}
 		if widest < 0 {
-			if w[0] <= 6 {
-				break
-			}
-			widest = 0
+			return false
 		}
 		w[widest]--
+		return true
+	}
+	// readable first: a size like "355.2G" is six cells, a header up to eight
+	readable := func(i int) int { return min(max(len(cols[i]), 6), 8) }
+	for !fits() {
+		if shrink(readable) {
+			continue
+		}
+		if w[0] > nameMin {
+			w[0]--
+			continue
+		}
+		if shrink(func(int) int { return 5 }) {
+			continue
+		}
+		last := -1
+		for i := len(w) - 1; i > 0; i-- {
+			if w[i] > 0 {
+				last = i
+				break
+			}
+		}
+		if last < 0 {
+			w[0] = max(total, 1)
+			break
+		}
+		w[last] = 0
 	}
 	return w
 }
@@ -1657,6 +1783,8 @@ func colourCell(rendered, raw string) string {
 		return stBad.Render(rendered)
 	case "warn", "unregistered", "stale", "never", "open", "pending", "inactive", "paused":
 		return stWarn.Render(rendered)
+	case "shut", "stopped", "off", "disabled", "no":
+		return stOff.Render(rendered)
 	}
 	return rendered
 }
