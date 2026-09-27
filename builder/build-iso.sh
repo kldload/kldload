@@ -3726,7 +3726,12 @@ log "darksite binaries: $(du -sh "${ROOTFS}/root/darksite/bin" 2>/dev/null | cut
 if [[ "$EDITION" != "core" && "$PAYLOAD" != "net" ]]; then
     # Copy darksite RPM repo into the rootfs for offline target installs
     if [[ -d /build/live-build/config/includes.chroot/root/darksite ]]; then
-        cp -r /build/live-build/config/includes.chroot/root/darksite/. "${ROOTFS}/root/darksite/"
+        # --update=none: never overwrite what this build already staged. The
+        # source tree carries caches from earlier builds, and a plain cp put a
+        # stale cilium.tgz (1.16.5) over the 1.20.2 the lock had just staged,
+        # so fiend's cluster ran 1.16.5 pulled from quay.io while its
+        # MANIFEST.txt said 1.20.2 (2026-09-27).
+        cp -r --update=none /build/live-build/config/includes.chroot/root/darksite/. "${ROOTFS}/root/darksite/"
         # the tree carries every piece the host has cached; drop what this
         # image was told not to carry
         has_darksite el || {

@@ -211,6 +211,51 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
             _pass "console launcher replaced by Web UI"
         fi
 
+        # ── The Kubernetes bundle in the ISO is the one the lock names ─────
+        # fiend's 1.5.0 carried cilium.tgz 1.16.5 under a MANIFEST.txt that
+        # said 1.20.2, because a stale copy was laid over the staged chart;
+        # its cluster then pulled all of Cilium from quay.io (2026-09-27).
+        # Read the version out of each chart, not the MANIFEST that lied.
+        _kx="$(mktemp -d)"
+        unsquashfs -q -f -d "$_kx/r" "$MOUNTPOINT/LiveOS/squashfs.img" etc/kldload/payload \
+            root/darksite/k8s-stack.lock root/darksite/helm-charts root/darksite/k8s-manifests \
+            root/darksite/cloud-images/SHA256SUMS >/dev/null 2>&1 ||
+            true # absent paths make unsquashfs exit non-zero; each is judged below
+        _kl="$_kx/r/root/darksite/k8s-stack.lock"
+        _kp="$(cat "$_kx/r/etc/kldload/payload" 2>/dev/null || true)" # swallow: core and older ISOs have no payload file
+        if [[ "$_kp" != full* ]]; then
+            _pass "k8s bundle: not a full payload (${_kp:-none}), nothing to compare"
+        elif [[ ! -s "$_kl" ]]; then
+            _fail "k8s bundle" "full payload but no root/darksite/k8s-stack.lock in the squashfs"
+        else
+            while IFS='|' read -r _r _u _c _v; do
+                [[ -n "$_c" ]] || continue
+                _t="$_kx/r/root/darksite/helm-charts/${_c}.tgz"
+                _got="$(tar -xOzf "$_t" "${_c}/Chart.yaml" 2>/dev/null | sed -n 's/^version: *//p' | head -1)" || _got=""
+                if [[ "$_got" == "$_v" ]]; then
+                    _pass "chart ${_c} ${_v} matches the lock"
+                else
+                    _fail "chart ${_c}" "the ISO carries '${_got:-nothing}', the lock says ${_v} — nodes would pull its images online"
+                fi
+            done < <(sed -n 's/^CHART=//p' "$_kl")
+            while IFS='|' read -r _m _u _v; do
+                [[ -n "$_m" ]] || continue
+                if grep -q '^kind:' "$_kx/r/root/darksite/k8s-manifests/${_m}.yaml" 2>/dev/null; then
+                    _pass "manifest ${_m} ${_v} in the ISO"
+                else
+                    _fail "manifest ${_m}" "not in root/darksite/k8s-manifests — kube-init would fetch it"
+                fi
+            done < <(sed -n 's/^MANIFEST=//p' "$_kl")
+            if [[ "$_kp" == *cloud=yes* ]]; then
+                if [[ -s "$_kx/r/root/darksite/cloud-images/SHA256SUMS" ]]; then
+                    _pass "cloud images: $(wc -l <"$_kx/r/root/darksite/cloud-images/SHA256SUMS") listed in the ISO"
+                else
+                    _fail "cloud images" "payload says cloud=yes but root/darksite/cloud-images/SHA256SUMS is absent"
+                fi
+            fi
+        fi
+        _rm_extract "$_kx"
+
         # ── Voice models ────────────────────────────────────────────────────
         # Downloaded at build time from HuggingFace. 2026-09-13 builds 9 full
         # and net each lost one or both to a transient failure logged only as
@@ -1375,6 +1420,27 @@ elif ((_rc == 0)); then
     _fail "hardcoded online fetch" "${_bad//$'\n'/ ; }"
 else
     _didnotrun "hardcoded online fetch" "grep could not read kube-init / kube-setup"
+fi
+# Every image kldload's own scripts deploy must be in the lock, or a cluster
+# built offline cannot run the tool that names it (nginx:alpine, 2026-09-27).
+# Only the unambiguous forms: --image=NAME and a YAML "image: NAME" line.
+# Names are canonicalised the way containerd does: no registry means
+# docker.io, no namespace means library/, no tag means :latest.
+_imgmiss=()
+while IFS= read -r _ref; do
+    [[ -n "$_ref" && "$_ref" != *'$'* ]] || continue
+    _c="$_ref"
+    [[ "${_c%%/*}" == *.* && "$_c" == */* ]] || _c="docker.io/${_c}"
+    [[ "$_c" == docker.io/*/* ]] || _c="${_c/docker.io\//docker.io/library/}"
+    [[ "${_c##*/}" == *:* ]] || _c="${_c}:latest"
+    grep -qxF "IMAGE=${_c}" "${ROOT}/build/darksite/k8s-stack.lock" || _imgmiss+=("${_ref} (${_c})")
+done < <(grep -rhoE -- '--image=[a-z0-9][a-zA-Z0-9./_:-]*|^[[:space:]]*image: *"?[a-z0-9][a-zA-Z0-9./_:-]*' \
+    "${_ic}/usr/local/bin" "${_ic}/usr/sbin" 2>/dev/null |
+    sed -E 's/^--image=//; s/^[[:space:]]*image: *"?//' | sort -u)
+if ((${#_imgmiss[@]} == 0)); then
+    _pass "every image kldload's scripts deploy is in k8s-stack.lock"
+else
+    _fail "images not in the lock" "${_imgmiss[*]} — an offline cluster cannot run the tool that names them"
 fi
 if grep -q '^IMAGE=.*@sha256' "${ROOT}/build/darksite/k8s-stack.lock"; then
     _fail "k8s-stack.lock" "digest references: podman saves those with no name and containerd cannot find them"

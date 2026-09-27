@@ -65,6 +65,13 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 #
 # The copy runs FIRST, before anything below reads the lock: the versions are
 # taken from the lock this brings in.
+# Everything from here also lands in a log on the node: provision-golden runs
+# this as an async task, and Ansible shows nothing of an async task's output,
+# so the golden's own report ("N of M images from the darksite") reached no
+# one on fiend's first offline build (2026-09-27). kube-cluster reads it back.
+mkdir -p /var/log/kldload
+exec > >(tee -a /var/log/kldload/kube-setup.log) 2>&1
+
 DARKSITE_URL="${KLDLOAD_DARKSITE_URL:-}"
 DNF_REPO_ARGS=()
 APT_REPO_ARGS=()
@@ -403,7 +410,14 @@ EOF
 # in a node serves the ZFS CSI only, and the node works without it.
 _zfs_from_darksite() {
     local kver
-    if [[ "$PM" == "dnf" ]]; then
+    # The RUNNING kernel first, when the mirror has its headers (the Fedora
+    # build adds the release kernel's, which is the cloud image's): nodes keep
+    # the kernel they were tested on, and Tetragon 1.7.1 cannot parse the BTF
+    # of the 7.2 kernel the fallback below installs (fiend, 2026-09-27).
+    if [[ "$PM" == "dnf" ]] && _dnf install -y "kernel-devel-$(uname -r)" dkms gcc make zfs zfs-dkms; then
+        kver="$(uname -r)"
+    elif [[ "$PM" == "dnf" ]]; then
+        log "no headers for the running kernel $(uname -r) in the darksite — installing the mirror's kernel for ZFS"
         _dnf install -y kernel kernel-devel dkms gcc make zfs zfs-dkms || {
             warn "ZFS packages did not install from the darksite -- nodes will have no zfs"
             return 0

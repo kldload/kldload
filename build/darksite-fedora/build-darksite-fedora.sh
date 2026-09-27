@@ -414,6 +414,22 @@ if (($(grep -c . <<<"${_kcores}") != 1)); then
 fi
 log "Pool carries one kernel: ${_kcores}"
 
+# ─── Headers for the cloud image's kernel ────────────────────────────────────
+# The Kubernetes golden is built from Fedora's cloud image, which boots the
+# release kernel (6.19.10-300.fc44 in 44-1.7, the same NVR as the release
+# repo's). kube-setup builds ZFS for the RUNNING kernel when its headers are
+# here; without them it installs the pinned kernel instead, and Tetragon 1.7.1
+# cannot parse that kernel's BTF ("header contains non-zero trailer"): every
+# Tetragon pod crash-looped on fiend's first offline cluster (2026-09-27).
+# Headers only, added after the eviction and the one-kernel check: a
+# kernel-devel boots nothing, so the one-kernel rule still holds.
+if dnf download --repo=fedora --releasever="${RELEASE}" --forcearch="${ARCH}" \
+    --destdir "${REPO_DIR}" kernel-devel >/dev/null 2>&1; then
+    log "Cloud-image kernel headers added: $(find "${REPO_DIR}" -name 'kernel-devel-[0-9]*.rpm' -printf '%f ' | sort)"
+else
+    log "WARNING: could not add the release kernel's kernel-devel — Kubernetes goldens will boot the pinned kernel instead"
+fi
+
 createrepo_c "${REPO_DIR}"
 
 _rpm_count=$(find "${REPO_DIR}" -name '*.rpm' | wc -l)

@@ -1520,6 +1520,12 @@ NETCFG
         die "ansible provision-golden failed"
     _golden_bundle_stop
     log "  provision-golden complete — kubeadm, helm, cilium-cli installed"
+    # What the golden said about itself: Ansible hides an async task's output,
+    # so these lines are read back from its log. They are the evidence that
+    # the golden was built from the darksite, or that it was not.
+    _ssh_cmd "$golden_ip" "grep -hE 'darksite|Packages:|container images:|NOT in the golden|ZFS (built|did not)|no headers' /var/log/kldload/kube-setup.log" 2>/dev/null |
+        sed 's/\x1b\[[0-9;]*m//g' | while IFS= read -r _l; do log "  golden: ${_l}"; done ||
+        warn "could not read the golden's /var/log/kldload/kube-setup.log"
 
     # ASSERT the image cache, do not assume it. The golden is already built
     # with the control-plane, Cilium, Hubble and MetalLB images baked in, which

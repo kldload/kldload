@@ -966,53 +966,14 @@ cmd_build() {
             mv -f "${_mlist}.new" "$_mlist"
             log "manifest cached: ${_mname} ${_mver}"
         done < <(sed -n 's/^MANIFEST=//p' "$ROOT/build/darksite/k8s-stack.lock")
-        # Cilium chart
-        if [[ ! -f "$helm_cache/cilium.tgz" ]]; then
-            log "Caching Cilium Helm chart..."
-            if command -v helm >/dev/null 2>&1; then
-                helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
-                helm repo update >/dev/null 2>&1 || true
-                helm pull cilium/cilium --version "${CILIUM_VERSION:-$(_lock_chart_version cilium)}" -d "$helm_cache" 2>/dev/null &&
-                    mv "$helm_cache"/cilium-*.tgz "$helm_cache/cilium.tgz" 2>/dev/null || true
-            elif command -v curl >/dev/null 2>&1; then
-                curl -fsSL "https://helm.cilium.io/cilium-${CILIUM_VERSION:-$(_lock_chart_version cilium)}.tgz" \
-                    -o "$helm_cache/cilium.tgz" 2>/dev/null || log "WARNING: Could not cache Cilium chart"
-            fi
-            [[ -f "$helm_cache/cilium.tgz" ]] && log "Cilium chart cached: $(du -h "$helm_cache/cilium.tgz" | cut -f1)"
-        fi
-        # Tetragon chart — Cilium's syscall/process/file eBPF observability.
-        # Autodeploy + kube-cluster both install this once the cluster is up.
-        # Must be offline-available or the prom scrape + Grafana dashboards
-        # sit empty. The build host often has no helm binary (CentOS Stream 9
-        # doesn't ship one) so the pre-existing `helm pull` path silently
-        # skipped and shipped a broken ISO — prefer curl against the chart's
-        # direct URL so this works out of the box.
-        if [[ ! -f "$helm_cache/tetragon.tgz" ]]; then
-            log "Caching Tetragon Helm chart..."
-            if command -v helm >/dev/null 2>&1; then
-                helm pull cilium/tetragon -d "$helm_cache" 2>/dev/null &&
-                    mv "$helm_cache"/tetragon-*.tgz "$helm_cache/tetragon.tgz" 2>/dev/null || true
-            fi
-            if [[ ! -f "$helm_cache/tetragon.tgz" ]] && command -v curl >/dev/null 2>&1; then
-                # Resolve the latest chart version from the Cilium helm repo
-                # index and download the tgz directly — no helm CLI required.
-                local _tg_ver
-                _tg_ver="$(curl -fsSL --max-time 10 https://helm.cilium.io/index.yaml 2>/dev/null |
-                    awk '/^  - name: tetragon$/{f=1;next} f && /version: /{print $2; exit}' |
-                    tr -d '\r')"
-                if [[ -n "$_tg_ver" ]]; then
-                    curl -fsSL --max-time 60 \
-                        -o "$helm_cache/tetragon.tgz" \
-                        "https://helm.cilium.io/tetragon-${_tg_ver}.tgz" 2>/dev/null ||
-                        log "WARNING: Could not download Tetragon chart via curl"
-                else
-                    log "WARNING: Could not resolve Tetragon chart version from helm.cilium.io"
-                fi
-            fi
-            [[ -f "$helm_cache/tetragon.tgz" ]] &&
-                log "Tetragon chart cached: $(du -h "$helm_cache/tetragon.tgz" | cut -f1)" ||
-                log "WARNING: Tetragon chart not cached — autodeploy will fall back to online install"
-        fi
+        # The Cilium and Tetragon charts are NOT cached here any more. This
+        # fetched each only when absent, so the first copy ever cached stayed
+        # forever, and build-iso's copy of this tree then put it over the
+        # chart the lock had staged: fiend's 1.5.0 carried Cilium 1.16.5 under
+        # a MANIFEST.txt that said 1.20.2 (2026-09-27). build-iso stages every
+        # chart from the lock; nothing here should compete with it.
+        rm -f "$helm_cache/cilium.tgz" "$helm_cache/tetragon.tgz"
+
         # Grafana dashboards (pre-fetched so firstboot never needs internet)
         # 1860  = Node Exporter Full
         # 16611 = Cilium Metrics

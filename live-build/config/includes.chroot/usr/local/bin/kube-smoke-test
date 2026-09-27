@@ -388,6 +388,32 @@ if [[ -n "$KUBECONF" ]]; then
         # What IS checkable is that CoreDNS is deployed and has ready endpoints
         # for something to resolve against. That is reported as what it is, and
         # the part that did not run says so rather than passing quietly.
+        # 2026-09-27: busybox is in the darksite now (the lock bakes the images
+        # kldload's own tools run), so resolution CAN be tested end to end.
+        # imagePullPolicy=Never is the point: an absent image fails as
+        # ErrImageNeverPull and is reported as not run, never fetched.
+        _dns_out="" _dns_phase=""
+        kubectl delete pod smoke-dns --grace-period=0 --force >/dev/null 2>&1 || true # swallow: no leftover from an earlier run
+        if kubectl run smoke-dns --image=docker.io/library/busybox:latest --image-pull-policy=Never \
+            --restart=Never --command -- nslookup kubernetes.default.svc.cluster.local >/dev/null 2>&1; then
+            for _i in $(seq 1 20); do
+                _dns_phase="$(kubectl get pod smoke-dns -o jsonpath='{.status.phase}' 2>/dev/null)"
+                [[ "$_dns_phase" == Succeeded || "$_dns_phase" == Failed ]] && break
+                sleep 2
+            done
+            _dns_out="$(kubectl logs smoke-dns 2>/dev/null)" || _dns_out=""
+            if [[ "$_dns_phase" == Succeeded ]] && grep -qE '^Address:? .*[0-9]' <<<"${_dns_out#*Name:}"; then
+                pass "cluster DNS resolves kubernetes.default ($(grep -oE '[0-9]+(\.[0-9]+){3}' <<<"${_dns_out#*Name:}" | head -1))"
+            elif [[ -z "$_dns_phase" || "$_dns_phase" == Pending ]]; then
+                warn "cluster DNS resolution DID NOT RUN — busybox is not on the node (pod stayed ${_dns_phase:-absent}; no pull was attempted)"
+            else
+                fail "cluster DNS did not resolve kubernetes.default (pod ${_dns_phase}): $(tail -2 <<<"$_dns_out" | tr '\n' ' ')"
+            fi
+        else
+            warn "cluster DNS resolution DID NOT RUN — could not create the busybox pod"
+        fi
+        kubectl delete pod smoke-dns --grace-period=0 --force >/dev/null 2>&1 || true # swallow: already gone
+
         _dns_eps="$(kubectl get endpoints -n kube-system kube-dns \
             -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)"
         _dns_n="$(printf '%s' "$_dns_eps" | wc -w)"
@@ -400,7 +426,6 @@ if [[ -n "$KUBECONF" ]]; then
         else
             fail "CoreDNS is not running — cluster DNS is down"
         fi
-        warn "cluster DNS resolution DID NOT RUN — needs a pod image with a resolver, and none is in the darksite"
 
     else
         fail "API server not reachable"
