@@ -12,7 +12,7 @@
 #                  [--cluster CID_OR_NAME] [--status S] [--wg-pubkey K]
 #   node-status    --hostname H --status S
 #   node-delete    --hostname H
-#   vm-register    --name N --cluster CID_OR_NAME [--role R] [--ip IP]
+#   vm-register    --name N --cluster CID_OR_NAME [--role R] [--default-role R] [--ip IP]
 #                  [--cpu N] [--ram-gb N] [--disk-gb N] [--golden-src G]
 #                  [--status S]
 #   vm-status      --name N --status S [--ip IP]
@@ -354,7 +354,11 @@ def cmd_vm_register(args):
             "INSERT INTO vms (id,cluster_id,node_id,name,role,cpu,ram_gb,disk_gb,"
             "status,golden_src,ip_addr,wg_pubkey,last_seen,data,created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (vid, cid, "", args.name, args.role or "unknown",
+            # --default-role names a NEW row only: an existing row keeps the
+            # role its creator gave it unless --role says otherwise. The
+            # enrolment sweep passed --role vm to everything it touched and
+            # relabelled klab-blue machines "vm" (fiend, 2026-09-27).
+            (vid, cid, "", args.name, args.role or args.default_role or "unknown",
              args.cpu or 2, args.ram_gb or 4, args.disk_gb or 64,
              args.status or "defined", args.golden_src or "",
              args.ip or "", "", now, "{}", now),
@@ -531,6 +535,7 @@ def main(argv):
     s.add_argument("--name", required=True)
     s.add_argument("--cluster", default="")
     s.add_argument("--role", default="")
+    s.add_argument("--default-role", dest="default_role", default="")
     s.add_argument("--ip", default="")
     s.add_argument("--cpu", type=int, default=0)
     s.add_argument("--ram-gb", dest="ram_gb", type=int, default=0)
