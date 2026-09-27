@@ -76,6 +76,8 @@ for _t in "${_toks[@]}"; do
     root=live:http://* | root=live:https://*) url="${_t#root=live:}" ;;
     # answers/<mac>.env names the machine being installed; shown, never trusted.
     kldload.seed=*) node="${_t##*/}" && node="${node%.env}" ;;
+    # the operator asked for the plain console (KLDLOAD_SHOW=0 in the answers)
+    kldload.show=0) exit 0 ;;
     esac
 done
 [[ -n "$url" ]] || exit 0
