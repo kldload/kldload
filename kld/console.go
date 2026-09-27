@@ -99,6 +99,10 @@ type console struct {
 
 type conTickMsg struct{}
 
+// screenBlocks selects half-blocks for the pane instead of braille
+// (KLD_SCREEN_CELLS=blocks); braille keeps a text console legible.
+var screenBlocks = os.Getenv("KLD_SCREEN_CELLS") == "blocks"
+
 func conTick() tea.Cmd {
 	return tea.Tick(80*time.Millisecond, func(time.Time) tea.Msg { return conTickMsg{} })
 }
@@ -445,29 +449,28 @@ func (c *console) renderScreen(w, h int) string {
 		oh -= oh % 2
 		c.scale = scale
 		c.offX, c.offY = (w-ow)/2, (h-oh/2)/2
-		// sample: out pixel (x,y) averages the source box it covers
-		px := make([][3]uint8, ow*oh)
-		for y := 0; y < oh; y++ {
-			sy0, sy1 := int(float64(y)/scale), int(float64(y+1)/scale)
-			sy1 = min(max(sy1, sy0+1), fh)
-			for x := 0; x < ow; x++ {
-				sx0, sx1 := int(float64(x)/scale), int(float64(x+1)/scale)
-				sx1 = min(max(sx1, sx0+1), fw)
-				var r, g, b, n uint32
-				for sy := sy0; sy < sy1; sy++ {
-					off := img.PixOffset(sx0, sy)
-					for sx := sx0; sx < sx1; sx++ {
-						r += uint32(img.Pix[off])
-						g += uint32(img.Pix[off+1])
-						b += uint32(img.Pix[off+2])
-						off += 4
-						n++
-					}
+		px := sample(img, ow, oh)
+		if !screenBlocks {
+			// braille by default: four times the resolution of half-blocks,
+			// and a boot log stays a boot log (see screen.go)
+			gw, gh = w*2, h*4
+			scale = min(float64(gw)/float64(fw), float64(gh)/float64(fh))
+			ow, oh = max(int(float64(fw)*scale), 2), max(int(float64(fh)*scale), 4)
+			ow -= ow % 2
+			oh -= oh % 4
+			c.scale = scale
+			c.offX, c.offY = (w-ow/2)/2, (h-oh/4)/2
+			px = sample(img, ow, oh)
+			pad := strings.Repeat(" ", c.offX)
+			lines := brailleLines(px, sampleMax(img, ow, oh), ow, oh)
+			for row := 0; row < h; row++ {
+				if row < c.offY || row >= c.offY+len(lines) {
+					out.WriteString("\n")
+					continue
 				}
-				if n > 0 {
-					px[y*ow+x] = [3]uint8{uint8(r / n), uint8(g / n), uint8(b / n)}
-				}
+				out.WriteString(pad + lines[row-c.offY] + "\n")
 			}
+			return
 		}
 		pad := strings.Repeat(" ", c.offX)
 		for row := 0; row < h; row++ {
@@ -643,8 +646,12 @@ func (c *console) mouse(msg tea.MouseMsg, bodyTop int) {
 		return
 	}
 	cx, cy := msg.X-c.offX, msg.Y-bodyTop-c.offY
-	fx := int(float64(cx) / c.scale)
-	fy := int(float64(cy*2) / c.scale)
+	cw, ch := 1.0, 2.0 // guest-grid pixels per cell: half-blocks
+	if !screenBlocks {
+		cw, ch = 2, 4 // braille
+	}
+	fx := int(float64(cx) * cw / c.scale)
+	fy := int(float64(cy) * ch / c.scale)
 	fx = min(max(fx, 0), max(c.fbW-1, 0))
 	fy = min(max(fy, 0), max(c.fbH-1, 0))
 	var bit uint8

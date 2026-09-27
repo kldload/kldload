@@ -43,11 +43,13 @@ import (
 // runScreen is `kld screen <vm> [--blocks|--sixel]`.
 func runScreen(args []string) error {
 	var vm string
-	blocks, sixel := false, false
+	blocks, sixel, braille := false, false, false
 	for _, a := range args {
 		switch {
 		case a == "--blocks":
 			blocks = true
+		case a == "--braille":
+			braille = true
 		case a == "--sixel":
 			sixel = true
 		case strings.HasPrefix(a, "-"):
@@ -122,6 +124,8 @@ func runScreen(args []string) error {
 	default:
 		s.sixel = s.probeTerminal(in) && !underTmux
 	}
+	// without sixels, braille unless blocks were asked for
+	s.braille = !s.sixel && !blocks || braille && !s.sixel
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
@@ -162,6 +166,7 @@ type screenView struct {
 	cols, rows   int
 	cellW, cellH int
 	sixel        bool
+	braille      bool // the cell fallback: braille dots (text stays legible) or half-blocks
 	menu         bool
 	dirty        bool
 	mask         uint8
@@ -240,11 +245,13 @@ func (s *screenView) fit(fd uintptr) {
 
 func (s *screenView) status() string {
 	if s.menu {
-		return "ctrl+]  d detach · x ctrl+alt+del · r redraw · ] send ctrl+] · any other key back"
+		return "ctrl+]  d detach · b braille/blocks · x ctrl+alt+del · r redraw · ] send ctrl+] · any other key back"
 	}
 	mode := "blocks"
 	if s.sixel {
 		mode = "sixel"
+	} else if s.braille {
+		mode = "braille"
 	}
 	return fmt.Sprintf("%s  screen %dx%d · %s · keys and mouse go to the machine · ctrl+] menu", s.vm, s.fbW, s.fbH, mode)
 }
@@ -253,9 +260,12 @@ func (s *screenView) status() string {
 func (s *screenView) draw() {
 	s.r.withFrame(func(img *image.RGBA) {
 		s.fbW, s.fbH = img.Bounds().Dx(), img.Bounds().Dy()
-		if s.sixel {
+		switch {
+		case s.sixel:
 			s.drawSixel(img)
-		} else {
+		case s.braille:
+			s.drawBraille(img)
+		default:
 			s.drawBlocks(img)
 		}
 	})
@@ -321,6 +331,35 @@ func sample(img *image.RGBA, ow, oh int) [][3]uint8 {
 			if n > 0 {
 				px[y*ow+x] = [3]uint8{uint8(r / n), uint8(g / n), uint8(b / n)}
 			}
+		}
+	}
+	return px
+}
+
+// sampleMax scales img to ow x oh keeping, per output pixel, the brightest
+// source pixel of its box: what a thin stroke needs to survive the scale.
+func sampleMax(img *image.RGBA, ow, oh int) [][3]uint8 {
+	fw, fh := img.Bounds().Dx(), img.Bounds().Dy()
+	px := make([][3]uint8, ow*oh)
+	for y := 0; y < oh; y++ {
+		sy0, sy1 := y*fh/oh, (y+1)*fh/oh
+		sy1 = min(max(sy1, sy0+1), fh)
+		for x := 0; x < ow; x++ {
+			sx0, sx1 := x*fw/ow, (x+1)*fw/ow
+			sx1 = min(max(sx1, sx0+1), fw)
+			var best [3]uint8
+			bestLum := uint32(0)
+			for sy := sy0; sy < sy1; sy++ {
+				off := img.PixOffset(sx0, sy)
+				for sx := sx0; sx < sx1; sx++ {
+					r, g, b := uint32(img.Pix[off]), uint32(img.Pix[off+1]), uint32(img.Pix[off+2])
+					if lum := (r*299 + g*587 + b*114) / 1000; lum >= bestLum {
+						bestLum, best = lum, [3]uint8{uint8(r), uint8(g), uint8(b)}
+					}
+					off += 4
+				}
+			}
+			px[y*ow+x] = best
 		}
 	}
 	return px
@@ -459,6 +498,11 @@ func (s *screenView) one(b []byte) (int, bool) {
 		case 'r':
 			s.out.WriteString("\x1b[2J")
 			r.requestUpdate(false)
+		case 'b':
+			if !s.sixel {
+				s.braille = !s.braille
+				s.out.WriteString("\x1b[2J")
+			}
 		case 0x1d:
 			r.key(ksControlL, true)
 			r.tap(']')
@@ -619,7 +663,7 @@ func (s *screenView) mouse(btn, cx, cy int, press bool) {
 		fy = (cy * s.cellH) * s.fbH / s.imgH
 	} else {
 		fx = (cx - s.offX) * s.fbW / s.imgW
-		fy = (cy - s.offY) * 2 * s.fbH / (s.imgH * 2)
+		fy = (cy - s.offY) * s.fbH / s.imgH
 	}
 	fx = min(max(fx, 0), s.fbW-1)
 	fy = min(max(fy, 0), s.fbH-1)
@@ -700,5 +744,103 @@ func terminalHasSixel() bool {
 		// a terminal that never answers leaves one read pending; it is
 		// consumed by bubbletea's reader as a stray key at worst
 		return false
+	}
+}
+
+// ── braille: two by four dots per cell ──────────────────────────────────
+// A text console is bright glyphs on black; half-blocks average eight
+// guest pixels into one cell and the glyphs melt. Braille gives every cell
+// eight dots (2 wide, 4 tall), a lit dot where the guest pixel is bright,
+// the cell's foreground the mean colour of the lit pixels and its
+// background the mean of the dark ones: the console text stays legible at
+// four times the resolution of blocks, which is what the operator's
+// screenshot of a blurred boot log asked for (2026-09-26). Photos look
+// better as blocks; b in the menu swaps.
+
+// brailleLines renders px (ow x oh, ow even, oh a multiple of 4) as rows of
+// braille cells with truecolour foreground and background.
+func brailleLines(px, mx [][3]uint8, ow, oh int) []string {
+	cols, rows := ow/2, oh/4
+	lines := make([]string, 0, rows)
+	var b strings.Builder
+	for cy := 0; cy < rows; cy++ {
+		b.Reset()
+		var lastFg, lastBg [3]uint8
+		first := true
+		for cx := 0; cx < cols; cx++ {
+			var bits rune
+			var lr, lg, lb, ln, dr, dg, db, dn uint32
+			for dy := 0; dy < 4; dy++ {
+				for dx := 0; dx < 2; dx++ {
+					// lit by the BRIGHTEST guest pixel under the dot, not the
+					// mean: a one-pixel glyph stroke averaged with black is
+					// grey and vanished (151 of 9720 dots on a boot log)
+					i := (cy*4+dy)*ow + cx*2 + dx
+					p, m := px[i], mx[i]
+					lum := (uint32(m[0])*299 + uint32(m[1])*587 + uint32(m[2])*114) / 1000
+					if lum >= 80 {
+						bits |= brailleBit(dx, dy)
+						lr += uint32(m[0])
+						lg += uint32(m[1])
+						lb += uint32(m[2])
+						ln++
+					} else {
+						dr += uint32(p[0])
+						dg += uint32(p[1])
+						db += uint32(p[2])
+						dn++
+					}
+				}
+			}
+			fg, bg := [3]uint8{}, [3]uint8{}
+			if ln > 0 {
+				fg = [3]uint8{uint8(lr / ln), uint8(lg / ln), uint8(lb / ln)}
+			}
+			if dn > 0 {
+				bg = [3]uint8{uint8(dr / dn), uint8(dg / dn), uint8(db / dn)}
+			}
+			if first || fg != lastFg {
+				fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm", fg[0], fg[1], fg[2])
+			}
+			if first || bg != lastBg {
+				fmt.Fprintf(&b, "\x1b[48;2;%d;%d;%dm", bg[0], bg[1], bg[2])
+			}
+			b.WriteRune(0x2800 + bits)
+			lastFg, lastBg, first = fg, bg, false
+		}
+		b.WriteString("\x1b[0m")
+		lines = append(lines, b.String())
+	}
+	return lines
+}
+
+// brailleBit is the Unicode braille dot for column dx (0..1), row dy (0..3).
+func brailleBit(dx, dy int) rune {
+	switch {
+	case dy < 3:
+		return 1 << (dy + 3*dx)
+	case dx == 0:
+		return 0x40
+	default:
+		return 0x80
+	}
+}
+
+// drawBraille is the full-window braille renderer.
+func (s *screenView) drawBraille(img *image.RGBA) {
+	fw, fh := img.Bounds().Dx(), img.Bounds().Dy()
+	w, h := s.cols, s.rows-1
+	if fw == 0 || fh == 0 || w < 2 || h < 1 {
+		return
+	}
+	scale := min(float64(w*2)/float64(fw), float64(h*4)/float64(fh))
+	ow, oh := max(int(float64(fw)*scale), 2), max(int(float64(fh)*scale), 4)
+	ow -= ow % 2
+	oh -= oh % 4
+	px, mx := sample(img, ow, oh), sampleMax(img, ow, oh)
+	s.imgW, s.imgH = ow/2, oh/4
+	s.offX, s.offY = (w-ow/2)/2, (h-oh/4)/2
+	for i, line := range brailleLines(px, mx, ow, oh) {
+		fmt.Fprintf(s.out, "\x1b[%d;%dH%s", s.offY+i+1, s.offX+1, line)
 	}
 }
