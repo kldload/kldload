@@ -511,6 +511,25 @@ k_profile_packages() {
         echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables wireguard-tools"
         ;;
 
+    console)
+        # The minimal appliance (operator, 2026-09-26): ZFS on root, KVM and
+        # the storage servers, every kldload tool and kld on the console —
+        # and no web UI, no monitoring stack, no desktop. Everything else
+        # (goldens, appliances, a cluster) is built after the fact from kld's
+        # Build menu. The KVM packages themselves come from
+        # k_profile_optional_packages (ENABLE_KVM=1 is the preset's default),
+        # the same way the kvm profile gets them.
+        local _c_nfs="nfs-kernel-server nfs-common" _c_iscsi="tgt"
+        if [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
+            _c_nfs="nfs-utils"
+            _c_iscsi="targetcli"
+        fi
+        echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
+        wireguard-tools tmux python3 python3-yaml htop net-tools ethtool tcpdump \
+        sanoid qemu-utils pciutils smartmontools ${_c_nfs} ${_c_iscsi} samba smbclient \
+        fzf bat eza fd-find ripgrep zoxide ${_fastfetch}"
+        ;;
+
     ai)
         # AI learning tool — core + WireGuard + Python + tmux + modern CLI. Ollama on firstboot.
         echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
@@ -3381,7 +3400,7 @@ WPEOF
     # behaviour, and the matrix passed it because no check asks whether a storage
     # server can serve storage (2026-09-18, first time this profile was ever
     # installed).
-    if [[ "$_profile" == "storage" ]]; then
+    if [[ "$_profile" == "storage" || "$_profile" == "console" ]]; then
         k_log "Configuring ZFS storage host"
 
         # One parent for everything served, so exports, snapshots and
