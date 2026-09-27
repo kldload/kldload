@@ -2934,7 +2934,14 @@ KBYAML
                 kube-network add-peer "$wip" "${w_pubs[$i]}" "${w_ids[$i]}" 2>/dev/null || true
             done
 
-            log "Host joined WireGuard mesh: 10.250.0.100 (mgmt), 10.251.0.100 (k8s)"
+            # The outcome, not the calls above: each one is swallowed, and this
+            # line used to print over a host with no wg-mgmt at all (fiend,
+            # 2026-09-27, after a re-bootstrap).
+            if ip link show wg-mgmt >/dev/null 2>&1 && ip link show wg-k8s >/dev/null 2>&1; then
+                log "Host joined WireGuard mesh: 10.250.0.100 (mgmt), 10.251.0.100 (k8s)"
+            else
+                warn "Host is NOT on the WireGuard mesh (wg-mgmt/wg-k8s down) — nodes are reached over virbr0; fix: kube-network init 100 && kube-cluster mesh-repair"
+            fi
         else
             warn "Host WireGuard key generation failed — using virbr0 for management"
         fi
