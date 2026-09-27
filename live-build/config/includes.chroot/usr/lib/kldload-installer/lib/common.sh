@@ -76,6 +76,40 @@ k_die() {
 # entirely on Debian trixie and then applied to all nine substrates at once.
 # On Fedora it would have reintroduced the invisible prompt on the one path
 # nobody had tested. Portable by default, specific by intent.
+# k_arc_max_bytes — the ZFS ARC cap for this install, in bytes, on stdout.
+#
+# Half of RAM, except on a host whose job is running VMs (the kvm and
+# console profiles, or ENABLE_KVM=1): there a quarter of RAM, never more
+# than 16 GiB and never less than 2 GiB. On a hypervisor the ARC competes
+# with guest memory and every guest keeps its own page cache on top, so
+# half of a 64 GiB fiend (31 GiB) was reserved for a cache the guests were
+# duplicating (assessment of fiend's kvm install, 2026-09-27). What the ARC
+# still does better than a page cache here is keep a golden's blocks ONCE
+# for every clone of it, compressed; 16 GiB holds the working set of the
+# goldens with room to spare. One function, because the same figure was
+# computed in three places (storage-zfs.sh, bootloader.sh, profiles.sh) and
+# a cap that differs between the cmdline and zfs.conf is not a cap.
+#
+# Args: none. Reads KLDLOAD_PROFILE, KLDLOAD_ENABLE_KVM and /proc/meminfo.
+# Returns: 0; prints 8 GiB when RAM cannot be read.
+k_arc_max_bytes() {
+    local ram gib=1073741824
+    ram="$(awk '/MemTotal/{print $2 * 1024}' /proc/meminfo 2>/dev/null)"
+    if [[ -z "$ram" || "$ram" -le 0 ]]; then
+        echo $((8 * gib))
+        return 0
+    fi
+    case "${KLDLOAD_PROFILE:-server}:${KLDLOAD_ENABLE_KVM:-0}" in
+    kvm:* | console:* | *:1)
+        local arc=$((ram / 4))
+        ((arc > 16 * gib)) && arc=$((16 * gib))
+        ((arc < 2 * gib)) && arc=$((2 * gib))
+        echo "$arc"
+        ;;
+    *) echo $((ram / 2)) ;;
+    esac
+}
+
 k_prompt_extension_applies() {
     case "${KLDLOAD_DISTRO:-debian}" in
     debian | ubuntu) return 0 ;;

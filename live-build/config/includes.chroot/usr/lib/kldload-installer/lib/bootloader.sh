@@ -1360,12 +1360,10 @@ EOFSTAB
     #
     # A module parameter on the kernel command line is honoured wherever the
     # module loads, initramfs included, so it cannot be missed by an initramfs
-    # that was built at the wrong moment. Half of RAM, matching the value
-    # profiles.sh documents.
-    local _ram_b _arc_b
-    _ram_b="$(awk '/MemTotal/{print $2 * 1024}' /proc/meminfo 2>/dev/null || echo 0)"
-    _arc_b=$((_ram_b / 2))
-    ((_arc_b > 0)) || _arc_b=8589934592
+    # that was built at the wrong moment. The figure is k_arc_max_bytes, the
+    # same one zfs.conf gets.
+    local _arc_b
+    _arc_b="$(k_arc_max_bytes)"
     _direct_bootargs+=" zfs.zfs_arc_max=${_arc_b}"
     # The SAME reasoning applies to every other option in that file, and they
     # were left behind when arc_max was rescued onto the command line. Measured

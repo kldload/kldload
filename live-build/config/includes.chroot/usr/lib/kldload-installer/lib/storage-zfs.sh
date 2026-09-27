@@ -719,10 +719,8 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     # UNCAPPED, so ARC could take the whole 62 GB out from under the VM fleet.
     # That is the 2026-08-13 freeze all over again, on the half of the matrix
     # the earlier fix did not reach.
-    local _zbm_ram _zbm_arc
-    _zbm_ram="$(awk '/MemTotal/{print $2 * 1024}' /proc/meminfo 2>/dev/null || echo 0)"
-    _zbm_arc=$((_zbm_ram / 2))
-    ((_zbm_arc > 0)) || _zbm_arc=8589934592
+    local _zbm_arc
+    _zbm_arc="$(k_arc_max_bytes)"
     _zbm_args+=" zfs.zfs_arc_max=${_zbm_arc} zfs.zfs_txg_timeout=10 zfs.l2arc_noprefetch=0"
     k_zfs_log "pinned ZFS module params on the ZBM cmdline (arc_max=${_zbm_arc})"
     zfs set org.zfsbootmenu:commandline="${_zbm_args} psi=1 selinux=0" rpool/ROOT

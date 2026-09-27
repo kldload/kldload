@@ -775,6 +775,11 @@ k_profile_optional_packages() {
         arch | alpine) : ;;
         *) out+=(ksmtuned) ;;
         esac
+        # tuned with the virtual-host profile: the performance governor, the
+        # scheduler and the dirty-page settings Red Hat ships for a host that
+        # runs guests. fiend's kvm install ran the powersave governor with no
+        # tuned at all (2026-09-27). Same name on every family.
+        out+=(tuned)
     fi
 
     # Kubernetes (optional checkbox)
@@ -3320,7 +3325,13 @@ WPEOF
         # ISO carried 3.3G of payload, and ai-webui.log said "no Whisper
         # weights in the darksite". Same failure the comment above describes,
         # re-triggered by making the weights optional.
-        if [[ -d /root/darksite/ollama ]]; then
+        # only where AI is wanted: 3.3 GB of runtime, interface and voice
+        # weights landed on every kvm install and nothing there used them
+        # (fiend, 2026-09-27). Adding AI later on a machine without it
+        # fetches online, which is what enabling a feature after install
+        # already does for the rest of the darksite.
+        if [[ -d /root/darksite/ollama ]] &&
+            [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" || "${_profile}" == "ai" ]]; then
             mkdir -p "${darksite_tgt}/ollama"
             rsync -a --exclude='*.lock' /root/darksite/ollama/ "${darksite_tgt}/ollama/"
             k_log "Ollama darksite installed to target: $(du -sh "${darksite_tgt}/ollama" 2>/dev/null | cut -f1)"
@@ -3543,16 +3554,16 @@ STORAGENFT
             rpool/vms/isos 2>/dev/null ||
             k_log "WARNING: could not create rpool/vms/isos"
 
-        # ARC tuning — cap at 50% of system RAM, leave the rest for KVM guests
-        local _total_ram_bytes
-        _total_ram_bytes=$(awk '/MemTotal/{print $2 * 1024}' /proc/meminfo 2>/dev/null || echo 0)
-        local _arc_max=$((_total_ram_bytes / 2))
-        [[ "$_arc_max" -gt 0 ]] || _arc_max=8589934592 # fallback 8GB
+        # ARC tuning — k_arc_max_bytes: a quarter of RAM up to 16 GiB on a
+        # VM host, half elsewhere; the same figure the kernel cmdline gets
+        local _arc_max
+        _arc_max="$(k_arc_max_bytes)"
 
         mkdir -p "${target}/etc/modprobe.d"
         cat >"${target}/etc/modprobe.d/zfs.conf" <<ZFSMOD
 # kldload KVM host — ZFS tuning
-# ARC capped at 50% of RAM to leave memory for KVM guests
+# ARC capped by k_arc_max_bytes: a quarter of RAM (at most 16 GiB) on a VM
+# host, so guest memory is not held by a cache the guests duplicate
 options zfs zfs_arc_max=${_arc_max}
 options zfs zfs_txg_timeout=10
 options zfs l2arc_noprefetch=0
@@ -3566,6 +3577,23 @@ options zfs l2arc_noprefetch=0
 # (onyx 2026-08-30: /sys/module/zfs/parameters/zfs_vdev_scheduler does not
 # exist).
 ZFSMOD
+
+        # tuned: virtual-host, set at install so the first boot already runs
+        # it. The two files are what `tuned-adm profile virtual-host` writes;
+        # the unit is enabled only when the package made it onto the target
+        # (the mirror gate can drop it, and an enable of nothing is a lie).
+        if [[ -f "${target}/usr/lib/systemd/system/tuned.service" ]]; then
+            mkdir -p "${target}/etc/tuned"
+            printf 'virtual-host\n' >"${target}/etc/tuned/active_profile"
+            printf 'manual\n' >"${target}/etc/tuned/profile_mode"
+            if chroot "${target}" systemctl enable tuned.service >/dev/null 2>&1; then
+                k_log "tuned: virtual-host profile, enabled"
+            else
+                k_log "WARNING: tuned is installed but could not be enabled — the host runs untuned"
+            fi
+        else
+            k_log "WARNING: tuned did not reach the target — no virtual-host tuning (is it in the mirror?)"
+        fi
 
         # Kernel VM tuning for ZFS on root + KVM
         mkdir -p "${target}/etc/sysctl.d"
