@@ -28,7 +28,8 @@
 #
 # Inputs:  $1 — libvirt domain name, or --all to sweep every running VM
 #          --ip A.B.C.D    skip lease lookup (the VM is not in libvirt's DHCP)
-#          --role NAME     inventory role; default "vm"
+#          --role NAME     inventory role; default: keep the role the VM
+#                          already has, "vm" for a VM the inventory has not seen
 #          --cluster NAME  inventory cluster; default "" (unclustered)
 #          --id N          force a mesh node id instead of allocating one
 #          --no-wg         register in the DB only, skip the mesh
@@ -157,7 +158,7 @@ sys.exit(1)' "$vm" && return 0
 
 if [[ "${1:-}" == "--all" ]]; then
     shift
-    _sweep_role="vm"
+    _sweep_role=""
     _sweep_cluster=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -175,7 +176,7 @@ if [[ "${1:-}" == "--all" ]]; then
             ;;
         esac
     done
-    [[ $EUID -eq 0 ]] || exec sudo "$0" --all --role "$_sweep_role" ${_sweep_cluster:+--cluster "$_sweep_cluster"}
+    [[ $EUID -eq 0 ]] || exec sudo "$0" --all ${_sweep_role:+--role "$_sweep_role"} ${_sweep_cluster:+--cluster "$_sweep_cluster"}
     # DELEGATE. The single-VM path below already resolves an address two ways
     # (guest agent, then MAC-to-DHCP-lease) and is already idempotent, so the
     # sweep just invokes it per VM and counts exit codes.
@@ -211,7 +212,7 @@ if [[ "${1:-}" == "--all" ]]; then
         # why, or the count is the only thing anyone can act on and it says
         # nothing.
         _out=""
-        _out="$("$0" "$_vm" --role "$_sweep_role" ${_sweep_cluster:+--cluster "$_sweep_cluster"} \
+        _out="$("$0" "$_vm" ${_sweep_role:+--role "$_sweep_role"} ${_sweep_cluster:+--cluster "$_sweep_cluster"} \
             </dev/null 2>&1)" || _rc=$?
         case "$_rc" in
         0) _done=$((_done + 1)) ;;
@@ -256,7 +257,7 @@ if _is_template "$VM"; then
 fi
 shift
 IP=""
-ROLE="vm"
+ROLE="" # empty: keep an existing row's role (see --role in the header)
 CLUSTER=""
 FORCE_ID=""
 DO_WG=1
@@ -351,9 +352,9 @@ _ssh_stdin() {
 # which is not yet meshed is useful — Ansible can still reach it over the
 # libvirt network. A meshed VM the inventory does not know about is not.
 if command -v kldload-db >/dev/null 2>&1; then
-    if kldload-db vm-register --name "$VM" --role "$ROLE" \
+    if kldload-db vm-register --name "$VM" ${ROLE:+--role "$ROLE"} --default-role vm \
         --cluster "$CLUSTER" --status "running" 2>/dev/null; then
-        log "${VM}: registered (role=${ROLE}${CLUSTER:+ cluster=${CLUSTER}})"
+        log "${VM}: registered (role=${ROLE:-as recorded}${CLUSTER:+ cluster=${CLUSTER}})"
     else
         warn "${VM}: kldload-db vm-register failed — Ansible will not see this VM"
     fi
@@ -373,7 +374,7 @@ if ((!DO_WG)); then
     # not correctness.
     command -v kldload-networks >/dev/null 2>&1 && kldload-networks sync >/dev/null 2>&1 || true
     # The only record this path leaves: nothing below runs.
-    kldload-db event --type vm --subject "$VM" --message "registered: role=${ROLE} ip=${IP} (no mesh)" 2>/dev/null || true # timeline nicety, never fatal
+    kldload-db event --type vm --subject "$VM" --message "registered: role=${ROLE:-as recorded} ip=${IP} (no mesh)" 2>/dev/null || true # timeline nicety, never fatal
     log "${VM}: --no-wg, done"
     exit 0
 fi
@@ -657,7 +658,7 @@ if ((_changed)); then
     # swallow: the event row is a timeline nicety. A DB that rejects it must
     # not fail an enrolment that has already put the VM on the mesh.
     command -v kldload-db >/dev/null 2>&1 &&
-        kldload-db event --type vm --subject "$VM" --message "enrolled: role=${ROLE} ip=${IP} mesh=${node_id}" 2>/dev/null || true
+        kldload-db event --type vm --subject "$VM" --message "enrolled: role=${ROLE:-as recorded} ip=${IP} mesh=${node_id}" 2>/dev/null || true
     log "${VM}: enrolled"
 else
     log "${VM}: already enrolled (id ${node_id}) — nothing changed"

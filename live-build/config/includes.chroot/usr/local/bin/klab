@@ -3730,6 +3730,7 @@ WG
 
         # Add all VM peers to host config
         node_id=1
+        local _members=""
         for distro in "${DISTROS[@]}"; do
             [[ -z "${wg_ips[$distro]:-}" ]] && {
                 ((node_id++))
@@ -3743,10 +3744,26 @@ AllowedIPs = ${wg_base}.${node_id}/32
 Endpoint = ${wg_ips[$distro]}:51830
 PersistentKeepalive = 25
 PEER
+            _members+="$(site_name "$site" "$distro") ${node_id} ${wg_pubs[$distro]} ${wg_ips[$distro]}"$'\n'
             # Add host as peer on the VM
             _ssh_cmd "${wg_ips[$distro]}" "wg set wg-lab peer ${host_pub} allowed-ips ${host_wg_ip}/32 endpoint $(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' | head -1):$([[ "$site" == "blue" ]] && echo 51831 || echo 51832) persistent-keepalive 25" 2>/dev/null || true
             ((node_id++))
         done
+
+        # Who this mesh was built for, in kvm-mesh's members format ("name id
+        # pubkey endpoint"), so kldload-estate can tell a quiesced site VM is
+        # still a member: WireGuard knows keys and addresses, not names, and a
+        # stopped VM has no address. Every site VM on fiend read as off the
+        # mesh after autodeploy's quiesce (2026-09-27). Atomic, like the
+        # members files kvm-mesh writes beside it.
+        local _mdir=/var/lib/kldload/mesh
+        if install -d -m 0755 "$_mdir" &&
+            printf '%s' "$_members" >"${_mdir}/.klab-${site}.members.tmp" &&
+            mv -f "${_mdir}/.klab-${site}.members.tmp" "${_mdir}/klab-${site}.members"; then
+            log "  mesh members recorded: $(grep -c . "${_mdir}/klab-${site}.members") in ${_mdir}/klab-${site}.members"
+        else
+            warn "could not record klab-${site}'s members — the estate will show its VMs off the mesh when they are stopped"
+        fi
 
         # Bring up host WireGuard interface.
         #

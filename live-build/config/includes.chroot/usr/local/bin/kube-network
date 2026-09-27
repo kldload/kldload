@@ -76,6 +76,28 @@ EOF
 }
 
 # ── init ───────────────────────────────────────────────────────────────────
+# _wg_up IFACE — make IFACE run its config file NOW, whether it was up or not,
+# and prove it: returns 1 with a warning when the link is not there after.
+#
+# Through the unit first, so systemd's idea of the interface matches the
+# link. `systemctl enable --now` is a no-op on a unit that is already
+# active, and wg-quick@ is a oneshot that STAYS active after its interface is
+# deleted by hand -- which kube-cluster's clean slate did with `ip link del`.
+# The re-bootstrap then "initialised" the host with no interface, and the
+# old reload (`wg-quick down X 2>/dev/null` under set -e, then up) died on
+# the down before reaching the up. Every call site swallowed it and the host
+# logged "joined WireGuard mesh" with no wg-mgmt at all (fiend, 2026-09-27).
+_wg_up() {
+    local i="$1"
+    if ! systemctl restart "wg-quick@${i}" >/dev/null 2>&1; then
+        wg-quick down "$i" >/dev/null 2>&1 || : # not up is fine: we bring it up next
+        wg-quick up "$i" >/dev/null 2>&1 || :   # judged by the link check below
+    fi
+    ip link show "$i" >/dev/null 2>&1 && return 0
+    warn "${i} is not up after a restart — run 'wg-quick up ${i}' to see why"
+    return 1
+}
+
 cmd_init() {
     local node_id="${1:?Usage: kube-network init <node-id>}"
     [[ "$node_id" =~ ^[0-9]+$ ]] || die "node-id must be a number (1-254)"
@@ -174,9 +196,14 @@ EOF
     # Save node ID for future reference
     echo "$node_id" >/etc/wireguard/.node-id
 
-    # Bring up interfaces
-    systemctl enable --now wg-quick@wg-mgmt 2>/dev/null || wg-quick up wg-mgmt 2>/dev/null || true
-    systemctl enable --now wg-quick@wg-k8s 2>/dev/null || wg-quick up wg-k8s 2>/dev/null || true
+    # Bring up interfaces, and keep them across a reboot
+    local _i _bad=0
+    for _i in wg-mgmt wg-k8s; do
+        systemctl enable "wg-quick@${_i}" >/dev/null 2>&1 ||
+            warn "wg-quick@${_i} could not be enabled — ${_i} will not come back after a reboot"
+        _wg_up "$_i" || _bad=1
+    done
+    ((_bad == 0)) || die "WireGuard did not come up for node ${node_id} (see above)"
 
     log "WireGuard initialized for node ${node_id}:"
     log "  Management: ${MGMT_SUBNET}.${node_id}/24 (port ${MGMT_PORT})"
@@ -222,11 +249,8 @@ AllowedIPs = ${K8S_SUBNET}.${peer_id}/32
 PersistentKeepalive = 25
 EOF
 
-    # Reload
-    wg-quick down wg-mgmt 2>/dev/null
-    wg-quick up wg-mgmt 2>/dev/null || true
-    wg-quick down wg-k8s 2>/dev/null
-    wg-quick up wg-k8s 2>/dev/null || true
+    # Reload: both planes re-read their files, and must be up after
+    _wg_up wg-mgmt && _wg_up wg-k8s || die "peer ${peer_id} written, but the mesh is not up (see above)"
 
     log "Peer ${peer_id} added: ${endpoint}"
     log "  Management: ${MGMT_SUBNET}.${peer_id}"
@@ -289,10 +313,7 @@ cmd_remove_peer() {
     done
 
     if ((removed)); then
-        wg-quick down wg-mgmt 2>/dev/null
-        wg-quick up wg-mgmt 2>/dev/null || true
-        wg-quick down wg-k8s 2>/dev/null
-        wg-quick up wg-k8s 2>/dev/null || true
+        _wg_up wg-mgmt && _wg_up wg-k8s || die "peer ${peer_id} removed from the files, but the mesh is not up (see above)"
         log "Peer ${peer_id} removed"
     else
         log "Peer ${peer_id} not present — nothing to do"

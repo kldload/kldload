@@ -1881,6 +1881,80 @@ NETCFG
 #
 # Returns 0 always: a control plane that joined the CLUSTER but not the mesh
 # is degraded, not broken, and failing the whole join here would be worse.
+# ─── The host's mesh is shared ──────────────────────────────────────────────
+# wg-mgmt and wg-k8s on the hypervisor are not this cluster's alone:
+# kldload-enroll puts every estate VM on them (klab sites, clones), with its
+# record in /var/lib/kldload/mesh/enrolled/<vm> (node_id=N). destroy and the
+# bootstrap clean slate used to delete both interfaces, their keys and the
+# node-id outright, which took every enrolled machine off the estate with the
+# cluster. HISTORY: fiend, 2026-09-27 -- a destroy --all and re-bootstrap
+# left klab-blue-centos/-debian/-rocky holding a host key that no longer
+# existed, and kldload-estate showed every one of them off the mesh.
+
+# _cluster_name_re — an ERE for this cluster's domain names: the control
+# planes (kldload-cp, kldload-cp-2, ...) and the workers (kldload-w-1, ...).
+_cluster_name_re() { printf '^(%s(-[0-9]+)?|%s-[0-9]+)$' "$CP_NAME" "$WORKER_PREFIX"; }
+
+# _host_mesh_keep_ids — print, one per line, the mesh ids of enrolled machines
+# that are NOT in this cluster. Empty output means nobody else is on the mesh.
+_host_mesh_keep_ids() {
+    local f name id re
+    re="$(_cluster_name_re)"
+    for f in /var/lib/kldload/mesh/enrolled/*; do
+        [[ -f "$f" ]] || continue
+        name="$(basename "$f")"
+        [[ "$name" =~ $re ]] && continue
+        id="$(sed -n 's/^node_id=//p' "$f" | tr -cd '0-9')"
+        [[ -n "$id" ]] && printf '%s\n' "$id"
+    done
+    return 0
+}
+
+# _host_mesh_release_cluster — take this cluster off the host's mesh and leave
+# everyone else on it. With no outside member it wipes the host's planes as
+# before (a clean re-init is what the next bootstrap wants); with any, it
+# keeps the interfaces, keys and node-id and removes only the peers that are
+# neither the host nor an outside member. The cluster's own enrolment records
+# go too: those machines no longer exist.
+# Returns 0; a peer that will not come off is warned about, not fatal, because
+# destroy must still finish tearing down the VMs it has already stopped.
+_host_mesh_release_cluster() {
+    local -a outside=() have=()
+    local id k host_id="" kept re f
+    mapfile -t outside < <(_host_mesh_keep_ids)
+    re="$(_cluster_name_re)"
+    for f in /var/lib/kldload/mesh/enrolled/*; do
+        [[ -f "$f" && "$(basename "$f")" =~ $re ]] && rm -f "$f"
+    done
+    if ((${#outside[@]} == 0)); then
+        # Stop the units, not just the links: a wg-quick@ unit stays "active"
+        # after its interface is deleted by hand, and the next init's enable
+        # --now then did nothing (kube-network _wg_up, fiend 2026-09-27).
+        systemctl stop wg-quick@wg-mgmt wg-quick@wg-k8s 2>/dev/null || true # not loaded on a host never meshed
+        ip link del wg-mgmt 2>/dev/null || true                             # gone already after the stop
+        ip link del wg-k8s 2>/dev/null || true                              # same
+        rm -f /etc/wireguard/wg-mgmt.* /etc/wireguard/wg-k8s.* /etc/wireguard/.node-id
+        log "host mesh: no other enrolled machine — both planes removed"
+        return 0
+    fi
+    [[ -s /etc/wireguard/.node-id ]] && host_id="$(tr -cd '0-9' </etc/wireguard/.node-id)"
+    mapfile -t have < <(grep -hoE '^# Node [0-9]+' /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-k8s.conf 2>/dev/null |
+        awk '{print $3}' | sort -un)
+    local removed=0
+    for id in "${have[@]}"; do
+        [[ -n "$id" && "$id" != "$host_id" ]] || continue
+        kept=0
+        for k in "${outside[@]}"; do [[ "$k" == "$id" ]] && kept=1 && break; done
+        ((kept)) && continue
+        if kube-network remove-peer "$id" >/dev/null 2>&1; then
+            removed=$((removed + 1))
+        else
+            warn "host mesh: could not remove cluster peer ${id} — kube-network remove-peer ${id}"
+        fi
+    done
+    log "host mesh: kept for ${#outside[@]} enrolled machine(s) (ids ${outside[*]}); ${removed} cluster peer(s) removed"
+}
+
 _cp_wg_join() {
     local cp_ip="$1" new_ip="$2" name="$3"
     local next_id pub
@@ -2267,14 +2341,11 @@ cmd_bootstrap() {
         grep -E "$_ds_re" || true); do
         zfs destroy -Rf "$ds" 2>/dev/null || true
     done
-    # Clean host state
-    ip link del wg-mgmt 2>/dev/null || true
-    ip link del wg-k8s 2>/dev/null || true
-    rm -f /etc/wireguard/wg-mgmt.* /etc/wireguard/wg-k8s.* 2>/dev/null
-    # ...and the node-id marker, or the host is left claiming to be an
-    # initialised mesh member with no config to back it up, and
-    # `kube-network init` then refuses as a silent no-op.
-    rm -f /etc/wireguard/.node-id 2>/dev/null
+    # Clean host state. The node-id marker goes with the configs when they
+    # go (or the host claims to be a mesh member with nothing behind it and
+    # `kube-network init` refuses as a silent no-op); the helper keeps all
+    # three when an enrolled machine outside the cluster still needs them.
+    _host_mesh_release_cluster
     rm -f /root/.kube/config 2>/dev/null
     sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
     systemctl start sanoid.timer 2>/dev/null || true
@@ -2863,7 +2934,14 @@ KBYAML
                 kube-network add-peer "$wip" "${w_pubs[$i]}" "${w_ids[$i]}" 2>/dev/null || true
             done
 
-            log "Host joined WireGuard mesh: 10.250.0.100 (mgmt), 10.251.0.100 (k8s)"
+            # The outcome, not the calls above: each one is swallowed, and this
+            # line used to print over a host with no wg-mgmt at all (fiend,
+            # 2026-09-27, after a re-bootstrap).
+            if ip link show wg-mgmt >/dev/null 2>&1 && ip link show wg-k8s >/dev/null 2>&1; then
+                log "Host joined WireGuard mesh: 10.250.0.100 (mgmt), 10.251.0.100 (k8s)"
+            else
+                warn "Host is NOT on the WireGuard mesh (wg-mgmt/wg-k8s down) — nodes are reached over virbr0; fix: kube-network init 100 && kube-cluster mesh-repair"
+            fi
         else
             warn "Host WireGuard key generation failed — using virbr0 for management"
         fi
@@ -3289,12 +3367,8 @@ cmd_destroy() {
     # Restart sanoid
     systemctl start sanoid.timer 2>/dev/null || true
 
-    # Clean up host WireGuard mesh
-    ip link del wg-mgmt 2>/dev/null || true
-    ip link del wg-k8s 2>/dev/null || true
-    rm -f /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-k8s.conf 2>/dev/null
-    rm -f /etc/wireguard/wg-mgmt.key /etc/wireguard/wg-mgmt.pub 2>/dev/null
-    rm -f /etc/wireguard/wg-k8s.key /etc/wireguard/wg-k8s.pub 2>/dev/null
+    # The cluster off the host's mesh; every other enrolled machine stays on.
+    _host_mesh_release_cluster
 
     # Clean up host kubeconfig and /etc/hosts entries
     rm -f /root/.kube/config 2>/dev/null
@@ -3514,7 +3588,8 @@ cmd_mesh_repair() {
 
     # Pass 3: the hypervisor's own view of the mesh.
     if [[ -n "$host_pub" ]] && command -v kube-network >/dev/null 2>&1; then
-        local -a hv_have=()
+        local -a hv_have=() outside_ids=()
+        mapfile -t outside_ids < <(_host_mesh_keep_ids)
         mapfile -t hv_have < <(grep -hoE '^# Node [0-9]+' /etc/wireguard/wg-k8s.conf 2>/dev/null |
             awk '{print $3}' | sort -un)
         for stale in "${hv_have[@]}"; do
@@ -3522,6 +3597,8 @@ cmd_mesh_repair() {
             local keep=0
             for cur in "${live_ids[@]}"; do [[ "$stale" == "$cur" ]] && keep=1 && break; done
             [[ "$stale" == "$host_id" ]] && keep=1
+            # an estate VM kldload-enroll put here is not stale; it is not ours
+            for cur in "${outside_ids[@]}"; do [[ "$stale" == "$cur" ]] && keep=1 && break; done
             ((keep)) || {
                 kube-network remove-peer "$stale" >/dev/null 2>&1 && removed=$((removed + 1))
                 log "  hypervisor: dropped stale peer ${stale}"
