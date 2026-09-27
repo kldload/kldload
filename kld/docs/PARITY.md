@@ -208,3 +208,35 @@ never a second implementation of them.
   background (doctor 120 s, snapshot counts 30 s).
 - A verb reloads the table it acted on; the live view refreshes itself
   every 3 s without a spinner; the cursor follows the row name.
+
+## Storage as a NAS console (operator, 2026-09-26: "a full zxplore console like the NAS guys")
+
+What TrueNAS-class consoles have that the Storage section does not yet,
+each mapped to the kldload verb or file that already owns it. Nothing here
+is a new engine.
+- todo — Shares: create/edit/remove NFS and SMB exports on a dataset
+  (sharenfs/sharesmb properties, /etc/exports.d, smb.conf shares, samba
+  users with smbpasswd), iSCSI targets (targetcli), with the daemon state
+  and "SHARES NOT SERVED" verdict the read-only tab already shows.
+- todo — Disks: the shelf (lsblk by-id, in-use reasons), SMART health and
+  self-tests (smartctl -H/-a/-t), temperatures, wear; a failing disk's
+  place in the pool topology; replace from the shelf.
+- todo — Snapshot policy: sanoid.conf templates per dataset (hourly/daily/
+  weekly/monthly counts, autosnap on/off) edited from the dataset row;
+  what the policy will keep, shown against what exists.
+- todo — Scrub and trim schedules: the timers, next run, last result.
+- todo — Replication tasks: the Sync tab (syncoid timers) with source,
+  target, schedule, last run and next; run now; the boot manifest capture.
+- todo — Quotas and reservations per dataset and per user/group
+  (userspace/groupspace), with usage against the limit.
+- todo — Permissions: owner/mode, POSIX ACLs and ZFS delegation (zfs
+  allow/unallow) from the dataset row; the dossier shows them first.
+- todo — Encryption: per-dataset keys with load/unload/change-key (partly
+  done) plus a key-status overview and unlock-at-boot state.
+- todo — Alerts: a Storage/Alerts tab from kldload-doctor's storage checks
+  and observe's verdicts, with the fix line; degraded pool, capacity,
+  errors, failed scrub, SMART failure.
+- todo — Users for shares: the local accounts a share is served to, with
+  smbpasswd; never a second identity store.
+- done — pools, datasets, snapshots, explorer with restore, ARC, topology,
+  boot environments, the read-only shares view.
