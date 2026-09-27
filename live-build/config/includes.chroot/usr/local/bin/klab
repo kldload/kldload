@@ -246,6 +246,41 @@ _register_vm() {
 
 _register_golden() { _register_vm "$1" klab-golden sealed; }
 
+# _deregister_vm — drop a destroyed VM from the state DB. The destroy path
+# never did, so every torn-down site left rows the inventory and the web
+# console still listed (source audit 2026-09-26). Best effort: the machine
+# is already gone, and a row that will not delete is reported, not fatal.
+_deregister_vm() {
+    local _name="$1"
+    command -v kldload-db >/dev/null 2>&1 || return 0
+    kldload-db vm-delete --name "$_name" >/dev/null 2>&1 ||
+        warn "could not remove ${_name} from the state DB — it may still be listed"
+    return 0
+}
+
+# _destroy_zvol_own — destroy a zvol and its snapshots, never its clones.
+#
+# -R takes every clone of every snapshot with it: a machine the operator
+# made with kvm-clone from a klab VM or golden is a dependent, and
+# `klab destroy goldens` deleted those along with the goldens (source
+# audit 2026-09-26). -r refuses while clones exist; the clones are then
+# named so the operator decides (kvm-delete them, or zfs promote them).
+# Args: $1 dataset. Returns 0 when gone or absent, 1 when something holds it.
+_destroy_zvol_own() {
+    local ds="$1" clones
+    zfs list "$ds" >/dev/null 2>&1 || return 0
+    if zfs destroy -r "$ds" 2>/dev/null; then
+        return 0
+    fi
+    clones="$(zfs list -H -t snapshot -o clones -r "$ds" 2>/dev/null | tr ',' '\n' | grep -v '^-$' | grep . | tr '\n' ' ')"
+    if [[ -n "$clones" ]]; then
+        warn "${ds} kept: machines were cloned from it: ${clones}— delete them (kvm-delete) or zfs promote them first"
+    else
+        warn "${ds} could not be destroyed (busy?) — left in place"
+    fi
+    return 1
+}
+
 _osvariant_known() {
     local _v="$1"
     if [[ -n "${_OSINFO_KNOWN:-}" ]]; then
@@ -2540,7 +2575,7 @@ build_golden_single() {
         if [[ "$_existing_result" == *"FAIL"* || "$_existing_result" == *"PARTIAL"* ]]; then
             warn "Golden ${name} exists but validation was: ${_existing_result} — rebuilding"
         else
-            log "Golden ${name} exists — skipping (destroy with: zfs destroy -Rf ${zpath})"
+            log "Golden ${name} exists — skipping (destroy with: klab destroy goldens)"
             return 0
         fi
     fi
@@ -2549,7 +2584,7 @@ build_golden_single() {
     log "  Cleaning up previous state..."
     virsh destroy "$name" 2>/dev/null || true
     virsh undefine "$name" --nvram 2>/dev/null || virsh undefine "$name" 2>/dev/null || true
-    zfs destroy -Rf "$zpath" 2>/dev/null || true
+    _destroy_zvol_own "$zpath" || true
     rm -f "${ISO_DIR}/${name}-cloud-init.iso" 2>/dev/null || true
 
     local t_start
@@ -3441,24 +3476,34 @@ deploy_site() {
                 ((skipped++))
                 continue
             fi
-            warn "${sname} zvol exists but no libvirt domain — clobbering and redeploying"
-            virsh destroy "$sname" 2>/dev/null || true
-            virsh undefine "$sname" --nvram 2>/dev/null ||
-                virsh undefine "$sname" 2>/dev/null || true
-            zfs destroy -Rf "$spath" 2>/dev/null || {
-                warn "failed to destroy orphan zvol ${spath}; skipping ${sname}"
-                ((skipped++))
-                continue
-            }
+            if [[ "${KLAB_ADOPT:-0}" == "1" ]]; then
+                # promote and rollback move a site's disks into place and ask
+                # for them to be booted AS THEY ARE; clobbering them here is
+                # what made promote a fresh redeploy that threw green's data
+                # away (source audit 2026-09-26)
+                log "${sname}: booting the existing disk (promoted or rolled back), not a fresh clone"
+            else
+                warn "${sname} zvol exists but no libvirt domain — clobbering and redeploying"
+                virsh destroy "$sname" 2>/dev/null || true
+                virsh undefine "$sname" --nvram 2>/dev/null ||
+                    virsh undefine "$sname" 2>/dev/null || true
+                _destroy_zvol_own "$spath" || {
+                    warn "failed to destroy orphan zvol ${spath}; skipping ${sname}"
+                    ((skipped++))
+                    continue
+                }
+            fi
         fi
 
-        echo -ne "  ${gname}@golden -> ${sname} (${vm_ip}) ... "
-        local cs
-        cs="$(timer_start)"
-        zfs clone "${gpath}@golden" "$spath"
-        local ce
-        ce="$(timer_elapsed_ms "$cs")"
-        echo -e "${G}done${N} (${C}${ce}ms${N})"
+        if ! zfs list "$spath" >/dev/null 2>&1; then
+            echo -ne "  ${gname}@golden -> ${sname} (${vm_ip}) ... "
+            local cs
+            cs="$(timer_start)"
+            zfs clone "${gpath}@golden" "$spath"
+            local ce
+            ce="$(timer_elapsed_ms "$cs")"
+            echo -e "${G}done${N} (${C}${ce}ms${N})"
+        fi
 
         for _ in $(seq 1 10); do
             [[ -b "$sdev" ]] && break
@@ -3755,35 +3800,46 @@ destroy_site() {
         spath="$(zvol_path "$sname")"
         virsh destroy "$sname" 2>/dev/null || true
         virsh undefine "$sname" --nvram 2>/dev/null || virsh undefine "$sname" 2>/dev/null || true
-        zfs destroy -Rf "$spath" 2>/dev/null || true
+        _destroy_zvol_own "$spath" || true # reported inside; the rest of the site still goes
+        # the disks promote and rollback kept for the way back
+        local prev
+        while read -r prev; do
+            [[ -n "$prev" ]] && { _destroy_zvol_own "$prev" || true; } # reported inside
+        done < <(zfs list -H -o name -t volume 2>/dev/null | grep -E "^${spath}-(prev|rolledback)-[0-9-]+$")
+        _deregister_vm "$sname"
         rm -f "${ISO_DIR}/${sname}-cloud-init.iso" 2>/dev/null
     done
     # Obs VM
     local obs_sname="${PREFIX}-${site}-obs"
     virsh destroy "$obs_sname" 2>/dev/null || true
     virsh undefine "$obs_sname" --nvram 2>/dev/null || virsh undefine "$obs_sname" 2>/dev/null || true
-    zfs destroy -Rf "${POOL}/vms/${obs_sname}" 2>/dev/null || true
+    _destroy_zvol_own "${POOL}/vms/${obs_sname}" || true # reported inside
+    _deregister_vm "$obs_sname"
     [[ -n "$quiet" ]] || log "Site ${site} destroyed"
 }
 
+# _site_stop <name> — stop and undefine a site domain so its zvol can be
+# renamed; the disk is kept. swallow: a domain that is absent or already off.
+_site_stop() {
+    virsh destroy "$1" >/dev/null 2>&1 || true
+    virsh undefine "$1" --nvram >/dev/null 2>&1 || virsh undefine "$1" >/dev/null 2>&1 || true
+}
+
+# cmd_promote — green becomes blue, WITH green's data, and the old blue is
+# kept as <blue>-prev-<ts> for `klab rollback`.
+#
+# The first version snapshotted blue, then destroy_site blue -Rf'd those
+# snapshots away, then cloned green into blue and zfs destroy -Rf'd green,
+# which took the new clone with it — so deploy_site found nothing and
+# cloned the golden: promote was a fresh redeploy that destroyed both
+# sites' data (source audit 2026-09-26). Now the disks are renamed, which
+# moves them with their snapshots, and deploy_site boots them as they are.
 cmd_promote() {
     local site="${1:-green}"
     [[ "$site" == "green" ]] || die "Can only promote green to blue"
-    log "Promoting green -> blue"
-
-    local ts
+    log "Promoting green -> blue (the old blue is kept for klab rollback)"
+    local ts moved=0
     ts="$(date +%Y%m%d-%H%M%S)"
-    local had_blue=false
-    for distro in "${DISTROS[@]}"; do
-        local bpath
-        bpath="$(zvol_path "$(site_name blue "$distro")")"
-        if zfs list "$bpath" >/dev/null 2>&1; then
-            had_blue=true
-            zfs snapshot "${bpath}@pre-promote-${ts}" 2>/dev/null || true
-        fi
-    done
-    $had_blue && destroy_site "blue" quiet
-
     for distro in "${DISTROS[@]}"; do
         local gname bname gpath bpath
         gname="$(site_name green "$distro")"
@@ -3791,40 +3847,57 @@ cmd_promote() {
         gpath="$(zvol_path "$gname")"
         bpath="$(zvol_path "$bname")"
         zfs list "$gpath" >/dev/null 2>&1 || continue
-        virsh destroy "$gname" 2>/dev/null || true
-        virsh undefine "$gname" --nvram 2>/dev/null || virsh undefine "$gname" 2>/dev/null || true
-        zfs snapshot "${gpath}@promoted-${ts}" 2>/dev/null || true
-        echo -ne "  ${gname} -> ${bname} ... "
-        local cs
-        cs="$(timer_start)"
-        zfs clone "${gpath}@promoted-${ts}" "$bpath"
-        echo -e "${G}done${N} (${C}$(timer_elapsed_ms "$cs")ms${N})"
-        zfs destroy -Rf "$gpath" 2>/dev/null || true
+        _site_stop "$gname"
+        if zfs list "$bpath" >/dev/null 2>&1; then
+            _site_stop "$bname"
+            zfs rename "$bpath" "${bpath}-prev-${ts}" ||
+                die "could not keep the old ${bname} (rename failed) — nothing moved for ${distro}"
+        fi
+        zfs rename "$gpath" "$bpath" || die "could not move ${gname} to ${bname}"
+        _deregister_vm "$gname"
+        echo -e "  ${gname} -> ${bname} ${G}moved${N} (old blue kept as ${bname}-prev-${ts})"
+        ((++moved))
     done
-
-    log "Booting new blue site..."
-    deploy_site "blue"
+    ((moved > 0)) || die "no green site to promote"
+    log "Booting the promoted blue site (${moved} machine(s), their disks as they were)..."
+    KLAB_ADOPT=1 deploy_site "blue"
 }
 
+# cmd_rollback — blue goes back to the blue that promote replaced
+# (<blue>-prev-<ts>, newest); the rolled-back blue is kept as
+# <blue>-rolledback-<ts>. With no -prev disk, blue rolls back to its newest
+# snapshot in place. Either way the disk is booted as it is: the first
+# version undefined the domains and deploy_site then clobbered the disk it
+# had just rolled back (source audit 2026-09-26).
 cmd_rollback() {
-    log "Rolling back blue site to previous snapshot..."
+    log "Rolling blue back..."
+    local ts
+    ts="$(date +%Y%m%d-%H%M%S)"
     for distro in "${DISTROS[@]}"; do
-        local bname bpath
+        local bname bpath prev snap
         bname="$(site_name blue "$distro")"
         bpath="$(zvol_path "$bname")"
-        zfs list "$bpath" >/dev/null 2>&1 || continue
-        local snap
-        snap="$(zfs list -t snapshot -o name -s creation -r "$bpath" 2>/dev/null | tail -1)"
-        [[ -z "$snap" || "$snap" == "NAME" ]] && {
-            warn "No snapshots for ${bname}"
+        prev="$(zfs list -H -o name -t volume -s creation 2>/dev/null | grep -E "^${bpath}-prev-[0-9-]+$" | tail -1)"
+        if [[ -n "$prev" ]]; then
+            _site_stop "$bname"
+            if zfs list "$bpath" >/dev/null 2>&1; then
+                zfs rename "$bpath" "${bpath}-rolledback-${ts}" || die "could not set ${bname} aside"
+            fi
+            zfs rename "$prev" "$bpath" || die "could not restore ${prev}"
+            log "  ${bname}: back to the blue promote replaced (${prev##*/}); the rolled-back one is ${bname}-rolledback-${ts}"
             continue
-        }
-        virsh destroy "$bname" 2>/dev/null || true
-        virsh undefine "$bname" --nvram 2>/dev/null || virsh undefine "$bname" 2>/dev/null || true
-        log "  Rolling back ${bname} to ${snap}"
-        zfs rollback -r "$snap"
+        fi
+        zfs list "$bpath" >/dev/null 2>&1 || continue
+        snap="$(zfs list -H -t snapshot -o name -s creation -d 1 "$bpath" 2>/dev/null | tail -1)"
+        if [[ -z "$snap" ]]; then
+            warn "No earlier blue and no snapshot for ${bname} — left as it is"
+            continue
+        fi
+        _site_stop "$bname"
+        log "  ${bname}: rolling back to ${snap##*@}"
+        zfs rollback -r "$snap" || die "rollback of ${bname} to ${snap} failed"
     done
-    deploy_site "blue"
+    KLAB_ADOPT=1 deploy_site "blue"
 }
 
 # ── Section 8: Payloads ──────────────────────────────────────────────────
@@ -4318,7 +4391,7 @@ cmd_test() {
         # only when a prior VM's qemu is still holding the zvol open.
         if zfs list "$zpath" >/dev/null 2>&1; then
             for _i in $(seq 1 15); do
-                zfs destroy -Rf "$zpath" 2>/dev/null && break
+                _destroy_zvol_own "$zpath" && break
                 sleep 1
             done
         fi
@@ -4327,7 +4400,7 @@ cmd_test() {
             # Last resort: SIGKILL any qemu still holding this name, then retry.
             pgrep -af "qemu.*${name}" | awk '{print $1}' | xargs -r kill -9 2>/dev/null
             sleep 2
-            zfs destroy -Rf "$zpath" 2>/dev/null
+            _destroy_zvol_own "$zpath"
             if zfs list "$zpath" >/dev/null 2>&1; then
                 warn "  ${distro}: zvol ${zpath} still busy after force-kill — skipping"
                 continue
@@ -4636,7 +4709,7 @@ cmd_test() {
         virsh undefine "$name" --nvram --remove-all-storage 2>/dev/null ||
             virsh undefine "$name" --nvram 2>/dev/null ||
             virsh undefine "$name" 2>/dev/null || true
-        zfs destroy -Rf "$(zvol_path "$name")" 2>/dev/null || true
+        _destroy_zvol_own "$(zvol_path "$name")" || true
         rm -f "${ISO_DIR}/${name}-cloud-init.iso" 2>/dev/null || true
     done
     log "Cleanup done."
@@ -4916,7 +4989,7 @@ cmd_verify() {
         vm_zdev="$(zvol_dev "$vm_name")"
         virsh destroy "$vm_name" 2>/dev/null || true
         virsh undefine "$vm_name" 2>/dev/null || true
-        zfs destroy -Rf "$vm_zpath" 2>/dev/null || true
+        _destroy_zvol_own "$vm_zpath" || true
 
         zfs clone "${zpath}@golden" "$vm_zpath" 2>/dev/null || {
             printf "  %-12s ${G}%-10s${N} ${R}%-10s${N}\n" "$distro" "OK" "CLONE FAIL"
@@ -4941,7 +5014,7 @@ cmd_verify() {
             ((fail++))
             virsh destroy "$vm_name" 2>/dev/null || true
             virsh undefine "$vm_name" 2>/dev/null || true
-            zfs destroy -Rf "$vm_zpath" 2>/dev/null || true
+            _destroy_zvol_own "$vm_zpath" || true
             rm -f "$ci_iso"
             continue
         fi
@@ -4974,7 +5047,7 @@ cmd_verify() {
 
         virsh destroy "$vm_name" 2>/dev/null || true
         virsh undefine "$vm_name" 2>/dev/null || true
-        zfs destroy -Rf "$vm_zpath" 2>/dev/null || true
+        _destroy_zvol_own "$vm_zpath" || true
         rm -f "$ci_iso"
     done
 
@@ -5031,7 +5104,8 @@ cmd_destroy() {
             name="$(test_vm_name "$distro")"
             virsh destroy "$name" 2>/dev/null || true
             virsh undefine "$name" 2>/dev/null || true
-            zfs destroy -Rf "$(zvol_path "$name")" 2>/dev/null || true
+            _destroy_zvol_own "$(zvol_path "$name")" || true # reported inside
+            _deregister_vm "$name"
         done
         log "All sites destroyed. Goldens preserved."
         ;;
@@ -5039,20 +5113,30 @@ cmd_destroy() {
         _destroy_confirm "EVERYTHING (sites + goldens)" || return 0
         destroy_site "blue"
         destroy_site "green"
+        local held=0
         for distro in "${DISTROS[@]}"; do
             local name
             name="$(golden_name "$distro")"
             virsh destroy "$name" 2>/dev/null || true
             virsh undefine "$name" --nvram 2>/dev/null || virsh undefine "$name" 2>/dev/null || true
-            zfs destroy -Rf "$(zvol_path "$name")" 2>/dev/null || true
+            if _destroy_zvol_own "$(zvol_path "$name")"; then
+                _deregister_vm "$name"
+            else
+                ((++held))
+            fi
             rm -f "${ISO_DIR}/${name}-cloud-init.iso" 2>/dev/null
             local tname
             tname="$(test_vm_name "$distro")"
             virsh destroy "$tname" 2>/dev/null || true
             virsh undefine "$tname" 2>/dev/null || true
-            zfs destroy -Rf "$(zvol_path "$tname")" 2>/dev/null || true
+            _destroy_zvol_own "$(zvol_path "$tname")" || true # reported inside
+            _deregister_vm "$tname"
         done
         [[ -f "$RHEL_CREDS_FILE" ]] && rm -f "$RHEL_CREDS_FILE"
+        if ((held > 0)); then
+            warn "${held} golden(s) kept: machines cloned from them still exist (listed above)"
+            return 1
+        fi
         log "Everything destroyed."
         ;;
     *) die "Unknown target: ${target}" ;;
