@@ -1014,6 +1014,14 @@ k_install_system_files() {
     [[ -f /etc/kldload/process-exporter.yml ]] &&
         cp /etc/kldload/process-exporter.yml "${target}/etc/kldload/process-exporter.yml"
     echo "${_profile}" >"${target}/etc/kldload/profile"
+    # KLDLOAD_SHOW=0: the first-boot show stays off on this machine too
+    # (kldload-firstboot-show reads this marker)
+    case "${KLDLOAD_SHOW:-1}" in
+    0 | no | off | false)
+        : >"${target}/etc/kldload/show-off"
+        k_log "KLDLOAD_SHOW=0: no first-boot show (/etc/kldload/show-off)"
+        ;;
+    esac
     printf '%s\n' "${root_ds}" >"${target}/etc/kldload/boot-environment"
 
     # ── Core profile: skip all kldload tools, sanoid, webui, snapshot hooks ────
@@ -2204,6 +2212,14 @@ DASHSTART
     mkdir -p "${target}/etc/kldload"
     [[ -f /etc/kldload/edition ]] && cp /etc/kldload/edition "${target}/etc/kldload/edition"
     echo "${_profile}" >"${target}/etc/kldload/profile"
+    # KLDLOAD_SHOW=0: the first-boot show stays off on this machine too
+    # (kldload-firstboot-show reads this marker)
+    case "${KLDLOAD_SHOW:-1}" in
+    0 | no | off | false)
+        : >"${target}/etc/kldload/show-off"
+        k_log "KLDLOAD_SHOW=0: no first-boot show (/etc/kldload/show-off)"
+        ;;
+    esac
 
     # ── User tools: ZFS helpers + adduser.local hook (skip for core) ─────────────
     mkdir -p "${target}/usr/local/bin" "${target}/usr/local/sbin"

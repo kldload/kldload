@@ -198,12 +198,17 @@ show_wanted() {
     if read -ra _toks <"${CMDLINE}"; then
         for _tok in "${_toks[@]}"; do
             case "${_tok}" in
-            kldload.firstboot_show=0 | kldload.firstboot_show=no | kldload.firstboot_show=off)
+            kldload.firstboot_show=0 | kldload.firstboot_show=no | kldload.firstboot_show=off | kldload.show=0)
                 _say "${_tok} on the cmdline — no show"
                 return 1
                 ;;
             esac
         done
+    fi
+    # installed with KLDLOAD_SHOW=0: the installer leaves this marker
+    if [[ -e "${ROOT}/etc/kldload/show-off" ]]; then
+        _say "/etc/kldload/show-off (installed with KLDLOAD_SHOW=0) — no show"
+        return 1
     fi
     for _tok in /run/live/medium /run/initramfs/live /lib/live/mount/medium; do
         if [[ -d "${ROOT}${_tok}" ]]; then

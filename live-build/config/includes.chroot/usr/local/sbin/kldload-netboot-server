@@ -282,6 +282,21 @@ ISO_ARGS='rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enfo
 # removing these from the armed snippet gives a verbose boot back.
 KIOSK_ARGS='kldload.kiosk=1 systemd.unit=multi-user.target quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3'
 
+# KLDLOAD_SHOW=0 in a machine's answers file: no show at all, the plain console.
+# The installer already writes to journal+console (kldload-autoinstall.service),
+# so dropping the kiosk and the quiet flags is what puts its log on tty1 where a
+# person at a crash cart can read it. kldload.show=0 also stops the initramfs
+# download panel, and the installer records it for the first-boot show.
+# WHY: operator, 2026-09-27, before a first data-centre install: "there needs
+# to be some option to turn it off if it fails to install on a rack".
+PLAIN_ARGS='kldload.kiosk=0 kldload.show=0 systemd.unit=multi-user.target'
+_show_args() {
+    case "$(_answer_val "$1" KLDLOAD_SHOW)" in
+    0 | no | off | false) printf '%s' "$PLAIN_ARGS" ;;
+    *) printf '%s' "$KIOSK_ARGS" ;;
+    esac
+}
+
 log() { printf '[kldload-netboot] %s\n' "$*" >&2; }
 die() {
     printf '[kldload-netboot] FATAL: %s\n' "$*" >&2
@@ -1358,7 +1373,11 @@ cmd_arm_install() {
     local key
     key="$(_nb_menu_key "$answers")"
     _nb_write_profile_answers "$m" "$answers" "$key"
-    _write_armed_install "$m" "$mac" "$answers" "$key" "${ISO_ARGS} ${KIOSK_ARGS}" "$netarg" "$netdev"
+    local show_args
+    show_args="$(_show_args "$answers")"
+    _write_armed_install "$m" "$mac" "$answers" "$key" "${ISO_ARGS} ${show_args}" "$netarg" "$netdev"
+    [[ "$show_args" == "$PLAIN_ARGS" ]] &&
+        log "  KLDLOAD_SHOW=0: no show on this machine -- the installer's log prints on its console"
     if ((open)); then
         log "ARMED-INSTALL OPEN — every machine that netboots here gets the install menu ($(_answer_val "$answers" KLDLOAD_DISTRO)/${key} preselected); nothing installs without a key"
     else
