@@ -25,6 +25,27 @@ set -Eeuo pipefail
 # must not be used — Ubuntu (different pocket semantics), an offline darksite
 # mirror (which carries no backports pocket), or an explicit opt-out via
 # KLDLOAD_DEBIAN_BACKPORTS=0. Always exits 0; callers test for an empty string.
+# k_drop_tlp_for_tuned NAME... -- print the package list, one per line, without
+# tlp and tlp-rdw when tuned is in it; unchanged otherwise.
+#
+# WHY: tlp's RPM declares "Conflicts: tuned". The desktop set carries tlp and a
+# KVM host's set carries tuned (virtual-host), and the RPM transaction runs
+# with --skip-broken, so dnf dropped tuned without a word: fiend's 6-full
+# install (desktop + KVM, build 152, 2026-09-27) came up with no tuned and the
+# installer's own check logged only to a file the target never keeps. The
+# desktop masks tlp at first boot anyway (power-profiles-daemon drives the
+# power slider), so on a KVM host tlp was installed only to be switched off.
+k_drop_tlp_for_tuned() {
+    local p has_tuned=0
+    for p in "$@"; do [[ "$p" == tuned ]] && has_tuned=1; done
+    for p in "$@"; do
+        if ((has_tuned)) && [[ "$p" == tlp || "$p" == tlp-rdw ]]; then
+            continue
+        fi
+        printf '%s\n' "$p"
+    done
+}
+
 k_debian_backports_suite() {
     if [[ "${KLDLOAD_DISTRO:-debian}" != "debian" ]]; then
         return 0
@@ -2345,6 +2366,11 @@ CUSTOMREPO
         _dnf_pkgs+=("${_opt_arr[@]}")
         k_log_to "$log" "Optional packages added: ${_opt_pkgs}"
     fi
+    # tuned (a KVM host) and tlp (the desktop set) conflict; tuned wins.
+    local _n_before=${#_dnf_pkgs[@]}
+    mapfile -t _dnf_pkgs < <(k_drop_tlp_for_tuned "${_dnf_pkgs[@]}")
+    ((${#_dnf_pkgs[@]} == _n_before)) ||
+        k_log_to "$log" "tlp left out: it conflicts with tuned, which this KVM host runs"
 
     # Point DNF cache to the target ZFS filesystem to avoid filling the live overlay
     mkdir -p "${target}/var/cache/dnf"
