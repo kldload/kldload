@@ -1519,15 +1519,17 @@ NETCFG
     # join later.
     #
     # Non-fatal on purpose -- a warning belongs here, not a failed build.
+    # COUNT, never pull: `kubeadm config images pull` asks the registry even for
+    # images already present, so on an offline host it spent two minutes on
+    # registry.k8s.io and then reported the cache unverifiable (fiend, round 3,
+    # 2026-09-27). kube-setup has already counted every locked image in; this
+    # only confirms the number survived to the seal.
     log "Verifying the golden image cache..."
-    if _ssh_cmd "$golden_ip" "kubeadm config images pull" >/dev/null 2>&1; then
-        _img_n="$(_ssh_cmd "$golden_ip" \
-            "ctr -n k8s.io images ls -q 2>/dev/null | wc -l" 2>/dev/null | tr -cd '0-9')"
-        log "  images cached in golden: ${_img_n:-?}"
-        [[ "${_img_n:-0}" -lt 10 ]] &&
-            log "  WARNING: only ${_img_n} images cached — a join will fetch over the network"
-    else
-        log "  WARNING: could not verify the image cache — nodes may fetch at join time"
+    _img_n="$(_ssh_cmd "$golden_ip" \
+        "ctr -n k8s.io images ls -q 2>/dev/null | grep -vc '^sha256:'" 2>/dev/null | tr -cd '0-9')" || _img_n=""
+    log "  images cached in golden: ${_img_n:-?}"
+    if [[ "${_img_n:-0}" -lt 10 ]]; then
+        warn "only ${_img_n:-0} images cached — a join will fetch over the network"
     fi
 
     # Seal via Ansible as well. One SSH transport, one idempotent playbook,
@@ -1957,7 +1959,11 @@ _join_control_plane_one() {
         echo "--- CP-join attempt ${attempt}: ${name} (${new_ip}) $(date -u +%FT%TZ) ---" >>"$logfile"
         local join_cmd cert_key
         join_cmd="$(_ssh_cmd "$cp_ip" 'kubeadm token create --ttl=15m --print-join-command' 2>/dev/null)" || join_cmd=""
-        cert_key="$(_ssh_cmd "$cp_ip" 'kubeadm init phase upload-certs --upload-certs 2>/dev/null' |
+        # The version goes in through a one-line config: upload-certs takes no
+        # --kubernetes-version, and without one it asks dl.k8s.io for the stable
+        # release first -- a ten-second timeout per control plane on an offline
+        # host, measured on fiend (2026-09-27). The printed key is unchanged.
+        cert_key="$(_ssh_cmd "$cp_ip" 'f=$(mktemp) && printf "apiVersion: kubeadm.k8s.io/v1beta4\nkind: ClusterConfiguration\nkubernetesVersion: %s\n" "$(kubeadm version -o short)" >"$f" && kubeadm init phase upload-certs --upload-certs --config "$f" 2>/dev/null; rc=$?; rm -f "$f"; exit $rc' |
             awk '/Using certificate key:/ { getline; gsub(/[[:space:]]/, ""); print; exit }')" || cert_key=""
         if [[ -z "$join_cmd" || ! "$cert_key" =~ ^[a-f0-9]{64}$ ]]; then
             echo "[fail] no token / invalid cert-key from CP ${cp_ip}" >>"$logfile"

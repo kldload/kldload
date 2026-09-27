@@ -414,7 +414,10 @@ _zfs_from_darksite() {
     # build adds the release kernel's, which is the cloud image's): nodes keep
     # the kernel they were tested on, and Tetragon 1.7.1 cannot parse the BTF
     # of the 7.2 kernel the fallback below installs (fiend, 2026-09-27).
-    if [[ "$PM" == "dnf" ]] && _dnf install -y "kernel-devel-$(uname -r)" dkms gcc make zfs zfs-dkms; then
+    # kernel-devel-matched for the SAME kernel: dkms requires the package, and
+    # the only other copy is the pinned kernel's, which pulls that kernel in.
+    if [[ "$PM" == "dnf" ]] && _dnf install -y "kernel-devel-$(uname -r)" "kernel-devel-matched-$(uname -r)" \
+        dkms gcc make zfs zfs-dkms; then
         kver="$(uname -r)"
     elif [[ "$PM" == "dnf" ]]; then
         log "no headers for the running kernel $(uname -r) in the darksite — installing the mirror's kernel for ZFS"
@@ -437,9 +440,24 @@ _zfs_from_darksite() {
     dkms autoinstall -k "$kver" >/dev/null 2>&1 ||
         true # swallow: the status check below is the outcome, whatever autoinstall returned
     if dkms status -k "$kver" zfs 2>/dev/null | grep -q 'installed'; then
-        log "ZFS built for ${kver}, the kernel the clones boot"
+        log "ZFS built for ${kver}"
     else
         warn "ZFS did not build for ${kver} -- nodes will have no zfs module"
+    fi
+    # The kernel the clones will BOOT must be the one ZFS was built for. A
+    # transaction that pulls in a second kernel makes it the default, and the
+    # log above still said "built for" the other one (round 3 on fiend: ZFS for
+    # 6.19, clones on 7.2.7, no zfs module and Tetragon crash-looping).
+    if command -v grubby >/dev/null 2>&1; then
+        local _boot
+        _boot="$(grubby --default-kernel 2>/dev/null | sed 's#.*/vmlinuz-##')" || _boot=""
+        if [[ -n "$_boot" && "$_boot" != "$kver" ]]; then
+            warn "the default boot kernel is ${_boot}, not ${kver} -- setting it back"
+            grubby --set-default "/boot/vmlinuz-${kver}" ||
+                warn "grubby could not set ${kver} as default; clones boot ${_boot} without ZFS"
+        fi
+        _boot="$(grubby --default-kernel 2>/dev/null | sed 's#.*/vmlinuz-##')" || _boot=""
+        log "clones boot ${_boot:-an unknown kernel}$([[ "$_boot" == "$kver" ]] && echo ', which has ZFS')"
     fi
 }
 

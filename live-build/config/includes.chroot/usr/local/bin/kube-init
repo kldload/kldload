@@ -276,7 +276,11 @@ run_kubeadm_init() {
         setup_cp_vip # raise the VIP (static) BEFORE init so wait-control-plane reaches it
     fi
 
+    # --kubernetes-version: without it kubeadm asks dl.k8s.io for the current
+    # stable release, which offline stalls on the lookup and online can pick a
+    # newer patch than the images the golden carries (fiend, round 3).
     kubeadm init \
+        --kubernetes-version="$(kubeadm version -o short)" \
         --pod-network-cidr="$POD_CIDR" \
         --service-cidr="$SVC_CIDR" \
         --apiserver-advertise-address="$node_ip" \

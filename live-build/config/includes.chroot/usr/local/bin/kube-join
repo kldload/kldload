@@ -111,7 +111,11 @@ _this_node_ip() {
 # fresh certificate key (64 hex chars). kubeadm's key expires ~2h, so we mint a
 # new one for THIS join rather than trusting the init-time key. Empty on failure.
 _fresh_cert_key() {
-    _ssh_cp 'kubeadm init phase upload-certs --upload-certs 2>/dev/null' |
+    # The version goes in through a one-line config: upload-certs takes no
+    # --kubernetes-version, and without one it asks dl.k8s.io for the stable
+    # release first -- a ten-second timeout per control plane on an offline
+    # host, measured on fiend (2026-09-27). The printed key is unchanged.
+    _ssh_cp 'f=$(mktemp) && printf "apiVersion: kubeadm.k8s.io/v1beta4\nkind: ClusterConfiguration\nkubernetesVersion: %s\n" "$(kubeadm version -o short)" >"$f" && kubeadm init phase upload-certs --upload-certs --config "$f" 2>/dev/null; rc=$?; rm -f "$f"; exit $rc' |
         awk '/Using certificate key:/ { getline; gsub(/[[:space:]]/, ""); print; exit }'
 }
 

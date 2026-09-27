@@ -423,8 +423,13 @@ log "Pool carries one kernel: ${_kcores}"
 # Tetragon pod crash-looped on fiend's first offline cluster (2026-09-27).
 # Headers only, added after the eviction and the one-kernel check: a
 # kernel-devel boots nothing, so the one-kernel rule still holds.
+# kernel-devel-matched too: Fedora's dkms hard-requires it, and the only one
+# in the pool was the pinned kernel's, which requires THAT kernel -- so
+# installing dkms against the cloud kernel dragged 7.2.7 in, the clones booted
+# it, and ZFS had been built for 6.19 (fiend, round 3, 2026-09-27). The
+# release one requires only the release kernel, which the cloud image has.
 if dnf download --repo=fedora --releasever="${RELEASE}" --forcearch="${ARCH}" \
-    --destdir "${REPO_DIR}" kernel-devel >/dev/null 2>&1; then
+    --destdir "${REPO_DIR}" kernel-devel kernel-devel-matched >/dev/null 2>&1; then
     log "Cloud-image kernel headers added: $(find "${REPO_DIR}" -name 'kernel-devel-[0-9]*.rpm' -printf '%f ' | sort)"
 else
     log "WARNING: could not add the release kernel's kernel-devel — Kubernetes goldens will boot the pinned kernel instead"
