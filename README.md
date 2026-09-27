@@ -162,6 +162,41 @@ KLDLOAD_BUILD_PROCESSORS=$(( $(nproc) - 4 )) PROFILE=desktop ./deploy.sh build
 
 ---
 
+## Provision a rack from one USB
+
+The same USB that installs one machine is the network server for a whole rack.
+It serves its own kernel and root image; **nothing is installed on the machine
+running it**, and nothing is fetched from the internet.
+
+```bash
+# 1. Make the master USB (the full image, 16.9 GB: it carries the offline mirrors)
+curl -L -o kldload.iso https://dl.kldload.com/kldload-free-latest.iso
+sudo dd if=kldload.iso of=/dev/sdX bs=4M oflag=direct conv=fsync status=progress && sync
+
+# 2. Boot any machine on the rack's switch from it and press  p  at the boot menu:
+#    "provision the rack from this USB". Log in as live / live and check:
+sudo kldload-netboot-server status        # payload: the live medium, armed: any
+
+# 3. Only if the switch has NO DHCP server of its own (air-gapped): give the
+#    master an address and let it hand them out
+sudo ip addr add 10.99.0.1/24 dev enp3s0
+printf 'NETBOOT_IFACE=enp3s0\nNETBOOT_DHCP=standalone\n' | sudo tee /etc/kldload/netboot.env
+sudo systemctl restart kldload-netboot-live
+```
+
+4. **Network-boot each target.** It shows the kldload menu and counts down. Left
+   alone it boots its own disk, so nothing is erased by accident; any key opens
+   the install, and the password and the disk are asked for on that machine's
+   own screen.
+5. **Or arm a whole rack unattended:** one answers file per MAC in a directory,
+   then `sudo kldload-netboot-server arm-all ./rack/` (add `--dry-run` first to
+   check every file). Each armed machine installs exactly its file.
+
+**Before you start:** each target needs UEFI network boot and **more RAM than
+the image** — the root image is loaded into memory, and an 8 GB machine panics
+part way. The full procedure, the two network cases and the known issues in
+1.5.0: [docs/NETBOOT.md](docs/NETBOOT.md).
+
 ## Installing with encryption
 
 Full-disk ZFS encryption is **off unless you ask for it** &mdash; that changed
