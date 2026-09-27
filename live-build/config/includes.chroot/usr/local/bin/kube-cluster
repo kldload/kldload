@@ -3223,26 +3223,37 @@ cmd_destroy() {
         rm -f "/var/lib/kldload/cloud-init/${vm}-ci.iso" "/var/lib/kldload/cloud-init/${vm}-cloud-init.iso" 2>/dev/null
     done
 
-    # Now destroy ZFS — use -Rf to handle autosnaps and dependent clones
-    if [[ $destroy_all -eq 1 ]]; then
-        # Nuke the entire vms tree except the isos dataset
-        zfs destroy -Rf "${POOL}/vms/${GOLDEN}" 2>/dev/null || true
+    # Now destroy ZFS, and CHECK it. This was `zfs destroy -Rf golden || true`
+    # followed by "Golden image destroyed" and "Everything destroyed" — and on
+    # fiend (2026-09-27) the golden and three node zvols were still there when
+    # it said so: a zvol can stay busy for a moment after `virsh destroy`, the
+    # destroy failed, and the error went nowhere. Each dataset is now retried
+    # while busy and listed afterwards; what survives is named, and the command
+    # fails instead of claiming a clean slate.
+    _zfs_gone() { # <dataset> — 0 when it is absent afterwards
+        local _i
+        for _i in 1 2 3 4 5 6; do
+            zfs list -H "$1" >/dev/null 2>&1 || return 0
+            zfs destroy -Rf "$1" 2>/dev/null ||
+                true # swallow: busy right after virsh destroy; the list below is the check
+            zfs list -H "$1" >/dev/null 2>&1 || return 0
+            sleep 2
+        done
+        return 1
+    }
+    local _zleft=() _ds
+    local _zlist=()
+    # Clones first, so -R has nothing left to fight over; the golden last.
+    mapfile -t _zlist < <(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null |
+        grep -E "/(${CP_NAME}(-[0-9]+)?|${WORKER_PREFIX}-[^/]+)$" || true) # swallow: no cluster zvols is a valid state
+    [[ $destroy_all -eq 1 ]] && _zlist+=("${POOL}/vms/${GOLDEN}")
+    for _ds in "${_zlist[@]}"; do
+        _zfs_gone "$_ds" || _zleft+=("$_ds")
+    done
+    if ((${#_zleft[@]})); then
+        warn "NOT destroyed (still present after retries): ${_zleft[*]}"
+    elif [[ $destroy_all -eq 1 ]]; then
         log "Golden image destroyed"
-    else
-        # Destroy clones only (golden preserved)
-        zfs destroy -Rf "${POOL}/vms/${CP_NAME}" 2>/dev/null || true
-        # ...and the HA control-plane zvols, which have the same omission as the
-        # VM list above. Anchored so ${CP_NAME} itself is not matched twice.
-        for name in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null |
-            # As above: no HA control-plane zvols is the single-CP case.
-            grep -E "/${CP_NAME}-[0-9]+$" || true); do
-            # Swallowed: a zvol already gone, or held by a clone destroyed
-            # moments earlier in this same sweep. Absent is the goal state.
-            zfs destroy -Rf "$name" 2>/dev/null || true
-        done
-        for name in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null | grep "/${WORKER_PREFIX}-" || true); do
-            zfs destroy -Rf "$name" 2>/dev/null || true
-        done
     fi
 
     # Clean up orphaned snapshots on golden
@@ -3264,7 +3275,9 @@ cmd_destroy() {
     rm -f /root/.kube/config 2>/dev/null
     sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
 
-    if [[ $destroy_all -eq 1 ]]; then
+    if ((${#_zleft[@]})); then
+        die "destroy incomplete: ${#_zleft[@]} zvol(s) remain (${_zleft[*]}) — see zfs holds / open handles, then run destroy again"
+    elif [[ $destroy_all -eq 1 ]]; then
         log "Everything destroyed. Run: kube-cluster bootstrap --workers ${WORKERS}"
     else
         log "Cluster destroyed. Golden image ${GOLDEN} preserved for fast rebuild."
