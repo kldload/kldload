@@ -2042,7 +2042,10 @@ if [[ "$EDITION" != "core" ]]; then
     # kldload-proxy is the :8443 reverse proxy that fronts webui, grafana,
     # ttyd-k9s and Bob behind a single cert — without it, nothing answers
     # on :8443 because the webui binds loopback :8444 now.
-    for _sb_bob in bob-splash bob-ui kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-proxy kldload-session kldload-headlamp-install kldload-secure-boot; do
+    # kldload-tty1 is the live install menu's tty1 hand (2026-09-26): the
+    # first console build shipped without it because this list is the only
+    # way a sbin tool reaches the rootfs, and smoke-build said so.
+    for _sb_bob in bob-splash bob-ui kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-proxy kldload-session kldload-headlamp-install kldload-secure-boot kldload-tty1; do
         src="/build/live-build/config/includes.chroot/usr/local/sbin/${_sb_bob}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/sbin/${_sb_bob}" && chmod +x "${ROOTFS}/usr/local/sbin/${_sb_bob}"
     done
@@ -3140,6 +3143,11 @@ if [[ "$EDITION" != "core" ]]; then
         chmod +x "${ROOTFS}/usr/local/sbin/adduser.local"
     fi
 
+    # root's login profile runs the install menu on tty1 of the live medium
+    # (kldload.tui=1); without it the USB boots to a login prompt, so its
+    # absence is fatal, not a warning.
+    install -m 0644 /build/live-build/config/includes.chroot/root/.bash_profile "${ROOTFS}/root/.bash_profile" ||
+        die "FATAL: includes.chroot/root/.bash_profile missing — the live install menu would never start"
     # Copy .bashrc with tmux auto-attach
     if [[ -f /build/live-build/config/includes.chroot/etc/skel/.bashrc ]]; then
         cp /build/live-build/config/includes.chroot/etc/skel/.bashrc "${ROOTFS}/etc/skel/.bashrc"

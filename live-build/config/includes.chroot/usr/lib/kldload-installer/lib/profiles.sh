@@ -1798,6 +1798,7 @@ DASHSTART
             # notice the warnings above.
             for _lnch in /usr/share/applications/kldload-*.desktop \
                 /usr/share/applications/bob-*.desktop \
+                /usr/share/applications/kld.desktop \
                 /usr/share/applications/zxplore.desktop \
                 /usr/share/applications/wgxplore.desktop \
                 /usr/share/applications/vmxplore*.desktop \

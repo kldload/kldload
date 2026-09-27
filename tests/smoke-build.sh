@@ -1006,9 +1006,12 @@ fi
 # web UI creates it, on the rpool/kldload/state dataset it mounts over /var/lib/kldload
 # on first boot, so that is where the permissions are set: an installer-side chgrp
 # lands in the directory the mount hides (7-net and 2-server, fiend 2026-09-13/14).
+# The DB is made by kldload-db init since the console branch (the schema
+# lives in one place), so the call follows the init's return check rather
+# than a con.close(); the gate accepts either shape (2026-09-26).
 _wu="${ROOT}/live-build/config/includes.chroot/usr/local/bin/kldload-webui"
 if grep -qE '^def _state_db_group_perms\(' "$_wu" &&
-    awk '/con.close\(\)/{c=NR} /_state_db_group_perms\(DB_PATH\)/{if (c && NR - c <= 2) f=1} END{exit !f}' "$_wu"; then
+    awk '/con.close\(\)|r.returncode != 0/{c=NR} /_state_db_group_perms\(DB_PATH\)/{if (c && NR - c <= 4) f=1} END{exit !f}' "$_wu"; then
     _pass "web UI gives the state.db it creates to the kldload group"
 else
     _fail "state.db permissions" "kldload-webui creates state.db without _state_db_group_perms — server editions fail the permissions smoke check"
