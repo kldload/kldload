@@ -746,11 +746,35 @@ install_node_exporter() {
     fi
 }
 
+# ── qemu-guest-agent ───────────────────────────────────────────────────────
+# Every cluster VM is a clone of this golden, and without the agent libvirt
+# sees nothing inside it: no address from virsh domifaddr, no fs freeze for a
+# consistent snapshot, and no clean shutdown (a host shutdown once sat for the
+# whole libvirt-guests timeout, 2026-08-21). It was installed from
+# kube-cluster's cloud-init bootcmd, which offline blocked sshd for twelve
+# minutes; here it comes from the darksite like every other package.
+install_guest_agent() {
+    if [[ "$PM" == "dnf" ]]; then
+        _dnf install -y qemu-guest-agent || warn "qemu-guest-agent did not install"
+    else
+        _apt install -y --no-install-recommends qemu-guest-agent || warn "qemu-guest-agent did not install"
+    fi
+    if command -v qemu-ga >/dev/null 2>&1; then
+        systemctl enable qemu-guest-agent.service ||
+            warn "qemu-guest-agent installed but did not enable"
+        systemctl is-enabled qemu-guest-agent.service >/dev/null 2>&1 &&
+            log "qemu-guest-agent installed and enabled"
+    else
+        warn "no qemu-ga binary -- libvirt will not see inside the clones"
+    fi
+}
+
 main() {
     log "Setting up Kubernetes node on $(hostname)"
     echo ""
 
     _darksite_repo
+    install_guest_agent
 
     setup_kernel
     setup_zfs_for_k8s
