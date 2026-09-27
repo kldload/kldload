@@ -680,14 +680,17 @@ cmd_build() {
             # changes the pool just as surely as adding a package does.
             local _deb_profiles="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
             local _deb_builder="$ROOT/build/darksite-debian/build-darksite-debian.sh"
+            # The k8s minor is part of the key, as for Fedora: the mirror now
+            # carries kubeadm at that minor (2026-09-27), and a key on the
+            # package set alone would keep the first minor it ever stocked.
             if [[ ! -f "$debian_darksite/apt/dists/trixie/Release" ]]; then
                 cmd_build_debian_darksite
-                printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder")" \
+                printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder" <(printf 'k8s=%s\n' "${K8S_MINOR:-$(_k8s_minor_from_lock)}"))" \
                     >"$debian_darksite/.pkgset-sha256"
-            elif [[ "$(cat "$debian_darksite/.pkgset-sha256" 2>/dev/null)" != "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder")" ]]; then
+            elif [[ "$(cat "$debian_darksite/.pkgset-sha256" 2>/dev/null)" != "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder" <(printf 'k8s=%s\n' "${K8S_MINOR:-$(_k8s_minor_from_lock)}"))" ]]; then
                 log "Debian package sets changed since the darksite was built — rebuilding the mirror"
                 cmd_build_debian_darksite
-                printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder")" \
+                printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles" "$_deb_builder" <(printf 'k8s=%s\n' "${K8S_MINOR:-$(_k8s_minor_from_lock)}"))" \
                     >"$debian_darksite/.pkgset-sha256"
             else
                 log "Debian darksite cached: $(du -sh "$debian_darksite" | cut -f1)"
