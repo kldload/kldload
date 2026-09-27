@@ -43,6 +43,7 @@ import socket
 import subprocess
 import sys
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 TIMEOUT = 8  # seconds; every external call is bounded
@@ -176,6 +177,37 @@ def src_wireguard() -> dict[str, str]:
     return peers
 
 
+MESH_DIR = Path("/var/lib/kldload/mesh")
+
+
+def src_mesh_members() -> dict[str, list[tuple[str, str]]]:
+    """Who each host-side mesh was built for, by NAME: {vm: [(iface, pubkey)]}.
+
+    kvm-mesh (an appliance's ap-* mesh) and klab (klab-blue, klab-green) write
+    /var/lib/kldload/mesh/<iface>.members, one "name id pubkey endpoint" line
+    per member. WireGuard itself only knows keys and addresses, and a stopped
+    VM has no address, so without this file a shut-off member read as off the
+    mesh -- every quiesced klab site and appliance on fiend did (2026-09-27).
+    A line that does not parse is skipped, not fatal: one bad file must not
+    blank the whole estate.
+    """
+    members: dict[str, list[tuple[str, str]]] = {}
+    try:
+        files = sorted(MESH_DIR.glob("*.members"))
+    except OSError:
+        return members
+    for f in files:
+        try:
+            lines = f.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 3:
+                members.setdefault(parts[0], []).append((f.stem, parts[2]))
+    return members
+
+
 def src_kubernetes() -> dict[str, dict[str, str]]:
     """Node membership and readiness, plus the address kubelet advertises.
 
@@ -265,6 +297,7 @@ def collect(probe: bool = False) -> dict[str, Any]:
     leases = src_leases()
     vmip = src_vmip()
     wg = src_wireguard()
+    members = src_mesh_members()
     k8s = src_kubernetes()
 
     names = set(libvirt) | set(db) | set(k8s)
@@ -289,15 +322,31 @@ def collect(probe: bool = False) -> dict[str, Any]:
             "db_status": d.get("status", ""),
             "ip": ip,
             "network": lease.get("network", ""),
-            # On the mesh if its address is a peer's, OR its recorded key is:
-            # the key survives an address change, the address does not.
-            "in_mesh": bool((ip and ip in wg) or (d.get("wg_pubkey") and d["wg_pubkey"] in wg)),
-            "mesh_ifaces": wg.get(ip, "") or wg.get(d.get("wg_pubkey", ""), ""),
+            "in_mesh": False,
+            "mesh_ifaces": "",
             "mesh_id": d.get("mesh_id", ""),
             "k8s": knode.get("ready", ""),
             "golden_src": d.get("golden_src", ""),
             "targetable": bool(running and ip),
         }
+        # Mesh membership by KEY first: a key recorded for this name (the
+        # enrolment key in the DB, the members file of each mesh built for it)
+        # that is a live peer on that interface. A key survives the VM being
+        # off and its address being handed to someone else; an address does
+        # neither. The address only decides for a RUNNING machine with no key
+        # on record -- app-sdr-statio, shut off, held a lease a klab-blue peer
+        # had used and was reported on klab-blue (fiend, 2026-09-27).
+        ifaces: list[str] = []
+        pub = d.get("wg_pubkey") or ""
+        if pub and pub in wg:
+            ifaces += wg[pub].split()
+        for iface, mpub in members.get(name, []):
+            if iface in wg.get(mpub, "").split():
+                ifaces.append(iface)
+        if not ifaces and not members.get(name) and not pub and running and ip:
+            ifaces += wg.get(ip, "").split()
+        m["mesh_ifaces"] = " ".join(dict.fromkeys(ifaces))
+        m["in_mesh"] = bool(ifaces)
         if probe and running and ip:
             m["ssh"] = probe_ssh(name, ip)
         machines.append(m)
