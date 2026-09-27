@@ -785,14 +785,6 @@ func kube(d *sectionData, args ...string) (string, bool) {
 	return out, true
 }
 
-func tableRows(d *sectionData, out string, n int) {
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if f := strings.Fields(line); len(f) >= n {
-			d.rows = append(d.rows, f[:n])
-		}
-	}
-}
-
 func loadNodes(d *sectionData) {
 	// JSON, not custom-columns: the control-plane label is present with an
 	// EMPTY value, which custom-columns printed as nothing and the row's

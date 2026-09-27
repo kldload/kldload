@@ -36,6 +36,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/term"
 )
@@ -553,15 +554,13 @@ func (s *screenView) one(b []byte) (int, bool) {
 		r.tap(ch)
 		r.key(ksControlL, false)
 	default:
-		// a UTF-8 character
-		str := string(b)
-		for i, ch := range str {
-			if ch == 0xfffd && i+4 > len(b) {
-				return 0, false // incomplete multibyte character
-			}
-			r.tap(runeKeysym(ch))
-			return len(string(ch)), false
+		// a UTF-8 character; an invalid byte is consumed alone (TestOneUTF8)
+		ch, size := utf8.DecodeRune(b)
+		if ch == utf8.RuneError && !utf8.FullRune(b) {
+			return 0, false // incomplete multibyte character, wait for the rest
 		}
+		r.tap(runeKeysym(ch))
+		return size, false
 	}
 	return 1, false
 }

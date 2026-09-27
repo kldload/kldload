@@ -136,7 +136,6 @@ type installModel struct {
 	hostname string
 	username string
 	password string
-	pass2    string
 	passph   string
 	input    textinput.Model
 	err      string
@@ -144,7 +143,6 @@ type installModel struct {
 	disks    []choice
 	offline  map[string]bool
 	dryrun   bool
-	written  string
 }
 
 type installDoneMsg struct{ err error }

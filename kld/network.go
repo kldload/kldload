@@ -132,9 +132,7 @@ func fleetHosts() []string {
 	sc := bufio.NewScanner(f)
 	var cur []string
 	flush := func() {
-		for _, h := range cur {
-			hs = append(hs, h)
-		}
+		hs = append(hs, cur...)
 		cur = nil
 	}
 	for sc.Scan() {

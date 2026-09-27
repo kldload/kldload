@@ -7,7 +7,7 @@
 //     qemu's local default), forces 32bpp truecolour, asks for Raw +
 //     DesktopSize + ExtendedDesktopSize, then streams framebuffer updates
 //     into an image.RGBA and publishes a copy after every complete update.
-//  3. pointer/key/cutText: input events to the guest, writes serialised.
+//  3. pointer/key: input events to the guest, writes serialised.
 //
 // Why hand-rolled: the peer is ALWAYS qemu over loopback, so Raw encoding
 // costs nothing and the auth surface is None; a general client would be
@@ -495,16 +495,6 @@ func (r *rfbConn) key(sym uint32, down bool) {
 // tap presses and releases one keysym.
 func (r *rfbConn) tap(sym uint32) { r.key(sym, true); r.key(sym, false) }
 
-// cutText hands text to the guest's clipboard (ClientCutText); guests with
-// qemu-vdagent pick it up.
-func (r *rfbConn) cutText(s string) {
-	b := []byte(s)
-	msg := make([]byte, 8, 8+len(b))
-	msg[0] = msgClientCutText
-	binary.BigEndian.PutUint32(msg[4:8], uint32(len(b)))
-	r.write(append(msg, b...))
-}
-
 // Close ends the session; the flag goes up first so the read loop's "use of
 // closed network connection" is a detach, not a fault.
 func (r *rfbConn) Close() {
@@ -554,13 +544,4 @@ func runeKeysym(c rune) uint32 {
 		return 0x01000000 + uint32(c)
 	}
 	return uint32(c)
-}
-
-// typeText types a string into the guest, one press/release per rune, with
-// Shift held for the characters a keyboard needs it for. qemu maps keysyms
-// to scancodes itself, so plain 'A' arrives as 'a' with Shift already.
-func (r *rfbConn) typeText(s string) {
-	for _, c := range s {
-		r.tap(runeKeysym(c))
-	}
 }

@@ -1741,14 +1741,6 @@ func numericColumns(rows [][]string, n int) []bool {
 	return num
 }
 
-func sum(xs []int) int {
-	t := 0
-	for _, x := range xs {
-		t += x
-	}
-	return t
-}
-
 // truncate cuts s to w cells with an ellipsis, escape sequences intact: the
 // rune-slicing version cut a coloured hint line inside its SGR sequence and
 // the status text after it rendered twice (2026-09-26).
