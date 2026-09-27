@@ -787,11 +787,35 @@ install_guest_agent() {
     fi
 }
 
+# _node_time_source — use the hypervisor for time (NTP_SERVER, passed by
+# kube-cluster) instead of the distro's public pool, which an offline node can
+# never reach. The golden is sealed with it, so every clone inherits it.
+_node_time_source() {
+    [[ -n "${NTP_SERVER:-}" ]] || return 0
+    local conf=/etc/chrony.conf
+    [[ -f "$conf" ]] || conf=/etc/chrony/chrony.conf # Debian and Ubuntu
+    if [[ ! -f "$conf" ]]; then
+        warn "no chrony.conf -- time source left as it is"
+        return 0
+    fi
+    # Comment out every other source, keep the host's own line: running this
+    # twice must not stack comments or duplicate the server.
+    awk -v keep="server ${NTP_SERVER} iburst" '
+        $0 == keep { print; next }
+        /^(pool|server) / { print "# kldload: host is the time source -- " $0; next }
+        { print }' "$conf" >"${conf}.kldload" && mv -f "${conf}.kldload" "$conf"
+    grep -qxF "server ${NTP_SERVER} iburst" "$conf" || echo "server ${NTP_SERVER} iburst" >>"$conf"
+    systemctl restart chronyd 2>/dev/null || systemctl restart chrony 2>/dev/null ||
+        warn "chrony did not restart; the new time source applies from the next boot"
+    log "time source: ${NTP_SERVER} (the host)"
+}
+
 main() {
     log "Setting up Kubernetes node on $(hostname)"
     echo ""
 
     _darksite_repo
+    _node_time_source
     install_guest_agent
 
     setup_kernel

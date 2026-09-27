@@ -1042,6 +1042,41 @@ HOST_DISTRO="$(detect_host_distro)"
 # does not come up; kube-setup then takes its online paths and says so.
 GOLDEN_DARKSITE_URL=""
 _GB_DIR="" _GB_HTTP_PID="" _GB_TUN_PID=""
+
+# _host_serves_ntp — make this host the time source for its VMs, and set
+# NODE_NTP_SERVER to the address they should use (empty when it cannot).
+# Nodes shipped with Fedora's public pool: offline, every node sent NTP
+# packets to the internet forever and kept time only by its virtual RTC
+# (fiend, blocked build, 2026-09-27). `allow` opens chronyd to the VM bridge
+# and `local stratum 10` keeps it answering when the host itself has no
+# upstream, which is the offline case. Idempotent: one marked block. Tested by
+# hand first: a worker pointed at 192.168.122.1 synced (^*) through kldload's
+# own nftables with no extra rule.
+NODE_NTP_SERVER=""
+_host_serves_ntp() {
+    local br_ip br_net
+    # The kernel's own route for the bridge: "192.168.122.0/24 ... src 192.168.122.1"
+    read -r br_net br_ip < <(ip -4 route show dev virbr0 scope link 2>/dev/null |
+        awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $1, $(i + 1); exit}}') || true # swallow: no route is handled just below
+    if [[ -z "${br_net:-}" || -z "${br_ip:-}" ]]; then
+        warn "no virbr0 route — nodes keep their default time servers"
+        return 0
+    fi
+    if ! systemctl is-active -q chronyd; then
+        warn "chronyd is not running on this host — nodes keep their default time servers"
+        return 0
+    fi
+    if ! grep -qxF "allow ${br_net}" /etc/chrony.conf; then
+        printf '\n# kldload kube-cluster: serve time to the VMs on virbr0\nallow %s\nlocal stratum 10\n' \
+            "$br_net" >>/etc/chrony.conf
+        systemctl restart chronyd || {
+            warn "chronyd did not restart with 'allow ${br_net}' — nodes keep their default time servers"
+            return 0
+        }
+        log "this host now serves time to ${br_net}"
+    fi
+    NODE_NTP_SERVER="$br_ip"
+}
 _golden_bundle_start() {
     local ip="$1" ds=/root/darksite repo="" f n=0 miss=0 port want got
     GOLDEN_DARKSITE_URL=""
@@ -1492,9 +1527,11 @@ NETCFG
         warn "no K8S_VERSION in the stack lock — the golden will take kube-setup's default"
     fi
     _golden_bundle_start "$golden_ip"
+    _host_serves_ntp
     log "Running Ansible provision-golden against ${golden_ip}..."
     run_ansible_against_vm "$golden_ip" provision-golden.yml \
-        -e "k8s_minor=${_k8s_minor}" -e "darksite_url=${GOLDEN_DARKSITE_URL}" ||
+        -e "k8s_minor=${_k8s_minor}" -e "darksite_url=${GOLDEN_DARKSITE_URL}" \
+        -e "ntp_server=${NODE_NTP_SERVER}" ||
         die "ansible provision-golden failed"
     _golden_bundle_stop
     log "  provision-golden complete — kubeadm, helm, cilium-cli installed"
