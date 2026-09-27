@@ -1325,6 +1325,63 @@ else
     _didnotrun "old 8K database size" "grep could not read the creators (rc ${_rc})"
 fi
 
+_section "Kubernetes goldens build from the darksite"
+
+# The golden is where every node comes from, and it fetched everything online
+# while the ISO carried the same things (2026-09-27). Each line is a piece of
+# the wiring that makes it offline; any one missing puts a download back.
+_ic="${ROOT}/live-build/config/includes.chroot"
+_kw=(
+    "usr/local/bin/kube-cluster|_golden_bundle_start \"\$golden_ip\""
+    "usr/local/bin/kube-cluster|-e \"darksite_url=\${GOLDEN_DARKSITE_URL}\""
+    "usr/local/share/kldload-ansible/playbooks/provision-golden.yml|KLDLOAD_DARKSITE_URL:"
+    "usr/local/bin/kube-init|/root/darksite/helm-charts/metallb.tgz"
+    "usr/local/bin/kube-init|/root/darksite/k8s-manifests/gateway-api.yaml"
+    "usr/local/bin/kube-init|/root/darksite/k8s-manifests/local-path.yaml"
+)
+# Cilium by tag in BOTH places, or the lock and the install disagree and the
+# saved archives carry no name (RepoTags []).
+for _k in image operator.image hubble.relay.image hubble.ui.backend.image hubble.ui.frontend.image envoy.image; do
+    _kw+=("usr/local/bin/kube-init|--set ${_k}.useDigest=false")
+    _kw+=("../../../build/darksite/resolve-k8s-stack.sh|--set ${_k}.useDigest=false")
+done
+for _s in "${_kw[@]}"; do
+    _f="${_ic}/${_s%%|*}"
+    _want="${_s#*|}"
+    if [[ ! -f "$_f" ]]; then
+        _fail "$(basename "$_f")" "missing"
+    elif grep -qF -- "$_want" "$_f"; then
+        _pass "$(basename "$_f"): ${_want}"
+    else
+        _fail "$(basename "$_f")" "no longer carries '${_want}' -- a golden would fetch it online"
+    fi
+done
+# Written is not wired: the three kube-setup steps must be CALLED, not only
+# defined, so match the call lines exactly.
+for _call in _darksite_fetch "    _darksite_repo" "    _darksite_retire"; do
+    if grep -qxF -- "$_call" "${_ic}/usr/local/bin/kube-setup"; then
+        _pass "kube-setup calls ${_call// /}"
+    else
+        _fail "kube-setup" "never calls ${_call// /} -- the golden would install from the internet"
+    fi
+done
+# and the literals that fetched online may not come back
+_rc=0
+_bad="$(grep -nE 'gateway-api/v1\.2\.1|quay\.io/metallb/(controller|speaker):v|helm install metallb metallb/metallb' \
+    "${_ic}/usr/local/bin/kube-init" "${_ic}/usr/local/bin/kube-setup")" || _rc=$?
+if ((_rc == 1)); then
+    _pass "no hardcoded Gateway API or MetalLB fetch in kube-init / kube-setup"
+elif ((_rc == 0)); then
+    _fail "hardcoded online fetch" "${_bad//$'\n'/ ; }"
+else
+    _didnotrun "hardcoded online fetch" "grep could not read kube-init / kube-setup"
+fi
+if grep -q '^IMAGE=.*@sha256' "${ROOT}/build/darksite/k8s-stack.lock"; then
+    _fail "k8s-stack.lock" "digest references: podman saves those with no name and containerd cannot find them"
+else
+    _pass "k8s-stack.lock names every image by tag"
+fi
+
 _section "Git State"
 
 cd "$ROOT"

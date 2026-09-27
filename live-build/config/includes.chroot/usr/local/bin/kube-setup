@@ -40,6 +40,14 @@ Environment:
 Set K8S_VERSION to the MINOR stream (v1.37), not a patch release -- it selects
 the pkgs.k8s.io repo, not a package pin.
 
+  KLDLOAD_DARKSITE_URL  the host's darksite as kube-cluster tunnels it into a
+                       golden (http://127.0.0.1:18080). When set, the lock,
+                       charts, manifests, CLI tarballs and container images
+                       are copied from it into /root/darksite first, and
+                       every package installs from its mirror ONLY -- no
+                       Docker, pkgs.k8s.io or zfsonlinux repo is added. Unset,
+                       everything comes from the internet as before.
+
 See also: kube-init, kube-join, kube-load-images, kube-status.
 USAGE
     exit 0
@@ -47,6 +55,49 @@ USAGE
 esac
 
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+# ── The host's darksite, when kube-cluster tunnels it in ────────────────────
+# A golden used to install everything from the internet: containerd from
+# Docker's repo, kubeadm from pkgs.k8s.io, ZFS from zfsonlinux.org, helm and
+# the CLIs from GitHub, and every image by crictl pull. The pre-pull below
+# said "darksite" and pulled from quay.io (found 2026-09-27). Every node is a
+# clone of the golden, so this is the one place the bundle has to land.
+#
+# The copy runs FIRST, before anything below reads the lock: the versions are
+# taken from the lock this brings in.
+DARKSITE_URL="${KLDLOAD_DARKSITE_URL:-}"
+DNF_REPO_ARGS=()
+APT_REPO_ARGS=()
+DARKSITE_REPO=0
+_darksite_fetch() {
+    [[ -n "$DARKSITE_URL" ]] || return 0
+    local idx f n=0 want=0 failed=()
+    if ! idx="$(curl -fsS --max-time 30 "${DARKSITE_URL}/index.txt")"; then
+        echo "[kube-setup] WARNING: ${DARKSITE_URL} did not answer — installing from the internet" >&2
+        DARKSITE_URL=""
+        return 0
+    fi
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        # SAFETY: the index is the host's, but each path lands under
+        # /root/darksite as root. Nothing absolute, nothing with a ..
+        case "$f" in /* | *..*)
+            failed+=("${f} (refused path)")
+            continue
+            ;;
+        esac
+        want=$((want + 1))
+        if curl -fsS --retry 2 --max-time 900 --create-dirs -o "/root/darksite/${f}" "${DARKSITE_URL}/${f}"; then
+            n=$((n + 1))
+        else
+            failed+=("$f")
+        fi
+    done <<<"$idx"
+    echo "[kube-setup] darksite: ${n} of ${want} files copied from the host" >&2
+    ((${#failed[@]} == 0)) || echo "[kube-setup] WARNING: darksite files NOT copied: ${failed[*]}" >&2
+    return 0
+}
+_darksite_fetch
 
 # The Kubernetes MINOR stream whose pkgs.k8s.io repo this installs from.
 #
@@ -179,6 +230,65 @@ _dnf_addrepo() {
         true
 }
 
+# _darksite_repo — make the host's mirror this golden's ONLY package source.
+# Only, not preferred: dnf takes the newest version across enabled repos, so a
+# mirror that is merely added still loses to fedora-updates (the installer
+# learned this on the XPS, 2026-05-18), and offline an unreachable repo fails
+# the transaction. gpgcheck=0 as the installer's own darksite repo: the
+# packages were fetched from signed repos when the ISO was built.
+# Sets DNF_REPO_ARGS / APT_REPO_ARGS and DARKSITE_REPO=1, or leaves the
+# online path alone and says why.
+_darksite_repo() {
+    [[ -n "$DARKSITE_URL" ]] || return 0
+    if [[ "$PM" == "dnf" ]]; then
+        cat >/etc/yum.repos.d/kldload-darksite.repo <<EOF
+[kldload-darksite]
+name=kldload darksite (this cluster's host)
+baseurl=${DARKSITE_URL}/repo/
+enabled=1
+gpgcheck=0
+EOF
+        DNF_REPO_ARGS=(--disablerepo='*' --enablerepo=kldload-darksite)
+        if dnf "${DNF_REPO_ARGS[@]}" makecache >/dev/null; then
+            DARKSITE_REPO=1
+        else
+            rm -f /etc/yum.repos.d/kldload-darksite.repo
+            DNF_REPO_ARGS=()
+        fi
+    else
+        local codename
+        codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+        echo "deb [trusted=yes] ${DARKSITE_URL}/repo ${codename} main" >/etc/apt/kldload-darksite.list
+        # SourceParts pointed at nothing: the cloud image's own deb822 sources
+        # would otherwise stay in the resolution, and fail offline.
+        APT_REPO_ARGS=(-o Dir::Etc::SourceList=/etc/apt/kldload-darksite.list
+            -o Dir::Etc::SourceParts=/nonexistent)
+        if apt-get "${APT_REPO_ARGS[@]}" update >/dev/null; then
+            DARKSITE_REPO=1
+        else
+            rm -f /etc/apt/kldload-darksite.list
+            APT_REPO_ARGS=()
+        fi
+    fi
+    if ((DARKSITE_REPO)); then
+        log "Packages: this host's darksite mirror ONLY (${DARKSITE_URL}/repo)"
+    else
+        warn "the host's mirror did not answer as a ${PM} repo — packages come from the internet"
+    fi
+}
+
+# _darksite_retire — the tunnel dies with provision-golden, so a repo pointing
+# at it would fail every later dnf/apt on every clone. The image tarballs are
+# in containerd now; the charts, manifests, lock and CLI tarballs stay, since
+# kube-init reads them on the control plane.
+_darksite_retire() {
+    rm -f /etc/yum.repos.d/kldload-darksite.repo /etc/apt/kldload-darksite.list
+    rm -rf /root/darksite/k8s-images
+}
+
+_dnf() { dnf "${DNF_REPO_ARGS[@]}" "$@"; }
+_apt() { DEBIAN_FRONTEND=noninteractive apt-get "${APT_REPO_ARGS[@]}" "$@"; }
+
 # ── Kernel modules & sysctl ────────────────────────────────────────────────
 setup_kernel() {
     log "Loading kernel modules for Kubernetes..."
@@ -240,7 +350,7 @@ install_containerd() {
         # with CentOS Stream 9. That breaks for RHEL 10 (different kernel + libc
         # transition), so RHEL gets its own /linux/rhel/ path. Rocky stays on the
         # centos path until Rocky 10 ships.
-        if ! dnf list containerd.io 2>/dev/null | grep -q containerd; then
+        if ((DARKSITE_REPO == 0)) && ! dnf list containerd.io 2>/dev/null | grep -q containerd; then
             local _docker_path
             case "$RPM_ID" in
             fedora) _docker_path="fedora" ;;
@@ -249,10 +359,10 @@ install_containerd() {
             esac
             _dnf_addrepo "https://download.docker.com/linux/${_docker_path}/docker-ce.repo"
         fi
-        dnf install -y containerd.io 2>/dev/null || dnf install -y containerd
+        _dnf install -y containerd.io || _dnf install -y containerd
     else
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y --no-install-recommends containerd
+        ((DARKSITE_REPO)) || apt-get update -y >/dev/null 2>&1
+        _apt install -y --no-install-recommends containerd
     fi
 
     mkdir -p /etc/containerd
@@ -284,12 +394,47 @@ EOF
     log "containerd installed and configured (SystemdCgroup=true)"
 }
 
+# _zfs_from_darksite — ZFS for the kernel the CLONES will boot.
+# The online path installs kernel-devel for the RUNNING cloud kernel, which the
+# mirror does not carry: it holds the kernel the host installs. So the golden
+# takes that kernel and its headers from the mirror, DKMS builds ZFS for it,
+# and every clone boots it -- the same kernel as the host, which is what the
+# Fedora-golden choice in kube-cluster was for. A build that fails warns: ZFS
+# in a node serves the ZFS CSI only, and the node works without it.
+_zfs_from_darksite() {
+    local kver
+    if [[ "$PM" == "dnf" ]]; then
+        _dnf install -y kernel kernel-devel dkms gcc make zfs zfs-dkms || {
+            warn "ZFS packages did not install from the darksite -- nodes will have no zfs"
+            return 0
+        }
+        kver="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-devel | sort -V | tail -1)"
+    else
+        local _a
+        _a="$(dpkg --print-architecture)"
+        _apt install -y --no-install-recommends "linux-image-${_a}" "linux-headers-${_a}" \
+            zfsutils-linux zfs-dkms || {
+            warn "ZFS packages did not install from the darksite -- nodes will have no zfs"
+            return 0
+        }
+        kver="$(find /usr/src -maxdepth 1 -name "linux-headers-*-${_a}" -printf '%f\n' |
+            sed 's/^linux-headers-//' | sort -V | tail -1)"
+    fi
+    dkms autoinstall -k "$kver" >/dev/null 2>&1 ||
+        true # swallow: the status check below is the outcome, whatever autoinstall returned
+    if dkms status -k "$kver" zfs 2>/dev/null | grep -q 'installed'; then
+        log "ZFS built for ${kver}, the kernel the clones boot"
+    else
+        warn "ZFS did not build for ${kver} -- nodes will have no zfs module"
+    fi
+}
+
 # ── Kubernetes repo + packages ─────────────────────────────────────────────
 install_k8s_packages() {
     log "Setting up Kubernetes $K8S_VERSION repo..."
 
     if [[ "$PM" == "dnf" ]]; then
-        cat >/etc/yum.repos.d/kubernetes.repo <<EOF
+        ((DARKSITE_REPO)) || cat >/etc/yum.repos.d/kubernetes.repo <<EOF
 [kubernetes]
 name=Kubernetes
 baseurl=https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/rpm/
@@ -304,9 +449,9 @@ EOF
         # but what survives it is now checked package by package.
         _k8s_pkgs=(kubelet kubeadm kubectl cri-tools conntrack-tools socat
             ipvsadm nftables wireguard-tools)
-        dnf install -y "${_k8s_pkgs[@]}" || {
+        _dnf install -y "${_k8s_pkgs[@]}" || {
             warn "Some packages failed — retrying once with --skip-broken"
-            dnf install -y --skip-broken "${_k8s_pkgs[@]}" || true
+            _dnf install -y --skip-broken "${_k8s_pkgs[@]}" || true # swallow: the per-package check right below names anything it skipped
         }
         # Verify by PACKAGE, not by binary. The previous check covered only
         # kubeadm/kubelet/kubectl, so a dropped socat or conntrack-tools went
@@ -333,7 +478,9 @@ EOF
         # fc(N-2). DKMS will still build against the running kernel even with
         # an "older" repo, since the userland tooling just needs zfs-dkms +
         # the kmod build deps.
-        if ! command -v zfs >/dev/null 2>&1; then
+        if ! command -v zfs >/dev/null 2>&1 && ((DARKSITE_REPO)); then
+            _zfs_from_darksite
+        elif ! command -v zfs >/dev/null 2>&1; then
             # EPEL is EL-only; Fedora pretends it doesn't exist (and dnf install
             # epel-release on Fedora throws "no match for argument: epel-release"
             # noise). Skip on Fedora.
@@ -377,18 +524,25 @@ EOF
         fi
         systemctl enable kubelet
     else
-        apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl gpg
-        install -d -m0755 /etc/apt/keyrings
-        curl -fsSL "https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/Release.key" |
-            gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg 2>/dev/null
-        echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/ /" \
-            >/etc/apt/sources.list.d/kubernetes.list
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y --no-install-recommends kubelet kubeadm kubectl cri-tools \
+        if ((DARKSITE_REPO == 0)); then
+            apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl gpg
+            install -d -m0755 /etc/apt/keyrings
+            curl -fsSL "https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/Release.key" |
+                gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg 2>/dev/null
+            echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/ /" \
+                >/etc/apt/sources.list.d/kubernetes.list
+            apt-get update -y >/dev/null 2>&1
+        fi
+        _apt install -y --no-install-recommends kubelet kubeadm kubectl cri-tools \
             conntrack socat nftables ipset ipvsadm wireguard-tools
+        for _pkg in kubelet kubeadm kubectl cri-tools; do
+            dpkg -s "$_pkg" >/dev/null 2>&1 || die "$_pkg not installed after apt"
+        done
         apt-mark hold kubelet kubeadm kubectl 2>/dev/null || true
         # Install ZFS if not already present (needed for ZFS CSI inside VMs)
-        if ! command -v zfs >/dev/null 2>&1; then
+        if ! command -v zfs >/dev/null 2>&1 && ((DARKSITE_REPO)); then
+            _zfs_from_darksite
+        elif ! command -v zfs >/dev/null 2>&1; then
             apt-get install -y --no-install-recommends zfsutils-linux zfs-dkms 2>/dev/null ||
                 apt-get install -y --no-install-recommends zfsutils-linux 2>/dev/null || true
         fi
@@ -460,8 +614,13 @@ install_cilium_cli() {
     [[ "$arch" == "aarch64" ]] && arch="arm64"
 
     # The tags carry their v (v0.20.0); the resolver above guarantees it.
-    curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${arch}.tar.gz" |
-        tar -xz -C /usr/local/bin
+    # The darksite copy first: the ISO bakes each CLI at the lock's version.
+    if [[ -s "/root/darksite/bin/cilium-linux-${arch}.tar.gz" ]]; then
+        tar -xzf "/root/darksite/bin/cilium-linux-${arch}.tar.gz" -C /usr/local/bin cilium
+    else
+        curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${arch}.tar.gz" |
+            tar -xz -C /usr/local/bin
+    fi
     chmod +x /usr/local/bin/cilium
 
     log "Cilium CLI installed"
@@ -472,16 +631,26 @@ install_cilium_cli() {
     # optional, so a miss is a warning, but a truthful one.
     if ! command -v hubble >/dev/null 2>&1; then
         log "Installing Hubble CLI ${HUBBLE_CLI_VERSION}..."
-        curl -fsSL "https://github.com/cilium/hubble/releases/download/${HUBBLE_CLI_VERSION}/hubble-linux-${arch}.tar.gz" |
-            tar -xz -C /usr/local/bin 2>/dev/null || true # optional tool; the outcome check below is what reports it
+        if [[ -s "/root/darksite/bin/hubble-linux-${arch}.tar.gz" ]]; then
+            tar -xzf "/root/darksite/bin/hubble-linux-${arch}.tar.gz" -C /usr/local/bin hubble ||
+                true # optional tool; the outcome check below is what reports it
+        else
+            curl -fsSL "https://github.com/cilium/hubble/releases/download/${HUBBLE_CLI_VERSION}/hubble-linux-${arch}.tar.gz" |
+                tar -xz -C /usr/local/bin 2>/dev/null || true # optional tool; the outcome check below is what reports it
+        fi
         [[ -x /usr/local/bin/hubble ]] && log "Hubble CLI installed" || log "WARNING: Hubble CLI ${HUBBLE_CLI_VERSION} install failed (optional)"
     fi
 
     # Install k9s (terminal UI for Kubernetes)
     if ! command -v k9s >/dev/null 2>&1; then
         log "Installing k9s..."
-        curl -fsSL "https://github.com/derailed/k9s/releases/latest/download/k9s_Linux_${arch}.tar.gz" |
-            tar -xz -C /usr/local/bin k9s 2>/dev/null || true
+        if [[ -s "/root/darksite/bin/k9s_Linux_${arch}.tar.gz" ]]; then
+            tar -xzf "/root/darksite/bin/k9s_Linux_${arch}.tar.gz" -C /usr/local/bin k9s ||
+                true # optional tool; the outcome check below reports it
+        else
+            curl -fsSL "https://github.com/derailed/k9s/releases/latest/download/k9s_Linux_${arch}.tar.gz" |
+                tar -xz -C /usr/local/bin k9s 2>/dev/null || true # optional tool; the outcome check below reports it
+        fi
         [[ -x /usr/local/bin/k9s ]] && log "k9s installed" || log "WARNING: k9s install failed (optional)"
     fi
 }
@@ -545,10 +714,9 @@ install_node_exporter() {
     log "Installing node_exporter..."
     local _ok=0
     if [[ "$PM" == "dnf" ]]; then
-        dnf install -y node-exporter && _ok=1
+        _dnf install -y node-exporter && _ok=1
     else
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            prometheus-node-exporter && _ok=1
+        _apt install -y --no-install-recommends prometheus-node-exporter && _ok=1
     fi
     if ((_ok == 0)); then
         warn "node_exporter did not install -- clones of this golden will not answer on :9100"
@@ -568,6 +736,8 @@ main() {
     log "Setting up Kubernetes node on $(hostname)"
     echo ""
 
+    _darksite_repo
+
     setup_kernel
     setup_zfs_for_k8s
     install_containerd
@@ -576,50 +746,39 @@ main() {
     install_cilium_cli
     install_node_exporter
 
-    # Pre-pull all container images so clones deploy without internet.
-    # kubeadm images + Cilium + MetalLB + Hubble — everything needed for
-    # a full cluster bootstrap from darksite (zero network dependency).
-    log "Pre-pulling container images (darksite)..."
-
-    # kubeadm images (API server, etcd, coredns, pause, scheduler, controller-manager)
-    kubeadm config images pull 2>/dev/null && log "  kubeadm images pulled" ||
-        log "WARNING: kubeadm image pull failed"
-
-    # Cilium + Hubble, from the lock this ISO was built with.
+    # Every image the cluster will run goes INTO the golden, so no clone
+    # fetches one: the lock's list (charts, manifests, kube-vip) and kubeadm's
+    # own for the kubeadm installed here. The bundle's tarballs load first;
+    # anything still absent is pulled and counted.
     #
-    # These were six hardcoded tags (cilium v1.16.5, hubble-ui v0.13.1, an
-    # envoy build hash). Once the darksite started resolving its stack fresh,
-    # a literal here asks for an image the mirror does not contain and pulls it
-    # over the internet — on a node whose entire premise is that it does not
-    # need one. The lock is the single answer; anything not in it is not in the
-    # mirror either (2026-09-20).
-    local _lock=/root/darksite/k8s-stack.lock
-    if [[ -s "$_lock" ]]; then
-        local _n=0 _got=0
-        while IFS= read -r img; do
-            [[ -n "$img" ]] || continue
-            _n=$((_n + 1))
-            if crictl pull "$img" 2>/dev/null; then
-                _got=$((_got + 1))
-            else
-                log "  WARN: failed to pull ${img##*/}"
-            fi
-        done < <(sed -n 's/^IMAGE=//p' "$_lock" | grep -E 'cilium|hubble|tetragon')
-        # A count against what it was given, not just a cheerful total.
-        log "  cilium/hubble images: ${_got}/${_n} pulled"
-    else
-        log "WARNING: ${_lock} is absent — cannot tell which Cilium images this build expects"
+    # This used to be `kubeadm config images pull` plus crictl pull of the
+    # Cilium lines and two hardcoded MetalLB 0.14.9 images -- all from the
+    # public registries, under a log line that said "darksite" (2026-09-27).
+    if compgen -G '/root/darksite/k8s-images/*.tar' >/dev/null; then
+        log "Loading container images from the darksite..."
+        kube-load-images /root/darksite/k8s-images ||
+            warn "kube-load-images reported failures -- the count below says which images are missing"
     fi
-
-    # MetalLB
-    for img in \
-        "quay.io/metallb/controller:v0.14.9" \
-        "quay.io/metallb/speaker:v0.14.9"; do
-        crictl pull "$img" 2>/dev/null && log "  pulled: ${img##*/}" ||
-            log "  WARN: failed to pull ${img##*/}"
+    local _have _img _n=0 _got=0 _pulled=0 _missing=() _imgs=()
+    _have="$(ctr -n k8s.io images ls -q 2>/dev/null)" || _have=""
+    mapfile -t _imgs < <({
+        sed -n 's/^IMAGE=//p' "$_k8s_lock" 2>/dev/null || true # swallow: no lock on a hand-run; kubeadm's list still applies
+        kubeadm config images list --kubernetes-version "$(kubeadm version -o short)" 2>/dev/null ||
+            true # swallow: an unreadable kubeadm list shows up as a short count below
+    } | sort -u)
+    for _img in "${_imgs[@]}"; do
+        [[ -n "$_img" ]] || continue
+        _n=$((_n + 1))
+        if grep -qxF "$_img" <<<"$_have"; then
+            _got=$((_got + 1))
+        elif crictl pull "$_img" >/dev/null 2>&1; then
+            _pulled=$((_pulled + 1))
+        else
+            _missing+=("$_img")
+        fi
     done
-
-    log "Container images pre-pulled — clones deploy without internet"
+    log "container images: ${_got} of ${_n} from the darksite, ${_pulled} pulled from the internet, ${#_missing[@]} missing"
+    ((${#_missing[@]} == 0)) || warn "NOT in the golden, clones will pull these: ${_missing[*]}"
 
     # Write DHCP networking config for clones. This runs INSIDE the golden VM
     # so the config is baked into the filesystem before the seal. Previous
@@ -733,6 +892,7 @@ RCLOCAL
     log "Clone networking configured (baked into golden image)"
 
     echo ""
+    _darksite_retire
     log "Kubernetes node setup complete"
     log "  kubeadm: $(kubeadm version -o short 2>/dev/null)"
     log "  kubelet: $(kubelet --version 2>/dev/null | awk '{print $2}')"

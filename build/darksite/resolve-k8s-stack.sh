@@ -157,7 +157,15 @@ for _entry in "${CHARTS[@]}"; do
     # default values can miss images behind feature flags, so the flags this
     # build actually enables are passed where they matter.
     _extra=()
-    [[ "$_cname" == cilium ]] && _extra=(--set hubble.relay.enabled=true --set hubble.ui.enabled=true --set gatewayAPI.enabled=true)
+    # The useDigest switches MUST match kube-init's helm install: Cilium pins
+    # its images by digest by default, and `podman save` of a digest reference
+    # writes an archive with NO name ("RepoTags":[]), which containerd imports
+    # as nothing kubelet can find. So kube-init installs by tag, and the lock
+    # lists the same tag references the images are saved under (2026-09-27).
+    [[ "$_cname" == cilium ]] && _extra=(--set hubble.relay.enabled=true --set hubble.ui.enabled=true
+        --set gatewayAPI.enabled=true --set image.useDigest=false --set operator.image.useDigest=false
+        --set hubble.relay.image.useDigest=false --set hubble.ui.backend.image.useDigest=false
+        --set hubble.ui.frontend.image.useDigest=false --set envoy.image.useDigest=false)
     # A chart that renders no images is fatal two lines down, where the chart
     # and version can be named; swallowing here only defers that check.
     _rendered="$(helm template "$_cname" "${_rname}/${_cname}" --version "$_ver" "${_extra[@]}" 2>/dev/null || true)"

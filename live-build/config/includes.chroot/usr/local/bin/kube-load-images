@@ -22,7 +22,8 @@ Needs root, because it talks to containerd through ctr.
 
 An empty or missing directory is not an error: it says so and exits 0, leaving
 the node to pull from the internet as it normally would. A missing ctr IS an
-error (exit 1), because that means containerd is not installed.
+error (exit 1), because that means containerd is not installed, and so is any
+tarball that does not import (exit 1, each one named).
 
 See also: kube-init, kube-join.
 USAGE
@@ -46,12 +47,23 @@ command -v ctr >/dev/null 2>&1 || {
     exit 1
 }
 
-count=0
+# Counted by outcome. This was `import || true` and "Loaded N" where N was the
+# number of files tried, so a golden reported every image loaded while the
+# digest-pinned Cilium archives, saved with no name, gave containerd nothing it
+# could find (2026-09-27).
+count=0 given=0
+failed=()
 for tarball in "$IMAGES_DIR"/*.tar; do
     [[ -f "$tarball" ]] || continue
-    log "Loading: $(basename "$tarball")"
-    ctr -n k8s.io images import "$tarball" 2>/dev/null || true
-    ((++count))
+    given=$((given + 1))
+    if ctr -n k8s.io images import "$tarball" >/dev/null; then
+        count=$((count + 1))
+    else
+        failed+=("$(basename "$tarball")")
+    fi
 done
-
-log "Loaded $count container images into containerd"
+log "Loaded ${count} of ${given} container image archives into containerd"
+if ((${#failed[@]})); then
+    log "FAILED to import: ${failed[*]}"
+    exit 1
+fi

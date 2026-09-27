@@ -136,6 +136,12 @@ CONTROL_PLANES="${CONTROL_PLANES:-3}"
 # kube-vip image for the multi-CP VIP float (must match the k8s darksite mirror
 # and kube-init's pin). Single-CP uses a static VIP (no kube-vip); kube-vip only
 # comes in at >1 CP, where it floats the VIP to whichever CP holds the lease.
+# From the host's lock, which is also what the golden was baked with; the
+# literal is only for a host with no lock (2026-09-27: the lock never carried
+# kube-vip, so no image was baked and every HA control plane pulled it).
+if [[ -z "${KUBE_VIP_VERSION:-}" && -r /root/darksite/k8s-stack.lock ]]; then
+    KUBE_VIP_VERSION="$(sed -n 's/^KUBE_VIP_VERSION=//p' /root/darksite/k8s-stack.lock | head -1)" || KUBE_VIP_VERSION=""
+fi
 KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v0.8.9}"
 
 # ANSI color codes for terminal output
@@ -1015,6 +1021,112 @@ detect_host_distro() {
 
 HOST_DISTRO="$(detect_host_distro)"
 
+# ── The golden's offline bundle ───────────────────────────────────────────
+# Everything the golden installs comes from THIS host's darksite: the package
+# mirror for its distro, the stack lock, the charts, the manifests, the CLI
+# tarballs and every locked container image. The golden is the one place every
+# node comes from, so baking the bundle into it makes every control plane and
+# worker offline by inheritance.
+#
+# WHY a tunnel and not the bridge: the server binds 127.0.0.1 on the host and
+# reaches the golden only through an ssh -R forward to the golden's own
+# 127.0.0.1:18080. Nothing listens on virbr0, so no firewall zone is involved
+# and no other VM can read the host's files. It lives only while
+# provision-golden runs; the EXIT trap stops it if anything dies first.
+#
+# Before this, the golden fetched containerd, kubeadm, ZFS, helm, the CLIs and
+# every image from the internet, and the "darksite" pre-pull was crictl pull
+# against the public registries (found reading the build, 2026-09-27).
+#
+# Sets GOLDEN_DARKSITE_URL, empty when there is nothing to serve or the tunnel
+# does not come up; kube-setup then takes its online paths and says so.
+GOLDEN_DARKSITE_URL=""
+_GB_DIR="" _GB_HTTP_PID="" _GB_TUN_PID=""
+_golden_bundle_start() {
+    local ip="$1" ds=/root/darksite repo="" f n=0 miss=0 port want got
+    GOLDEN_DARKSITE_URL=""
+    [[ -r "${ds}/k8s-stack.lock" ]] || {
+        warn "no ${ds}/k8s-stack.lock on this host — the golden will install everything from the internet"
+        return 0
+    }
+    # WHY fedora for every RPM host: the golden is built from Fedora there
+    # (find_cloud_image), so its packages must come from the Fedora mirror.
+    case "$HOST_DISTRO" in
+    debian | ubuntu) repo="${HOST_DISTRO}/apt" ;;
+    *) repo="fedora/rpm" ;;
+    esac
+    _GB_DIR="$(mktemp -d -p /run kldload-golden-bundle.XXXXXX)"
+    trap _golden_bundle_stop EXIT
+    if [[ -d "${ds}/${repo}" ]]; then
+        ln -s "${ds}/${repo}" "${_GB_DIR}/repo"
+    else
+        warn "no ${ds}/${repo} mirror on this host — the golden installs its packages from the internet"
+    fi
+    # The files the golden copies, each linked into the served tree at the
+    # path it will have under the golden's /root/darksite.
+    _gb_add() { # <relative path>
+        mkdir -p "${_GB_DIR}/$(dirname "$1")"
+        ln -s "${ds}/$1" "${_GB_DIR}/$1"
+        echo "$1" >>"${_GB_DIR}/index.txt"
+        n=$((n + 1))
+    }
+    : >"${_GB_DIR}/index.txt"
+    _gb_add k8s-stack.lock
+    for f in "${ds}"/helm-charts/*.tgz "${ds}"/k8s-manifests/*.yaml "${ds}"/bin/helm-linux-*.tar.gz \
+        "${ds}"/bin/cilium-linux-*.tar.gz "${ds}"/bin/hubble-linux-*.tar.gz "${ds}"/bin/k9s_Linux_*.tar.gz; do
+        [[ -s "$f" ]] && _gb_add "${f#"${ds}/"}"
+    done
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        f="k8s-images/$(printf '%s' "$f" | tr '/:@' '___').tar"
+        if [[ -s "${ds}/${f}" ]]; then _gb_add "$f"; else miss=$((miss + 1)); fi
+    done < <(sed -n 's/^IMAGE=//p' "${ds}/k8s-stack.lock")
+    ((miss == 0)) || warn "${miss} locked image(s) are not in ${ds}/k8s-images — the golden will pull those from the internet"
+
+    port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+    python3 -m http.server "$port" --bind 127.0.0.1 --directory "$_GB_DIR" >"${_GB_DIR}.log" 2>&1 &
+    _GB_HTTP_PID=$!
+    # StrictHostKeyChecking=no: the golden is a throwaway VM whose host key is
+    # new on every build, same as every other ssh in this file.
+    ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes -o ServerAliveInterval=30 -i "$SSH_KEY" \
+        -R "127.0.0.1:18080:127.0.0.1:${port}" "root@${ip}" </dev/null >>"${_GB_DIR}.log" 2>&1 &
+    _GB_TUN_PID=$!
+    sleep 3
+    if ! kill -0 "$_GB_TUN_PID" 2>/dev/null && command -v sshpass >/dev/null 2>&1; then
+        sshpass -p kldload ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+            -o ServerAliveInterval=30 -R "127.0.0.1:18080:127.0.0.1:${port}" "root@${ip}" \
+            </dev/null >>"${_GB_DIR}.log" 2>&1 &
+        _GB_TUN_PID=$!
+        sleep 3
+    fi
+    # Ask the golden, not the host: the only proof the path works is the
+    # golden reading the index through it, line for line.
+    want="$(wc -l <"${_GB_DIR}/index.txt")"
+    got="$(_ssh_cmd "$ip" "curl -fsS --max-time 20 http://127.0.0.1:18080/index.txt | wc -l" 2>/dev/null | tr -cd '0-9')" || got=""
+    if [[ "${got:-0}" != "$want" ]]; then
+        warn "the golden cannot read this host's darksite (${got:-0} of ${want} index lines) — it installs from the internet; see ${_GB_DIR}.log"
+        _golden_bundle_stop
+        return 0
+    fi
+    GOLDEN_DARKSITE_URL="http://127.0.0.1:18080"
+    log "golden builds from this host's darksite: ${n} files, ${repo} mirror$([[ -e "${_GB_DIR}/repo" ]] || echo ' ABSENT')"
+}
+
+_golden_bundle_stop() {
+    local _p
+    for _p in "$_GB_TUN_PID" "$_GB_HTTP_PID"; do
+        [[ -n "$_p" ]] || continue
+        kill "$_p" 2>/dev/null || true # swallow: the process already exited, which is the state wanted
+    done
+    if [[ -n "$_GB_DIR" && "$_GB_DIR" == /run/kldload-golden-bundle.* ]]; then
+        rm -rf "$_GB_DIR" "${_GB_DIR}.log"
+    fi
+    _GB_TUN_PID="" _GB_HTTP_PID="" _GB_DIR=""
+    return 0
+}
+
 # ── Find Cloud Image ──────────────────────────────────────────────────────
 # Locates a qcow2 cloud image to use as the base for the golden VM.
 # Precedence: --image flag > local file search > auto-download.
@@ -1034,6 +1146,16 @@ find_cloud_image() {
     # ~500MB (and died outright with no network — FOSSY laptop, 2026-08-05,
     # "could not resolve download.fedoraproject.org" on a box with the image
     # already on disk). Match the capitalised spelling too.
+    # The copy the ISO baked, verified at build and again at install, where
+    # klab keeps its own. The installer puts it there; this is the only base
+    # image a machine with no network can have (2026-09-27).
+    local _want="fedora"
+    case "$HOST_DISTRO" in debian | ubuntu) _want="$HOST_DISTRO" ;; esac
+    if [[ -s "/var/lib/kldload/cloud-init/${_want}-cloud.qcow2" ]]; then
+        echo "/var/lib/kldload/cloud-init/${_want}-cloud.qcow2"
+        return 0
+    fi
+
     local search_dirs=("/var/lib/libvirt/isos" "/root" "/tmp")
     for dir in "${search_dirs[@]}"; do
         for img in "${dir}"/*-GenericCloud*.qcow2 "${dir}"/*-genericcloud*.qcow2 \
@@ -1391,10 +1513,12 @@ NETCFG
     else
         warn "no K8S_VERSION in the stack lock — the golden will take kube-setup's default"
     fi
+    _golden_bundle_start "$golden_ip"
     log "Running Ansible provision-golden against ${golden_ip}..."
     run_ansible_against_vm "$golden_ip" provision-golden.yml \
-        -e "k8s_minor=${_k8s_minor}" ||
+        -e "k8s_minor=${_k8s_minor}" -e "darksite_url=${GOLDEN_DARKSITE_URL}" ||
         die "ansible provision-golden failed"
+    _golden_bundle_stop
     log "  provision-golden complete — kubeadm, helm, cilium-cli installed"
 
     # ASSERT the image cache, do not assume it. The golden is already built
@@ -1972,7 +2096,10 @@ IFACE=\$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if(\$i=="de
 # kube-vip kubeconfig → this node's OWN API (valid TLS via node-IP SAN), never the VIP.
 cp -f /etc/kubernetes/admin.conf /etc/kubernetes/kube-vip.conf
 sed -i "s#server: https://${vip}:6443#server: https://\${NODE_IP}:6443#" /etc/kubernetes/kube-vip.conf
-ctr -n k8s.io image pull ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION} >/dev/null 2>&1 || true
+# Pull only if the golden did not already carry it: ctr pull asks the
+# registry even for an image it has, which on an offline node is a failure.
+ctr -n k8s.io image ls -q | grep -qxF ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION} ||
+    ctr -n k8s.io image pull ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION} >/dev/null
 ctr -n k8s.io run --rm --net-host ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION} kvmani \\
     /kube-vip manifest pod --interface "\${IFACE}" --address "${vip}" \\
     --controlplane --arp --leaderElection --prometheusHTTPServer ":2113" \\
@@ -2853,6 +2980,30 @@ KBYAML
             -o /usr/local/bin/kubectl 2>/dev/null && chmod +x /usr/local/bin/kubectl && log "kubectl installed" ||
             warn "kubectl install failed"
     fi
+
+    # helm, cilium, hubble, k9s: the ISO bakes each at the lock's version into
+    # /root/darksite/bin; the network is only for a host without that copy.
+    # They came from GitHub and get.helm.sh every time (2026-09-27).
+    _host_tool_from_darksite() { # <tool> <tarball> — 0 when installed from it
+        local _tb="/root/darksite/bin/$2" _t
+        [[ -s "$_tb" ]] || return 1
+        _t="$(mktemp -d)"
+        if tar -xzf "$_tb" -C "$_t" && _bin="$(find "$_t" -type f -name "$1" | head -1)" && [[ -n "$_bin" ]]; then
+            install -m 0755 "$_bin" "/usr/local/bin/$1"
+            rm -rf "$_t"
+            log "$1 installed from the darksite ($2)"
+            return 0
+        fi
+        rm -rf "$_t"
+        warn "$1: ${_tb} did not unpack — trying the network"
+        return 1
+    }
+    local _bin=""
+    for _tool in helm:helm-linux-${arch_dl}.tar.gz cilium:cilium-linux-${arch_dl}.tar.gz \
+        hubble:hubble-linux-${arch_dl}.tar.gz k9s:k9s_Linux_${arch_k9s}.tar.gz; do
+        command -v "${_tool%%:*}" >/dev/null 2>&1 && continue
+        _host_tool_from_darksite "${_tool%%:*}" "${_tool#*:}" || true # swallow: absent copy; the online installs below run for whatever is still missing
+    done
 
     # helm
     if ! command -v helm >/dev/null 2>&1; then
