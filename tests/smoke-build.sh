@@ -1856,13 +1856,18 @@ else
         # and executes it, so a host mounting /tmp noexec (onyx does) fails with
         # "fork/exec ...: permission denied" — which reads like a broken test
         # and is actually the gate failing to start.
-        mkdir -p "$_gd/.gotmp"
+        # WHY per uid: the build runs this gate as root and leaves a root-owned
+        # .gotmp behind; the next run as the operator could not create its work
+        # dir there and reported "go kld: failing: test(gui)" on clean code
+        # (onyx, 1.5.1-console, 2026-09-27).
+        _gotmp="$_gd/.gotmp-$(id -u)"
+        mkdir -p "$_gotmp"
         _go_bad=""
         [[ -n "$(cd "$_gd" && gofmt -l . 2>/dev/null)" ]] && _go_bad+=" gofmt"
         (cd "$_gd" && go vet ./... >/dev/null 2>&1) || _go_bad+=" vet"
         (cd "$_gd" && go vet -tags gui ./... >/dev/null 2>&1) || _go_bad+=" vet(gui)"
-        (cd "$_gd" && GOTMPDIR="$_gd/.gotmp" go test ./... >/dev/null 2>&1) || _go_bad+=" test"
-        (cd "$_gd" && GOTMPDIR="$_gd/.gotmp" go test -tags gui ./... >/dev/null 2>&1) || _go_bad+=" test(gui)"
+        (cd "$_gd" && GOTMPDIR="$_gotmp" go test ./... >/dev/null 2>&1) || _go_bad+=" test"
+        (cd "$_gd" && GOTMPDIR="$_gotmp" go test -tags gui ./... >/dev/null 2>&1) || _go_bad+=" test(gui)"
         if [[ -z "$_go_bad" ]]; then
             _pass "go ${_gm}: gofmt, vet and test clean (both flavors)"
         else
