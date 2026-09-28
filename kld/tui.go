@@ -1788,6 +1788,18 @@ func colourCell(rendered, raw string) string {
 // with it on, the terminal's own text selection is gone.
 
 func (m model) openConsole(kind consoleKind, vm, addr string) (tea.Model, tea.Cmd) {
+	// A text console drawn as dots is unreadable: in gnome-terminal (VTE with
+	// sixels off, which is every GNOME terminal) w showed kldload-cp's login
+	// screen as braille noise (fiend, 2026-09-27; the fallback of 90524367
+	// promised "a boot log stays legible" and it does not at this scale). So a
+	// terminal that cannot draw images gets the VM's serial console -- the
+	// same console, as text -- whenever the VM has one, and says so. A VM with
+	// no serial port (a Windows guest) still gets the cell picture.
+	note := ""
+	if kind == conScreen && !sixelTerminal && hasSerial(vm) {
+		kind = conSerial
+		note = "this terminal draws no images · ctrl+] 1 for the dot picture · pixels need a sixel terminal such as foot"
+	}
 	if kind == conScreen && sixelTerminal {
 		// pixels where the terminal draws them: the full window, back to
 		// the table on ctrl+] d
@@ -1809,6 +1821,7 @@ func (m model) openConsole(kind consoleKind, vm, addr string) (tea.Model, tea.Cm
 		m.con.close()
 	}
 	m.con = c
+	c.note = note
 	c.resize(m.width, m.conBodyH())
 	if kind == conScreen {
 		return m, tea.Batch(conTick(), tea.EnableMouseCellMotion)
