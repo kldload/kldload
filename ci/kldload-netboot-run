@@ -737,7 +737,10 @@ if [[ "$AI" == 1 ]]; then v="$(systemctl is-active ollama 2>&1)"; [[ "$v" == act
 # answers file: the installer turns KVM on for every profile but core unless
 # told otherwise. fiend's 6-full install (2026-09-27) passed every other check
 # here with tuned silently dropped by a tlp conflict under --skip-broken.
-if command -v virsh >/dev/null 2>&1; then v="$(tuned-adm active 2>&1)"; [[ "$v" == *virtual-host* ]] && r PASS "tuned on a KVM host" "$v" || r FAIL "tuned on a KVM host" "$v"; fi
+# The daemon's own answer, not a word search: "Cannot talk to TuneD daemon ...
+# Preset profile: virtual-host" contains virtual-host too, and passed on build
+# 153 with tuned dead. One line, so the report's table stays one row.
+if command -v virsh >/dev/null 2>&1; then v="$(systemctl is-active tuned 2>&1); $(tuned-adm active 2>&1 | head -n 1)"; [[ "$v" == "active; Current active profile: virtual-host" ]] && r PASS "tuned on a KVM host" "$v" || r FAIL "tuned on a KVM host" "$v"; fi
 # The metrics plane is installed by first boot's KVM-host section, gated on KVM or K8s:
 # a server edition gets none, whatever DEVOPS says (7-net, 2026-09-13: DEVOPS=1, no
 # KVM, no Grafana). Checked where the installer actually puts it.
