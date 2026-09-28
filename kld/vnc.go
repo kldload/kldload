@@ -90,6 +90,33 @@ func vncPort(name string) (int, error) {
 	return 0, fmt.Errorf("%s has no live VNC display (is it running?)", name)
 }
 
+// hasSerial reports whether the domain has a pty serial port or console that
+// `virsh console` can attach to. False on any error: the caller then keeps the
+// video screen, which is the conservative choice.
+func hasSerial(name string) bool {
+	x, err := run(15*time.Second, "virsh", "dumpxml", name)
+	if err != nil {
+		return false
+	}
+	var d struct {
+		Serial []struct {
+			Type string `xml:"type,attr"`
+		} `xml:"devices>serial"`
+		Console []struct {
+			Type string `xml:"type,attr"`
+		} `xml:"devices>console"`
+	}
+	if xml.Unmarshal([]byte(x), &d) != nil {
+		return false
+	}
+	for _, s := range append(d.Serial, d.Console...) {
+		if s.Type == "pty" {
+			return true
+		}
+	}
+	return false
+}
+
 // rfbConn is one VNC session. The read loop owns img; pub is the published
 // copy every consumer reads under pubMu; frames counts published updates so
 // a renderer can tell "new frame" from "same frame" without a callback.

@@ -65,6 +65,7 @@ type console struct {
 	kind consoleKind
 	vm   string // the VM, or the job's label
 	addr string // the ssh target, for conSSH
+	note string // shown beside the kind in the status bar: why this console and not the one asked for
 	// jobs: what runs, since when, and whether the table has been told
 	// the result yet
 	argv     []string
@@ -394,6 +395,9 @@ func (c *console) status() string {
 		return stKey.Render("ctrl+]") + stDim.Render("  d detach · 1 screen · 2 serial · 3 ssh · f full window (pixels) · x ctrl+alt+del · r redraw · ] send ctrl+] · any other key back")
 	}
 	what := c.kind.String()
+	if c.note != "" {
+		what += " (" + c.note + ")"
+	}
 	if c.kind == conScreen {
 		what = fmt.Sprintf("screen %dx%d", c.fbW, c.fbH)
 	}
