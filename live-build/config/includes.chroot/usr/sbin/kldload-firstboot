@@ -2882,7 +2882,21 @@ SMBSHARE
         # on 10.100.10.119 (2026-06-14), blocking nvidia heal + autodeploy.
         # Enable/disable/mask only (config, instant) and fire the start with
         # --no-block so we never wait on a job; ppd is fully active next boot.
-        if rpm -q power-profiles-daemon >/dev/null 2>&1; then
+        # A KVM host runs tuned (virtual-host) instead: tuned.service conflicts
+        # with ppd, so enabling ppd here left tuned installed, enabled and dead
+        # on fiend (build 153, 2026-09-27). tuned-ppd keeps the GNOME slider.
+        if rpm -q tuned >/dev/null 2>&1; then
+            # swallow: ppd and tlp are absent on most KVM installs; masking is the point
+            systemctl disable power-profiles-daemon tlp tlp-rdw >/dev/null 2>&1 || true
+            # swallow: as above
+            systemctl mask power-profiles-daemon tlp >/dev/null 2>&1 || true
+            systemctl enable tuned >/dev/null 2>&1 || log "WARNING: tuned not enabled -- the KVM host runs untuned"
+            # swallow: tuned-ppd is only on desktops; its absence is not a fault
+            systemctl enable tuned-ppd >/dev/null 2>&1 || true
+            # swallow: a start fired without waiting (the --now deadlock below); the enable above warns
+            systemctl --no-block restart tuned >/dev/null 2>&1 || true
+            ok "tuned enabled (virtual-host); ppd and tlp masked; GNOME power slider via tuned-ppd"
+        elif rpm -q power-profiles-daemon >/dev/null 2>&1; then
             # swallow: tlp is only installed on laptops
             systemctl disable tlp tlp-rdw >/dev/null 2>&1 || true
             # swallow: as above

@@ -25,8 +25,9 @@ set -Eeuo pipefail
 # must not be used — Ubuntu (different pocket semantics), an offline darksite
 # mirror (which carries no backports pocket), or an explicit opt-out via
 # KLDLOAD_DEBIAN_BACKPORTS=0. Always exits 0; callers test for an empty string.
-# k_drop_tlp_for_tuned NAME... -- print the package list, one per line, without
-# tlp and tlp-rdw when tuned is in it; unchanged otherwise.
+# k_drop_tlp_for_tuned NAME... -- print the package list, one per line, fitted to
+# tuned when tuned is in it: without tlp and tlp-rdw, and with tuned-ppd in place
+# of power-profiles-daemon. Unchanged when tuned is not in the list.
 #
 # WHY: tlp's RPM declares "Conflicts: tuned". The desktop set carries tlp and a
 # KVM host's set carries tuned (virtual-host), and the RPM transaction runs
@@ -35,11 +36,20 @@ set -Eeuo pipefail
 # installer's own check logged only to a file the target never keeps. The
 # desktop masks tlp at first boot anyway (power-profiles-daemon drives the
 # power slider), so on a KVM host tlp was installed only to be switched off.
+#
+# And ppd: tuned.service carries Conflicts=power-profiles-daemon.service, and
+# first boot enables ppd on a desktop, so build 153's fiend had tuned installed,
+# enabled and dead (2026-09-27). tuned-ppd is Fedora's own answer: the same
+# D-Bus API the GNOME slider talks to, backed by tuned.
 k_drop_tlp_for_tuned() {
     local p has_tuned=0
     for p in "$@"; do [[ "$p" == tuned ]] && has_tuned=1; done
     for p in "$@"; do
         if ((has_tuned)) && [[ "$p" == tlp || "$p" == tlp-rdw ]]; then
+            continue
+        fi
+        if ((has_tuned)) && [[ "$p" == power-profiles-daemon ]]; then
+            printf 'tuned-ppd\n'
             continue
         fi
         printf '%s\n' "$p"
@@ -2370,7 +2380,7 @@ CUSTOMREPO
     local _n_before=${#_dnf_pkgs[@]}
     mapfile -t _dnf_pkgs < <(k_drop_tlp_for_tuned "${_dnf_pkgs[@]}")
     ((${#_dnf_pkgs[@]} == _n_before)) ||
-        k_log_to "$log" "tlp left out: it conflicts with tuned, which this KVM host runs"
+        k_log_to "$log" "tlp left out and tuned-ppd in place of power-profiles-daemon: both conflict with tuned, which this KVM host runs"
 
     # Point DNF cache to the target ZFS filesystem to avoid filling the live overlay
     mkdir -p "${target}/var/cache/dnf"
