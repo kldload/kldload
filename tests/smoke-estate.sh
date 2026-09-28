@@ -323,27 +323,50 @@ if ((_vm_count == 0)); then
 elif ! have wg; then
     _didnotrun "mesh attachment" "wg is not installed"
 else
-    # No interface at all is a legitimate state (no mesh on this host) and is
-    # reported as DID NOT RUN two lines down.
-    _if="$(wg show interfaces 2>/dev/null | tr ' ' '\n' | head -n 1 || true)"
-    if [[ -z "$_if" ]]; then
+    # Each mesh is judged by its RUNNING members. The first interface wg lists
+    # used to be judged alone, and on fiend that was klab-blue -- a site
+    # autodeploy stops on purpose once every peer has handshaken -- so a healthy
+    # host failed "5 peer(s) on klab-blue and NOT ONE has handshaken" while the
+    # six running cluster nodes on other meshes were never looked at (build
+    # 153, 2026-09-27). kldload-estate says which machines are running and
+    # which meshes each belongs to (by key, so a stopped member still counts
+    # as a member); a mesh whose members are all stopped is idle, not broken.
+    _ifs="$(wg show interfaces 2>/dev/null || true)" # no wg interface: reported below
+    if [[ -z "${_ifs// /}" ]]; then
         _didnotrun "mesh attachment" "no WireGuard interface is up on this host"
+    elif ! have kldload-estate; then
+        _didnotrun "mesh attachment" "kldload-estate is missing, so running members cannot be told from stopped ones"
     else
-        _peers="$(wg show "$_if" peers 2>/dev/null | _count .)"
+        _est="$(kldload-estate 2>/dev/null || true)" # judged below: empty is DID NOT RUN
         _now="$(date +%s)"
-        # 15 minutes: the mesh keepalive is well under that, so anything older
-        # is a peer that is not actually talking.
-        _live="$(wg show "$_if" latest-handshakes 2>/dev/null |
-            awk -v n="$_now" '$2>0 && (n-$2)<900' | _count .)"
-        if ((_peers == 0)); then
-            _warn "mesh attachment" "${_if} is up with no peers — nothing has enrolled"
-        elif ((_live == _peers)); then
-            _pass "mesh: all ${_peers} peer(s) on ${_if} handshook within 15 min"
-        elif ((_live == 0)); then
-            _fail "mesh attachment" "${_peers} peer(s) on ${_if} and NOT ONE has handshaken"
-        else
-            _warn "mesh attachment" "${_live} of ${_peers} peer(s) on ${_if} handshook recently"
-        fi
+        _judged=0
+        for _if in $_ifs; do
+            _run="$(python3 -c 'import json,sys
+d=json.loads(sys.stdin.read() or "{}")
+print(sum(1 for m in d.get("machines",[]) if m.get("power")=="running" and sys.argv[1] in (m.get("mesh_ifaces") or "").split()))' "$_if" <<<"$_est" 2>/dev/null || echo "")"
+            [[ -n "$_run" ]] || {
+                _didnotrun "mesh attachment" "kldload-estate gave no usable answer"
+                break
+            }
+            _peers="$(wg show "$_if" peers 2>/dev/null | _count .)"
+            # 15 minutes: the mesh keepalive is well under that, so anything
+            # older is a peer that is not actually talking.
+            _live="$(wg show "$_if" latest-handshakes 2>/dev/null |
+                awk -v n="$_now" '$2>0 && (n-$2)<900' | _count .)"
+            if ((_run == 0)); then
+                echo "    ${_if}: ${_peers} peer(s), no member running -- idle, not judged"
+                continue
+            fi
+            _judged=$((_judged + 1))
+            if ((_live == 0)); then
+                _fail "mesh attachment" "${_if}: ${_run} member(s) running and NOT ONE peer has handshaken"
+            elif ((_live < _run)); then
+                _warn "mesh attachment" "${_if}: ${_live} handshake(s) for ${_run} running member(s)"
+            else
+                _pass "mesh: ${_if} -- ${_live} handshake(s) within 15 min for ${_run} running member(s)"
+            fi
+        done
+        ((_judged > 0)) || _didnotrun "mesh attachment" "no running machine is on any mesh"
     fi
 fi
 
