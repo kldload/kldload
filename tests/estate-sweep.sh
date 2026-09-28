@@ -11,6 +11,11 @@
 #   4. Waits for the machine to come back with the profile that edition asked
 #      for, identified by its install manifest rather than by address.
 #   5. Runs tests/profile-report.sh on it and saves the manifest.
+#   5a. Clones every sealed golden and runs estate-lifecycle.sh on each.
+#   5b. Runs netboot-run's verify phase: the machine against what its
+#       answers file asked for (goldens, node counts, tuned, metrics, units).
+#   5c. Where a cluster was asked for, k8s-offline-rebuild.sh: destroy and
+#       re-bootstrap with the VMs cut off from the internet.
 #   6. Runs tests/collect-bundle.sh and pulls the bundle back.
 #   7. Appends one row to SUMMARY.md and moves to the next edition.
 #
@@ -210,7 +215,7 @@ STAGED_COMMIT="${STAGED_COMMIT%-dirty}"
     echo
     echo "Image: \`${STAGED_COMMIT:-unknown}\`"
     echo
-    echo '| edition | distro/profile | install | verdict | pass | fail | warn | lifecycle | report |'
+    echo '| edition | distro/profile | install | verdict | pass | fail | warn | lifecycle | verify | k8s offline | report |'
     echo '|---|---|---|---|---|---|---|---|---|'
 } >"$SUMMARY"
 
@@ -254,6 +259,7 @@ for ed in "${EDITIONS[@]}"; do
     want_profile="$(sudo -n grep -hE '^KLDLOAD_PROFILE=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
     want_distro="$(sudo -n grep -hE '^KLDLOAD_DISTRO=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
     want_images="$(sudo -n grep -hE '^KLDLOAD_BUILD_IMAGES=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
+    want_k8s="$(sudo -n grep -hE '^KLDLOAD_K8S_BOOTSTRAP=' "$ANS" | tail -1 | cut -d= -f2 | tr -d '"')"
     say "=== ${ed} (${want_distro}/${want_profile})"
 
     # 0. Is this edition already installing? Decided BEFORE the scan below,
@@ -636,6 +642,58 @@ for ed in "${EDITIONS[@]}"; do
         _lifecycle="no hypervisor"
     fi
 
+    # 5b. The machine against what its answers file ASKED FOR: netboot-run's
+    #     verify phase, run on its own. The report above measures what is
+    #     there; this measures what is missing -- every requested golden
+    #     sealed, k8s nodes Ready equal to the count asked, tuned, the metrics
+    #     stack, the NVIDIA driver, no failed units. The sweep never ran it,
+    #     so a 6-full with one golden unsealed read as a pass here while the
+    #     same install FAILED verify under netboot-run (2026-09-28).
+    _verify="verify DID NOT RUN"
+    _vf="${OUT}/verify.txt"
+    _vrc=0
+    timeout 900 sudo -n "${REPO}/ci/kldload-netboot-run" --answers "$ANS" --from verify --hosts "$ip" \
+        </dev/null >"$_vf" 2>&1 || _vrc=$?
+    # swallow: grep -c exits 1 at zero; zero FAILs is the passing case, zero of both is judged below
+    _vp="$(grep -cE '^  PASS ' "$_vf" || true)"
+    _vx="$(grep -cE '^  FAIL ' "$_vf" || true)"
+    if ((_vp + _vx == 0)); then
+        RC=1
+        _verify="verify DID NOT RUN (exit ${_vrc}: $(tail -n 1 "$_vf" | cut -c1-80))"
+    elif ((_vx == 0)); then
+        _verify="verify ${_vp}/${_vp}"
+    else
+        RC=1
+        _verify="verify ${_vx} FAILED: $(sed -n 's/^  FAIL  \(.\{28\}\).*/\1/p' "$_vf" | sed 's/ *$//' | paste -sd, -)"
+    fi
+    say "${ed}: ${_verify}"
+
+    # 5c. Kubernetes, rebuilt with the VMs cut off from the internet. Only
+    #     where a cluster was asked for; there, "did not run" is a failure,
+    #     because the one thing this edition exists to show was not shown.
+    #     After the lifecycle and verify, so they measure first boot's
+    #     cluster, and before the bundle, so the bundle carries the rebuild.
+    _k8soff="-"
+    if [[ "${want_k8s:-0}" == 1 ]]; then
+        _kf="${OUT}/k8s-offline-rebuild.txt"
+        _krc=0
+        say "${ed}: k8s offline rebuild (destroy --all, bootstrap with the VMs blocked, count the drops)"
+        SSH_T=7200 ssh_bench "$ip" "sudo -n bash /usr/local/share/kldload/tests/k8s-offline-rebuild.sh" \
+            >"$_kf" 2>&1 || _krc=$?
+        _ksum="$(grep -oE 'k8s offline rebuild: [0-9]+ passed, [0-9]+ failed' "$_kf" | tail -n 1 || true)"
+        if ((_krc == 0)) && [[ -n "$_ksum" ]]; then
+            _k8soff="ok (${_ksum#k8s offline rebuild: })"
+        else
+            RC=1
+            if [[ -z "$_ksum" ]]; then
+                _k8soff="DID NOT FINISH (exit ${_krc})"
+            else
+                _k8soff="FAILED (${_ksum#k8s offline rebuild: }): $(sed 's/\x1b\[[0-9;]*m//g' "$_kf" | sed -n 's/^  ✗ FAIL  \([^—]*\).*/\1/p' | sed 's/ *$//' | paste -sd, -)"
+            fi
+        fi
+        say "${ed}: k8s offline: ${_k8soff}"
+    fi
+
     # 6. the bundle
     b="$(SSH_T=900 ssh_bench "$ip" 'bash /tmp/collect-bundle.sh' | tail -1 || true)"
     if [[ -n "$b" ]]; then
@@ -650,9 +708,9 @@ for ed in "${EDITIONS[@]}"; do
 
     # 7. the row
     # The machine's own distro/profile, confirmed above -- not the answers file's.
-    printf '| %s | %s/%s | %s | %s | %s | %s | %s | %s | [report](%s/report.md) |\n' \
+    printf '| %s | %s/%s | %s | %s | %s | %s | %s | %s | %s | %s | [report](%s/report.md) |\n' \
         "$ed" "$got_distro" "$got_profile" "$_install_col" "${verdict:-?}" "$sp" "$sf" "$sw" \
-        "${_lifecycle:-not run}" "$ed" >>"$SUMMARY"
+        "${_lifecycle:-not run}" "$_verify" "$_k8soff" "$ed" >>"$SUMMARY"
     say "${ed}: ${verdict:-no verdict}"
     [[ "$verdict" == PASS* ]] || RC=1
 done
