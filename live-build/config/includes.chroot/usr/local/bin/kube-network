@@ -89,6 +89,22 @@ EOF
 # logged "joined WireGuard mesh" with no wg-mgmt at all (fiend, 2026-09-27).
 _wg_up() {
     local i="$1"
+    # Up and owned by its unit: re-read the file in place. Restarting the unit
+    # per peer tripped systemd's start limit when a re-bootstrap added six peers
+    # in a row; the fallback then raised the link outside systemd, and every
+    # start after that failed "wg-mgmt already exists" -- links up, units
+    # failed (fiend, build 153 re-bootstrap, 2026-09-27). syncconf changes peers
+    # without a bounce and without a restart.
+    if ip link show "$i" >/dev/null 2>&1 && systemctl is-active -q "wg-quick@${i}"; then
+        wg syncconf "$i" <(wg-quick strip "$i") 2>/dev/null && return 0
+        warn "wg syncconf ${i} failed -- restarting it instead"
+    fi
+    # Up but not the unit's (raised by hand, or by the fallback below): hand it
+    # back, so the unit can own it and the next boot agrees with this one.
+    if ip link show "$i" >/dev/null 2>&1 && ! systemctl is-active -q "wg-quick@${i}"; then
+        wg-quick down "$i" >/dev/null 2>&1 || : # a half-owned link; the restart below decides
+    fi
+    systemctl reset-failed "wg-quick@${i}" >/dev/null 2>&1 || : # clears a spent start limit
     if ! systemctl restart "wg-quick@${i}" >/dev/null 2>&1; then
         wg-quick down "$i" >/dev/null 2>&1 || : # not up is fine: we bring it up next
         wg-quick up "$i" >/dev/null 2>&1 || :   # judged by the link check below
