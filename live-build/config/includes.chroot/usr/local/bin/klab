@@ -1699,7 +1699,14 @@ dnf install -y qemu-guest-agent 2>/dev/null || echo "klab: WARNING qemu-guest-ag
 # wireguard-tools is NOT optional (every clone joins the mesh with it) and has
 # its own transaction, so a missing eBPF package cannot take it down too; the
 # golden's validation FAILS without it (3-kvm, build 70, 2026-09-26).
-dnf install -y wireguard-tools curl jq || echo "klab: WARNING wireguard-tools FAILED — clones of this golden cannot join the mesh" >&2
+# wireguard-tools in a transaction of its own: listed beside curl and jq, the
+# already-installed curl was "upgraded" to the best candidate, which needed an
+# openssl-libs that Rocky 9.8's mirrors had published before the matching
+# openssl-devel -- the whole transaction failed and took wireguard-tools with
+# it, so klab-ztest-rocky was refused at validation (fiend, build 153,
+# 2026-09-27). The optional pair cannot cost the critical one now.
+dnf install -y wireguard-tools || echo "klab: WARNING wireguard-tools FAILED — clones of this golden cannot join the mesh" >&2
+dnf install -y curl jq || echo "klab: WARNING curl/jq did not install" >&2
 dnf install -y bpftrace bcc-tools 2>/dev/null || true
 
 # Guest audio. The domain already carries an ich9 card (virt-install attaches
