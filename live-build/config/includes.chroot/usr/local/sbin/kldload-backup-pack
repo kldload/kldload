@@ -1,72 +1,110 @@
 #!/usr/bin/env bash
-# kldload-backup-pack — snapshot the system root and ship it to a remote
-# host (default: fiend) as a single zstd-compressed ZFS send stream.
+# kldload-backup-pack — snapshot the system root (and /home) and ship them
+# to a backup host as zstd-compressed ZFS send streams.
 #
-# What "the system root" means here:
-#   The ZFS dataset currently mounted at / — typically rpool/ROOT/<node>.
-#   We send -R so all CHILD datasets travel with it, AND every snapshot
-#   in their history travels too. This means the receiver gets a complete,
-#   atomic copy of the install (config + SPA + kldload binaries + /home).
+# What is sent:
+#   1. The ZFS dataset mounted at / — typically rpool/ROOT/<node> — with -R,
+#      so every CHILD dataset and every snapshot in their history travels
+#      too: config, state, the kldload tools, the package database.
+#   2. The pool's home dataset (<pool>/home, the one ksnap snapshots), -R,
+#      as a SECOND stream — when it exists. /home is a sibling of
+#      rpool/ROOT/, not a child, so the root stream alone never carried it,
+#      although this header claimed it did (2026-09-23). The sidecar names
+#      the home stream so kldload-backup-restore receives both.
 #
 # What's NOT included:
-#   /vms, /srv/ollama, klab goldens, container-storage datasets — those
-#   are siblings of rpool/ROOT/, not children, so -R skips them. That's
-#   intentional: VM images and LLM models are heavy and can be rebuilt
-#   from the install. If you want everything, pass --full to send the
-#   whole pool.
+#   /vms, /srv/ollama, klab goldens, container-storage datasets — siblings
+#   of rpool/ROOT/ that -R skips. Intentional: VM images and LLM models are
+#   heavy and can be rebuilt from the install. --full sends the whole pool
+#   instead (home included, as part of it).
 #
 # Output:
-#   <remote-dir>/<hostname>-<utc-timestamp>.zfs.zst   # the stream
-#   <remote-dir>/<hostname>-<utc-timestamp>.meta      # sidecar metadata
+#   <remote-dir>/<hostname>-<utc-timestamp>.zfs.zst        # the root stream
+#   <remote-dir>/<hostname>-<utc-timestamp>-home.zfs.zst   # the home stream
+#   <remote-dir>/<hostname>-<utc-timestamp>.meta           # sidecar metadata
 #
 # Usage:
-#   sudo kldload-backup-pack                        # default: fiend, system root
-#   sudo kldload-backup-pack --full                 # whole pool
-#   sudo kldload-backup-pack --host other.host      # remote override
+#   sudo kldload-backup-pack --host HOST            # system root + home
+#   sudo kldload-backup-pack --host HOST --full     # whole pool
+#   sudo kldload-backup-pack --dest-dir DIR         # remote directory
+#                                                     (default /var/lib/kldload-backups)
 #   sudo kldload-backup-pack --dataset rpool/foo    # source dataset override
+#                                                     (no home stream then)
 #   sudo kldload-backup-pack --keep-snapshot        # don't delete @backup-... after
 #
-# Env overrides:
-#   BACKUP_REMOTE_HOST   default: fiend
+# The backup host is REQUIRED: --host, else BACKUP_REMOTE_HOST in the
+# environment, else BACKUP_REMOTE_HOST= in /etc/kldload/backup.conf. There
+# is no default — the old one was the author's own machine.
+#
+# Env overrides (each also readable from /etc/kldload/backup.conf, KEY=value):
+#   BACKUP_REMOTE_HOST   no default; see above
 #   BACKUP_REMOTE_DIR    default: /var/lib/kldload-backups
 #   BACKUP_SSH_OPTS      default: -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+#
+# Exit: 0 both streams landed and were verified; 1 a step failed; 2 usage
+#       error (unknown argument, no backup host).
 
 set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-REMOTE_HOST="${BACKUP_REMOTE_HOST:-fiend}"
-REMOTE_DIR="${BACKUP_REMOTE_DIR:-/var/lib/kldload-backups}"
-SSH_OPTS="${BACKUP_SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=accept-new}"
+# _conf KEY — KEY's value from /etc/kldload/backup.conf, or empty. Read with
+# sed, never sourced: a config file is data, and sourcing it would run
+# whatever a line held.
+CONF=/etc/kldload/backup.conf
+_conf() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | head -1; }
+
+REMOTE_HOST="${BACKUP_REMOTE_HOST:-$(_conf BACKUP_REMOTE_HOST)}"
+REMOTE_DIR="${BACKUP_REMOTE_DIR:-$(_conf BACKUP_REMOTE_DIR)}"
+REMOTE_DIR="${REMOTE_DIR:-/var/lib/kldload-backups}"
+SSH_OPTS="${BACKUP_SSH_OPTS:-$(_conf BACKUP_SSH_OPTS)}"
+SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=accept-new}"
 SOURCE_DATASET=""
 FULL_POOL=0
 KEEP_SNAP=0
 
+# _need_value FLAG VALUE — a flag with no value is a usage error naming it.
+_need_value() {
+    [[ -n "${2:-}" && "${2:-}" != -* ]] || {
+        echo "kldload-backup-pack: $1 needs a value" >&2
+        exit 2
+    }
+}
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --full) FULL_POOL=1 ;;
     --host)
+        _need_value "$1" "${2:-}"
         REMOTE_HOST="$2"
         shift
         ;;
     --dest-dir)
+        _need_value "$1" "${2:-}"
         REMOTE_DIR="$2"
         shift
         ;;
     --dataset)
+        _need_value "$1" "${2:-}"
         SOURCE_DATASET="$2"
         shift
         ;;
     --keep-snapshot) KEEP_SNAP=1 ;;
     -h | --help)
-        sed -n '2,32p' "$0"
+        # The banner: every consecutive comment line from line 2.
+        sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
         exit 0
         ;;
     *)
-        echo "unknown arg: $1" >&2
+        echo "kldload-backup-pack: unknown arg: $1 (try --help)" >&2
         exit 2
         ;;
     esac
     shift
 done
+
+[[ -n "$REMOTE_HOST" ]] || {
+    echo "kldload-backup-pack: no backup host. Give --host HOST, set BACKUP_REMOTE_HOST, or put BACKUP_REMOTE_HOST=host in ${CONF}." >&2
+    exit 2
+}
 
 LOG=/var/log/kldload/backup-pack.log
 mkdir -p /var/log/kldload
@@ -130,50 +168,93 @@ SNAP="${SOURCE_DATASET}@backup-${TS}"
 REMOTE_NAME="${HOSTNAME_SHORT}-${TS}.zfs.zst"
 REMOTE_META="${HOSTNAME_SHORT}-${TS}.meta"
 
-# Atomic snapshot. -r includes children so the send stream is consistent.
+# The home dataset rides along as a second stream: <pool>/home, the same
+# dataset ksnap snapshots, and only for the default (root) shape — --full
+# already carries it as part of the pool, and an explicit --dataset means
+# the operator named exactly what they want.
+HOME_DATASET=""
+HOME_SNAP=""
+HOME_REMOTE_NAME=""
+if ((FULL_POOL == 0)) && [[ "$SOURCE_DATASET" == "$(findmnt -no SOURCE /)" ]]; then
+    _pool="${SOURCE_DATASET%%/*}"
+    if zfs list -H -o name "${_pool}/home" >/dev/null 2>&1; then
+        HOME_DATASET="${_pool}/home"
+        HOME_SNAP="${HOME_DATASET}@backup-${TS}"
+        HOME_REMOTE_NAME="${HOSTNAME_SHORT}-${TS}-home.zfs.zst"
+        log "home dataset: ${HOME_DATASET} (sent as a second stream)"
+    else
+        log "no ${_pool}/home dataset — only the root tree is sent"
+    fi
+fi
+
+# Atomic snapshots. -r includes children so each send stream is consistent.
 log "taking recursive snapshot: ${SNAP}"
 zfs snapshot -r "$SNAP"
+if [[ -n "$HOME_SNAP" ]]; then
+    log "taking recursive snapshot: ${HOME_SNAP}"
+    zfs snapshot -r "$HOME_SNAP"
+fi
 
 cleanup() {
-    if ((KEEP_SNAP == 0)); then
-        log "removing local backup snapshot: ${SNAP}"
-        zfs destroy -r "$SNAP" 2>/dev/null || true
-    else
-        log "keeping local backup snapshot (--keep-snapshot): ${SNAP}"
-    fi
+    local s
+    for s in "$SNAP" "$HOME_SNAP"; do
+        [[ -n "$s" ]] || continue
+        if ((KEEP_SNAP == 0)); then
+            log "removing local backup snapshot: ${s}"
+            zfs destroy -r "$s" 2>/dev/null || true # already gone is fine
+        else
+            log "keeping local backup snapshot (--keep-snapshot): ${s}"
+        fi
+    done
 }
 trap cleanup EXIT
-
-# Size estimate (uncompressed bytes the send would emit). Useful sanity check.
-SIZE_BYTES="$(zfs send -nP -R "$SNAP" 2>/dev/null | awk '/^size/{print $2}' | tail -1)"
-log "estimated uncompressed stream size: ${SIZE_BYTES:-unknown} bytes"
 
 # zstd -T0 uses all cores; -3 is fast and the WAN is the bottleneck anyway.
 # pv is nice for live throughput but optional — only insert if installed.
 PV=cat
 command -v pv >/dev/null 2>&1 && PV="pv -prtab"
 
-log "sending → ${REMOTE_HOST}:${REMOTE_DIR}/${REMOTE_NAME}"
-# shellcheck disable=SC2086
-if ! zfs send -R "$SNAP" |
-    $PV |
-    zstd -T0 -3 --long |
-    ssh $SSH_OPTS "$REMOTE_HOST" "cat > '${REMOTE_DIR}/${REMOTE_NAME}'"; then
-    log "FATAL: send pipeline failed (check ssh + remote disk space)"
-    exit 1
+# send_stream SNAP REMOTE-NAME — send -R SNAP to REMOTE-NAME on the backup
+# host and prove the file landed with a size > 0. Sets SIZE_BYTES (estimate)
+# and REMOTE_SIZE (what arrived). Dies on any failure.
+send_stream() {
+    local snap="$1" name="$2"
+    SIZE_BYTES="$(zfs send -nP -R "$snap" 2>/dev/null | awk '/^size/{print $2}' | tail -1)"
+    log "estimated uncompressed stream size: ${SIZE_BYTES:-unknown} bytes"
+    log "sending ${snap} → ${REMOTE_HOST}:${REMOTE_DIR}/${name}"
+    # shellcheck disable=SC2086
+    if ! zfs send -R "$snap" |
+        $PV |
+        zstd -T0 -3 --long |
+        ssh $SSH_OPTS "$REMOTE_HOST" "cat > '${REMOTE_DIR}/${name}'"; then
+        log "FATAL: send pipeline failed for ${snap} (check ssh + remote disk space)"
+        exit 1
+    fi
+    # Verify the remote file exists and grab its size.
+    # shellcheck disable=SC2086
+    REMOTE_SIZE="$(ssh $SSH_OPTS "$REMOTE_HOST" "stat -c %s '${REMOTE_DIR}/${name}'" 2>/dev/null || echo 0)"
+    [[ "$REMOTE_SIZE" -gt 0 ]] ||
+        {
+            log "FATAL: remote file ${name} is empty or missing"
+            exit 1
+        }
+    log "remote file: ${name} ${REMOTE_SIZE} bytes compressed"
+}
+
+send_stream "$SNAP" "$REMOTE_NAME"
+ROOT_SIZE_BYTES="${SIZE_BYTES:-unknown}"
+ROOT_REMOTE_SIZE="$REMOTE_SIZE"
+HOME_SIZE_BYTES=""
+HOME_REMOTE_SIZE=""
+if [[ -n "$HOME_SNAP" ]]; then
+    send_stream "$HOME_SNAP" "$HOME_REMOTE_NAME"
+    HOME_SIZE_BYTES="${SIZE_BYTES:-unknown}"
+    HOME_REMOTE_SIZE="$REMOTE_SIZE"
 fi
 
-# Verify the remote file exists and grab its size.
-# shellcheck disable=SC2086
-REMOTE_SIZE="$(ssh $SSH_OPTS "$REMOTE_HOST" "stat -c %s '${REMOTE_DIR}/${REMOTE_NAME}'" 2>/dev/null || echo 0)"
-[[ "$REMOTE_SIZE" -gt 0 ]] ||
-    {
-        log "FATAL: remote file is empty or missing"
-        exit 1
-    }
-log "remote file: ${REMOTE_SIZE} bytes compressed"
-
-# Sidecar metadata. Plain text so it's grep-able from any host.
+# Sidecar metadata. Plain text so it's grep-able from any host. The home_*
+# keys are what kldload-backup-restore reads to know a second stream exists;
+# they are absent when none was sent.
 # shellcheck disable=SC2086
 ssh $SSH_OPTS "$REMOTE_HOST" "cat > '${REMOTE_DIR}/${REMOTE_META}'" <<META
 source_host=${HOSTNAME_SHORT}
@@ -181,8 +262,12 @@ source_dataset=${SOURCE_DATASET}
 source_snapshot=backup-${TS}
 created_utc=${TS}
 created_local=$(date -Is)
-stream_bytes_compressed=${REMOTE_SIZE}
-stream_bytes_estimated_raw=${SIZE_BYTES:-unknown}
+stream_bytes_compressed=${ROOT_REMOTE_SIZE}
+stream_bytes_estimated_raw=${ROOT_SIZE_BYTES}
+${HOME_DATASET:+home_dataset=${HOME_DATASET}
+home_stream=${HOME_REMOTE_NAME}
+home_bytes_compressed=${HOME_REMOTE_SIZE}
+home_bytes_estimated_raw=${HOME_SIZE_BYTES}}
 kldload_edition=$(cat /etc/kldload/edition 2>/dev/null || echo unknown)
 kldload_profile=$(cat /etc/kldload/profile 2>/dev/null || echo unknown)
 kernel=$(uname -r)
@@ -190,5 +275,6 @@ META
 
 log "DONE"
 log "  remote: ${REMOTE_HOST}:${REMOTE_DIR}/${REMOTE_NAME}"
+[[ -n "$HOME_REMOTE_NAME" ]] && log "  home:   ${REMOTE_HOST}:${REMOTE_DIR}/${HOME_REMOTE_NAME}"
 log "  meta:   ${REMOTE_HOST}:${REMOTE_DIR}/${REMOTE_META}"
-log "  to restore: sudo kldload-backup-restore --file ${REMOTE_NAME}"
+log "  to restore: sudo kldload-backup-restore --host ${REMOTE_HOST} --file ${REMOTE_NAME}"

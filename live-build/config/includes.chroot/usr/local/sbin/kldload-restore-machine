@@ -68,12 +68,18 @@ die() {
     exit "${2:-1}"
 }
 
+# usage [0] — with 0 (asked for) the text goes to stdout and the exit is 0;
+# otherwise it is a usage error: stderr, exit 2. Both used to be stderr + 2,
+# so `--help` returned an error code for an answer (2026-09-23).
 usage() {
-    cat >&2 <<EOF
+    local rc="${1:-2}"
+    if ((rc != 0)); then exec >&2; fi
+    cat <<EOF
 usage: kldload-restore-machine --archive-host HOST --archive DATASET --disk DEV --yes
        kldload-restore-machine --archive-url URL --disk DEV --yes
                                [--pool NAME] [--hostname NAME] [--esp-size SIZE]
-                               [--ssh-key PATH] [--dry-run]
+                               [--ssh-key PATH] [--manifest FILE]
+                               [--esp-archive FILE] [--dry-run]
 
   --archive-host HOST   the backup host holding the replica (it does the send).
                         Use "local" when running ON the backup host itself.
@@ -99,7 +105,7 @@ usage: kldload-restore-machine --archive-host HOST --archive DATASET --disk DEV 
 EXIT STATUS
   0  restored and verified   1  a step failed   2  usage or validation
 EOF
-    exit 2
+    exit "$rc"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -153,7 +159,7 @@ while [[ $# -gt 0 ]]; do
         DRY_RUN=1
         shift
         ;;
-    -h | --help) usage ;;
+    -h | --help) usage 0 ;;
     *) die "unknown argument: $1" 2 ;;
     esac
 done

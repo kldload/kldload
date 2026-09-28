@@ -1247,7 +1247,13 @@ _write_armed_install() {
 
 cmd_arm_install() {
     local usage="usage: arm-install <mac> <answers-file> [--netdev <mac2>]"
-    local mac="${1:?$usage}" answers="${2:?$usage}"
+    # A missing operand is a usage error (exit 2), not bash's "${1:?}"
+    # "parameter null or not set" with exit 1, which read as a failed arm.
+    [[ -n "${1:-}" && -n "${2:-}" ]] || {
+        log "$usage"
+        exit 2
+    }
+    local mac="$1" answers="$2"
     shift 2
     local netdev="" netdev_from="--netdev"
     while (($#)); do
@@ -1350,9 +1356,21 @@ cmd_arm_deploy() {
 # key. A golden is sealed and unencrypted by construction; the target applies
 # its own encryption policy on receive. zfs send fails loudly otherwise.
 cmd_golden() {
-    local dataset="${1:?usage: golden <dataset> [as <name>]}" name
-    shift || true
-    if [[ "${1:-}" == as ]]; then name="${2:?'as' needs a name}"; else name="${dataset##*/}"; fi
+    [[ -n "${1:-}" ]] || {
+        log "usage: golden <dataset> [as <name>]"
+        exit 2
+    }
+    local dataset="$1" name
+    shift
+    if [[ "${1:-}" == as ]]; then
+        [[ -n "${2:-}" ]] || {
+            log "usage: golden <dataset> as <name> — 'as' needs a name"
+            exit 2
+        }
+        name="$2"
+    else
+        name="${dataset##*/}"
+    fi
     [[ "$name" =~ ^[a-zA-Z0-9._-]+$ ]] || die "golden: bad name '$name'"
     zfs list -H -o name "$dataset" >/dev/null 2>&1 || die "no such dataset: $dataset"
     install -d -m 0755 "$ROOT/golden"
@@ -1376,7 +1394,11 @@ cmd_golden() {
 
 # ── disarm / status ──────────────────────────────────────────────────────────
 cmd_disarm() {
-    local mac="${1:?usage: disarm <mac>}" m
+    [[ -n "${1:-}" ]] || {
+        log "usage: disarm <mac>"
+        exit 2
+    }
+    local mac="$1" m
     m="$(_mac_norm "$mac")"
     local gone=0
     [[ -f "$ROOT/armed/${m}.ipxe" ]] && {

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# kldload-backup-restore — pull a previously-packed install stream from
-# fiend (or any remote host) and zfs-recv it into a NEW dataset tree on
-# this pool. Never touches the live root.
+# kldload-backup-restore — pull a previously-packed install stream from the
+# backup host and zfs-recv it into a NEW dataset tree on this pool. Never
+# touches the live root.
 #
 # Restored layout:
-#   rpool/restore/<timestamp>/...        # exact mirror of the sender's
-#                                         # dataset tree, rooted under
-#                                         # rpool/restore/<ts>/
+#   rpool/restore/<timestamp>/ROOT/<node>  # the sender's root tree, -d
+#                                          # strips the sender's pool name
+#   rpool/restore/<timestamp>/home         # the sender's home dataset, when
+#                                          # the sidecar names a home stream
+#                                          # (kldload-backup-pack sends one)
 #
 # Why never in-place: replacing the dataset mounted at / would crash the
 # running system. Operator promotes manually after inspection by:
@@ -14,16 +16,24 @@
 #   2) `zfs rename` / boot-loader update outside this script.
 #
 # Usage:
-#   sudo kldload-backup-restore                       # list + interactive pick
-#   sudo kldload-backup-restore --file foo.zfs.zst    # specific file
-#   sudo kldload-backup-restore --latest              # newest file on the host
-#   sudo kldload-backup-restore --host other.host     # remote override
-#   sudo kldload-backup-restore --target rpool/restore/test  # target prefix
+#   sudo kldload-backup-restore --host HOST                 # list + interactive pick
+#   sudo kldload-backup-restore --host HOST --file foo.zfs.zst   # specific file
+#   sudo kldload-backup-restore --host HOST --latest        # newest file on the host
+#   sudo kldload-backup-restore --src-dir DIR               # remote directory
+#                                                             (default /var/lib/kldload-backups)
+#   sudo kldload-backup-restore --target rpool/restore/test # target prefix
 #
-# Env overrides:
-#   BACKUP_REMOTE_HOST   default: fiend
+# The backup host is REQUIRED: --host, else BACKUP_REMOTE_HOST in the
+# environment, else BACKUP_REMOTE_HOST= in /etc/kldload/backup.conf. There
+# is no default — the old one was the author's own machine.
+#
+# Env overrides (each also readable from /etc/kldload/backup.conf, KEY=value):
+#   BACKUP_REMOTE_HOST   no default; see above
 #   BACKUP_REMOTE_DIR    default: /var/lib/kldload-backups
 #   BACKUP_SSH_OPTS      default: -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+#
+# Exit: 0 received; 1 a step failed (the target is left for inspection);
+#       2 usage error (unknown argument, no backup host, bad pick).
 
 set -Eeuo pipefail
 
