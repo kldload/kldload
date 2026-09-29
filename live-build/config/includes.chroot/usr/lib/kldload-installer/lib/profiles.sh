@@ -479,7 +479,8 @@ k_profile_packages() {
         ${_nodeexp} \
         nftables chrony \
         podman \
-        wireguard-tools"
+        wireguard-tools \
+        python3 python3-websockets python3-yaml ${_pam}"
         ;;
 
     vdi)

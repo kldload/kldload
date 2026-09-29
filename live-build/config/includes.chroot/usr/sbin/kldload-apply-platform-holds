@@ -230,8 +230,24 @@ _apply_apt() {
     # apt-mark's exit code is deliberately ignored: it reports success for
     # names it merely recognised, so it is not evidence. The showhold read
     # on the next line is the evidence, and missing names are reported.
-    apt-mark hold "${installed[@]}" >>"$LOG" 2>&1 || true
-    mapfile -t pinned < <(apt-mark showhold 2>/dev/null | sort -u)
+    #
+    # dpkg does not wait for its lock: it errors. At first boot this unit runs
+    # while another dpkg is still busy, and deb-11-storage (build 155,
+    # 2026-09-28) pinned 0 of its packages on "Unable to acquire the dpkg
+    # frontend lock" and reported success. So retry while anything asked for
+    # is still missing, every 5 s for up to 5 minutes.
+    local _try _p _miss
+    for _try in $(seq 1 60); do
+        apt-mark hold "${installed[@]}" >>"$LOG" 2>&1 || true # judged by the read-back below
+        mapfile -t pinned < <(apt-mark showhold 2>/dev/null | sort -u)
+        _miss=0
+        for _p in "${installed[@]}"; do
+            printf '%s\n' "${pinned[@]:-}" | grep -qxF "$_p" || _miss=1
+        done
+        ((_miss == 0)) && break
+        _log "attempt ${_try}: not every hold landed (dpkg busy?) -- retrying in 5 s"
+        sleep 5
+    done
     _log "unpin with: apt-mark unhold <pkg>"
 }
 
@@ -351,4 +367,7 @@ fi
 if ((${#missing[@]} > 0)); then
     echo "kldload: WARNING — these platform packages were not pinned: ${missing[*]}" >&2
     echo "kldload: an upgrade could move them independently; see $LOG" >&2
+    # Fail the unit: a green unit over an unpinned kernel is the silent
+    # success this tool exists to prevent (deb-11-storage, build 155).
+    exit 1
 fi
