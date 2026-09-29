@@ -152,6 +152,13 @@ var verbs = map[string][]verb{
 		{key: "C", label: "serial console", console: conSerial},
 		{key: "H", label: "ssh terminal", console: conSSH},
 		{key: "V", label: "vmxplore", noRow: true, inter: true, argv: fixed("vmxplore", "--tui")},
+		// The wall is a browser page -- fifty live video tiles cannot be drawn
+		// in a terminal -- so kld hands it to vmx, which finds every VDI
+		// that is streaming (the appliance and its Firecracker clones),
+		// writes the page and opens it; the job pane shows what it found
+		// and the page's path (operator, 2026-09-28: the video shoot is
+		// driven from kld alone).
+		{key: "W", label: "VDI wall: every streaming desktop in the browser", noRow: true, job: true, argv: fixed("vmxplore", "--vdi-wall", "--open")},
 		{key: "n", label: "new VM", job: true, noRow: true, prompt: "kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]: ", argv: func(_ []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 || !nameOK(f[0]) {
@@ -301,6 +308,13 @@ var verbs = map[string][]verb{
 		{key: "H", label: "ssh", inter: true, argv: onRow("kfire", "ssh", "{}")},
 		{key: "C", label: "serial console log", inter: true, argv: onRow("kfire", "console", "{}")},
 		{key: "!", label: "kfire status", noRow: true, job: true, argv: fixed("sh", "-c", `kfire status; echo; read -r -p "enter to return" _`)},
+		// Same verb as Machines/VMs W: the wall is a browser page -- fifty live video tiles cannot be drawn
+		// in a terminal -- so kld hands it to vmx, which finds every VDI
+		// that is streaming (the appliance and its Firecracker clones),
+		// writes the page and opens it; the job pane shows what it found
+		// and the page's path (operator, 2026-09-28: the video shoot is
+		// driven from kld alone).
+		{key: "W", label: "VDI wall: every streaming desktop in the browser", noRow: true, job: true, argv: fixed("vmxplore", "--vdi-wall", "--open")},
 	},
 	"Machines/Networks": {
 		{key: "S", label: "start", argv: onRow("virsh", "net-start", "{}")},
