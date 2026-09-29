@@ -908,6 +908,17 @@ func (m model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.input) > 0 {
 			m.input = m.input[:len(m.input)-1]
 		}
+	case "ctrl+u":
+		// the whole line: a prefilled example the operator does not want
+		// is one key to clear, not a held backspace
+		m.input = ""
+	case "ctrl+w":
+		t := strings.TrimRight(m.input, " ")
+		if i := strings.LastIndex(t, " "); i >= 0 {
+			m.input = t[:i+1]
+		} else {
+			m.input = ""
+		}
 	default:
 		// A paste (or tmux send-keys) arrives as ONE KeyRunes event carrying
 		// the whole string; taking only single-character events dropped
@@ -961,6 +972,13 @@ func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
 	}
 	if v.prompt != "" {
 		m.prompt = strings.ReplaceAll(v.prompt, "{}", name)
+		if v.example != nil {
+			hint, val := v.example(row)
+			if hint != "" {
+				m.prompt = strings.TrimSuffix(strings.TrimSpace(m.prompt), ":") + " — " + hint + " (enter runs, ctrl+u clears): "
+			}
+			m.input = val
+		}
 		m.secret = v.secret
 		m.pending = func(in string) tea.Cmd { return m.execVerb(v, row, in) }
 		return m, nil

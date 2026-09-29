@@ -26,6 +26,13 @@ type verb struct {
 	prompt  string // when set, the verb asks for this before running
 	confirm bool   // the row's name must be typed back (destructive verbs)
 	noRow   bool   // the verb needs no selection
+	// example fills a prompt in before the operator types anything: a hint
+	// naming the choices, and a value that already runs as it stands. A
+	// blank prompt with a synopsis in it asked the operator to know the
+	// command; even the author did not (operator, 2026-09-28: "no one is
+	// ever going to know what commands to enter"). Enter takes it as is,
+	// ctrl+u clears it. Interim until kld/docs/FORMS-DESIGN.md.
+	example func(row []string) (hint, value string)
 	// asUser runs a job verb as the operator instead of under sudo -n: for
 	// a command that hands something to the operator's desktop. Root has no
 	// Wayland or D-Bus session, so the VDI wall opened under sudo reached
@@ -164,7 +171,9 @@ var verbs = map[string][]verb{
 		// and the page's path (operator, 2026-09-28: the video shoot is
 		// driven from kld alone).
 		{key: "W", label: "VDI wall: every streaming desktop in the browser", noRow: true, job: true, asUser: true, argv: fixed("vmxplore", "--vdi-wall", "--open")},
-		{key: "n", label: "new VM", job: true, noRow: true, prompt: "kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]: ", argv: func(_ []string, in string) ([]string, error) {
+		{key: "n", label: "new VM", job: true, noRow: true, prompt: "kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]: ", example: func(_ []string) (string, string) {
+			return "name, then sizes; --iso path to install from an ISO", "vm1 --ram 2048 --cpus 2 --disk 20"
+		}, argv: func(_ []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 || !nameOK(f[0]) {
 				return nil, errors.New("a VM name comes first")
@@ -228,7 +237,7 @@ var verbs = map[string][]verb{
 			}
 			return buildArgvs(col(row, 4), "")
 		}},
-		{key: "X", label: "build it with an argument (a distro, a format, an image and a count)", job: true, prompt: "argument for {}: ", argvs: func(row []string, in string) ([][]string, error) {
+		{key: "X", label: "build it with an argument (a distro, a format, an image and a count)", job: true, prompt: "argument for {}: ", example: buildArgExample, argvs: func(row []string, in string) ([][]string, error) {
 			in = strings.TrimSpace(in)
 			switch col(row, 5) {
 			case "distro":
@@ -295,7 +304,13 @@ var verbs = map[string][]verb{
 		}},
 	},
 	"Machines/microVMs": {
-		{key: "c", label: "clone microVMs from a golden", noRow: true, prompt: "kfire clone <golden> [options]: ", argv: func(_ []string, in string) ([]string, error) {
+		{key: "c", label: "clone microVMs from a golden", noRow: true, prompt: "kfire clone <golden> [options]: ", example: func(_ []string) (string, string) {
+			g := microVMGoldens()
+			if len(g) == 0 {
+				return "no golden yet: seal a shut-off appliance with F on Machines/VMs", ""
+			}
+			return "golden: " + strings.Join(g, " ") + " · -n how many · --ram MB · --wait times them", g[0] + " -n 2 --wait"
+		}, argv: func(_ []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 || !nameOK(f[0]) {
 				return nil, errors.New("a golden name comes first")
@@ -804,4 +819,29 @@ func buildArgvs(cmd, distro string) ([][]string, error) {
 		out = append(out, argv)
 	}
 	return out, nil
+}
+
+// buildArgExample is the X prompt's hint and ready-to-run value for a Build
+// row, by the kind of argument the row takes (column 5): the same kinds
+// X's argvs switch accepts, so an example never fails its own validation.
+func buildArgExample(row []string) (string, string) {
+	switch col(row, 5) {
+	case "distro":
+		return "distro: all " + strings.Join(klabDistros, " "), "fedora"
+	case "format":
+		return "format: qcow2 raw vhd vmdk all", "qcow2"
+	case "deploy":
+		return "<image name> <count 1-64> (images: kimage list)", ""
+	case "workers":
+		return "workers 0-64, with 3 control planes", "3"
+	case "moreworkers":
+		return "how many more workers, 1-64", "1"
+	case "cps":
+		return "control planes: 1, 3 or 5", "3"
+	case "golden":
+		return "<name> <distro or base VM> [post-install file, or a command run as root]", "mygolden fedora"
+	case "vm":
+		return "<name> <distro or base VM> [post-install file, or a command run as root]", "myvm fedora"
+	}
+	return "", ""
 }

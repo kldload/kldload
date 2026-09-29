@@ -48,3 +48,28 @@ func TestEveryTabHasACollector(t *testing.T) {
 		}
 	}
 }
+
+// Every X example is a value X itself accepts: an example that fails its
+// own validation would be worse than an empty prompt.
+func TestBuildArgExamplesPassX(t *testing.T) {
+	var x *verb
+	for i, v := range verbs["Machines/Build"] {
+		if v.key == "X" {
+			x = &verbs["Machines/Build"][i]
+		}
+	}
+	if x == nil || x.example == nil {
+		t.Fatal("Machines/Build has no X verb with an example")
+	}
+	for _, kind := range []string{"distro", "format", "workers", "moreworkers", "cps", "golden", "vm"} {
+		row := []string{"row", "", "", "", "klab golden all", kind}
+		hint, val := x.example(row)
+		if hint == "" || val == "" {
+			t.Errorf("%s: no hint or no value (%q, %q)", kind, hint, val)
+			continue
+		}
+		if _, err := x.argvs(row, val); err != nil {
+			t.Errorf("%s: example %q fails X's validation: %v", kind, val, err)
+		}
+	}
+}
