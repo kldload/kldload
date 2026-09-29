@@ -684,6 +684,31 @@ in the order it would have hurt:
 
 What the review did not change, and why, is under Known issues.
 
+
+### Found in the last sweep before the tag
+
+The estate sweep ran once more on 25-26 September, and five of what it found
+were fixed before 1.5.0 was tagged:
+
+- A Kubernetes install that asked for three control planes and got one is no
+  longer reported as a pass. The RAM check at first boot sees the worst
+  moment and caps the count; first boot now grows the cluster back to what
+  was asked once memory settles, and marks the install degraded if it cannot
+- A klab golden could seal without WireGuard: one failed download dropped it
+  together with the optional eBPF tools, silently, and every clone of that
+  golden then failed to join the mesh. WireGuard installs on its own now, and
+  a golden without it does not seal
+- `kldload-doctor` reported a healthy cluster as failing because it took the
+  first ARP entry for a VM, a stale lease, instead of the address that
+  actually answers ssh
+- The USB-as-PXE-server mode could not have served a single machine: every ISO
+  carried the network-boot initrd readable by root only, so the web server
+  refused it. The ISO now carries it world-readable and the live server
+  copies it rather than linking it
+- The estate lifecycle test deleted its own probe VM the moment the probe
+  joined the mesh, so every later check failed against a VM that no longer
+  existed. The test was wrong, not the estate
+
 ### Known issues
 
 - `builder/build-iso.sh` is the last script not running under strict mode, held
