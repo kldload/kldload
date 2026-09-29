@@ -13,6 +13,46 @@ Enter on anything kld can run opens a form: every option is a menu or a
 number you nudge, prefilled with a working example; the command it will run is
 shown live underneath, editable; Enter runs it; the last runs are one key away.
 
+## Status (2026-09-28 night)
+
+Built as an interim on console-build (kld 688dd2eb, 39d15c85), and tested by
+walking every path to its argv (wizard_test.go) and in tmux on onyx:
+
+- a **picker** overlay (the palette, given a list and a title) that any verb
+  can open (`verb.picker`);
+- **b on Build: the guided build** — what kind (OS / desktop / database /
+  OpenZFS test golden, Kubernetes cluster, appliance, Firecracker golden, your
+  own golden, a VM from an ISO, Windows, this host as an image file) -> which ->
+  options -> a confirm step showing the exact command (run / edit first);
+- **c on microVMs: the clone wizard** — golden, how many, memory, wait, confirm;
+- prompts open **prefilled** with a working example; ctrl+u / ctrl+w edit.
+
+Still to build from this design: per-form **history**, **admission** (cost
+before running), numbers nudged with +/- instead of listed, forms for the
+remaining verbs (VM clone, vcpus/memory, grow), and the **env file +
+post-installer** step below.
+
+## The middle option: an env file plus a post-installer
+
+Operator, 2026-09-28: the builder "would essentially give the middle option
+between the env file and the post installer to make simple appliance and
+golden images". kldload already teaches that pair for HOST installs (the
+answers file's KLDLOAD_* settings, and a postinstall.sh that reads them as
+environment variables: kldload.com/build/postinstallers). The same pair makes
+an image: base golden + settings + script -> a golden or a simple appliance.
+
+- The wizard's "your own golden" already offers every `*.sh` in
+  /srv/postinstallers, /etc/kldload/postinstallers and ~/postinstallers.
+- Missing: the settings. `kvm-golden` takes `--post FILE` / `--run CMD` and no
+  environment. Proposal: `kvm-golden --env FILE` (KEY=VALUE lines, validated as
+  plain assignments -- never sourced as shell on the host), exported into the
+  post-install's environment in the guest; the wizard lists `*.env` beside
+  each script (web.sh + web.env) and shows the keys as a form (the same
+  KEY=VALUE fields vmxplore's appliance builder already asks for).
+- A pair in the folder IS a simple appliance: the wizard can list "web (web.sh
+  + web.env)" as a buildable image, which is the bridge between a one-off
+  golden and a catalogue tile.
+
 ## What it replaces
 
 | Today | Why it is yuck |
