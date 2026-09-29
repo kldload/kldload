@@ -23,9 +23,15 @@ batch so `kdeploy destroy <batch>` removes exactly what it made.
 | `kfire clone <golden> -n N --wait` | N Firecracker microVMs, timed to first answer, enrolled (mesh, CA, inventory) | only Firecracker; only from a shell |
 | vmxplore `fcdemo` (the 45-machine demo) | three lanes at once, wall/RDP/browser opened | hard-wired to vdi/rdp/lamp and `/etc/vmxplore/demo-count` |
 | `klab deploy blue\|green` | one test VM per distro | a lab shape, not "give me N" |
+| vmxplore TUI/GUI and kld | clone WITH A QUANTITY (vmx `C` "name and qty", kld `c <name> <count>`), the Factory (build goldens), the VDI wall (`vmx --vdi-wall`, kld `W`), microVM clone (`kfire clone -n`) | one batch record and one "destroy this batch"; containers; a report checked against what was asked |
 | Image Factory (design, memory) | BUILDING goldens and image sets | the deploy side |
 | containers | `podman run` / `kubectl` / helm by hand | anything point-and-shoot |
 | `kldload-db deployments` | Ansible playbook runs (target, playbook, rc) | not a record of machines made |
+
+Correction (operator, 2026-09-28: "it's already all built in vmxplore"): most
+of point-and-shoot exists in vmxplore and kld already -- quantity clones, the
+Factory, the wall. The genuine gaps are containers, a batch record with one
+teardown, and one report across backends. Phase 1 below shrinks to those.
 
 The Image Factory builds images; this deploys them. Together they are the
 "provision like a cloud, on your own iron" argument the demo makes by hand.
@@ -89,6 +95,26 @@ kdeploy destroy vdi-20260929-0712           # exactly what that batch made
   backend; a live table of instances coming up) and a verb in `kld`.
 - fcdemo becomes `kdeploy vdi=N,rdp=N,lamp=N --open` with the demo count; the
   demo keeps its button, the implementation stops being special.
+
+## The terminal wall
+
+Operator, 2026-09-28: "a literal VDI wall in terminal" -- the browser wall
+(`vmx --vdi-wall`, kld `W`) drawn inside kld instead. kld already draws one
+VM's screen in the terminal (its VNC framebuffer as sixel, `w`), so the
+drawing half exists. What differs:
+
+- VDI desktops have no VNC: Firecracker has no display device, and the VDI
+  tile streams its session through mediamtx (what the browser wall plays).
+  The terminal wall decodes those streams: one `ffmpeg` per stream at ~1 fps,
+  scaled to a tile, composed into one grid image, drawn as sixel. KVM VMs in
+  the grid can use their VNC display, as `w` does.
+- Throughput: 50 tiles at 1 fps is 50 small decodes and one composite per
+  second; the limit is the terminal's sixel speed (foot is fast; a terminal
+  with no image support falls back to a text grid of names and states).
+- Pages when the grid would make tiles smaller than readable; enter on a
+  tile opens that desktop's screen (`w`).
+- To measure before promising a frame rate: decode cost per stream on fiend,
+  composite + sixel time for 50 tiles in foot.
 
 ## Safety and admission
 
