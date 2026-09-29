@@ -1447,6 +1447,7 @@ if [[ "${WANT[klab]}" == "1" ]]; then
             # 1-hour poll budget here covers a reasonable real run; longer than
             # that and the operator should investigate manually.
             _deadline=$(($(date +%s) + 7200))
+            _kfb_rebased=0
             while (($(date +%s) < _deadline)); do
                 [[ -f /var/lib/kldload/klab-firstboot-done ]] && break
                 # Inactive is not finished. klab-firstboot is started by a
@@ -1463,7 +1464,19 @@ if [[ "${WANT[klab]}" == "1" ]]; then
                 _kfb_state="$(systemctl show -p ActiveState --value klab-firstboot.service 2>/dev/null)" || _kfb_state=""
                 _kfb_ran="$(systemctl show -p InactiveExitTimestampMonotonic --value klab-firstboot.service 2>/dev/null)" || _kfb_ran=0
                 case "$_kfb_state" in
-                active | activating | reloading) : ;;
+                active | activating | reloading)
+                    # The unit's own TimeoutStartSec is 7200 s from when IT
+                    # starts, and it starts from a timer after this loop does:
+                    # a deadline taken before that expired three minutes
+                    # before klab-firstboot finished, and autodeploy ended
+                    # "partial" over a unit that succeeded (3-kvm, build 155,
+                    # 2026-09-28). Re-based once, when the unit is first seen
+                    # running, with five minutes for the marker to land.
+                    if ((_kfb_rebased == 0)); then
+                        _kfb_rebased=1
+                        _deadline=$(($(date +%s) + 7200 + 300))
+                    fi
+                    ;;
                 failed)
                     log "[klab] klab-firstboot.service failed — proceeding without it (journalctl -u klab-firstboot)"
                     break
@@ -1647,7 +1660,8 @@ quiesce_idle_vms() {
     # already off when this pass ran. This pass had nothing left to reclaim
     # except the cluster the operator asked for.
     local _keep_cp="${KLDLOAD_KEEP_CPS:-999}" _keep_w="${KLDLOAD_KEEP_WORKERS:-999}"
-    local _vm _cp_seen=0 _w_seen=0 _off=0
+    local _vm _cp_seen=0 _w_seen=0 _off=0 _still=""
+    local _sent=()
 
     log "[quiesce] powering down idle VMs (keeping ${_keep_cp} CP + ${_keep_w} workers)"
     # A golden is finished when klab snapshots it @golden. One that is running
@@ -1679,18 +1693,35 @@ quiesce_idle_vms() {
             ((_w_seen <= _keep_w)) && continue
             ;;
         esac
-        # A guest that ignores ACPI is not a failure worth aborting for — it is
-        # reported and left running, because forcing it off could corrupt a
-        # golden mid-write.
         if virsh shutdown "$_vm" >/dev/null 2>&1; then
-            _off=$((_off + 1))
-            log "[quiesce]   shutdown ${_vm}"
+            _sent+=("$_vm")
+            log "[quiesce]   shutdown requested: ${_vm}"
         else
             log "[quiesce]   WARN ${_vm} did not accept shutdown — left running"
         fi
     done < <(virsh list --name --state-running 2>/dev/null)
 
-    log "[quiesce] ${_off} VM(s) powered down; start any of them with: virsh start <name>"
+    # A request is not a power-off. This counted every `virsh shutdown` it SENT
+    # as powered down, and klab-blue-centos -- hung, no address -- ignored it
+    # and ran unenrolled for another 40 minutes, where the smoke suite found a
+    # running VM absent from Ansible and Prometheus (3-kvm, build 155,
+    # 2026-09-28). Every request is confirmed. Blue/green clones are disposable
+    # and are stopped if they ignore ACPI; anything else (a golden may be
+    # mid-write) is reported and left running.
+    for _vm in "${_sent[@]}"; do
+        case "$_vm" in
+        klab-blue-* | klab-green-*) _await_power_off "$_vm" 90 1 ;;
+        *) _await_power_off "$_vm" 90 0 ;;
+        esac
+        if virsh domstate "$_vm" 2>/dev/null | grep -q running; then
+            _still+=" ${_vm}"
+        else
+            _off=$((_off + 1))
+        fi
+    done
+
+    log "[quiesce] ${_off} of ${#_sent[@]} VM(s) powered down; start any of them with: virsh start <name>"
+    [[ -z "$_still" ]] || log "[quiesce] WARN still running after shutdown:${_still}"
 }
 
 # Only quiesce when this run actually built something. A re-run that did no
