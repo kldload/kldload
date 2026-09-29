@@ -3651,6 +3651,18 @@ ZFSMOD
             mkdir -p "${target}/etc/tuned"
             printf 'virtual-host\n' >"${target}/etc/tuned/active_profile"
             printf 'manual\n' >"${target}/etc/tuned/profile_mode"
+            # tuned-ppd (the GNOME power slider on a desktop KVM host) applies
+            # its own default on start, and ships balanced=balanced: 6-full on
+            # fiend came up "Current active profile: balanced" with the files
+            # above in place (build 155, 2026-09-28). Its "balanced" is this
+            # host's normal state, so it maps to virtual-host. Same edit in
+            # components/kvm.component.
+            if [[ -f "${target}/etc/tuned/ppd.conf" ]]; then
+                sed -i '/^\[profiles\]/,/^\[/s/^balanced=balanced$/balanced=virtual-host/' "${target}/etc/tuned/ppd.conf"
+                grep -qx 'balanced=virtual-host' "${target}/etc/tuned/ppd.conf" &&
+                    k_log "tuned-ppd: the power slider's balanced is virtual-host" ||
+                    k_log "WARNING: tuned-ppd's balanced is not virtual-host -- it will switch the host to tuned's balanced on boot"
+            fi
             if chroot "${target}" systemctl enable tuned.service >/dev/null 2>&1; then
                 k_log "tuned: virtual-host profile, enabled"
             else

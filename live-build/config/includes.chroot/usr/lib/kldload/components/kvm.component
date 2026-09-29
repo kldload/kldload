@@ -109,6 +109,15 @@ component_install() {
     # settings. A machine that becomes a KVM host later gets the same host.
     if command -v tuned-adm >/dev/null 2>&1; then
         systemctl enable --now tuned >/dev/null 2>&1 || echo "WARNING: tuned did not start" >&2
+        # tuned-ppd's default "balanced" would switch the host back to tuned's
+        # balanced on its next start; the installer maps it the same way (profiles.sh).
+        if [[ -f /etc/tuned/ppd.conf ]]; then
+            sed -i '/^\[profiles\]/,/^\[/s/^balanced=balanced$/balanced=virtual-host/' /etc/tuned/ppd.conf
+            grep -qx 'balanced=virtual-host' /etc/tuned/ppd.conf ||
+                echo "WARNING: tuned-ppd's balanced is not virtual-host" >&2
+            # swallow: try-restart is a no-op when tuned-ppd is not running
+            systemctl try-restart tuned-ppd >/dev/null 2>&1 || true
+        fi
         tuned-adm profile virtual-host 2>/dev/null ||
             echo "WARNING: tuned-adm could not set virtual-host" >&2
     fi
