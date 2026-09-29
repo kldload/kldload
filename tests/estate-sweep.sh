@@ -731,7 +731,18 @@ for ed in "${EDITIONS[@]}"; do
     printf '| %s | %s/%s | %s | %s | %s | %s | %s | %s | %s | %s | [report](%s/report.md) |\n' \
         "$ed" "$got_distro" "$got_profile" "$_install_col" "${verdict:-?}" "$sp" "$sf" "$sw" \
         "${_lifecycle:-not run}" "$_verify" "$_k8soff" "$ed" >>"$SUMMARY"
-    say "${ed}: ${verdict:-no verdict}"
+    # The report's verdict alone printed "11-storage: PASS" over a verify that
+    # had FAILED (build 159, 2026-09-29): the row and RC were right, the line
+    # an operator reads first was not. Every failing column goes on the line.
+    _also=()
+    [[ "$_verify" == *FAILED* || "$_verify" == *"DID NOT RUN"* ]] && _also+=("$_verify")
+    [[ "$_k8soff" == FAILED* || "$_k8soff" == "DID NOT"* ]] && _also+=("k8s offline ${_k8soff%%:*}")
+    [[ "${_lifecycle:-}" == *failed:* || "${_lifecycle:-}" == *"0 goldens though"* ]] && _also+=("$_lifecycle")
+    if ((${#_also[@]})); then
+        say "${ed}: FAIL — report ${verdict:-no verdict}; $(printf '%s; ' "${_also[@]}" | sed 's/; $//')"
+    else
+        say "${ed}: ${verdict:-no verdict}"
+    fi
     [[ "$verdict" == PASS* ]] || RC=1
 done
 
