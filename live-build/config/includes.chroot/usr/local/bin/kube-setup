@@ -848,38 +848,46 @@ _node_time_source() {
     log "time source: ${NTP_SERVER} (the host)"
 }
 
-# _node_cluster_routes — cluster addresses never leave through the default route.
+# _node_cluster_routes — pod addresses never leave through the default route.
 #
-# A node that has not started Cilium yet has nothing that knows a Service or
-# a pod address, so a packet to one follows the default route out of the
-# host: during every control-plane join the API server's aggregator dialled
-# metrics-server's ClusterIP that way, 350-413 packets per offline rebuild
-# (6-full and 4-k8s, build 155, 2026-09-28). An unreachable route for each
-# range fails those locally instead. It does not get in Cilium's way: with
-# kubeProxyReplacement, a Service address is rewritten at connect() before any
-# route is looked up, and the pod routes Cilium adds per node are more
-# specific than this /16. kube-smoke-test's `kubectl top node` is the check
-# that the aggregated APIs still answer.
+# A node that has not started Cilium yet has nothing that knows a pod address,
+# so a packet to one follows the default route out of the host: during a
+# control-plane join one packet went to metrics-server's pod that way (6-full
+# and 4-k8s offline rebuilds, build 155, 2026-09-28). An unreachable route for
+# the pod range fails it locally instead; Cilium's per-node pod routes are more
+# specific than this /16, so the cluster is unaffected once Cilium runs.
 #
-# The ranges are kube-init's defaults (POD_CIDR / SVC_CIDR there); a cluster
-# built with others passes the same variables here. Installed into the golden
-# as a unit ordered before kubelet, so every clone has the routes from boot.
+# NOT the Service range: 10.96.0.0/12 covers 10.96-10.111, where operators put
+# LANs (the bench LAN is 10.100.10.0/24), and a route over it cut every node off
+# from them. The ClusterIP leak it was meant to stop (350-413 packets per
+# rebuild, the aggregator dialling metrics-server) wants aggregator routing
+# instead -- open work.
+#
+# The range is kube-init's default POD_CIDR; a cluster built with another
+# passes the same variable here. Installed into the golden as a unit ordered
+# before kubelet, so every clone has the route from boot.
 _node_cluster_routes() {
-    local pod="${POD_CIDR:-10.244.0.0/16}" svc="${SVC_CIDR:-10.96.0.0/12}"
+    # The POD range only. The Service range was here too, and 10.96.0.0/12 is
+    # 10.96-10.111: it swallowed the operator's own LAN (10.100.10.0/24), so
+    # every node lost every LAN host that no more specific route covered
+    # (review, 2026-09-28, before it shipped). Service traffic before Cilium
+    # is up is the API server's aggregator dialling a ClusterIP; the fix for
+    # that is aggregator routing (to endpoints, i.e. pod addresses, which the
+    # route below does cover), not a route over a range people use for LANs.
+    local pod="${POD_CIDR:-10.244.0.0/16}"
     install -d -m 0755 /etc/systemd/system
     cat >/etc/systemd/system/kldload-cluster-routes.service <<UNIT
-# kldload kube-setup: Service and pod addresses never leave via the default
-# route before Cilium is running on this node. Read by systemd at boot;
-# missing, a joining node leaks cluster traffic to its gateway.
+# kldload kube-setup: pod addresses never leave via the default route before
+# Cilium is running on this node. Read by systemd at boot; missing, a joining
+# node leaks pod traffic to its gateway.
 [Unit]
-Description=kldload: cluster address ranges are unreachable until Cilium routes them
+Description=kldload: the pod range is unreachable until Cilium routes it
 After=network.target
 Before=kubelet.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/sbin/ip route replace unreachable ${svc}
 ExecStart=/usr/sbin/ip route replace unreachable ${pod}
 
 [Install]
@@ -890,7 +898,7 @@ UNIT
         die "kldload-cluster-routes.service did not enable -- joining nodes would leak cluster traffic"
     systemctl is-enabled kldload-cluster-routes.service >/dev/null 2>&1 ||
         die "kldload-cluster-routes.service is not enabled after enabling it"
-    log "cluster ranges ${svc} and ${pod} unreachable until Cilium routes them (kldload-cluster-routes.service)"
+    log "pod range ${pod} unreachable until Cilium routes it (kldload-cluster-routes.service)"
 }
 
 main() {
