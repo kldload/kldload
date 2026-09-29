@@ -6,8 +6,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // walk follows a wizard the way the operator does: from the entries shown,
@@ -143,7 +141,7 @@ func TestWizardRejects(t *testing.T) {
 			mm = nm.(model)
 		}
 	}
-	msg := mm.pending("99")().(tea.Msg)
+	msg := mm.pending("99")()
 	if d, ok := msg.(doneMsg); !ok || d.err == nil {
 		t.Fatalf("99 workers was accepted: %#v", msg)
 	}
