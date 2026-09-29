@@ -253,6 +253,9 @@ cmd_golden() {
     udevadm settle --timeout=30 >/dev/null 2>&1 || log "golden $vm: udev did not settle in 30 s; re-reading the partition table anyway"
     partx -u "$_rdev" >/dev/null 2>&1 || partprobe "$_rdev" >/dev/null 2>&1 ||
         log "golden $vm: could not re-read the partition table of $_rdev; the root partition size may be stale"
+    # partx changes the kernel's view at once, but the udev database that
+    # lsblk reads FSTYPE from follows asynchronously: settle again.
+    udevadm settle --timeout=30 >/dev/null 2>&1 || log "golden $vm: udev did not settle after the re-read"
     part=$(root_part "$root_zv")
     [[ -n $part ]] || die "no root partition found on $root_zv"
     fstype=$(lsblk -nro FSTYPE "$part")

@@ -3437,7 +3437,7 @@ deploy_site() {
     validate_site "$site"
 
     ensure_ssh_key
-    local deployed=0 skipped=0 unreachable=0 unreachable_names=""
+    local deployed=0 skipped=0 unreachable=0 unreachable_names="" checked=0
     local total_start
     total_start="$(timer_start)"
 
@@ -3585,6 +3585,7 @@ deploy_site() {
         local sname
         sname="$(site_name "$site" "$distro")"
         virsh domstate "$sname" >/dev/null 2>&1 || continue
+        checked=$((checked + 1))
         # ASK, do not COMPUTE. This used to be
         #     local ip="192.168.122.$((ip_base + vm_idx))"
         # on the theory that blue lands on .101-106 and green on .201-206. The
@@ -3836,7 +3837,11 @@ PEER
     # an address was still counted, and 3-kvm (build 155, 2026-09-28) printed
     # "5 deployed, 0 skipped" twice with klab-blue-centos and
     # klab-green-centos dead. Unreachable is reported and fails the command.
-    log "Deploy complete: ${G}$((deployed - unreachable)) up${N}, ${R}${unreachable} unreachable${N}, ${Y}${skipped} skipped${N} of ${deployed} cloned ($((total_elapsed / 1000))s)"
+    # Counted over what the boot check actually looked at: it also covers
+    # VMs that already existed and were skipped above, so "cloned minus
+    # unreachable" went negative on a re-run (review, 2026-09-28); and a
+    # skip for a missing golden has no VM, so skipped cannot stand in for it.
+    log "Deploy complete: ${G}$((checked - unreachable)) of ${checked} up${N}, ${R}${unreachable} unreachable${N} (${deployed} cloned now, ${skipped} skipped) ($((total_elapsed / 1000))s)"
     echo -e "  ${W}WireGuard:${N}  ${wg_base}.0/24 (all traffic encrypted)"
     echo -e "  ${W}SSH:${N}        ssh root@<vm-ip> (password: kldload)"
     echo -e "  ${W}Grafana:${N}    http://localhost:3000 (admin/admin)"
