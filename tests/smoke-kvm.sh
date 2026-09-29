@@ -191,6 +191,27 @@ else
     _fail "sanoid --cron" "exits with error, or did not finish within 300s"
 fi
 
+# Container image layers are rebuilt by a pull, never snapshotted: podman's zfs
+# driver makes each layer a dataset, and rpool/var/lib's recursion put 3,531
+# layer snapshots on onyx (2026-09-28). Judged only when the question can be
+# answered both ways: layer datasets exist, and sanoid has snapshotted their
+# parent tree (so "no layer snapshots" is sanoid skipping them, not sanoid
+# never having run).
+_ctr=rpool/var/lib/containers
+if ! zfs list -H -o name "$_ctr" >/dev/null 2>&1; then
+    _warn "container layers not snapshotted" "not exercised: no ${_ctr} dataset here"
+elif ! zfs list -H -t snapshot -o name -d 1 rpool/var/lib 2>/dev/null | grep -q '@autosnap_'; then
+    _warn "container layers not snapshotted" "not exercised: sanoid has not snapshotted rpool/var/lib yet"
+else
+    # swallow: grep -c exits 1 at zero, which is the passing case
+    _n="$(zfs list -H -t snapshot -o name -r "$_ctr" 2>/dev/null | grep -c '@autosnap_' || true)"
+    if ((_n == 0)); then
+        _pass "container layers not snapshotted (sanoid skips ${_ctr})"
+    else
+        _fail "container layers snapshotted" "${_n} sanoid snapshots under ${_ctr} -- /etc/sanoid/sanoid.conf lacks the [${_ctr}] override"
+    fi
+fi
+
 # ── sshpass ──────────────────────────────────────────────────────────────────
 _section "SSH Automation"
 test_cmd "sshpass" "sshpass"
