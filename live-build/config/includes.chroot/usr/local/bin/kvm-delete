@@ -81,6 +81,46 @@ EOF
     fi
 fi
 
+# ─── The VM's data disk goes with it ────────────────────────────────────────
+#
+# An appliance keeps its data on a second zvol, <name>-data, wherever libvirt
+# says it is (the data parent can be another pool). Only the root zvol was
+# destroyed here, so every deleted appliance left its data disk behind --
+# onyx's orphaned jelly-data (2026-09-04), found again by the kld/vmx parity
+# audit (2026-09-29). Read from libvirt while the domain still exists, and
+# owned by NAME only: a zvol attached to this VM whose name is exactly
+# <name>-data. Any other attached disk (shared, an ISO, another VM's) is never
+# touched. With no domain, the conventional rpool/vms/<name>-data only.
+DATA_ZVOLS=()
+# kvm-clone's cloud-init seed, <name>-seed.iso, attached as a cdrom: it too
+# outlived every deleted clone (a probe's, found 2026-09-29). Same rule --
+# the file attached to THIS VM whose name is exactly <name>-seed.iso.
+SEED_ISOS=()
+if virsh dominfo "${NAME}" >/dev/null 2>&1; then
+    while read -r _type _dev _tgt _src; do
+        if [[ "$_type" == file && "$_dev" == cdrom && "${_src##*/}" == "${NAME}-seed.iso" ]]; then
+            SEED_ISOS+=("$_src")
+            continue
+        fi
+        [[ "$_type" == block && "$_dev" == disk && "$_src" == /dev/zvol/* ]] || continue
+        _ds="${_src#/dev/zvol/}"
+        [[ "${_ds##*/}" == "${NAME}-data" ]] && DATA_ZVOLS+=("$_ds")
+    done < <(virsh domblklist "${NAME}" --details 2>/dev/null | awk 'NR > 2 && NF >= 4 {print $1, $2, $3, $4}')
+elif zfs list -H -o name "rpool/vms/${NAME}-data" >/dev/null 2>&1; then
+    DATA_ZVOLS+=("rpool/vms/${NAME}-data")
+fi
+# Refuse before mutating, as for the root zvol: clones of the data disk would
+# be stranded by its destroy.
+for _dz in "${DATA_ZVOLS[@]}"; do
+    _deps=$(zfs list -H -o name,origin -t volume,filesystem 2>/dev/null | awk -v z="${_dz}@" '$2 ~ "^"z {print $1}')
+    if [[ -n "$_deps" ]]; then
+        echo "ERROR: ${NAME}'s data disk ${_dz} has clones:" >&2
+        printf '  %s\n' ${_deps} >&2
+        echo "Nothing has been changed. Delete or promote those first." >&2
+        exit 1
+    fi
+done
+
 # Check VM exists
 if ! virsh dominfo "${NAME}" >/dev/null 2>&1; then
     echo "Warning: VM '${NAME}' not found in libvirt (removing zvol only)"
@@ -163,6 +203,27 @@ if zfs list "${ZVOL}" >/dev/null 2>&1; then
 else
     echo "Warning: ZFS zvol '${ZVOL}' not found"
 fi
+
+# The data disks found above, after the root, with the same bounded retry.
+for _dz in "${DATA_ZVOLS[@]}"; do
+    echo "Destroying its data disk: ${_dz}"
+    _dd_err=""
+    for _dd_try in 1 2 3 4 5; do
+        if _dd_err="$(zfs destroy -r "${_dz}" 2>&1)"; then
+            _dd_err=""
+            break
+        fi
+        sleep 2
+    done
+    if [[ -n "$_dd_err" ]]; then
+        _zvol_left=1
+        echo "WARNING: could not destroy ${_dz} after 5 attempts: ${_dd_err}" >&2
+        echo "WARNING: remove it by hand: zfs destroy -r ${_dz}" >&2
+    fi
+done
+for _si in "${SEED_ISOS[@]}"; do
+    rm -f -- "$_si" || echo "WARNING: could not remove the seed ${_si}" >&2
+done
 
 echo ""
 if ((${_zvol_left:-0})); then
