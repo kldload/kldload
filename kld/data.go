@@ -306,6 +306,32 @@ func loadMicroVMs(d *sectionData) {
 	if len(d.rows) == 0 {
 		d.headline = "no Firecracker microVMs — clone one from an appliance golden (c)"
 	}
+	// Name the goldens. The tab lists instances only, so with none running it
+	// said "clone one from an appliance golden" and showed nothing to clone
+	// from (onyx, 2026-09-28: four goldens, an empty tab).
+	if g := microVMGoldens(); len(g) > 0 {
+		d.headline += " · goldens: " + strings.Join(g, ", ")
+	} else {
+		d.headline += " · no goldens yet: seal a shut-off appliance with F (Machines/VMs)"
+	}
+}
+
+// microVMGoldens is the names kfire can clone from, in its own order; empty
+// when kfire lists none or cannot answer.
+func microVMGoldens() []string {
+	out, _ := run(30*time.Second, "kfire", "goldens", "--json") // empty on failure, which reads as none
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSuffix(strings.TrimSpace(line), ",")
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) == nil && str(m["name"]) != "" {
+			names = append(names, str(m["name"]))
+		}
+	}
+	return names
 }
 
 func loadVMNetworks(d *sectionData) {
