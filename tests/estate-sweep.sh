@@ -166,6 +166,9 @@ scp_to() { # scp_to <ip> <local...> <remote dir>
 # Identified by what the machine SAYS IT IS, never by a remembered address: the
 # bench machine takes a new lease on most installs, and the previous occupant
 # of an address answers ssh just as happily (fiend has moved seven times).
+# find_bench <profile|*> — the first address on the subnet whose install
+# manifest names that profile; "*" takes any kldload install. Prints it, or
+# returns 1.
 find_bench() {
     local want="$1" ip got
     for ip in $(seq 100 200); do
@@ -174,7 +177,7 @@ find_bench() {
         # Most addresses on this subnet are not the bench machine, and an
         # address that does not answer ssh is the normal case, not an error.
         got="$(ssh_bench "$ip" 'sudo -n grep -hE "^KLDLOAD_PROFILE=" /etc/kldload/install-manifest.env 2>/dev/null | cut -d= -f2 | tr -d "\""' || true)"
-        [[ "$got" == "$want" ]] || continue
+        [[ "$got" == "$want" || ("$want" == "*" && -n "$got") ]] || continue
         printf '%s\n' "$ip"
         return 0
     done
@@ -286,7 +289,10 @@ for ed in "${EDITIONS[@]}"; do
     cur=""
     _bw=0
     while :; do
-        for p in "$want_profile" desktop server core kvm storage ai master; do
+        # One scan that takes any kldload install. It was one full subnet scan
+        # per profile name, in a fixed order, so finding a kvm bench for an ai
+        # edition took seven minutes (9-ai, build 155, 2026-09-28).
+        for p in '*'; do
             ((_adopt == 1)) && break
             # find_bench returns 1 when that profile is not on the subnet, which
             # is expected for all but one of the profiles tried here.
@@ -475,8 +481,17 @@ for ed in "${EDITIONS[@]}"; do
         #
         # SubState is the one that moves: running -> exited.
         # shellcheck disable=SC2016 # expanded on the bench machine, not here
+        #
+        # Then first boot's own smoke run, which starts when autodeploy ends:
+        # measured before it finished, the report ran beside it and both
+        # suites fought over the same probe VM (3-kvm), or verify read a smoke
+        # report with no summary yet (9-ai), build 155, 2026-09-28. Finished is
+        # its done-file or the unit ending failed; no such unit (core) is
+        # nothing to wait for.
+        # shellcheck disable=SC2016 # expanded on the bench machine, not here
         if ssh_bench "$ip" 'test -e /var/lib/kldload/firstboot-done' &&
-            ssh_bench "$ip" 'case "$(systemctl show -p SubState --value kldload-autodeploy)" in running | start | start-pre | auto-restart) exit 1 ;; *) exit 0 ;; esac'; then
+            ssh_bench "$ip" 'case "$(systemctl show -p SubState --value kldload-autodeploy)" in running | start | start-pre | auto-restart) exit 1 ;; *) exit 0 ;; esac' &&
+            ssh_bench "$ip" 'systemctl cat kldload-smoke-firstboot >/dev/null 2>&1 || exit 0; test -e /var/lib/kldload/smoke-firstboot-done && exit 0; [ "$(systemctl show -p ActiveState --value kldload-smoke-firstboot)" = failed ] && exit 0; exit 1'; then
             break
         fi
         sleep 60
