@@ -14,6 +14,8 @@ Source-only parity audit, 2026-09-29. File:line refs are to ~/vmxplore and kld/.
   it, rolls back to the newest snapshot, restarts it (kld verbs.go:207). vmx refused
   a running VM and said how many newer snapshots the rollback destroys
   (vmx verbs.go:574-584, tui.go:885-898).
+  **FIXED f9d17d8a**: VMs `b` refuses a running VM and wants the name typed;
+  Snapshots `b` checks the domain state before rolling back.
 - **Same keys, different meanings**: vmx `d` = graceful shutdown, kld `d` = delete
   (a stopped VM goes on one key); vmx `b` = reboot, kld `b` = rollback.
 
@@ -21,8 +23,8 @@ Source-only parity audit, 2026-09-29. File:line refs are to ~/vmxplore and kld/.
 
 | # | Item | Size |
 |---|---|---|
-| 1 | Rollback refuses a running VM (or confirms), shows how many newer snapshots it destroys | S |
-| 2 | Delete also removes the VM's `-data` zvol and seed (in kvm-delete, so the CLI gets it) | S |
+| 1 | ~~Rollback refuses a running VM (or confirms)~~ done f9d17d8a; still to do: show how many newer snapshots it destroys | S |
+| 2 | ~~Delete also removes the VM's `-data` zvol and seed (in kvm-delete, so the CLI gets it)~~ done bdcd89be, tested on onyx probes | S |
 | 3 | Rules file: honour `snap` class lines + `--rules`; classify/collapse noise in Snapshots | M |
 | 4 | Snapshot with a typed suffix on VMs | S |
 | 5 | Marks: space on a group header marks the group; plan all targets first; clear marks after a batch | M |
