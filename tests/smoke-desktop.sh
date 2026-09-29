@@ -218,8 +218,7 @@ _section "Darksite (post-firstboot cleanup)"
 # you to ignore the report. What actually matters is that the CONSUMED payloads
 # are gone — the distro mirrors and the 5.4 GB ollama set — while the charts
 # remain. (.113, 2026-08-17.)
-test_succeeds "darksite package mirrors reclaimed" \
-    "! ls -d /root/darksite/{debian,ubuntu,rpm,fedora,arch,alpine} >/dev/null 2>&1"
+test_darksite_reclaimed
 test_succeeds "darksite ollama payload reclaimed (weights/runtime/webui)" \
     "[[ ! -d /root/darksite/ollama ]]"
 test_succeeds "darksite helm charts KEPT (offline k8s deploys need them)" \

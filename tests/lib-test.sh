@@ -143,6 +143,41 @@ test_succeeds() {
     else _fail "$name" "command failed: $cmd"; fi
 }
 
+# test_darksite_reclaimed — firstboot's reclaim promise, asked the way
+# firstboot decides it (_darksite_reclaim in kldload-firstboot): a machine with
+# virsh KEEPS its own family's mirror, because it builds goldens from it
+# (debian/ubuntu by os-release ID, every other host fedora); every other
+# family's mirror is gone. The two suites used to assert "no debian/apt and no
+# rpms" unconditionally, which FAILed every Debian KVM host that kept its
+# mirror on purpose (deb-3-kvm, deb-4-k8s, build 155) and could never fail on
+# an RPM host, where firstboot neither makes nor removes rpms/.
+# DARKSITE_ROOT and OS_RELEASE are overridable for the suite's own fixture test.
+test_darksite_reclaimed() {
+    local root="${DARKSITE_ROOT:-/root/darksite}" osr="${OS_RELEASE:-/etc/os-release}"
+    local keep="" d bad="" id
+    if command -v virsh >/dev/null 2>&1; then
+        # shellcheck source=/dev/null # os-release, read the way firstboot reads it
+        id="$(. "$osr" && echo "${ID:-}")"
+        case "$id" in
+        debian | ubuntu) keep="$id" ;;
+        *) keep=fedora ;;
+        esac
+    fi
+    for d in debian ubuntu rpm fedora arch alpine; do
+        [[ "$d" == "$keep" ]] && continue
+        [[ -d "${root}/${d}" ]] && bad+=" ${d}"
+    done
+    if [[ -n "$bad" ]]; then
+        _fail "darksite package mirrors reclaimed (firstboot)" "still present under ${root}:${bad}"
+    elif [[ -n "$keep" && ! -d "${root}/${keep}" ]]; then
+        _fail "darksite ${keep} mirror kept for goldens" "${root}/${keep} is gone -- this hypervisor cannot build a golden offline"
+    elif [[ -n "$keep" ]]; then
+        _pass "darksite reclaimed; ${keep} mirror kept (this host builds goldens)"
+    else
+        _pass "darksite package mirrors reclaimed (firstboot)"
+    fi
+}
+
 # probe_bounded <seconds> <outfile> <cmd...> — run a probe that may never
 # return, without waiting on it.
 #

@@ -180,8 +180,7 @@ if [[ -f /etc/kldload/keep-darksite ]]; then
         test_file "APT Release file" "/root/darksite/debian/apt/dists/trixie/Release"
     fi
 else
-    test_succeeds "darksite package mirrors reclaimed (firstboot)" \
-        "[[ ! -d /root/darksite/debian/apt && ! -d /root/darksite/rpms ]]"
+    test_darksite_reclaimed
 fi
 # ZBM EFI lives at the canonical EFI System Partition path, not inside
 # /root/darksite (old layout). Verify it's where the bootloader actually
