@@ -1066,9 +1066,19 @@ _host_serves_ntp() {
         warn "chronyd is not running on this host — nodes keep their default time servers"
         return 0
     fi
-    if ! grep -qxF "allow ${br_net}" /etc/chrony.conf; then
+    # Debian and Ubuntu read /etc/chrony/chrony.conf; appending to
+    # /etc/chrony.conf there wrote a file chronyd never reads, so the host
+    # served no time while the nodes were pointed at it and had their pools
+    # commented out (review, 2026-09-28). Same fallback kube-setup uses.
+    local conf=/etc/chrony.conf
+    [[ -f "$conf" ]] || conf=/etc/chrony/chrony.conf
+    if [[ ! -f "$conf" ]]; then
+        warn "no chrony.conf on this host — nodes keep their default time servers"
+        return 0
+    fi
+    if ! grep -qxF "allow ${br_net}" "$conf"; then
         printf '\n# kldload kube-cluster: serve time to the VMs on virbr0\nallow %s\nlocal stratum 10\n' \
-            "$br_net" >>/etc/chrony.conf
+            "$br_net" >>"$conf"
         systemctl restart chronyd || {
             warn "chronyd did not restart with 'allow ${br_net}' — nodes keep their default time servers"
             return 0
