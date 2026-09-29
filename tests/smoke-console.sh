@@ -288,9 +288,12 @@ TABS
     # scrolled on the terminal (2026-09-26). Jobs now run in a pane: this
     # creates a 2 GB probe VM through the pane, waits for "done in", leaves
     # the pane, and deletes the probe by typed name from the table. Only
-    # the name kld-probe-gate is ever created or destroyed here.
+    # the name kld-probe-gate-<pid> is ever created or destroyed here: the
+    # pid because two smoke runs at once (the sweep's report and first boot's
+    # own suite, 3-kvm build 155, 2026-09-28) created and deleted the SAME
+    # fixed name under each other and both reported failures.
     if command -v tmux >/dev/null && command -v kvm-create >/dev/null && [[ -d /sys/class/net/br0 || -d /sys/class/net/virbr0 ]]; then
-        _pv="kld-probe-gate"
+        _pv="kld-probe-gate-$$"
         _t3="console-probe-job-$$"
         _job_cleanup() {
             tmux -L "$_t3" kill-server 2>/dev/null || true # gone already if kld quit
