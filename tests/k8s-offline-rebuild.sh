@@ -159,28 +159,42 @@ fi
 
 # ─── The host's mesh ────────────────────────────────────────────────────────
 _section "Mesh after the rebuild"
-for _if in wg-mgmt wg-k8s; do
-    if ip link show "$_if" up >/dev/null 2>&1; then
-        _pass "${_if} is up"
+# A bootstrap that FAILED never reaches the step that joins the host to the
+# cluster mesh, so wg-k8s down is its consequence, not a second fault.
+# deb-4-k8s (build 155, 2026-09-28) reported one failed bootstrap as five
+# failures this way. What must hold either way is below: the machines that
+# are not cluster nodes keep their wg-mgmt membership. Exit 3 is a cluster
+# that came UP with problems; it has joined the host, so it is judged.
+if ((_brc == 0 || _brc == 3)); then
+    for _if in wg-mgmt wg-k8s; do
+        if ip link show "$_if" up >/dev/null 2>&1; then
+            _pass "${_if} is up"
+        else
+            _fail "${_if}" "down or missing after the re-bootstrap"
+        fi
+    done
+    # Handshakes are driven by keepalives; give a fresh cluster three minutes.
+    _stale=""
+    for _w in $(seq 1 18); do
+        # swallow: wg exits 1 when wg-k8s does not exist; the peer count below FAILs that
+        _stale="$(wg show wg-k8s latest-handshakes 2>/dev/null | awk -v now="$(date +%s)" '$2 == 0 || now - $2 > 180 {print $1}' | tr '\n' ' ' || true)"
+        [[ -z "${_stale// /}" ]] && break
+        sleep 10
+    done
+    _peers="$(wg show wg-k8s peers 2>/dev/null | grep -c . || true)"
+    if ((_peers == 0)); then
+        _fail "wg-k8s peers" "none"
+    elif [[ -z "${_stale// /}" ]]; then
+        _pass "wg-k8s: all ${_peers} peers handshaking"
     else
-        _fail "${_if}" "down or missing after the re-bootstrap"
+        _fail "wg-k8s handshakes" "$(wc -w <<<"$_stale") of ${_peers} peers silent"
     fi
-done
-# Handshakes are driven by keepalives; give a fresh cluster three minutes.
-_stale=""
-for _w in $(seq 1 18); do
-    # swallow: wg exits 1 when wg-k8s does not exist; the peer count below FAILs that
-    _stale="$(wg show wg-k8s latest-handshakes 2>/dev/null | awk -v now="$(date +%s)" '$2 == 0 || now - $2 > 180 {print $1}' | tr '\n' ' ' || true)"
-    [[ -z "${_stale// /}" ]] && break
-    sleep 10
-done
-_peers="$(wg show wg-k8s peers 2>/dev/null | grep -c . || true)"
-if ((_peers == 0)); then
-    _fail "wg-k8s peers" "none"
-elif [[ -z "${_stale// /}" ]]; then
-    _pass "wg-k8s: all ${_peers} peers handshaking"
 else
-    _fail "wg-k8s handshakes" "$(wc -w <<<"$_stale") of ${_peers} peers silent"
+    _warn "cluster mesh (wg-k8s)" "not judged: the bootstrap failed before the host joins it"
+    if ((${#KEEP_KEYS[@]} > 0)); then
+        ip link show wg-mgmt up >/dev/null 2>&1 && _pass "wg-mgmt is up (non-cluster machines are on it)" ||
+            _fail "wg-mgmt" "down after a failed bootstrap, with ${#KEEP_KEYS[@]} non-cluster machine(s) on it"
+    fi
 fi
 _lost=""
 for _n in "${!KEEP_KEYS[@]}"; do
