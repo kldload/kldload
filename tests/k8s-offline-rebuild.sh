@@ -173,21 +173,35 @@ if ((_brc == 0 || _brc == 3)); then
             _fail "${_if}" "down or missing after the re-bootstrap"
         fi
     done
-    # Handshakes are driven by keepalives; give a fresh cluster three minutes.
-    _stale=""
+    # Judged on the CLUSTER'S peers only: wg-k8s also carries every enrolled
+    # machine, and powered-off klab clones are on it by design -- 6-full
+    # (build 155) failed "4 of 10 peers silent" on klab-blue-* that quiesce
+    # had shut down. A node's peer is the one whose endpoint is its
+    # INTERNAL-IP; every node must have one that handshook in the last three
+    # minutes (keepalives drive it, so a fresh cluster gets that long).
+    _node_ips="$(printf '%s\n' "$_nodes" | awk 'NF {print $6}' | sort -u)"
+    _live=0 _dead=""
     for _w in $(seq 1 18); do
-        # swallow: wg exits 1 when wg-k8s does not exist; the peer count below FAILs that
-        _stale="$(wg show wg-k8s latest-handshakes 2>/dev/null | awk -v now="$(date +%s)" '$2 == 0 || now - $2 > 180 {print $1}' | tr '\n' ' ' || true)"
-        [[ -z "${_stale// /}" ]] && break
+        _live=0 _dead=""
+        for _ip in $_node_ips; do
+            # dump: pubkey psk endpoint allowed-ips latest-handshake rx tx keepalive
+            # swallow: no wg-k8s is an empty dump, reported as a dead node below
+            _hs="$(wg show wg-k8s dump 2>/dev/null | awk -v ip="$_ip" 'NR > 1 {split($3, e, ":"); if (e[1] == ip) print $5}' | sort -n | tail -n 1 || true)"
+            if [[ -n "$_hs" ]] && ((_hs > 0 && $(date +%s) - _hs <= 180)); then
+                _live=$((_live + 1))
+            else
+                _dead+=" ${_ip}"
+            fi
+        done
+        [[ -z "$_dead" ]] && break
         sleep 10
     done
-    _peers="$(wg show wg-k8s peers 2>/dev/null | grep -c . || true)"
-    if ((_peers == 0)); then
-        _fail "wg-k8s peers" "none"
-    elif [[ -z "${_stale// /}" ]]; then
-        _pass "wg-k8s: all ${_peers} peers handshaking"
+    if [[ -z "$_node_ips" ]]; then
+        _fail "wg-k8s peers" "no node addresses to judge (kubectl listed no nodes)"
+    elif [[ -z "$_dead" ]]; then
+        _pass "wg-k8s: all ${_live} cluster nodes handshaking"
     else
-        _fail "wg-k8s handshakes" "$(wc -w <<<"$_stale") of ${_peers} peers silent"
+        _fail "wg-k8s handshakes" "$(wc -w <<<"$_dead") of $(wc -w <<<"$_node_ips") nodes silent:${_dead}"
     fi
 else
     _warn "cluster mesh (wg-k8s)" "not judged: the bootstrap failed before the host joins it"
