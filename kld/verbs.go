@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 type verb struct {
@@ -33,6 +35,10 @@ type verb struct {
 	// ever going to know what commands to enter"). Enter takes it as is,
 	// ctrl+u clears it. Interim until kld/docs/FORMS-DESIGN.md.
 	example func(row []string) (hint, value string)
+	// picker, when set, opens a list to choose from instead of a prompt
+	// (operator, 2026-09-28: "can't you show all of them in a context menu?
+	// I can just select and ask qty"). Each entry does its own asking.
+	picker func(m model) (title string, entries []palEntry)
 	// asUser runs a job verb as the operator instead of under sudo -n: for
 	// a command that hands something to the operator's desktop. Root has no
 	// Wayland or D-Bus session, so the VDI wall opened under sudo reached
@@ -844,4 +850,51 @@ func buildArgExample(row []string) (string, string) {
 		return "<name> <distro or base VM> [post-install file, or a command run as root]", "myvm fedora"
 	}
 	return "", ""
+}
+
+// The picker is attached here, not in the table: its "type it yourself"
+// entry looks the verb up in the table, and a reference from inside the
+// table's own initialiser is an initialisation cycle.
+func init() {
+	for i, v := range verbs["Machines/microVMs"] {
+		if v.key == "c" {
+			verbs["Machines/microVMs"][i].picker = pickMicroVMGolden
+		}
+	}
+}
+
+// pickMicroVMGolden lists the goldens kfire can clone from; choosing one asks
+// only how many, with 2 filled in, and clones them with --wait in a job pane.
+// The last entry is the free-form prompt, for options the list does not ask.
+func pickMicroVMGolden(m model) (string, []palEntry) {
+	var es []palEntry
+	for _, g := range goldensCached() {
+		g := g
+		es = append(es, palEntry{text: "clone " + g, run: func(m model) (tea.Model, tea.Cmd) {
+			m.prompt = "how many " + g + " microVMs, 1-64 (enter clones with --wait, ctrl+u clears): "
+			m.input = "2"
+			m.pending = func(in string) tea.Cmd {
+				n, err := strconv.Atoi(strings.TrimSpace(in))
+				if err != nil || n < 1 || n > 64 {
+					return func() tea.Msg { return doneMsg{"clone " + g, errors.New("a count from 1 to 64")} }
+				}
+				argv := []string{"kfire", "clone", g, "-n", strconv.Itoa(n), "--wait"}
+				return func() tea.Msg { return jobStartMsg{label: "clone " + g, argv: argv} }
+			}
+			return m, nil
+		}})
+	}
+	if len(es) == 0 {
+		es = append(es, palEntry{text: "no goldens yet: seal a shut-off appliance with F on Machines/VMs", run: func(m model) (tea.Model, tea.Cmd) { return m, nil }})
+	}
+	es = append(es, palEntry{text: "type the kfire clone command yourself…", run: func(m model) (tea.Model, tea.Cmd) {
+		for _, v := range verbs["Machines/microVMs"] {
+			if v.key == "c" {
+				v.picker = nil
+				return m.runVerb(v)
+			}
+		}
+		return m, nil
+	}})
+	return "clone microVMs from", es
 }

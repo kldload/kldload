@@ -82,6 +82,10 @@ type model struct {
 	palette bool
 	palIn   textinput.Model
 	palRow  int
+	// pick, when set, is what the palette lists instead of every tab and
+	// verb: a picker a verb opens (verb.picker), titled pickTitle.
+	pick      []palEntry
+	pickTitle string
 }
 
 // palEntry is one line of the palette: what it says and what it does.
@@ -94,8 +98,11 @@ type palEntry struct {
 // palEntries lists the tabs of every section as "go" entries and the verbs
 // of the current tab, filtered by the typed text (every word must match).
 func (m model) palEntries() []palEntry {
-	var all []palEntry
+	all := m.pick
 	for si, s := range sections {
+		if m.pick != nil {
+			break
+		}
 		for sj, sub := range s.subs {
 			si, sj := si, sj
 			all = append(all, palEntry{text: fmt.Sprintf("go   %s / %s", s.name, sub), run: func(m model) (tea.Model, tea.Cmd) {
@@ -105,6 +112,9 @@ func (m model) palEntries() []palEntry {
 		}
 	}
 	for _, v := range m.verbsHere() {
+		if m.pick != nil {
+			break
+		}
 		v := v
 		all = append(all, palEntry{text: fmt.Sprintf("%-4s %s", v.key, v.label), shown: mnemonic(v.key, v.label, isDanger(v.label)),
 			run: func(m model) (tea.Model, tea.Cmd) { return m.runVerb(v) }})
@@ -134,11 +144,13 @@ func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.palette = false
+		m.pick, m.pickTitle = nil, ""
 		m.palIn.Blur()
 		return m, nil
 	case "enter":
 		es := m.palEntries()
 		m.palette = false
+		m.pick, m.pickTitle = nil, ""
 		m.palIn.Blur()
 		if m.palRow < len(es) {
 			return es[m.palRow].run(m)
@@ -166,7 +178,11 @@ func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) paletteView() string {
 	es := m.palEntries()
 	var b strings.Builder
-	b.WriteString(stKey.Render(":") + " " + m.palIn.View() + "\n\n")
+	if m.pickTitle != "" {
+		b.WriteString(stKey.Render(m.pickTitle) + "  " + m.palIn.View() + "\n\n")
+	} else {
+		b.WriteString(stKey.Render(":") + " " + m.palIn.View() + "\n\n")
+	}
 	start := 0
 	if m.palRow >= 14 {
 		start = m.palRow - 13
@@ -185,7 +201,11 @@ func (m model) paletteView() string {
 	if len(es) == 0 {
 		b.WriteString(stDim.Render("  nothing matches") + "\n")
 	}
-	b.WriteString("\n" + stDim.Render(fmt.Sprintf("%d of %d · enter runs · esc closes · a tab is \"go section / tab\", a verb is its key and label", min(m.palRow+1, len(es)), len(es))))
+	foot := fmt.Sprintf("%d of %d · enter runs · esc closes · a tab is \"go section / tab\", a verb is its key and label", min(m.palRow+1, len(es)), len(es))
+	if m.pickTitle != "" {
+		foot = fmt.Sprintf("%d of %d · ↑↓ choose · enter picks · type to filter · esc closes", min(m.palRow+1, len(es)), len(es))
+	}
+	b.WriteString("\n" + stDim.Render(foot))
 	box := stPane.Padding(1, 2).Render(b.String())
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
@@ -564,6 +584,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cycleSort()
 		case ":":
 			// the command palette: every tab and every verb here, by name
+			m.palIn.Placeholder = "type a tab or a verb"
 			m.palette, m.palRow = true, 0
 			m.palIn.SetValue("")
 			m.palIn.Focus()
@@ -933,7 +954,22 @@ func (m model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // runVerb resolves what a verb needs — a row, typed input, typed consent —
 // and then runs its argv in the background (a doneMsg follows) or in the
 // foreground (the terminal is handed over and comes back).
+// openPicker shows es in the palette overlay under title: arrows choose,
+// typing filters, enter runs the entry.
+func (m model) openPicker(title string, es []palEntry) (tea.Model, tea.Cmd) {
+	m.pick, m.pickTitle = es, title
+	m.palIn.Placeholder = "type to filter"
+	m.palette, m.palRow = true, 0
+	m.palIn.SetValue("")
+	m.palIn.Focus()
+	return m, nil
+}
+
 func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
+	if v.picker != nil {
+		title, es := v.picker(m)
+		return m.openPicker(title, es)
+	}
 	// A batch: the verb runs once per marked row, in table order, one
 	// after another; a destructive batch asks for the count to be typed.
 	// Verbs that ask or take the terminal run on the selection only.
