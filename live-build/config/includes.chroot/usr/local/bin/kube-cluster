@@ -1397,8 +1397,31 @@ build_golden() {
     # from the host via Ansible — which is idempotent, observable, and does
     # not suffer from cloud-init's per-distro bootcmd/runcmd ordering quirks.
     log "Creating minimal cloud-init configuration..."
-    local ci_dir
+    local ci_dir ntp_bootcmd=""
     ci_dir="$(mktemp -d)"
+
+    # Time from the host from the golden's FIRST boot. kube-setup points the
+    # node at the host too, but it runs minutes later over Ansible, and the
+    # cloud image's chrony had already sent its burst to four public servers
+    # by then (6-full and 4-k8s offline rebuilds, build 155, 2026-09-28). So
+    # the host's address is decided before the VM exists and handed to a
+    # bootcmd. bootcmd runs on EVERY boot: both edits are idempotent, and match
+    # what kube-setup's _node_time_source writes. It narrows the window; a
+    # chronyd that starts before cloud-init's network stage can still send a
+    # few packets, which the offline rebuild counts.
+    _host_serves_ntp
+    if [[ -n "$NODE_NTP_SERVER" ]]; then
+        # A QUOTED heredoc and a placeholder: these two lines pass through
+        # bash, the user-data heredoc, YAML and sh, and escaping for all four
+        # at once produced YAML cloud-init cannot parse (caught rendering it).
+        ntp_bootcmd="$(
+            cat <<'NTPCMD'
+  - [ sh, -c, "f=/etc/chrony.conf; [ -f $f ] || f=/etc/chrony/chrony.conf; if [ -f $f ]; then sed -i -E '/^server @NTP@ iburst$/!s/^(pool|server) /# kldload: host is the time source -- &/' $f; grep -qx 'server @NTP@ iburst' $f || echo 'server @NTP@ iburst' >> $f; systemctl restart chronyd 2>/dev/null || systemctl restart chrony 2>/dev/null; fi; true" ]
+  - [ sh, -c, "if [ -f /usr/lib/systemd/system/systemd-timesyncd.service ] || [ -f /lib/systemd/system/systemd-timesyncd.service ]; then mkdir -p /etc/systemd/timesyncd.conf.d; printf '[Time]\\nNTP=@NTP@\\nFallbackNTP=\\n' > /etc/systemd/timesyncd.conf.d/kldload.conf; systemctl try-restart systemd-timesyncd 2>/dev/null; fi; true" ]
+NTPCMD
+        )"
+        ntp_bootcmd="${ntp_bootcmd//@NTP@/$NODE_NTP_SERVER}"
+    fi
 
     cat >"${ci_dir}/meta-data" <<META
 instance-id: ${GOLDEN}
@@ -1433,6 +1456,7 @@ bootcmd:
   # 2,049 packets to port 443 dropped). kube-setup installs it from the
   # host's darksite now, with everything else. The NOTE below still holds:
   # this heredoc is UNQUOTED, so no backticks or dollar-paren in it.
+${ntp_bootcmd}
 USERDATA
 
     # Network config matches both naming conventions: Debian uses predictable
@@ -1527,7 +1551,6 @@ NETCFG
         warn "no K8S_VERSION in the stack lock — the golden will take kube-setup's default"
     fi
     _golden_bundle_start "$golden_ip"
-    _host_serves_ntp
     log "Running Ansible provision-golden against ${golden_ip}..."
     run_ansible_against_vm "$golden_ip" provision-golden.yml \
         -e "k8s_minor=${_k8s_minor}" -e "darksite_url=${GOLDEN_DARKSITE_URL}" \
