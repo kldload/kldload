@@ -308,6 +308,9 @@ TABS
         done
         tmux -L "$_t3" send-keys -t "$_t3" n
         sleep 0.5
+        # the prompt opens prefilled with an example (kld 885ccd82); clear it
+        # first, or the probe's spec is appended to the example
+        tmux -L "$_t3" send-keys -t "$_t3" C-u
         tmux -L "$_t3" send-keys -t "$_t3" -l "$_pv --ram 512 --cpus 1 --disk 2"
         sleep 0.3
         tmux -L "$_t3" send-keys -t "$_t3" Enter
