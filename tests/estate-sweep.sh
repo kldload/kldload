@@ -178,6 +178,11 @@ find_bench() {
         # address that does not answer ssh is the normal case, not an error.
         got="$(ssh_bench "$ip" 'sudo -n grep -hE "^KLDLOAD_PROFILE=" /etc/kldload/install-manifest.env 2>/dev/null | cut -d= -f2 | tr -d "\""' || true)"
         [[ "$got" == "$want" || ("$want" == "*" && -n "$got") ]] || continue
+        # ...and it must BE the bench: the machine carrying $MAC. "Any kldload
+        # install" (one scan, 0d6d7b21) would otherwise take the lowest address
+        # that logs in -- onyx, or any other kldload box on the subnet -- and
+        # kick_pxe would reboot it into the installer (review, 2026-09-28).
+        ssh_bench "$ip" 'ip -br link' 2>/dev/null | grep -qi -- "$MAC" || continue
         printf '%s\n' "$ip"
         return 0
     done
@@ -219,7 +224,7 @@ STAGED_COMMIT="${STAGED_COMMIT%-dirty}"
     echo "Image: \`${STAGED_COMMIT:-unknown}\`"
     echo
     echo '| edition | distro/profile | install | verdict | pass | fail | warn | lifecycle | verify | k8s offline | report |'
-    echo '|---|---|---|---|---|---|---|---|---|'
+    echo '|---|---|---|---|---|---|---|---|---|---|---|'
 } >"$SUMMARY"
 
 say "sweep ${RUN_ID}: ${#EDITIONS[@]} edition(s) — ${EDITIONS[*]}"
