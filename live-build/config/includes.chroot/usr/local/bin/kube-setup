@@ -386,6 +386,27 @@ install_containerd() {
     grep -qE '^[[:space:]]*SystemdCgroup = true' /etc/containerd/config.toml ||
         die "SystemdCgroup = true is not in /etc/containerd/config.toml after editing it — containerd $(containerd --version 2>/dev/null | head -1) emits a default this sed does not match"
 
+    # The pod sandbox (pause) image is the one the lock pinned and the darksite
+    # carries -- not whatever this containerd defaults to. Debian's containerd
+    # 1.7 defaults to pause:3.8 while the lock and the golden carry 3.10.2, so
+    # an offline kubeadm init could create no pod at all and the control plane
+    # never came up (deb-4-k8s, build 155, fiend 2026-09-28: 68 SYNs to
+    # registry.k8s.io). Fedora's containerd 2.x happened to default to the same
+    # tag, which is luck, not a guarantee. 1.7 writes `sandbox_image = "..."`,
+    # 2.x writes `sandbox = '...'`; `sandbox_mode`/`sandboxer` do not match.
+    local _pause=""
+    [[ -r "$_k8s_lock" ]] &&
+        _pause="$(sed -n 's#^IMAGE=\(registry\.k8s\.io/pause:.*\)$#\1#p' "$_k8s_lock" | sed -n 1p)"
+    if [[ -n "$_pause" ]]; then
+        sed -E -i "s#^([[:space:]]*(sandbox_image|sandbox)[[:space:]]*=[[:space:]]*)[\"'][^\"']*[\"']#\1\"${_pause}\"#" \
+            /etc/containerd/config.toml
+        grep -qE "^[[:space:]]*(sandbox_image|sandbox)[[:space:]]*=[[:space:]]*\"${_pause}\"" /etc/containerd/config.toml ||
+            die "containerd's sandbox image is not ${_pause} after editing config.toml — containerd $(containerd --version 2>/dev/null | head -1) writes it in a form this sed does not match"
+        log "containerd sandbox image: ${_pause} (the lock's)"
+    elif [[ -r "$_k8s_lock" ]]; then
+        die "${_k8s_lock} pins no registry.k8s.io/pause image — not a resolver-written lock"
+    fi
+
     # Use systemd cgroup driver — required for kubeadm
     systemctl enable --now containerd
     systemctl restart containerd
@@ -635,7 +656,7 @@ install_helm() {
 # ── Cilium CLI ─────────────────────────────────────────────────────────────
 install_cilium_cli() {
     if command -v cilium >/dev/null 2>&1; then
-        log "Cilium CLI already installed: $(cilium version --client 2>/dev/null | head -1)"
+        log "Cilium CLI already installed (no \`cilium version\`: it asks GitHub for the stable tag)"
         return 0
     fi
 
@@ -795,7 +816,24 @@ _node_time_source() {
     local conf=/etc/chrony.conf
     [[ -f "$conf" ]] || conf=/etc/chrony/chrony.conf # Debian and Ubuntu
     if [[ ! -f "$conf" ]]; then
-        warn "no chrony.conf -- time source left as it is"
+        # Debian's and Ubuntu's cloud images keep time with systemd-timesyncd,
+        # not chrony, and this function used to warn and leave them on the
+        # public pool: every Debian node sent NTP out of an offline host
+        # (deb-4-k8s, build 155, 2026-09-28). FallbackNTP= empty so a host
+        # that does not answer is not replaced by the distro's pool.
+        # The unit FILE, not `systemctl cat`: that needs a running manager
+        # and answers "no" in a chroot or container.
+        if [[ -f /usr/lib/systemd/system/systemd-timesyncd.service || -f /lib/systemd/system/systemd-timesyncd.service ]]; then
+            install -d -m 0755 /etc/systemd/timesyncd.conf.d
+            printf '[Time]\nNTP=%s\nFallbackNTP=\n' "$NTP_SERVER" >/etc/systemd/timesyncd.conf.d/kldload.conf
+            grep -qx "NTP=${NTP_SERVER}" /etc/systemd/timesyncd.conf.d/kldload.conf ||
+                die "timesyncd drop-in did not land"
+            systemctl restart systemd-timesyncd ||
+                warn "systemd-timesyncd did not restart; the new time source applies from the next boot"
+            log "time source: ${NTP_SERVER} (the host, via systemd-timesyncd)"
+            return 0
+        fi
+        warn "neither chrony nor systemd-timesyncd -- time source left as it is"
         return 0
     fi
     # Comment out every other source, keep the host's own line: running this
@@ -978,7 +1016,9 @@ RCLOCAL
     log "  kubelet: $(kubelet --version 2>/dev/null | awk '{print $2}')"
     log "  kubectl: $(kubectl version --client -o yaml 2>/dev/null | grep gitVersion | awk '{print $2}')"
     log "  helm:    $(helm version --short 2>/dev/null)"
-    log "  cilium:  $(cilium version --client 2>/dev/null | head -1)"
+    # The lock's pin, not `cilium version`: that asks GitHub for the stable
+    # release, and an offline golden sent it out of the host (deb-4-k8s, 2026-09-28).
+    log "  cilium:  ${CILIUM_CLI_VERSION} (cli, from the lock)$(command -v cilium >/dev/null 2>&1 || echo ' -- NOT INSTALLED')"
     log "  containerd: $(containerd --version 2>/dev/null | awk '{print $3}')"
     echo ""
     log "Next steps:"
