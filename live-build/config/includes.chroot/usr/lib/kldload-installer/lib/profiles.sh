@@ -4363,7 +4363,9 @@ Description=Enable libvirt default network (virbr0) autostart
 # to work, so the one prerequisite that does not apply is the one it was
 # waiting for (2026-08-18).
 After=libvirtd.service virtnetworkd.socket virtnetworkd.service
-Wants=libvirtd.service virtnetworkd.socket
+# Not Wants=libvirtd.service: that starts the monolithic daemon on a modular
+# host, where it conflicts virtqemud out (fiend, 2026-09-29).
+Wants=virtnetworkd.socket
 # Stop retrying after ~10 minutes (6 attempts * (90s + 15s)); failed state
 # is now visible to kldload-doctor instead of being papered over.
 # These keys MUST live in [Unit], not [Service]. On .137 b628 systemd

@@ -26,7 +26,11 @@
 Description=Sync libvirt VM addresses into the kldload inventory
 # libvirt is the source of the leases; without it there is nothing to read.
 After=libvirtd.service virtqemud.service
-Wants=libvirtd.service
+# WHY no Wants=libvirtd.service: on a modular host (Fedora, EL) the monolithic
+# daemon CONFLICTS with virtqemud, and Wants= starts it even though firstboot
+# disabled it -- each run of this unit tore down virtqemud mid-operation; a
+# kvm-create in the smoke suite died that way (fiend, 11-storage, 2026-09-29).
+# libvirt is socket-activated in both shapes; After= above only orders.
 
 [Service]
 Type=oneshot

@@ -41,7 +41,11 @@ Description=Enrol every running VM into the kldload estate (name, mesh, inventor
 # libvirt supplies the guest list and the leases; without it there is nothing
 # to sweep. wg-quick brings up the planes the guests are peered onto.
 After=libvirtd.service virtqemud.service network-online.target
-Wants=libvirtd.service
+# WHY no Wants=libvirtd.service: on a modular host (Fedora, EL) the monolithic
+# daemon CONFLICTS with virtqemud, and Wants= starts it even though firstboot
+# disabled it -- each run of this unit tore down virtqemud mid-operation; a
+# kvm-create in the smoke suite died that way (fiend, 11-storage, 2026-09-29).
+# libvirt is socket-activated in both shapes; After= above only orders.
 
 [Service]
 Type=oneshot

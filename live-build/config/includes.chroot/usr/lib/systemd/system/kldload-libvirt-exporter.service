@@ -2,7 +2,11 @@
 Description=Prometheus libvirt-exporter — per-VM metrics from hypervisor (no in-guest agent needed)
 Documentation=https://github.com/inovex/prometheus-libvirt-exporter
 After=libvirtd.service network-online.target
-Wants=libvirtd.service
+# WHY no Wants=libvirtd.service: on a modular host (Fedora, EL) the monolithic
+# daemon CONFLICTS with virtqemud, and Wants= starts it even though firstboot
+# disabled it -- each run of this unit tore down virtqemud mid-operation; a
+# kvm-create in the smoke suite died that way (fiend, 11-storage, 2026-09-29).
+# libvirt is socket-activated in both shapes; After= above only orders.
 ConditionPathExists=/usr/local/bin/libvirt-exporter
 ConditionPathExists=/var/run/libvirt/libvirt-sock-ro
 
