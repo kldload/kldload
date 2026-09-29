@@ -103,3 +103,18 @@ func TestRollbackIsGuarded(t *testing.T) {
 		t.Error("Snapshots b: rolls back and destroys newer snapshots without a typed confirm")
 	}
 }
+
+// The clone prompt opens on a name that nameOK accepts and cloneNames turns
+// into exactly one clone of that name, even from a source near the limit.
+func TestCloneExample(t *testing.T) {
+	for _, src := range []string{"web", strings.Repeat("a", 63), strings.Repeat("b", 56) + "-------"} {
+		hint, val := cloneExample([]string{src})
+		if hint == "" || !nameOK(val) {
+			t.Fatalf("source %q: example %q (hint %q) is not a valid name", src, val, hint)
+		}
+		names, snap, err := cloneNames(val)
+		if err != nil || snap != "" || len(names) != 1 || names[0] != val {
+			t.Fatalf("source %q: example %q parsed to %v %q %v", src, val, names, snap, err)
+		}
+	}
+}

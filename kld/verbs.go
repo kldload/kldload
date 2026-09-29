@@ -106,7 +106,7 @@ var verbs = map[string][]verb{
 		{key: "T", label: "shutdown", argv: onRow("virsh", "shutdown", "{}")},
 		{key: "R", label: "reboot", argv: onRow("virsh", "reboot", "{}")},
 		{key: "K", label: "force off", argv: onRow("virsh", "destroy", "{}")},
-		{key: "c", label: "clone", job: true, prompt: "clone {} as <name> [count] [--snap @name]  (count > 1 makes name-1, name-2, …): ", names: func(_ []string, in string) []string {
+		{key: "c", label: "clone", job: true, prompt: "clone {} as: ", example: cloneExample, names: func(_ []string, in string) []string {
 			names, _, _ := cloneNames(in)
 			return names
 		}, argv: func(row []string, in string) ([]string, error) {
@@ -785,6 +785,18 @@ func versionPaths(row []string, ctx string) (src, dst string, err error) {
 		return "", "", errors.New("no file is open, or its dataset is not mounted")
 	}
 	return mp + "/.zfs/snapshot/" + snap + rel, mp + rel, nil
+}
+
+// cloneExample prefills the VM clone prompt with a name that is free now:
+// the source's name and the time, as vmx --tui offered (parity item 6). The
+// source part is trimmed so the whole stays inside nameOK's 63 characters.
+func cloneExample(row []string) (hint, value string) {
+	suffix := "-" + time.Now().Format("150405")
+	src := col(row, 0)
+	if len(src)+len(suffix) > 63 {
+		src = strings.TrimRight(src[:63-len(suffix)], "-_.")
+	}
+	return "a count after the name makes name-1, name-2 · --snap @name clones that snapshot", src + suffix
 }
 
 // cloneNames parses the clone prompt: a name, an optional count (the name
