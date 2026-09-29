@@ -309,11 +309,29 @@ func loadMicroVMs(d *sectionData) {
 	// Name the goldens. The tab lists instances only, so with none running it
 	// said "clone one from an appliance golden" and showed nothing to clone
 	// from (onyx, 2026-09-28: four goldens, an empty tab).
-	if g := microVMGoldens(); len(g) > 0 {
+	g := microVMGoldens()
+	goldensMu.Lock()
+	goldensSeen = g
+	goldensMu.Unlock()
+	if len(g) > 0 {
 		d.headline += " · goldens: " + strings.Join(g, ", ")
 	} else {
 		d.headline += " · no goldens yet: seal a shut-off appliance with F (Machines/VMs)"
 	}
+}
+
+// goldensSeen is what the microVMs loader last read from kfire, for the
+// clone prompt's example: the prompt opens inside the key handler, and
+// asking kfire there froze kld for 4.6 s on a loaded onyx (2026-09-28).
+var (
+	goldensMu   sync.Mutex
+	goldensSeen []string
+)
+
+func goldensCached() []string {
+	goldensMu.Lock()
+	defer goldensMu.Unlock()
+	return goldensSeen
 }
 
 // microVMGoldens is the names kfire can clone from, in its own order; empty
