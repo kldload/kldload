@@ -1260,7 +1260,18 @@ func (m model) View() string {
 		if m.secret {
 			shown = strings.Repeat("•", len(m.input))
 		}
-		sl = stWarn.Render(m.prompt) + shown + "█"
+		// The input and its cursor are the part that must be seen: the line
+		// used to be cut from the right to fit the row count, and a long
+		// prompt pushed the value off a 100-column screen -- typing showed
+		// nothing, and esc was the only key that seemed to do anything
+		// (onyx, 2026-09-28). So the PROMPT gives way, never the input,
+		// and an input wider than the line shows its end, where the cursor is.
+		tail := shown + "█"
+		if tw := lipgloss.Width(tail); tw > w-14 {
+			r := []rune(tail)
+			tail = "…" + string(r[len(r)-(w-15):])
+		}
+		sl = stWarn.Render(truncate(m.prompt, w-lipgloss.Width(tail)-3)) + tail
 	case m.filterOn:
 		sl = m.filter.View() + stDim.Render("   enter keep · esc clear")
 	case m.status != "":
@@ -1289,6 +1300,9 @@ func (m model) View() string {
 	}
 	if n := m.runningJobs(); n > 0 {
 		sr = fmt.Sprintf("%d job(s) running (ctrl+j) · ", n) + sr
+	}
+	if m.prompt != "" {
+		sr = "" // the whole line is the prompt's while the operator types
 	}
 	b.WriteString(padBetween(truncate(sl, w-lipgloss.Width(sr)-2), stDim.Render(sr), w))
 	return b.String()
