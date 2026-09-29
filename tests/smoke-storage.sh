@@ -162,6 +162,9 @@ else
 fi
 for _prop in xattr=sa acltype=posixacl atime=off; do
     _got="$(zfs get -H -o value "${_prop%%=*}" "$SHARE_DS" 2>/dev/null || echo '?')"
+    # WHY: posixacl is an alias; OpenZFS 2.2+ reads it back as 'posix', so the
+    # exact compare warned on every storage install (deb-11-storage, 2026-09-29).
+    [[ "$_prop" == acltype=posixacl && "$_got" == posix ]] && _got=posixacl
     if [[ "$_got" == "${_prop#*=}" ]]; then
         _pass "$SHARE_DS ${_prop%%=*}=${_got}"
     else
