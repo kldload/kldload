@@ -94,12 +94,19 @@ def src_db() -> dict[str, dict[str, Any]]:
         data = json.loads(out)
     except json.JSONDecodeError:
         return {}
+    # A cluster node's role is the one it was REGISTERED with in the nodes
+    # table -- the source the Ansible inventory groups by. The vms row's role
+    # is whatever its last writer said: kldload-cp and the workers read "vm"
+    # while the control planes added by scale read "control_plane", so the
+    # estate showed one cluster as two kinds of machine (6-full, 2026-09-28).
+    node_role = {n.get("hostname"): n.get("role") or ""
+                 for n in data.get("nodes", []) if not n.get("deleted_at")}
     vms: dict[str, dict[str, Any]] = {}
     for v in data.get("vms", []):
         if v.get("deleted_at"):
             continue
         vms[v["name"]] = {
-            "role": v.get("role") or "",
+            "role": node_role.get(v["name"]) or v.get("role") or "",
             "status": v.get("status") or "",
             "ip": v.get("ip_addr") or "",
             "cluster": v.get("cluster_id") or "",
