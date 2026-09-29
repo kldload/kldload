@@ -144,7 +144,10 @@ _img="$(grep -oiE '[0-9]+/[0-9]+ images?[^.]*' "$BOOTLOG" | tail -n 1 || true)"
 
 # ─── The cluster that came back ─────────────────────────────────────────────
 _section "Cluster"
-_nodes="$(timeout 60 kubectl get nodes --no-headers 2>/dev/null || true)"
+# -o wide: the wg-k8s check below reads each node's INTERNAL-IP ($6), which the
+# default output does not print (review 2026-09-28: without it every cluster
+# edition failed "no node addresses"). VERSION stays column 5 either way.
+_nodes="$(timeout 60 kubectl get nodes -o wide --no-headers 2>/dev/null || true)"
 _n_all="$(printf '%s\n' "$_nodes" | grep -c . || true)"
 _n_ready="$(printf '%s\n' "$_nodes" | awk '$2 == "Ready"' | grep -c . || true)"
 if ((_n_ready == want_cp + want_w && _n_all == _n_ready)); then
