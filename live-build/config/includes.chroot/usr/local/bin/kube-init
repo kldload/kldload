@@ -582,9 +582,13 @@ install_zfs_csi() {
         helm repo update >/dev/null 2>&1
     fi
 
+    # analytics off: the chart defaults it on, and the controller then reports
+    # to Google Analytics -- on an offline cluster it sent 32 DNS queries to
+    # 8.8.8.8 the second it deployed (4-k8s and 6-full, build 155, 2026-09-28).
     helm install zfs-localpv "$_zfs_chart" \
         --namespace openebs --create-namespace \
         --set zfsNode.encrKeysDir=/etc/openebs \
+        --set analytics.enabled=false \
         --wait --timeout 300s \
         2>&1 || log "WARNING: zfs-localpv install returned non-zero — the check below decides"
 
