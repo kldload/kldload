@@ -8,9 +8,11 @@
 #      the one list klab and kube-cluster already download from. Fedora's is
 #      re-resolved to the newest build in its release directory, as klab does.
 #   2. Fetches the vendor's checksum file for each image.
-#   3. Keeps a cached image that still matches its recorded checksum and is
-#      younger than CLOUD_IMAGE_MAX_AGE_DAYS; otherwise downloads it again and
-#      verifies it against the vendor's checksum before it replaces the cache.
+#   3. Keeps a cached image only when it IS the vendor's current one (same
+#      hash as the vendor's checksum file says now); otherwise downloads the
+#      current one and verifies it before it replaces the cache. With no
+#      network, a cached image that still matches its own recorded hash is used,
+#      and the log says when it was fetched.
 #   4. Writes SHA256SUMS over the whole set, which the installer checks again
 #      after copying the images onto a machine.
 #
@@ -22,7 +24,8 @@
 #
 # INPUT:  $1 cache directory (default live-build/darksite-cloud-cache)
 #         CLOUD_DISTROS  which to fetch (default: centos rocky fedora debian ubuntu)
-#         CLOUD_IMAGE_MAX_AGE_DAYS  reuse a verified cache this young (default 14)
+#         CLOUD_IMAGE_MAX_AGE_DAYS  offline only: a cached image older than this
+#                                   is used with a louder warning (default 14)
 # OUTPUT: <dir>/<distro>-cloud.qcow2, <dir>/<distro>-cloud.source, <dir>/SHA256SUMS
 # EXIT:   0 every distro asked for is cached and verified · 1 one or more are
 #         missing or failed verification · 2 usage (no klab table found)
@@ -148,17 +151,23 @@ for d in "${DISTROS[@]}"; do
             log "${d}: cached image no longer matches its recorded hash — refetching"
         fi
     fi
-    if ((cached_ok)) && [[ -z "$(find "$dest" -mtime +"$MAX_AGE" -print)" ]]; then
-        log "CACHED ${d}: $(du -h "$dest" | cut -f1), verified, under ${MAX_AGE} days old"
-        _ok=$((_ok + 1))
-        continue
-    fi
+    # No shortcut on age: every build asks the vendor what is current. A
+    # verified cache younger than 14 days used to be kept without asking, so a
+    # new Fedora build or a moved Debian daily/Ubuntu current image was baked
+    # up to two weeks late (every build after 09-27 carried 09-27's images;
+    # operator, 2026-09-28: the build must pull fresh images when it runs).
+    # The checksum file is a few KB; the image is fetched only when it changed.
 
     sums="$(mktemp -p "$OUT" .sums.XXXXXX)"
     if [[ -z "$sums_url" ]] || ! curl -fsSL --retry 3 --max-time 60 -o "$sums" "$sums_url"; then
         rm -f "$sums"
         if ((cached_ok)); then
-            log "WARN ${d}: cannot reach the vendor; using the cached image (older than ${MAX_AGE} days, still verified)"
+            _fetched="$(sed -n 's/^fetched=//p' "$src")"
+            if [[ -n "$(find "$dest" -mtime +"$MAX_AGE" -print)" ]]; then
+                log "WARN ${d}: cannot reach the vendor; using the cached image fetched ${_fetched:-at an unknown time}, OLDER than ${MAX_AGE} days (still verified)"
+            else
+                log "WARN ${d}: cannot reach the vendor; using the cached image fetched ${_fetched:-at an unknown time} (still verified)"
+            fi
             _ok=$((_ok + 1))
         else
             log "FAIL ${d}: no checksum from ${sums_url:-<unresolved>} and no usable cache"
