@@ -123,7 +123,7 @@ var verbs = map[string][]verb{
 			script := `src="$1"; snap="$2"; shift 2; for n in "$@"; do echo "== kvm-clone $src $n"; if [ -n "$snap" ]; then kvm-clone "$src" "$n" --snap "$snap" || exit 1; else kvm-clone "$src" "$n" || exit 1; fi; done`
 			return append([]string{"sh", "-c", script, "_", col(row, 0), snap}, names...), nil
 		}},
-		{key: "s", label: "snapshot", argv: onRow("kvm-snap", "{}")},
+		{key: "s", label: "snapshot", prompt: "snapshot {} as: ", example: snapExample, argv: snapArgv},
 		// Rollback throws away everything since the snapshot, and kvm-snap
 		// rollback force-destroys a RUNNING VM to do it: one key did that
 		// here (parity audit, 2026-09-29; vmx refused a running VM). So: a
@@ -229,7 +229,7 @@ var verbs = map[string][]verb{
 		{key: "d", label: "delete snapshot", argv: func(row []string, _ string) ([]string, error) {
 			return []string{"kvm-snap", col(row, 0), "delete", "@" + col(row, 1)}, nil
 		}},
-		{key: "s", label: "snapshot this VM now", argv: onRow("kvm-snap", "{}")},
+		{key: "s", label: "snapshot this VM now", prompt: "snapshot {} as: ", example: snapExample, argv: snapArgv},
 	},
 	"Machines/Appliances": {
 		{key: "b", label: "build one as a VM", prompt: "vm name, then KEY=VALUE settings for {}: ", job: true, argv: func(row []string, in string) ([]string, error) {
@@ -785,6 +785,25 @@ func versionPaths(row []string, ctx string) (src, dst string, err error) {
 		return "", "", errors.New("no file is open, or its dataset is not mounted")
 	}
 	return mp + "/.zfs/snapshot/" + snap + rel, mp + rel, nil
+}
+
+// snapExample and snapArgv: s on a VM names the snapshot (vmx --tui parity
+// item 4). The prefill is the timestamp kvm-snap would pick anyway, so Enter
+// behaves as the old one-key snapshot; kvm-snap checks the name, pauses a
+// running VM around the snapshot, and refuses a name already taken.
+func snapExample(_ []string) (hint, value string) {
+	return "type a name (pre-upgrade) or keep the time", time.Now().Format("2006-01-02_150405")
+}
+
+func snapArgv(row []string, in string) ([]string, error) {
+	in = strings.TrimSpace(in)
+	if in == "" {
+		return []string{"kvm-snap", col(row, 0)}, nil
+	}
+	if strings.ContainsAny(in, "@/ ") || strings.HasPrefix(in, "-") {
+		return nil, fmt.Errorf("%q is not a snapshot name", in)
+	}
+	return []string{"kvm-snap", col(row, 0), "snap", in}, nil
 }
 
 // cloneExample prefills the VM clone prompt with a name that is free now:

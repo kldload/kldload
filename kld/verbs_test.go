@@ -118,3 +118,26 @@ func TestCloneExample(t *testing.T) {
 		}
 	}
 }
+
+// s on a VM: a typed name reaches kvm-snap as `snap NAME`, blank keeps the
+// old timestamped snapshot, and a name that would break the zfs argument is
+// refused before anything runs.
+func TestSnapArgv(t *testing.T) {
+	row := []string{"web"}
+	if got, err := snapArgv(row, "pre-upgrade"); err != nil || strings.Join(got, " ") != "kvm-snap web snap pre-upgrade" {
+		t.Fatalf("named: %v %v", got, err)
+	}
+	if got, err := snapArgv(row, "  "); err != nil || strings.Join(got, " ") != "kvm-snap web" {
+		t.Fatalf("blank: %v %v", got, err)
+	}
+	for _, bad := range []string{"-x", "a/b", "a@b", "two words"} {
+		if _, err := snapArgv(row, bad); err == nil {
+			t.Fatalf("%q was accepted", bad)
+		}
+	}
+	if _, v := snapExample(row); v == "" {
+		t.Fatal("no prefill")
+	} else if got, err := snapArgv(row, v); err != nil || got[3] != v {
+		t.Fatalf("prefill %q does not run as is: %v %v", v, got, err)
+	}
+}

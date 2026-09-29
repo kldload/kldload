@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # kvm-snap — ZFS snapshot a VM's zvol
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kvm-snap: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate to root (ZFS + libvirt require it)
 # Rule 9: -h/--help answers BEFORE this re-exec. Asking a tool to explain
@@ -16,6 +17,7 @@ Usage: kvm-snap <vm-name> [action]
 
 Actions:
   (none)     Create a timestamped snapshot
+  snap <name>      Create a snapshot with that name (letters, digits, - _ . :)
   list       List all snapshots for this VM
   rollback   Roll back to the most recent snapshot
   rollback <snap>  Roll back to a specific snapshot
@@ -23,6 +25,7 @@ Actions:
 
 Examples:
   kvm-snap myvm                    # snapshot now
+  kvm-snap myvm snap pre-upgrade   # snapshot now, named
   kvm-snap myvm list               # list snapshots
   kvm-snap myvm rollback           # rollback to latest
   kvm-snap myvm delete @2026-03-30
@@ -49,7 +52,19 @@ fi
 
 case "$ACTION" in
 snap | create)
-    SNAP="${ZVOL}@$(date +%Y-%m-%d_%H%M%S)"
+    # A name is optional; kld's snapshot prompt passes the one the operator
+    # typed (vmx --tui parity, 2026-09-29). Checked here, not trusted: it ends
+    # up after the @ of a zfs argument.
+    _label="${1:-$(date +%Y-%m-%d_%H%M%S)}"
+    if [[ ! "$_label" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]]; then
+        echo "Error: '${_label}' is not a snapshot name (letters, digits, - _ . :; not starting with -)" >&2
+        exit 2
+    fi
+    SNAP="${ZVOL}@${_label}"
+    if zfs list -H -o name "${SNAP}" >/dev/null 2>&1; then
+        echo "Error: ${SNAP} already exists" >&2
+        exit 1
+    fi
     # Stop VM briefly for consistent snapshot (optional)
     STATE=$(virsh domstate "${NAME}" 2>/dev/null || echo "unknown")
     if [[ "$STATE" == "running" ]]; then
