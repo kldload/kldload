@@ -189,7 +189,11 @@ if ((_brc == 0 || _brc == 3)); then
         for _ip in $_node_ips; do
             # dump: pubkey psk endpoint allowed-ips latest-handshake rx tx keepalive
             # swallow: no wg-k8s is an empty dump, reported as a dead node below
-            _hs="$(wg show wg-k8s dump 2>/dev/null | awk -v ip="$_ip" 'NR > 1 {split($3, e, ":"); if (e[1] == ip) print $5}' | sort -n | tail -n 1 || true)"
+            # the node's address can be its endpoint (Fedora: kubelet reports
+            # the libvirt address) OR its mesh address in allowed-ips (Debian:
+            # kubelet reports 10.251.0.x) -- matching the endpoint alone called
+            # a healthy Debian mesh "6 of 6 silent" (deb-4-k8s, build 159)
+            _hs="$(wg show wg-k8s dump 2>/dev/null | awk -v ip="$_ip" 'NR > 1 {split($3, e, ":"); if (e[1] == ip || index("," $4 ",", "," ip "/32,")) print $5}' | sort -n | tail -n 1 || true)"
             if [[ -n "$_hs" ]] && ((_hs > 0 && $(date +%s) - _hs <= 180)); then
                 _live=$((_live + 1))
             else
