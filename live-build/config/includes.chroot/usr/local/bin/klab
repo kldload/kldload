@@ -3437,7 +3437,7 @@ deploy_site() {
     validate_site "$site"
 
     ensure_ssh_key
-    local deployed=0 skipped=0
+    local deployed=0 skipped=0 unreachable=0 unreachable_names=""
     local total_start
     total_start="$(timer_start)"
 
@@ -3533,9 +3533,18 @@ deploy_site() {
             continue
         }
 
-        local ci_iso
+        local ci_iso vm_ram="$RAM"
         ci_iso="$(make_cloud_init_iso "$sname" "${site}-${distro}" "" "$vm_ip")"
-        virt-install --name "$sname" --ram "$RAM" --vcpus "$CPUS" \
+        # EL10 does not reliably boot in the 384 MiB the first-boot demo
+        # spawn asks for: klab-blue-centos never got an address on 3-kvm
+        # (build 155, fiend 2026-09-28) and klab-firstboot spent two hours
+        # waiting on it, while the same size booted on two other installs.
+        # virt-install recommends 2048 for CentOS Stream 10; 1024 is the floor
+        # for the EL clones, everything else keeps what it was asked for.
+        case "$distro" in
+        centos | rocky) ((vm_ram >= 1024)) || vm_ram=1024 ;;
+        esac
+        virt-install --name "$sname" --ram "$vm_ram" --vcpus "$CPUS" \
             --sound ich9 \
             --os-variant "${OS_VARIANTS[$distro]}" \
             --disk "path=${sdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
@@ -3596,6 +3605,8 @@ deploy_site() {
         ip="$(get_vm_ip "$sname")"
         if [[ -z "$ip" ]]; then
             printf "  ${R}%-25s${N} %-18s %s\n" "$sname" "(no address)" "unreachable"
+            unreachable=$((unreachable + 1))
+            unreachable_names+=" ${sname}"
             continue
         fi
         if wait_for_ssh "$ip" 60; then
@@ -3605,6 +3616,8 @@ deploy_site() {
             printf "  ${G}%-25s${N} %-18s %s\n" "$sname" "$ip" "$zfs_ver"
         else
             printf "  ${R}%-25s${N} %-18s %s\n" "$sname" "$ip" "no SSH"
+            unreachable=$((unreachable + 1))
+            unreachable_names+=" ${sname}"
         fi
     done
 
@@ -3819,10 +3832,18 @@ PEER
     local total_elapsed
     total_elapsed="$(timer_elapsed_ms "$total_start")"
     echo ""
-    log "Deploy complete: ${G}${deployed} deployed${N}, ${Y}${skipped} skipped${N} ($((total_elapsed / 1000))s)"
+    # "deployed" is counted when the clone is DEFINED; a clone that never got
+    # an address was still counted, and 3-kvm (build 155, 2026-09-28) printed
+    # "5 deployed, 0 skipped" twice with klab-blue-centos and
+    # klab-green-centos dead. Unreachable is reported and fails the command.
+    log "Deploy complete: ${G}$((deployed - unreachable)) up${N}, ${R}${unreachable} unreachable${N}, ${Y}${skipped} skipped${N} of ${deployed} cloned ($((total_elapsed / 1000))s)"
     echo -e "  ${W}WireGuard:${N}  ${wg_base}.0/24 (all traffic encrypted)"
     echo -e "  ${W}SSH:${N}        ssh root@<vm-ip> (password: kldload)"
     echo -e "  ${W}Grafana:${N}    http://localhost:3000 (admin/admin)"
+    if ((unreachable > 0)); then
+        warn "unreachable after deploy (no address or no SSH):${unreachable_names}"
+        return 1
+    fi
 }
 
 # ── Section 7: Blue-Green Operations ─────────────────────────────────────
