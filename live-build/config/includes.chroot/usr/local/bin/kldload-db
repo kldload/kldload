@@ -269,14 +269,34 @@ def _resolve_cluster_id(con, cluster):
 
 # ── Subcommands ───────────────────────────────────────────────────────────
 
+def _revive_clears_mesh(row, new_pubkey, sets):
+    """A deleted row being registered again is a NEW machine with an old name.
+
+    Registering revives the soft-deleted row and, because empty arguments never
+    overwrite, it kept the dead machine's mesh_id and wg_pubkey. kldload-estate
+    matches mesh membership by that key before the address, so a control plane
+    rebuilt under the same name read "not in mesh" while its new key was
+    handshaking (kldload-cp-2/-3 after a destroy and re-bootstrap, 6-full,
+    build 155, 2026-09-28). The next enrolment records the real key. Appends
+    SET clauses to `sets`; a key the caller is supplying is left to the caller.
+    """
+    if not row["deleted_at"]:
+        return
+    sets.append("mesh_id=''")
+    if not new_pubkey:
+        sets.append("wg_pubkey=''")
+
+
 def cmd_node_register(args):
     con = _connect()
     cid = _resolve_cluster_id(con, args.cluster)
-    row = con.execute("SELECT id FROM nodes WHERE hostname=?", (args.hostname,)).fetchone()
+    row = con.execute("SELECT id, deleted_at FROM nodes WHERE hostname=?",
+                      (args.hostname,)).fetchone()
     now = _now()
     if row:
         # Build UPDATE dynamically so empty args don't overwrite good data.
         sets, vals = [], []
+        _revive_clears_mesh(row, args.wg_pubkey, sets)
         for col, val in [
             ("role",       args.role),
             ("ip_mgmt",    args.ip_mgmt),
@@ -328,10 +348,11 @@ def cmd_node_delete(args):
 def cmd_vm_register(args):
     con = _connect()
     cid = _resolve_cluster_id(con, args.cluster)
-    row = con.execute("SELECT id FROM vms WHERE name=?", (args.name,)).fetchone()
+    row = con.execute("SELECT id, deleted_at FROM vms WHERE name=?", (args.name,)).fetchone()
     now = _now()
     if row:
         sets, vals = [], []
+        _revive_clears_mesh(row, "", sets)
         for col, val in [
             ("role",       args.role),
             ("ip_addr",    args.ip),
