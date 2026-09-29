@@ -1078,6 +1078,17 @@ k_install_system_files() {
                     k_log "left behind drop-in: ${_droproot}/${_svc}/kldload-tty1.conf (live medium only)"
                     continue
                 fi
+                # WHY: core returns below before any kldload tool is copied, so a
+                # drop-in that EXECUTES one points at nothing there. nginx on
+                # Debian core spawned the missing kldload-tls-cert every 3 s,
+                # "Failed at step EXEC" (deb-1-core, builds 159 and 160,
+                # 2026-09-29). The guards this carry exists for (ipmi, zfs-mount)
+                # run no kldload tool and still travel.
+                if [[ "$_profile" == core ]] &&
+                    grep -qE '^Exec[A-Za-z]*=.*(/usr/local/|kldload-)' "$_conf"; then
+                    k_log "left behind drop-in: ${_droproot}/${_svc}/$(basename "$_conf") (runs a kldload tool; core has none)"
+                    continue
+                fi
                 install -m 0644 "$_conf" \
                     "${target}${_droproot}/${_svc}/$(basename "$_conf")"
                 k_log "carried drop-in: ${_droproot}/${_svc}/$(basename "$_conf")"
