@@ -1847,7 +1847,16 @@ if [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && command -v vmx >/dev/null 2>&1; 
         if VMX_BUILD_JOBS="$_vmx_jobs" vmx --build-all 2>&1 | tee "$_apps_summary" |
             sed -uE 's/^([[:space:]]+[^()]*\([A-Z0-9_]*(PASS|PASSWORD|PASSPHRASE|SECRET|TOKEN|KEY)\): ).+$/\1(redacted; root can read it in \/root\/kldload-appliances.txt)/' >>"$LOG_FILE"; then
             touch "${STATE_DIR}/appliances-ready"
-            log "[apps] appliance goldens ready — list: kfire goldens · clone: kfire clone <golden> · logins: /root/kldload-appliances.txt"
+            # vmx's exit status counts failed TILES; a tile whose Firecracker
+            # golden failed is still a working VM, so it exits 0 -- and this
+            # line said "appliance goldens ready" over a seedbox with no golden
+            # (deb-3-kvm, build 155, 2026-09-28). Count them from its own log.
+            # swallow: grep -c exits 1 at zero, the passing case
+            _fc_bad="$(grep -c 'Firecracker golden FAILED' "$_apps_summary" || true)"
+            if ((_fc_bad > 0)); then
+                log "[apps] WARNING: ${_fc_bad} Firecracker golden(s) FAILED -- $(grep -oE '^\[app-[a-z0-9-]+\] +Firecracker golden FAILED' "$_apps_summary" | grep -oE 'app-[a-z0-9-]+' | sort -u | tr '\n' ' ')-- retry one with: kfire golden <vm>"
+            fi
+            log "[apps] appliance VMs ready; $(ls -1d /var/lib/kfire/goldens/*/ 2>/dev/null | wc -l) Firecracker golden(s) -- list: kfire goldens · clone: kfire clone <golden> · logins: /root/kldload-appliances.txt"
         else
             log "[apps] WARNING: appliance build incomplete — see $LOG_FILE; rerun with: vmx --build-all (built tiles are skipped)"
         fi
