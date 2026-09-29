@@ -241,7 +241,18 @@ cmd_golden() {
     [[ -z $data_zv ]] || zfs list -H -t snapshot "$data_zv@$SNAP" >/dev/null 2>&1 || zfs snapshot "$data_zv@$SNAP"
 
     # the guest's kernel and initramfs come off its own root filesystem
-    local part fstype pn rootflags="" mp
+    local part fstype pn rootflags="" mp _rdev
+    # The guest grows its own root partition (cloud-init growpart), which the
+    # host kernel only learns of when udev re-reads the table after qemu
+    # closes the zvol -- asynchronously. app-seedbox's golden was taken one
+    # second after the VM stopped, lsblk still reported the old 5 GB p3, and
+    # btrfs refused a 21 GB filesystem on it: "open_ctree failed" on fiend's
+    # console (deb-3-kvm, build 155, 2026-09-28). Wait for udev, then re-read
+    # the table ourselves, as kvm-grow does, before asking which partition.
+    _rdev=$(readlink -f "/dev/zvol/$root_zv")
+    udevadm settle --timeout=30 >/dev/null 2>&1 || log "golden $vm: udev did not settle in 30 s; re-reading the partition table anyway"
+    partx -u "$_rdev" >/dev/null 2>&1 || partprobe "$_rdev" >/dev/null 2>&1 ||
+        log "golden $vm: could not re-read the partition table of $_rdev; the root partition size may be stale"
     part=$(root_part "$root_zv")
     [[ -n $part ]] || die "no root partition found on $root_zv"
     fstype=$(lsblk -nro FSTYPE "$part")
