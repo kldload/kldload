@@ -3711,14 +3711,35 @@ SYSCTL
         # ZFS replication script — send VM snapshots to a remote host over WireGuard
         mkdir -p "${target}/usr/local/sbin"
         cat >"${target}/usr/local/sbin/kvm-replicate" <<'REPL'
-#!/bin/bash
-# kvm-replicate — incremental ZFS replication of VM zvols to a remote host
-# Usage: kvm-replicate <dataset> <remote_host> [remote_dataset]
-# Example: kvm-replicate rpool/vms/images/vm1 backup-host rpool/vms/replicas/vm1
-set -euo pipefail
+#!/usr/bin/env bash
+# kvm-replicate — incremental ZFS replication of a VM's zvol to a remote host
+#
+# Usage:   kvm-replicate <dataset> <remote_host> [remote_dataset]
+# Example: kvm-replicate rpool/vms/vm1 backup-host rpool/vms/replicas/vm1
+#
+# Snapshots <dataset>@repl-<utc>, then sends it to <remote_host> over ssh:
+# incrementally from the previous @repl- snapshot when one exists, in full
+# otherwise, and keeps the last two @repl- snapshots on the source.
+# Exit: 0 replicated · 1 a step failed · 2 usage.
+set -Eeuo pipefail
+trap 'echo "kvm-replicate: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-DS="${1:?Usage: kvm-replicate <dataset> <remote_host> [remote_dataset]}"
-REMOTE="${2:?Usage: kvm-replicate <dataset> <remote_host> [remote_dataset]}"
+# --help is answered before anything else: it used to fall into the ${1:?}
+# check and print "line 8: 2: Usage" as an error (found 2026-09-28).
+usage() { sed -n '2,/^# Exit/{s/^# \{0,1\}//; p}' "$0"; }
+case "${1:-}" in
+-h | --help)
+    usage
+    exit 0
+    ;;
+esac
+if (($# < 2)); then
+    usage >&2
+    exit 2
+fi
+
+DS="$1"
+REMOTE="$2"
 REMOTE_DS="${3:-${DS}}"
 SNAP="${DS}@repl-$(date -u +%Y%m%dT%H%M%SZ)"
 
