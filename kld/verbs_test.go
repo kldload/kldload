@@ -25,7 +25,9 @@ func TestVerbKeysDoNotCollideWithNavigation(t *testing.T) {
 				t.Errorf("%s: key %q is bound twice", tab, v.key)
 			}
 			seen[v.key] = true
-			if v.argv == nil && v.ctxArgv == nil && v.rowCtxArgv == nil && v.argvs == nil && v.console == conNone {
+			// a picker is a verb's action too: it opens entries that each run
+			// (the guided build, the clone wizard)
+			if v.argv == nil && v.ctxArgv == nil && v.rowCtxArgv == nil && v.argvs == nil && v.console == conNone && v.picker == nil {
 				t.Errorf("%s: verb %q builds no command", tab, v.label)
 			}
 		}

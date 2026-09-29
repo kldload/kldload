@@ -858,36 +858,19 @@ func buildArgExample(row []string) (string, string) {
 func init() {
 	for i, v := range verbs["Machines/microVMs"] {
 		if v.key == "c" {
-			verbs["Machines/microVMs"][i].picker = pickMicroVMGolden
+			verbs["Machines/microVMs"][i].picker = func(m model) (string, []palEntry) {
+				title, es := wizClone(m)
+				return title, append(es, freeFormClone())
+			}
 		}
 	}
+	verbs["Machines/Build"] = append([]verb{{key: "b", label: "build (guided: what, which, options)", noRow: true, picker: wizBuild}}, verbs["Machines/Build"]...)
 }
 
-// pickMicroVMGolden lists the goldens kfire can clone from; choosing one asks
-// only how many, with 2 filled in, and clones them with --wait in a job pane.
-// The last entry is the free-form prompt, for options the list does not ask.
-func pickMicroVMGolden(m model) (string, []palEntry) {
-	var es []palEntry
-	for _, g := range goldensCached() {
-		g := g
-		es = append(es, palEntry{text: "clone " + g, run: func(m model) (tea.Model, tea.Cmd) {
-			m.prompt = "how many " + g + " microVMs, 1-64 (enter clones with --wait, ctrl+u clears): "
-			m.input = "2"
-			m.pending = func(in string) tea.Cmd {
-				n, err := strconv.Atoi(strings.TrimSpace(in))
-				if err != nil || n < 1 || n > 64 {
-					return func() tea.Msg { return doneMsg{"clone " + g, errors.New("a count from 1 to 64")} }
-				}
-				argv := []string{"kfire", "clone", g, "-n", strconv.Itoa(n), "--wait"}
-				return func() tea.Msg { return jobStartMsg{label: "clone " + g, argv: argv} }
-			}
-			return m, nil
-		}})
-	}
-	if len(es) == 0 {
-		es = append(es, palEntry{text: "no goldens yet: seal a shut-off appliance with F on Machines/VMs", run: func(m model) (tea.Model, tea.Cmd) { return m, nil }})
-	}
-	es = append(es, palEntry{text: "type the kfire clone command yourself…", run: func(m model) (tea.Model, tea.Cmd) {
+// freeFormClone is the escape hatch at the bottom of the clone picker: the
+// kfire clone prompt, filled in, for options the lists do not ask.
+func freeFormClone() palEntry {
+	return palEntry{text: "type the kfire clone command yourself…", run: func(m model) (tea.Model, tea.Cmd) {
 		for _, v := range verbs["Machines/microVMs"] {
 			if v.key == "c" {
 				v.picker = nil
@@ -895,6 +878,5 @@ func pickMicroVMGolden(m model) (string, []palEntry) {
 			}
 		}
 		return m, nil
-	}})
-	return "clone microVMs from", es
+	}}
 }

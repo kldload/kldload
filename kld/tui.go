@@ -411,6 +411,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, conTick())
 		}
 		return m, tea.Batch(cmds...)
+	case pickerMsg:
+		return m.openPicker(msg.title, msg.entries)
 	case jobStartMsg:
 		argvs := msg.argvs
 		if len(argvs) == 0 {

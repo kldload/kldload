@@ -473,14 +473,22 @@ func loadBuild(d *sectionData) {
 			}
 		}
 	}
+	hostGoldensMu.Lock()
+	hostGoldensSeen = goldens
+	hostGoldensMu.Unlock()
 	apps := 0
+	var appVMs []string
 	if out, err := run(10*time.Second, "virsh", "list", "--all", "--name"); err == nil {
 		for _, n := range strings.Fields(out) {
 			if strings.HasPrefix(n, "app-") {
 				apps++
+				appVMs = append(appVMs, n)
 			}
 		}
 	}
+	hostGoldensMu.Lock()
+	appVMsSeen = appVMs
+	hostGoldensMu.Unlock()
 	for _, r := range buildRows() {
 		have := "-"
 		if r.have != nil {
