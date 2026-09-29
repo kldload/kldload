@@ -968,6 +968,12 @@ func (m model) openPicker(title string, es []palEntry) (tea.Model, tea.Cmd) {
 }
 
 func (m model) runVerb(v verb) (tea.Model, tea.Cmd) {
+	if v.refuse != nil {
+		if err := v.refuse(m.selectedRow()); err != nil {
+			m.say(stBad.Render(err.Error()))
+			return m, nil
+		}
+	}
 	if v.picker != nil {
 		title, es := v.picker(m)
 		return m.openPicker(title, es)

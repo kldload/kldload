@@ -28,6 +28,10 @@ type verb struct {
 	prompt  string // when set, the verb asks for this before running
 	confirm bool   // the row's name must be typed back (destructive verbs)
 	noRow   bool   // the verb needs no selection
+	// refuse, when set, is asked of the row before any prompt or confirm: a
+	// reason not to run at all, from what the row already shows (no command
+	// on the keypress). Rollback of a running VM is the first user.
+	refuse func(row []string) error
 	// example fills a prompt in before the operator types anything: a hint
 	// naming the choices, and a value that already runs as it stands. A
 	// blank prompt with a synopsis in it asked the operator to know the
@@ -120,7 +124,16 @@ var verbs = map[string][]verb{
 			return append([]string{"sh", "-c", script, "_", col(row, 0), snap}, names...), nil
 		}},
 		{key: "s", label: "snapshot", argv: onRow("kvm-snap", "{}")},
-		{key: "b", label: "rollback to the newest snapshot", argv: onRow("kvm-snap", "{}", "rollback")},
+		// Rollback throws away everything since the snapshot, and kvm-snap
+		// rollback force-destroys a RUNNING VM to do it: one key did that
+		// here (parity audit, 2026-09-29; vmx refused a running VM). So: a
+		// running VM is refused with the way forward, and the name is typed.
+		{key: "b", label: "rollback to the newest snapshot (loses every change since it)", confirm: true, refuse: func(row []string) error {
+			if col(row, 2) == "running" {
+				return errors.New(col(row, 0) + " is running: a rollback would kill it — shut it down first (T), then b")
+			}
+			return nil
+		}, argv: onRow("kvm-snap", "{}", "rollback")},
 		{key: "d", label: "delete VM + zvol", argv: onRow("kvm-delete", "{}", "--force")},
 		{key: "e", label: "enrol on the mesh", job: true, argv: onRow("kldload-enroll", "{}")},
 		{key: "z", label: "suspend", argv: onRow("virsh", "suspend", "{}")},
@@ -204,7 +217,13 @@ var verbs = map[string][]verb{
 		}},
 	},
 	"Machines/Snapshots": {
-		{key: "b", label: "roll the VM back to this snapshot", argv: func(row []string, _ string) ([]string, error) {
+		{key: "b", label: "roll the VM back to this snapshot (destroys every newer snapshot)", confirm: true, argv: func(row []string, _ string) ([]string, error) {
+			// Asked once, after the name is typed, never on the keypress: this
+			// row carries no state, and a running VM must not be rolled back
+			// (kvm-snap force-destroys it first).
+			if st, _ := run(10*time.Second, "virsh", "domstate", col(row, 0)); strings.TrimSpace(st) == "running" { // an error reads as not running; kvm-snap then reports it
+				return nil, errors.New(col(row, 0) + " is running: a rollback would kill it — shut it down first (Machines/VMs, T)")
+			}
 			return []string{"kvm-snap", col(row, 0), "rollback", "@" + col(row, 1)}, nil
 		}},
 		{key: "d", label: "delete snapshot", argv: func(row []string, _ string) ([]string, error) {

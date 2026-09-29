@@ -75,3 +75,31 @@ func TestBuildArgExamplesPassX(t *testing.T) {
 		}
 	}
 }
+
+// Rollback on a VM row is refused while the VM runs (kvm-snap would kill it),
+// before any prompt, and asks for the name otherwise; the snapshot-row
+// rollback, which also destroys every newer snapshot, asks for the name too.
+func TestRollbackIsGuarded(t *testing.T) {
+	find := func(tab, key string) verb {
+		for _, v := range verbs[tab] {
+			if v.key == key {
+				return v
+			}
+		}
+		t.Fatalf("%s has no %q", tab, key)
+		return verb{}
+	}
+	vm := find("Machines/VMs", "b")
+	if !vm.confirm || vm.refuse == nil {
+		t.Fatalf("VMs b: confirm=%v refuse set=%v, want both", vm.confirm, vm.refuse != nil)
+	}
+	if err := vm.refuse([]string{"web1", "g", "running"}); err == nil {
+		t.Error("VMs b: a running VM was not refused")
+	}
+	if err := vm.refuse([]string{"web1", "g", "shut off"}); err != nil {
+		t.Errorf("VMs b: a shut-off VM was refused: %v", err)
+	}
+	if snap := find("Machines/Snapshots", "b"); !snap.confirm {
+		t.Error("Snapshots b: rolls back and destroys newer snapshots without a typed confirm")
+	}
+}
