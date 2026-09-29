@@ -173,6 +173,17 @@ func openJob(label string, argv []string, cols, rows int) (*console, error) {
 	return c, nil
 }
 
+// openJobAsUser is openJob without sudo: the command runs as the operator,
+// with their session environment, for a verb that opens something on their
+// desktop (verb.asUser).
+func openJobAsUser(label string, argv []string, cols, rows int) (*console, error) {
+	c := &console{kind: conJob, vm: label, argv: argv, started: time.Now(), cols: max(cols, 20), rows: max(rows, 5)}
+	if err := c.spawn(argv...); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 // openJobSeq is openJob for several commands: they run one after another
 // in the same pty, each announced with a "== argv" line, the pane ending
 // with the first failure or the last exit. Sequential on purpose (clones

@@ -26,7 +26,12 @@ type verb struct {
 	prompt  string // when set, the verb asks for this before running
 	confirm bool   // the row's name must be typed back (destructive verbs)
 	noRow   bool   // the verb needs no selection
-	inter   bool   // takes the terminal (virsh console, ssh, logs, plays)
+	// asUser runs a job verb as the operator instead of under sudo -n: for
+	// a command that hands something to the operator's desktop. Root has no
+	// Wayland or D-Bus session, so the VDI wall opened under sudo reached
+	// no browser at all (onyx, 2026-09-28).
+	asUser bool
+	inter  bool // takes the terminal (virsh console, ssh, logs, plays)
 	// argv builds the command; row is the selected row (nil when noRow),
 	// input is what the prompt collected. A returned error is shown as is.
 	argv func(row []string, input string) ([]string, error)
@@ -158,7 +163,7 @@ var verbs = map[string][]verb{
 		// writes the page and opens it; the job pane shows what it found
 		// and the page's path (operator, 2026-09-28: the video shoot is
 		// driven from kld alone).
-		{key: "W", label: "VDI wall: every streaming desktop in the browser", noRow: true, job: true, argv: fixed("vmxplore", "--vdi-wall", "--open")},
+		{key: "W", label: "VDI wall: every streaming desktop in the browser", noRow: true, job: true, asUser: true, argv: fixed("vmxplore", "--vdi-wall", "--open")},
 		{key: "n", label: "new VM", job: true, noRow: true, prompt: "kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--iso path]: ", argv: func(_ []string, in string) ([]string, error) {
 			f := strings.Fields(in)
 			if len(f) == 0 || !nameOK(f[0]) {
@@ -314,7 +319,7 @@ var verbs = map[string][]verb{
 		// writes the page and opens it; the job pane shows what it found
 		// and the page's path (operator, 2026-09-28: the video shoot is
 		// driven from kld alone).
-		{key: "W", label: "VDI wall: every streaming desktop in the browser", noRow: true, job: true, argv: fixed("vmxplore", "--vdi-wall", "--open")},
+		{key: "W", label: "VDI wall: every streaming desktop in the browser", noRow: true, job: true, asUser: true, argv: fixed("vmxplore", "--vdi-wall", "--open")},
 	},
 	"Machines/Networks": {
 		{key: "S", label: "start", argv: onRow("virsh", "net-start", "{}")},

@@ -240,9 +240,10 @@ func (m *model) pop() bool {
 
 // jobStartMsg asks Update to open a job pane for a verb's command.
 type jobStartMsg struct {
-	label string
-	argv  []string   // one command …
-	argvs [][]string // … or several, run in order in one pane
+	label  string
+	asUser bool       // run as the operator, not under sudo (verb.asUser)
+	argv   []string   // one command …
+	argvs  [][]string // … or several, run in order in one pane
 }
 
 // conBodyTop is the first row of a console's body: title, rail, sub-tabs.
@@ -395,7 +396,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(argvs) == 0 {
 			argvs = [][]string{msg.argv}
 		}
-		c, err := openJobSeq(msg.label, argvs, m.width, m.conBodyH())
+		var c *console
+		var err error
+		if msg.asUser && len(argvs) == 1 {
+			c, err = openJobAsUser(msg.label, argvs[0], m.width, m.conBodyH())
+		} else {
+			c, err = openJobSeq(msg.label, argvs, m.width, m.conBodyH())
+		}
 		if err != nil {
 			m.say(stBad.Render(msg.label + ": " + err.Error()))
 			return m, nil
@@ -1072,7 +1079,7 @@ func (m model) execVerb(v verb, row []string, in string) tea.Cmd {
 		if name := col(row, 0); name != "" && !v.noRow {
 			label += " " + name
 		}
-		return func() tea.Msg { return jobStartMsg{label: label, argv: argv} }
+		return func() tea.Msg { return jobStartMsg{label: label, argv: argv, asUser: v.asUser} }
 	}
 	if v.inter {
 		c := exec.Command("sudo", append([]string{"-n"}, argv...)...)
