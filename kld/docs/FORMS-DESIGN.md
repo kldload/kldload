@@ -119,5 +119,7 @@ does not refuse: the operator decides. Each field has one line of help (why
 1. `x` = run with defaults at once, Enter = form (as above), or Enter = form
    and drop `x`?
 2. History: per form (above) or one shared list across kld?
-3. Should vmxplore's TUI get the same forms, or is kld the one console
-   (ONE-CONSOLE.md) and vmxplore's TUI frozen?
+3. ~~Should vmxplore's TUI get the same forms?~~ Decided 2026-09-28: kld is
+   the console of the minimalist KVM profile (terminal only) and vmxplore the
+   GUI big brother; the forms are kld's. ONE-CONSOLE.md's merge plan is
+   superseded.
