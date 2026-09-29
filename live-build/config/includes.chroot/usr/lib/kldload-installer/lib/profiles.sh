@@ -1068,6 +1068,16 @@ k_install_system_files() {
             mkdir -p "${target}${_droproot}/${_svc}"
             for _conf in "$_dropdir"/*.conf; do
                 [[ -f "$_conf" ]] || continue
+                # WHY: kldload-tty1.conf is the LIVE USB's install menu on tty1; on an
+                # installed system it only reproduces the stock login. It runs
+                # kldload-tty1, which core never gets (core returns below before any
+                # tool is copied), so every core install booted with getty@tty1
+                # start-limit-hit and no login on tty1 (fiend, 1-core, build 159,
+                # 2026-09-29). The stock getty is the right tty1 for every install.
+                if [[ "${_svc}/$(basename "$_conf")" == getty@tty1.service.d/kldload-tty1.conf ]]; then
+                    k_log "left behind drop-in: ${_droproot}/${_svc}/kldload-tty1.conf (live medium only)"
+                    continue
+                fi
                 install -m 0644 "$_conf" \
                     "${target}${_droproot}/${_svc}/$(basename "$_conf")"
                 k_log "carried drop-in: ${_droproot}/${_svc}/$(basename "$_conf")"
