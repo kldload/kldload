@@ -438,6 +438,11 @@ fi
 # ─── 3. Delete and unjoin ───────────────────────────────────────────────────
 _section "Unjoin (kvm-delete)"
 
+# The seed kvm-clone attached, read from the domain before it goes: kvm-delete
+# left every clone's <name>-seed.iso behind until bdcd89be (2026-09-29).
+PROBE_SEED="$(virsh domblklist "$PROBE" --details 2>/dev/null </dev/null |
+    awk -v s="${PROBE}-seed.iso" '$2 == "cdrom" && $4 ~ ("/" s "$") {print $4}' | head -n 1)"
+
 if timeout 300 kvm-delete "$PROBE" --force >/dev/null 2>&1; then
     _pass "kvm-delete returned 0"
 else
@@ -463,6 +468,13 @@ if has_zvol "$PROBE"; then
     _fail "unjoin: storage" "the zvol for ${PROBE} survived kvm-delete"
 else
     _pass "unjoin: the zvol is gone"
+fi
+if [[ -z "$PROBE_SEED" ]]; then
+    _warn "unjoin: seed" "the probe had no ${PROBE}-seed.iso attached, so its removal was not tested"
+elif [[ -e "$PROBE_SEED" ]]; then
+    _fail "unjoin: seed" "${PROBE_SEED} survived kvm-delete"
+else
+    _pass "unjoin: the seed ISO is gone"
 fi
 
 printf '\n  estate lifecycle: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
