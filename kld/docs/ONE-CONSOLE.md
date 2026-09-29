@@ -1,5 +1,10 @@
 # One console: kld and vmxplore become one tool
 
+> **Superseded 2026-09-28.** The operator decided against merging:
+> kld is the console of the minimalist KVM profile (terminal only, lean
+> host) and vmxplore is the GUI big brother. This plan is kept as history;
+> do not act on it. kld's terminal UX work is in FORMS-DESIGN.md.
+
 Status: plan, 2026-09-27. Nothing below is built yet except where it says so.
 
 ## Why
