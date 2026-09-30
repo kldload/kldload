@@ -1,0 +1,75 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-LOADTEST 8
+.Os
+.Sh NAME
+.Nm kldload-loadtest
+.Nd load the network, the disks and process creation at once, so every dashboard has something to show
+.Sh SYNOPSIS
+.Nm
+.Op Ar seconds
+.Op Fl -http-only | -io-only | -fork-only
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+For a live demonstration: run
+.Nm
+in one terminal and walk through the eBPF views, the TCP details and the
+Grafana dashboards while every layer is busy.
+For
+.Ar seconds ,
+60 by default, it runs at once:
+.Bl -tag -width "process"
+.It HTTP
+50 connections against the demo deployment in the cluster, deployed
+first if missing, which Hubble, Cilium's load balancer and conntrack show.
+.It Disk
+.Xr fio 1
+reading and writing a 2 GB file in
+.Pa /var/tmp ,
+which moves the ZFS transaction groups, the ARC and the block-latency
+heat map.
+.It Processes
+a loop starting short-lived processes, which Tetragon's exec rate shows.
+.El
+.Pp
+It removes what it started \(em the pods, fio, the loop, the file \(em
+when it ends or is interrupted.
+The arguments may come in either order.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -http-only , Fl -io-only , Fl -fork-only
+Only that layer.
+.It Fl h , Fl -help
+Print the header comment and exit 0, starting nothing.
+.El
+.Sh EXIT STATUS
+0 when it ran; 2 when an argument is neither a number of seconds nor a
+layer.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+$ kldload-loadtest abc
+kldload-loadtest: not a number of seconds or a mode: abc (see --help)
+# (exited 2)
+.Ed
+.Pp
+Running it; not done for this page:
+.Bd -literal -offset indent
+# kldload-loadtest 120
+# kldload-loadtest --io-only 30
+.Ed
+.Sh SEE ALSO
+.Xr fio 1 ,
+.Xr kldload-dash 8 ,
+.Xr kube-demo 8
+.Sh HISTORY
+On 2026-09-30, writing this page:
+.Ql kldload-loadtest --io-only
+read the layer as the number of seconds and ran all three.
+Earlier the same day,
+.Fl -help
+started a load test.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
