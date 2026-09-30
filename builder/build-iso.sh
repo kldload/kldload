@@ -3678,12 +3678,28 @@ fi
 mkdir -p "${ROOTFS}/root/darksite/bin"
 
 _bake_bin() {
-    # $1 name for the log, $2 destination filename, $3 URL
-    local _what="$1" _dest="${ROOTFS}/root/darksite/bin/$2" _url="$3"
-    if curl -sL --connect-timeout 20 --max-time 300 -o "${_dest}.part" "$_url" &&
+    # $1 name for the log, $2 destination filename, $3 URL, $4 (optional) URL
+    # of the release's SHA-256 list, "<hash>  <name>" lines naming $3's file.
+    # WHY -f: without it a 404 page was saved, was non-empty, and was logged
+    # as baked; the offline install then failed at tar (2026-09-30). And a
+    # sum where the release publishes one: these become root binaries on
+    # every installed machine.
+    local _what="$1" _dest="${ROOTFS}/root/darksite/bin/$2" _url="$3" _sums="${4:-}" _want _got
+    if curl -fsSL --connect-timeout 20 --max-time 300 -o "${_dest}.part" "$_url" &&
         [[ -s "${_dest}.part" ]]; then
+        if [[ -n "$_sums" ]]; then
+            # a missing sum list leaves _want empty, which is refused below
+            _want="$(curl -fsSL --max-time 30 "$_sums" | awk -v n="${_url##*/}" '$2 == n || $2 == "*" n { print $1 }')" || _want=""
+            _got="$(sha256sum "${_dest}.part" | awk '{ print $1 }')"
+            if [[ -z "$_want" || "$_want" != "$_got" ]]; then
+                rm -f "${_dest}.part"
+                log "WARNING: ${_what} did not verify (published sha256 '${_want:-none}', downloaded ${_got}) — not baked; an OFFLINE install will not have it"
+                return 0
+            fi
+        fi
         mv -f "${_dest}.part" "$_dest"
-        log "baked ${_what}: $(du -sh "$_dest" | cut -f1)"
+        # stat, not du: du on ZFS reports a fresh write as 1.0K
+        log "baked ${_what}${_sums:+ (sha256 verified)}: $(numfmt --to=iec "$(stat -c %s "$_dest")")"
     else
         rm -f "${_dest}.part"
         log "WARNING: could not bake ${_what} — an OFFLINE install will not have it"
@@ -3701,16 +3717,20 @@ _HELM_V="$(_lockv HELM_CLI_VERSION)"
 [[ -n "$_HELM_V" ]] || _HELM_V="$(curl -sL --max-time 20 https://api.github.com/repos/helm/helm/releases/latest 2>/dev/null |
     grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4)"
 [[ -n "$_HELM_V" ]] && _bake_bin "helm ${_HELM_V}" "helm-linux-amd64.tar.gz" \
-    "https://get.helm.sh/helm-${_HELM_V}-linux-amd64.tar.gz"
+    "https://get.helm.sh/helm-${_HELM_V}-linux-amd64.tar.gz" \
+    "https://get.helm.sh/helm-${_HELM_V}-linux-amd64.tar.gz.sha256sum"
 _CCLI_V="$(_lockv CILIUM_CLI_VERSION)"
 [[ -n "$_CCLI_V" ]] && _bake_bin "cilium-cli ${_CCLI_V}" "cilium-linux-amd64.tar.gz" \
-    "https://github.com/cilium/cilium-cli/releases/download/${_CCLI_V}/cilium-linux-amd64.tar.gz"
+    "https://github.com/cilium/cilium-cli/releases/download/${_CCLI_V}/cilium-linux-amd64.tar.gz" \
+    "https://github.com/cilium/cilium-cli/releases/download/${_CCLI_V}/cilium-linux-amd64.tar.gz.sha256sum"
 _HUB_V="$(_lockv HUBBLE_CLI_VERSION)"
 [[ -n "$_HUB_V" ]] && _bake_bin "hubble ${_HUB_V}" "hubble-linux-amd64.tar.gz" \
-    "https://github.com/cilium/hubble/releases/download/${_HUB_V}/hubble-linux-amd64.tar.gz"
+    "https://github.com/cilium/hubble/releases/download/${_HUB_V}/hubble-linux-amd64.tar.gz" \
+    "https://github.com/cilium/hubble/releases/download/${_HUB_V}/hubble-linux-amd64.tar.gz.sha256sum"
 _K9S_V="$(_lockv K9S_VERSION)"
 [[ -n "$_K9S_V" ]] && _bake_bin "k9s ${_K9S_V}" "k9s_Linux_amd64.tar.gz" \
-    "https://github.com/derailed/k9s/releases/download/${_K9S_V}/k9s_Linux_amd64.tar.gz"
+    "https://github.com/derailed/k9s/releases/download/${_K9S_V}/k9s_Linux_amd64.tar.gz" \
+    "https://github.com/derailed/k9s/releases/download/${_K9S_V}/checksums.sha256"
 
 _FC_V="$(curl -sL --max-time 20 https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest 2>/dev/null |
     grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4)"
