@@ -112,6 +112,31 @@ CLOUD_IMAGE="${CLOUD_IMAGE:-}"
 SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
 POOL="rpool"
 
+# ── The network plan (docs/NETWORK-PLAN.md) ──────────────────────────────────
+# The Kubernetes ranges come from THIS host's plan (/usr/lib/kldload/
+# network-plan.defaults, then /etc/kldload/network-plan.env) and are handed to
+# the guests: the golden's kube-setup and the control plane's kube-init run
+# where no plan file exists. A host without the library keeps the literals it
+# always had. The Services range was 10.96.0.0/12 -- the bench LAN's range --
+# until 2026-09-29.
+if [[ -r /usr/lib/kldload/netplan.sh ]]; then
+    # shellcheck source=/dev/null
+    source /usr/lib/kldload/netplan.sh
+fi
+_plan() {
+    if declare -F netplan_get >/dev/null && netplan_get "$1" 2>/dev/null; then return 0; fi
+    printf '%s\n' "$2"
+}
+POD_CIDR="${POD_CIDR:-$(_plan K8S_POD_CIDR 10.244.0.0/16)}"
+SVC_CIDR="${SVC_CIDR:-$(_plan K8S_SVC_CIDR 10.96.0.0/16)}"
+# SAFETY: these reach the control plane inside a quoted ssh command line.
+for _r in "$POD_CIDR" "$SVC_CIDR"; do
+    [[ "$_r" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || {
+        echo "kube-cluster: '${_r}' is not a CIDR (POD_CIDR / SVC_CIDR)" >&2
+        exit 2
+    }
+done
+
 # ── HA control plane (brick 4) ───────────────────────────────────────────────
 # HA_READY=1 (default) makes EVERY cluster born expandable: kube-init is told a
 # floating VIP, so kubeadm uses --control-plane-endpoint + --upload-certs even
@@ -124,7 +149,7 @@ POOL="rpool"
 # of libvirt DHCP so dnsmasq never leases it out from under kube-vip.
 HA_READY="${HA_READY:-1}"
 KUBE_VIP_ADDRESS="${KUBE_VIP_ADDRESS:-}"
-KUBE_VIP_DEFAULT="${KUBE_VIP_DEFAULT:-192.168.122.240}"
+KUBE_VIP_DEFAULT="${KUBE_VIP_DEFAULT:-$(_plan K8S_VIP 192.168.122.240)}"
 
 # ── Multi control plane (brick 3) ────────────────────────────────────────────
 # CONTROL_PLANES is the TARGET control-plane count. Default 3 = real HA (survives
@@ -1564,7 +1589,8 @@ NETCFG
     log "Running Ansible provision-golden against ${golden_ip}..."
     run_ansible_against_vm "$golden_ip" provision-golden.yml \
         -e "k8s_minor=${_k8s_minor}" -e "darksite_url=${GOLDEN_DARKSITE_URL}" \
-        -e "ntp_server=${NODE_NTP_SERVER}" ||
+        -e "ntp_server=${NODE_NTP_SERVER}" \
+        -e "pod_cidr=${POD_CIDR}" -e "svc_cidr=${SVC_CIDR}" ||
         die "ansible provision-golden failed"
     _golden_bundle_stop
     log "  provision-golden complete — kubeadm, helm, cilium-cli installed"
@@ -2660,7 +2686,7 @@ cmd_bootstrap() {
     # connection) and the bootstrap stops here rather than printing "Control
     # plane initialized" over a control plane that does not exist and then
     # joining workers to it.
-    _ssh_cmd "$cp_ip" "KUBE_VIP_ADDRESS='${KUBE_VIP_ADDRESS}' METALLB_POOL='${METALLB_POOL:-}' METALLB_POOL_NAME='${METALLB_POOL_NAME:-}' CILIUM_VERSION='${_cil}' kube-init" \
+    _ssh_cmd "$cp_ip" "KUBE_VIP_ADDRESS='${KUBE_VIP_ADDRESS}' METALLB_POOL='${METALLB_POOL:-}' METALLB_POOL_NAME='${METALLB_POOL_NAME:-}' CILIUM_VERSION='${_cil}' POD_CIDR='${POD_CIDR}' SVC_CIDR='${SVC_CIDR}' kube-init" \
         >"/var/log/kldload/kube-init-${CLUSTER_NAME}.log" 2>&1 ||
         die "kube-init failed on ${cp_ip} (exit $?) — see /var/log/kldload/kube-init-${CLUSTER_NAME}.log; the VMs are left as they are"
 
