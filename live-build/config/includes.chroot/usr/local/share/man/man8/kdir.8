@@ -1,0 +1,158 @@
+.Dd September 30, 2026
+.Dt KDIR 8
+.Os
+.Sh NAME
+.Nm kdir
+.Nd make a ZFS dataset where you would have made a directory
+.Sh SYNOPSIS
+.Nm
+.Op Fl p
+.Op Fl o Ar property Ns = Ns Ar value ...
+.Ar path ...
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+is
+.Xr mkdir 1
+for a ZFS system: for each
+.Ar path
+it creates a dataset mounted there, so the directory can have its own
+snapshots, quota, compression and record size, and be sent, cloned and
+rolled back on its own.
+.Pp
+The dataset is named under the dataset mounted at the path's parent:
+with
+.Pa /srv
+mounted from
+.Ql rpool/srv ,
+.Ql kdir /srv/app
+creates
+.Ql rpool/srv/app ,
+mounted at
+.Pa /srv/app .
+It then checks that the new dataset really is mounted at
+.Ar path .
+.Pp
+It refuses, and creates nothing:
+.Bl -bullet -compact
+.It
+a parent that is not where a dataset is mounted \(em a plain directory, or
+not ZFS \(em unless
+.Fl p ;
+.It
+a path that exists as a directory with files in it, which the dataset
+would hide;
+.It
+a path where a dataset is already mounted;
+.It
+a relative path.
+.El
+.Pp
+It must run as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl p
+Create the missing parents as datasets too, from the top down.
+A parent that exists as a plain directory is refused: it cannot become a
+dataset without hiding what is in it.
+.It Fl o Ar property Ns = Ns Ar value
+Set a ZFS property on each dataset created; repeat for more.
+A
+.Ql mountpoint=
+that differs from
+.Ar path
+is created and reported as an error, since the dataset is then not where
+it was asked for.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Every path is a dataset now.
+.It 1
+Refused, not root, or
+.Xr zfs 8
+failed; paths before the failing one were created.
+.It 2
+A usage error.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, under a throwaway dataset,
+.Ql rpool/kd-3587274
+mounted at
+.Pa /var/tmp/kd-3587274 ,
+that held a plain directory,
+.Pa plain ;
+all destroyed afterwards.
+.Ss One dataset
+.Bd -literal -offset indent
+# kdir /var/tmp/kd-3587274/good
+kdir: creating dataset: rpool/kd-3587274/good  →  /var/tmp/kd-3587274/good
+# (exited 0)
+.Ed
+.Ss With its parents (-p)
+.Bd -literal -offset indent
+# kdir -p /var/tmp/kd-3587274/a/b/c
+kdir: creating dataset: rpool/kd-3587274/a  →  /var/tmp/kd-3587274/a
+kdir: creating dataset: rpool/kd-3587274/a/b  →  /var/tmp/kd-3587274/a/b
+kdir: creating dataset: rpool/kd-3587274/a/b/c  →  /var/tmp/kd-3587274/a/b/c
+# (exited 0)
+.Ed
+.Ss With properties (-o)
+.Bd -literal -offset indent
+# kdir -o compression=zstd -o quota=1G /var/tmp/kd-3587274/z
+kdir: creating dataset: rpool/kd-3587274/z  →  /var/tmp/kd-3587274/z
+# (exited 0)
+# zfs list -H -o name,mountpoint,compression,quota -r rpool/kd-3587274
+rpool/kd-3587274	/var/tmp/kd-3587274	lz4	none
+\&...
+rpool/kd-3587274/good	/var/tmp/kd-3587274/good	lz4	none
+rpool/kd-3587274/z	/var/tmp/kd-3587274/z	zstd	1G
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+# kdir /var/tmp/kd-3587274/plain/data
+kdir: error: parent '/var/tmp/kd-3587274/plain' is not where a ZFS dataset is mounted (a plain directory, or not ZFS); use -p to create it
+# (exited 1)
+# kdir -p /var/tmp/kd-3587274/plain/x
+kdir: error: /var/tmp/kd-3587274/plain exists as a plain directory; kdir cannot make it a dataset (its files would be hidden)
+# (exited 1)
+# kdir /var/tmp/kd-3587274/good
+kdir: error: /var/tmp/kd-3587274/good is already where a dataset is mounted
+# (exited 1)
+# kdir relative/path
+kdir: error: 'relative/path' must be an absolute path
+# (exited 1)
+# kdir -o mountpoint=/var/tmp/kd-3587274/elsewhere /var/tmp/kd-3587274/m
+kdir: creating dataset: rpool/kd-3587274/m  →  /var/tmp/kd-3587274/m
+kdir: error: created rpool/kd-3587274/m, but it is mounted at /var/tmp/kd-3587274/elsewhere, not /var/tmp/kd-3587274/m (a -o mountpoint= overrides the path)
+# (exited 1)
+$ kdir /var/tmp/kd-3587274/u
+kdir: error: must run as root (zfs create)
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr mkdir 1 ,
+.Xr zfsprops 7 ,
+.Xr kclone 8 ,
+.Xr kdf 8 ,
+.Xr zfs-create 8
+.Sh HISTORY
+On 2026-09-30, writing this page: with a plain directory as the parent,
+.Nm
+named the new dataset after the dataset containing that directory, so it
+was mounted somewhere else than it said \(em
+.Ql kdir /x/plain/data
+reported
+.Pa /x/plain/data
+and mounted at
+.Pa /x/data ,
+exit 0.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A dataset's name follows the parent dataset's, not the path: under a
+parent mounted somewhere unusual, the name can look unrelated to the
+path.
