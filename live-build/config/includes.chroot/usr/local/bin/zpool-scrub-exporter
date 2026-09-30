@@ -5,7 +5,10 @@
 #
 # Parses `zpool status` output per pool:
 #   scan: scrub repaired 0B in 00:01:29 with 0 errors on Tue Apr 21 08:50:41 2026
-#   scan: scrub in progress since Tue Apr 21 ..., 1.23G scanned out of 5.00G, 25.1% done, ...
+#   scan: scrub in progress since Tue Apr 21 ...
+#         1.23T / 3.31T scanned at 1.2G/s, 400G / 3.31T issued at 500M/s
+#         0B repaired, 12.08% done, 01:00:00 to go
+#   scan: scrub repaired 0B in 1 days 02:03:04 with 0 errors on ...   (past a day)
 #   scan: resilvered 12G in 00:05:00 with 0 errors on ...
 #
 # Emits:
@@ -69,15 +72,19 @@ mkdir -p "$(dirname "$OUT")"
 
         # ── completed scrub: "scrub repaired 0B in H:M:S with N errors on <date>"
         if printf '%s' "$_scan" | grep -qE 'scrub repaired .* with [0-9]+ errors on '; then
-            _dur=$(printf '%s' "$_scan" | sed -nE 's/.* in ([0-9]+):([0-9]+):([0-9]+) with.*/\1 \2 \3/p')
+            # OpenZFS prints "N days HH:MM:SS" past a day (secs_to_dhms in
+            # zpool_main.c); without the optional days a 30-hour scrub on a
+            # big pool emitted no duration at all (found 2026-09-30).
+            _dur=$(printf '%s' "$_scan" | sed -nE 's/.* in (([0-9]+) days )?([0-9]+):([0-9]+):([0-9]+) with.*/\2 \3 \4 \5/p')
             _errs=$(printf '%s' "$_scan" | sed -nE 's/.*with ([0-9]+) errors.*/\1/p')
             _date=$(printf '%s' "$_scan" | sed -nE 's/.*errors on (.*)$/\1/p')
             _ts=$(date -d "$_date" +%s 2>/dev/null || echo 0)
             if [[ -n "$_dur" ]]; then
                 # Force base-10 — leading zeros like "00:01:29" otherwise trip
                 # bash into parsing as octal and choking on "08"/"09".
-                read -r _h _m _s <<<"$_dur"
-                _secs=$((10#$_h * 3600 + 10#$_m * 60 + 10#$_s))
+                read -r _d _h _m _s <<<"$_dur"
+                [[ -n "${_s:-}" ]] || { _s=$_m _m=$_h _h=$_d _d=0; }
+                _secs=$((10#$_d * 86400 + 10#$_h * 3600 + 10#$_m * 60 + 10#$_s))
                 echo "zpool_scrub_last_duration_seconds{pool=\"$pool\"} $_secs"
             fi
             echo "zpool_scrub_last_timestamp{pool=\"$pool\"} $_ts"
@@ -86,7 +93,10 @@ mkdir -p "$(dirname "$OUT")"
 
         # ── in progress: "scrub in progress since <date> ... N% done ..."
         elif printf '%s' "$_scan" | grep -qE 'scrub in progress'; then
-            _pct=$(printf '%s' "$_status" | sed -nE 's/.*([0-9]+\.[0-9]+)% done.*/\1/p' | head -1)
+            # WHY: the number must start after a non-digit. A greedy ".*" in
+            # front took every digit but the last, so 12.08% was reported
+            # as 0.0208 (found 2026-09-30).
+            _pct=$(printf '%s' "$_status" | sed -nE 's/(^|.*[^0-9.])([0-9]+\.[0-9]+)% done.*/\2/p' | head -1)
             echo "zpool_scrub_in_progress{pool=\"$pool\"} 1"
             [[ -n "$_pct" ]] && echo "zpool_scrub_progress_ratio{pool=\"$pool\"} $(awk -v p="$_pct" 'BEGIN{print p/100}')"
         else
