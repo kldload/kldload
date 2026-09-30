@@ -122,6 +122,22 @@ _resign_loaded_zfs() {
         log "zfs module not installed — skipping re-sign"
         return 0
     fi
+    # SAFETY: only an uncompressed .ko is signed in place. sign-file appends
+    # the signature to whatever file it is given; given zfs.ko.xz it exits 0
+    # and leaves "Compressed data is corrupt" (a copy of onyx's module,
+    # 2026-09-30). Fedora compresses modules, so `enable` would have broken
+    # the on-disk ZFS module while reporting success -- harmless until the
+    # next initramfs rebuild copied it in and the root pool stopped
+    # importing. A compressed module is left for DKMS, whose sign helper was
+    # just installed and signs the .ko before compressing it.
+    case "${mod}" in
+    *.ko) ;;
+    *)
+        log "ZFS module is compressed (${mod##*.}) — NOT signed in place, which would corrupt it."
+        log "  DKMS signs it when it next builds it: run 'dkms autoinstall -k ${kver}' or wait for the next kernel."
+        return 0
+        ;;
+    esac
     # sign-file rewrites in place. If the module is under /lib/modules,
     # that's fine — it's already the on-disk canonical path.
     if "${sign_file}" sha256 "${CA_KEY}" "${CA}" "${mod}" 2>/dev/null; then
