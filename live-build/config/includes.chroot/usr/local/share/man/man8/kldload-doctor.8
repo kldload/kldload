@@ -1,0 +1,470 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-DOCTOR 8
+.Os
+.Sh NAME
+.Nm kldload-doctor
+.Nd check a kldload host against what its install should be, and say how to fix each difference
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+runs a fixed list of checks against the machine it is on and prints one
+JSON document on standard output: a result for every check, grouped two
+ways, and a count of each outcome.
+It changes nothing on the machine except its own log.
+.Pp
+Each check has one of four outcomes:
+.Bl -tag -width "skip"
+.It Li ok
+The thing checked is as a kldload install leaves it.
+.It Li warn
+It is not, but the machine works; a warning names the difference and the
+command that removes it.
+.It Li fail
+It is not, and something that should work does not.
+.It Li skip
+The check does not apply to this machine, or could not look.
+A machine installed without Kubernetes skips every Kubernetes check; a
+check that needs root, run as a user, skips and says
+.Dq not checked -- run as root .
+A skip is never counted as a pass.
+.El
+.Pp
+Checks follow the install, not a single idea of a healthy machine: a
+.Ql core
+install, which ships no kldload tools, is not failed for their absence,
+and Prometheus, Grafana and Ollama are judged only where the install put
+them.
+.Pp
+It should run as root.
+Run as a user, it cannot read
+.Pa /root
+or ask libvirt about the system's machines, and says so for each check
+that needed to; the Kubernetes checks then use the user's own kubeconfig.
+.Pp
+A run takes about two seconds on a machine with no cluster.
+With a cluster, the mesh check logs in to every node over
+.Xr ssh 1 ,
+which takes longer.
+When the apiserver named by the kubeconfig does not answer its port within
+1.5 seconds, every check that would ask it is skipped at once instead of
+waiting out a timeout each.
+.Pp
+The web console's Doctor view,
+.Xr kld 1
+and the estate sweep's per-machine report run
+.Nm
+and read the same document.
+.Ss Output
+The document has four keys:
+.Bl -tag -width "subsystems"
+.It Li summary
+The number of results with each outcome:
+.Li ok , warn , fail , skip .
+.It Li results
+One object per check, in the order they ran, each with
+.Li subsystem , name , status , expected , actual , severity
+.Po
+.Li critical , high , medium
+or
+.Li low
+.Pc
+and
+.Li remediation ,
+the command to run, or an empty string.
+.It Li subsystems
+The same objects, keyed by subsystem.
+.It Li version
+The document's format,
+.Ql 1.0 .
+.El
+.Pp
+Keys are sorted.
+A check's name is the same whatever its outcome, so its history can be
+found in the log by name.
+.Ss The checks
+In the order they run, with checks of the same kind taken together.
+.Bl -tag -width Ds
+.It Li boot/bootfs set
+The pool's
+.Li bootfs
+property names a boot environment.
+Without it ZFSBootMenu has no default and an unattended reboot stops at
+its menu.
+Fails when unset.
+.It Li desktop/audio sinks
+PipeWire has at least one sink, asked as the user at the screen.
+Skips with no
+.Xr pactl 1
+or nobody seated.
+.It Li desktop/dock pins
+At least one kldload launcher or console is pinned in the GNOME dock of
+the user at the screen, or, with nobody seated, in the system default.
+Fails when none is; that is how an interrupted first boot shows.
+.It Li disk/AI payload reclaimed
+The 3.3 GB AI payload under
+.Pa /root/darksite/ollama
+was removed after installing.
+Warns when it is still there, unless
+.Pa /etc/kldload/keep-darksite
+exists.
+.It Li containers/docker storage driver
+Docker stores its layers on the
+.Li zfs
+driver, so they can be snapshotted and sent.
+Fails on any other driver.
+Skips with no Docker or no daemon.
+.It Li zfs/rpool health
+.Li rpool
+is imported and ONLINE.
+Fails otherwise, at critical severity.
+.It Li zfs/pool errors
+.Ql zpool status -x
+reports every pool healthy.
+Warns otherwise.
+.It Li zfs/arc sized
+The ARC holds less than 80% of memory.
+Warns above.
+.It Li zfs/sanoid timer
+.Pa sanoid.timer ,
+which takes the scheduled snapshots, is active.
+Warns otherwise.
+.It Li kldload-zfs/namespace exists
+.Li rpool/kldload
+and its
+.Li secrets , state
+and
+.Li playbooks
+datasets exist.
+Warns for each missing one.
+.It Li kldload-zfs/secrets encrypted
+.Li rpool/kldload/secrets
+is encrypted.
+Fails when it is not.
+.It Li network/wireguard module
+The
+.Li wireguard
+kernel module is loaded.
+Warns otherwise.
+.It Li network/wireguard mesh
+Lists the WireGuard interfaces; skips when there are none.
+.It Li network/virbr0 up
+libvirt's default bridge is administratively up.
+A bridge with no machine attached has no carrier; that is reported, not
+warned about.
+Warns when it is down.
+.It Li kubernetes/apiserver
+The apiserver the kubeconfig names answers.
+Fails on a control plane (one holding
+.Pa /etc/kubernetes/manifests/kube-apiserver.yaml ) ;
+elsewhere warns, since a kubeconfig left by a cluster that is gone is
+common.
+When it does not answer, every check from here to
+.Li observability/metrics-server
+skips.
+.It Li kubernetes/nodes ready
+Every registered node is Ready.
+A node whose machine is powered off is named in
+.Li expected .
+Fails at critical severity.
+.It Li kubernetes/cilium healthy , k8s-stack/cilium agents
+A Ready Cilium agent on every node.
+Fail when short.
+.It Li k8s-stack/cilium operator , hubble relay , metallb , zfs csi
+Every pod of each is Ready.
+Fail when short.
+.It Li k8s-stack/hubble ui
+Every Hubble UI pod is Ready.
+Warns when short.
+.It Li k8s-stack/gateway api
+The Gateway API resource definitions are installed.
+.It Li helm/releases
+Every Helm release is
+.Li deployed
+or
+.Li superseded .
+Fails naming the others.
+.It Li observability/metrics-server
+metrics-server is Ready and
+.Ql kubectl top node
+answers.
+Fails when it is missing or not Ready; warns when Ready but not
+answering.
+.It Li observability/prometheus , grafana
+The service is active, where it is installed.
+Fail when stopped.
+.It Li observability/prometheus scrape
+Prometheus scrapes the host's node exporter, and on a machine with a
+cluster the Cilium, Hubble and Tetragon jobs too, each with at least one
+target up.
+Fails naming the missing or dark jobs.
+.It Li observability/cilium scrape labels , tetragon scrape , hubble scrape
+Each job's metrics arrive, with the labels the stock Cilium dashboards
+filter by.
+Skip while a job has not been scraped yet, which on a new cluster lasts
+minutes; fail once it has and the data is still absent.
+.It Li observability/grafana dashboards
+No provisioned dashboard carries an unresolved
+.Ql ${DS_PROMETHEUS}
+placeholder, which leaves every panel empty.
+.It Li observability/cluster firewall
+Where an nftables policy drops traffic, the node subnet or the kubelet
+port, and the pod network, are allowed in.
+Skips where nothing drops.
+.It Li kubernetes/cluster mesh peers
+Every running cluster node
+.Po
+a machine named
+.Ql kldload-cp*
+or
+.Ql kldload-w*
+.Pc
+holds a WireGuard peer for each other node and for this host, asked over
+.Xr ssh 1 .
+Fails on any difference, and on any node it could not reach.
+.It Li k8s-stack/darksite charts , darksite images
+The Helm charts and container images a cluster is deployed from without a
+network are on the machine.
+Skip on an install that carries no darksite.
+.It Li ai/ollama
+Ollama answers and has a model in memory.
+Skips where Ollama is not installed; fails when it does not answer.
+kldload keeps models loaded
+.Pq Ev OLLAMA_KEEP_ALIVE Ns =-1 ,
+so an empty memory is a warning: the first prompt waits for a load.
+.It Li ai/webui tools
+The web console still offers the assistant its eight observability tools.
+.It Li installer/artifacts
+The files an install puts in place for the automatic deployment and the
+cluster tools are there.
+Skips on
+.Ql core .
+.It Li services/kldload-webui
+The web console's service is active.
+.It Li services/libvirt
+.Xr virsh 1
+connects to
+.Li qemu:///system ,
+whichever of the modular daemons or
+.Xr libvirtd 8
+this host runs.
+.It Li services/cli tools
+.Xr kvm-create 8 ,
+.Xr kvm-clone 8 ,
+.Xr kube-cluster 8 ,
+.Xr kldload-db 8 ,
+.Xr kldload-inventory 8 ,
+.Nm
+and
+.Xr kexport 8
+are on the path.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the usage and exit 0.
+Runs no check and needs no root.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KUBECONFIG
+The cluster the Kubernetes checks ask, as for
+.Xr kubectl 1 ;
+unset, root's is
+.Pa /root/.kube/config .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/kldload-doctor.log
+A line per run with its counts, and a line per warning and failure.
+Moved to
+.Pa /root/kldload-doctor.log.old
+past 2 MB.
+.It Pa /etc/kldload/profile
+The install's profile; on
+.Ql core
+the artifacts check skips.
+.It Pa /etc/kldload/keep-darksite
+Present on a machine kept as a mirror: the AI payload is kept on purpose.
+.It Pa /root/darksite/
+The offline payload the darksite checks look in.
+.It Pa /var/lib/grafana/dashboards/
+The dashboards the Grafana check reads.
+.It Pa /etc/nftables.conf
+The firewall the cluster firewall check reads, when a drop policy is in
+effect.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+No check failed.
+Warnings and skips do not change this.
+.It 1
+At least one check failed.
+.It 2
+A check crashed; it is reported as a failure of subsystem
+.Li runner ,
+named for its function.
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on a kldload desktop with no cluster on 2026-09-29.
+.Ss Usage (-h, --help)
+.Bd -literal -offset indent
+$ kldload-doctor --help
+usage: kldload-doctor
+
+Profiles this host against a known-good baseline and prints JSON on stdout:
+  .summary            counts of ok / warn / fail / skip
+  .results[]          one per check: subsystem, name, status, actual,
+                      expected, severity and the remediation command
+There are no options. Read it with jq, for example the checks that are not ok:
+
+  kldload-doctor | jq -r '.results[] | select(.status!="ok")
+      | "\e(.status)\et\e(.name)\et\e(.remediation)"'
+
+Each run is also appended to /root/kldload-doctor.log (fails and warns).
+
+Exit status: 0 no check failed, 1 at least one failed, 2 a check crashed.
+See kldload-doctor(8).
+.Ed
+.Ss The verdict
+.Bd -literal -offset indent
+# kldload-doctor | jq .summary
+{
+  "fail": 0,
+  "ok": 21,
+  "skip": 21,
+  "warn": 1
+}
+# kldload-doctor >/dev/null; echo $?
+0
+.Ed
+.Ss What needs attention
+.Bd -literal -offset indent
+# kldload-doctor | jq -r '.results[] | select(.status=="warn" or .status=="fail") | "\e(.status)\et\e(.subsystem)/\e(.name)\et\e(.actual)"'
+warn	ai/ollama	no models loaded -- the first prompt will wait for one to load
+.Ed
+.Ss One check in full
+.Bd -literal -offset indent
+# kldload-doctor | jq '.results[] | select(.name=="virbr0 up")'
+{
+  "actual": "up, no carrier (no guest attached)",
+  "expected": "administratively UP",
+  "name": "virbr0 up",
+  "remediation": "",
+  "severity": "medium",
+  "status": "ok",
+  "subsystem": "network"
+}
+.Ed
+.Ss By subsystem
+.Bd -literal -offset indent
+# kldload-doctor | jq -r '.subsystems | to_entries[] | "\e(.key)\et\e(.value | map(.status) | join(" "))"'
+ai	warn ok
+boot	ok
+containers	skip
+desktop	skip ok
+disk	ok
+helm	skip
+installer	ok
+k8s-stack	skip skip skip skip skip skip skip ok skip
+kldload-zfs	ok ok
+kubernetes	skip skip skip skip
+network	ok skip ok
+observability	skip ok ok skip skip skip ok ok skip
+services	ok ok ok
+zfs	ok ok ok ok
+.Ed
+.Ss The log
+.Bd -literal -offset indent
+# tail -2 /root/kldload-doctor.log
+# ts=2026-09-29T22:43:04.158389 ok=21 fail=0 warn=1 skip=21
+  [WARN] ai/ollama: no models loaded -- the first prompt will wait for one to load
+.Ed
+.Ss As a user
+The checks that read
+.Pa /root
+or ask the system libvirt say they did not look, the Kubernetes checks ask
+the user's own kubeconfig (here one left by a cluster that is gone), and
+the log cannot be written; the verdict is still printed:
+.Bd -literal -offset indent
+$ kldload-doctor | jq -c .summary
+kldload-doctor: run not logged: [Errno 13] Permission denied: '/root/kldload-doctor.log'
+{"fail":0,"ok":18,"skip":22,"warn":3}
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kldload-doctor: run not logged: REASON"
+The log could not be written: a run as a user, or a read-only
+.Pa /root .
+The document and the exit status are unaffected.
+.It "crashed: MESSAGE"
+In a result of subsystem
+.Li runner :
+the named check raised an error instead of returning a result.
+The run carries on with the others and exits 2.
+.It "not checked -- run as root"
+The check needs to read
+.Pa /root
+or ask the system libvirt; its skip means nothing about the machine.
+.It "apiserver unreachable (port probe)"
+Seen in the
+.Li actual
+of a Kubernetes check: see
+.Li kubernetes/apiserver
+above.
+.El
+.Sh SEE ALSO
+.Xr jq 1 ,
+.Xr kld 1 ,
+.Xr kldload-estate 8 ,
+.Xr kube-cluster 8 ,
+.Xr kube-status 8 ,
+.Xr zpool-status 8
+.Sh HISTORY
+Most checks carry a date: the defect they were written to catch, or a
+false alarm of their own that was taken out.
+Two that shaped the rest:
+on 2026-08-19 the nodes check had been taught to expect powered-off nodes,
+and stayed green while an etcd member, an apiserver and a scheduler were
+down; every registered node is expected Ready since.
+The libvirt check once reported a healthy host running the modular
+daemons as broken and prescribed enabling
+.Xr libvirtd 8 ,
+the command that, on 2026-09-16, had pushed those daemons' sockets out and
+cost a six-node cluster and fifteen golden images; it asks
+.Xr virsh 1
+since, and prescribes by what the host runs.
+.Pp
+On 2026-09-29, writing this page: the metrics-server check failed every
+machine without a cluster, so each exited 1; the bridge check and the dock
+check could not fail, one matching
+.Ql UP
+in the list of a down link's flags, the other counting GNOME's own default
+pins; an apiserver that did not answer skipped every Kubernetes check
+without saying so; run as a user, the darksite checks reported an absent
+darksite and a reclaimed payload they had not looked at; and four checks
+changed name with their outcome.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A pass means the checks passed, not that the machine is sound: nothing
+here reads a disk's SMART data, tries a backup restore, or boots a
+snapshot.
+.Pp
+The cluster checks know the Cilium, Hubble, MetalLB, ZFS CSI and Tetragon
+that
+.Xr kube-cluster 8
+deploys; a cluster built otherwise skips or fails them by its labels, not
+its health.
+.Pp
+The cluster firewall check reads
+.Pa /etc/nftables.conf
+for the pod network
+.Li 10.244.0.0/16 ;
+a cluster given another pod range by the network plan is warned about
+until this check reads the plan.
