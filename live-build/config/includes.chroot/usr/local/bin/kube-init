@@ -160,8 +160,13 @@ snapshot_before_init() {
         pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
         if [[ -n "$pool" ]]; then
             local snap="${pool}@pre-kube-init-$(date -u +%Y%m%dT%H%M%SZ)"
-            zfs snapshot -r "$snap" 2>/dev/null || true
-            log "ZFS snapshot created: $snap (rollback point)"
+            # A failed snapshot is said, not logged as created (2026-09-30,
+            # the same line kube-reset and kube-join had).
+            if zfs snapshot -r "$snap"; then
+                log "ZFS snapshot created: $snap (rollback point)"
+            else
+                warn "could not take $snap -- there is no rollback point for this init"
+            fi
         fi
     fi
 }
