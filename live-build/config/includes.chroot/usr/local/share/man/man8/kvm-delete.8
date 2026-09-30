@@ -1,0 +1,319 @@
+.Dd September 29, 2026
+.Dt KVM-DELETE 8
+.Os
+.Sh NAME
+.Nm kvm-delete
+.Nd remove a virtual machine and everything it owns
+.Sh SYNOPSIS
+.Nm
+.Ar name
+.Op Fl -force
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+removes the virtual machine
+.Ar name
+and what belongs to it alone:
+.Bl -bullet -compact
+.It
+its libvirt definition and its UEFI variable store;
+.It
+its disk,
+.Pa rpool/vms/ Ns Ar name ,
+with every snapshot of it;
+.It
+its data disk, a volume called
+.Ar name Ns Pa -data
+attached to it, wherever it lives;
+.It
+the cloud-init seed
+.Xr kvm-clone 8
+gave it,
+.Ar name Ns Pa -seed.iso ;
+.It
+the snapshots
+.Xr kvm-clone 8
+took of its source, once no clone uses them;
+.It
+its row in the kldload state database, so the inventory stops listing it;
+.It
+its WireGuard mesh peer, if it was enrolled.
+.El
+.Pp
+Anything else attached to it \(em an installer image, a disk shared with
+another machine \(em is left alone.
+A UEFI variable store that another machine also points at is kept; clones
+made before 2026-09-29 share their source's.
+.Pp
+Everything that can refuse is asked before anything is removed.
+.Nm
+changes nothing when:
+.Bl -bullet -compact
+.It
+a machine was cloned from this one, or from its data disk: removing the
+disk would strand them, and ZFS would refuse anyway;
+.It
+the machine is not shut off and
+.Fl -force
+was not given;
+.It
+the power-off, or libvirt's undefine, fails;
+.It
+there is no machine of that name at all.
+.El
+.Pp
+A machine with a disk and no libvirt definition, left by an earlier
+failure, is removed with a warning; so is a definition with no disk.
+.Pp
+A disk that ZFS reports busy, as a volume often is in the seconds after
+its machine stopped, is tried five times, two seconds apart.
+If it still cannot be destroyed, the definition is already gone:
+.Nm
+says so, clears the database row anyway, and exits 1.
+.Pp
+Names are letters, digits,
+.Ql \&. ,
+.Ql _
+and
+.Ql - ,
+up to 63 characters, starting with a letter or a digit.
+.Pp
+.Nm
+must run as root; run as a user it re-executes itself with
+.Xr sudo 8 .
+.Fl -help
+needs neither.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -force
+Power the machine off first, as pulling its plug would, if it is running,
+paused, or in any state but shut off.
+Nothing in its memory is saved first.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+Needs no root and changes nothing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa rpool/vms/ Ns Ar name
+The machine's disk.
+.It Ar pool Ns Pa / Ns Ar ... Ns Pa / Ns Ar name Ns Pa -data
+Its data disk, found through its libvirt definition; with no definition,
+.Pa rpool/vms/ Ns Ar name Ns Pa -data
+only.
+.It Pa /var/lib/libvirt/qemu/nvram/ Ns Ar name Ns Pa _VARS Ns \&. Ns Ar ext
+Its UEFI variables.
+.It Pa /var/lib/libvirt/images/ Ns Ar name Ns Pa -seed.iso
+Its cloud-init seed.
+.It Pa /var/lib/kldload/mesh/enrolled/ Ns Ar name
+Its mesh enrolment, for machines enrolled before the state database
+recorded it.
+.It Pa /etc/wireguard/wg-mgmt.conf
+The mesh configuration its peer is removed from.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+The machine and everything it owned are gone.
+.It 1
+Nothing was changed, for one of the reasons above; or the definition was
+removed but a disk is still on disk or the machine is still a mesh peer,
+and the warnings say which.
+.It 2
+A usage error: no name, a name that is not a plain name, or an argument
+other than
+.Fl -force .
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on a kldload host on 2026-09-29, against throwaway machines made for the
+purpose with
+.Xr kvm-create 8
+and
+.Xr kvm-clone 8 :
+.Ql dl-3234727-src ,
+a clone of it, and machines left running, paused, and with a disk but no
+definition.
+.Ss A machine that is shut off
+The clone was defined and never started.
+Its seed went with it, and so did the snapshot of its source that it was
+made from, which nothing else used:
+.Bd -literal -offset indent
+# kvm-delete dl-3234727-clone
+Removing VM definition...
+Destroying ZFS zvol: rpool/vms/dl-3234727-clone
+Cleaning up orphaned snapshot: rpool/vms/dl-3234727-src@clone-20260929_224555465177330
+
+Deleted 'dl-3234727-clone'
+# (exited 0)
+.Ed
+.Ss A running machine (--force)
+Without
+.Fl -force
+a running or paused machine is refused:
+.Bd -literal -offset indent
+# kvm-delete dl-3234727-running
+kvm-delete: dl-3234727-running is running; shut it down first or use --force
+# (exited 1)
+# kvm-delete dl-3234727-paused
+kvm-delete: dl-3234727-paused is paused; shut it down first or use --force
+# (exited 1)
+.Ed
+.Pp
+With it, the machine is powered off first.
+This one had a data disk attached, which went with it:
+.Bd -literal -offset indent
+# kvm-delete dl-3234727-running --force
+Force-stopping VM (running)...
+Removing VM definition...
+Destroying ZFS zvol: rpool/vms/dl-3234727-running
+Destroying its data disk: rpool/vms/dl-3234727-running-data
+
+Deleted 'dl-3234727-running'
+# (exited 0)
+# kvm-delete dl-3234727-paused --force
+Force-stopping VM (paused)...
+Removing VM definition...
+Destroying ZFS zvol: rpool/vms/dl-3234727-paused
+
+Deleted 'dl-3234727-paused'
+# (exited 0)
+.Ed
+.Ss A source with clones
+.Bd -literal -offset indent
+# kvm-delete dl-3234727-src
+ERROR: dl-3234727-src still has machines cloned from it:
+  rpool/vms/dl-3234727-clone
+
+Nothing has been changed. Delete those first, or take one off its origin
+with:
+
+  zfs promote <clone>
+
+which makes that clone own the data and leaves the rest working. Deleting
+this VM with its clones still attached would strand every one of them.
+# (exited 1)
+.Ed
+.Pp
+Once the clone was deleted:
+.Bd -literal -offset indent
+# kvm-delete dl-3234727-src --force
+Force-stopping VM (running)...
+Removing VM definition...
+Destroying ZFS zvol: rpool/vms/dl-3234727-src
+
+Deleted 'dl-3234727-src'
+# (exited 0)
+.Ed
+.Ss A disk with no definition
+.Bd -literal -offset indent
+# kvm-delete dl-3234727-zonly
+Warning: VM 'dl-3234727-zonly' not found in libvirt (removing zvol only)
+Destroying ZFS zvol: rpool/vms/dl-3234727-zonly
+
+Deleted 'dl-3234727-zonly'
+# (exited 0)
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+# kvm-delete nosuch-dl-3234727
+kvm-delete: no VM named nosuch-dl-3234727 (no libvirt domain, no rpool/vms/nosuch-dl-3234727)
+# (exited 1)
+$ kvm-delete web/data
+kvm-delete: 'web/data' is not a plain name (letters, digits, . _ -)
+# (exited 2)
+$ kvm-delete x --froce
+kvm-delete: unexpected argument(s): --froce
+Usage: kvm-delete <vm-name> [--force]
+\&...
+# (exited 2)
+.Ed
+.Ss An enrolled machine
+A machine enrolled on the WireGuard mesh with
+.Xr kldload-enroll 8
+is taken off it as well; nothing was enrolled on the host these examples
+were captured on:
+.Bd -literal -offset indent
+# kvm-delete web01
+# among its lines: Removed from the mesh (peer N, identity from state DB)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "ERROR: NAME still has machines cloned from it:"
+Followed by the clones.
+Nothing was changed.
+Delete them first, or make one independent with
+.Xr zfs-promote 8 .
+.It "ERROR: NAME's data disk DATASET has clones:"
+The same, for the data disk.
+.It "kvm-delete: NAME is STATE; shut it down first or use --force"
+The machine is running, paused, or otherwise not shut off.
+.It "kvm-delete: could not power NAME off; nothing has been removed"
+libvirt refused the power-off; its own error is above.
+.It "kvm-delete: libvirt would not undefine NAME; its disks are untouched"
+The definition could not be removed, so neither was anything else.
+.It "WARNING: could not destroy DATASET after 5 attempts: REASON"
+The definition is gone and the disk is not.
+The next lines give the command to finish by hand; the exit status is 1.
+.It "keeping PATH: OTHER uses it too"
+The UEFI variable store is shared with
+.Ar OTHER ,
+a clone made before 2026-09-29 or its source, and is left for it.
+.It "WARNING: NAME is still a mesh peer (id N) \(em remove it: kube-network remove-peer N"
+The peer could not be removed; the exit status is 1.
+.It "WARNING: NAME's key is on the mesh but not under id N \(em left alone, check 'wg show'"
+The identity on record no longer matches the peer that holds that id,
+which can happen when an id was given to a newer machine.
+Nothing is removed rather than risk cutting off the wrong one.
+.El
+.Sh SEE ALSO
+.Xr kld 1 ,
+.Xr virsh 1 ,
+.Xr kldload-db 8 ,
+.Xr kldload-enroll 8 ,
+.Xr kube-network 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-create 8 ,
+.Xr kvm-snap 8 ,
+.Xr zfs-destroy 8 ,
+.Xr zfs-promote 8
+.Sh HISTORY
+The refusal before any change dates from a delete that undefined the
+machine and then failed to destroy its disk, leaving the disk stranded
+and the operator believing the delete had failed.
+The bounded retry dates from 2026-09-21, when a disk still held open for a
+moment after its machine stopped left 4-k8s with a machine gone from
+libvirt, its disk on disk, and its row still in the inventory.
+Mesh removal was added on 2026-09-22, after an enrolled clone's peer was
+found outliving it; the data disk and the seed on 2026-09-29, after both
+were found outliving theirs.
+.Pp
+On 2026-09-29, writing this page: a name was not checked before it
+reached
+.Xr zfs-destroy 8 ;
+a name that existed nowhere was reported deleted;
+a paused machine counted as stopped;
+and a failed power-off or undefine was ignored and the disk destroyed
+under a definition that still existed.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+There is no confirmation and no undo.
+A snapshot of the disk does not survive: the disk is destroyed with all
+of its snapshots.
+To keep a machine's state, send it somewhere first with
+.Xr zfs-send 8 ,
+or clone it with
+.Xr kvm-clone 8
+and promote the clone with
+.Xr zfs-promote 8 .
+.Pp
+The snapshot a clone came from is removed only if it is named
+.Ql clone- Ns Ar timestamp ,
+as
+.Xr kvm-clone 8
+names the ones it takes; one taken by hand and given with
+.Fl -snap
+is kept.
