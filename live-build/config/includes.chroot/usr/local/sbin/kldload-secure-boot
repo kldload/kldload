@@ -61,11 +61,11 @@ _materialize_mok_from_ca() {
     # Copy CA material into the legacy MOK paths so DKMS framework.conf.d
     # and existing consumers work without editing their configs.
     mkdir -p "${MOK_DIR}"
-    cp "${CA_KEY}" "${MOK_DIR}/mok.key"
-    cp "${CA}" "${MOK_DIR}/mok.pub"
-    cp "${CA_DER}" "${MOK_DIR}/mok.der"
-    chmod 0600 "${MOK_DIR}/mok.key"
-    chmod 0644 "${MOK_DIR}/mok.pub" "${MOK_DIR}/mok.der"
+    # install -m, not cp then chmod: the key is created 0600 rather than
+    # keeping whatever mode an older copy had until the chmod ran.
+    install -m 0600 "${CA_KEY}" "${MOK_DIR}/mok.key"
+    install -m 0644 "${CA}" "${MOK_DIR}/mok.pub"
+    install -m 0644 "${CA_DER}" "${MOK_DIR}/mok.der"
     log "MOK materialized from kldload-ca root at ${MOK_DIR}/mok.{key,pub,der}"
 }
 
@@ -197,14 +197,26 @@ _queue_mok_enrollment() {
         return 1
     fi
 
-    # Already enrolled with this exact cert? Short-circuit.
-    if mokutil --test-key "${CA_DER}" 2>/dev/null | grep -qi 'is already enrolled'; then
+    # Already enrolled with this exact cert? Short-circuit. Output captured,
+    # not piped to grep -q (a SIGPIPE there reads as "not enrolled").
+    local _t _new _fp
+    # WHY || true: --test-key exits non-zero for a key that is not enrolled,
+    # which is an answer, not a failure.
+    _t="$(mokutil --test-key "${CA_DER}" 2>/dev/null || true)"
+    if [[ "${_t,,}" == *"is already enrolled"* ]]; then
         log "kldload CA already enrolled in MOK list — nothing to queue"
         return 0
     fi
 
-    # Already queued and waiting for MokManager? Surface that.
-    if mokutil --list-new 2>/dev/null | grep -q "$(openssl x509 -in "${CA}" -noout -subject_hash 2>/dev/null)"; then
+    # Already queued and waiting for MokManager? Matched by SHA1 fingerprint,
+    # which mokutil prints lower-case with colons. It matched an OpenSSL
+    # subject hash, which mokutil never prints, so this never fired and a
+    # second `enable` queued the key again (shown against onyx's enrolled list,
+    # 2026-09-30: the fingerprint finds an enrolled key, the hash finds nothing).
+    _fp="$(openssl x509 -in "${CA}" -noout -fingerprint -sha1 2>/dev/null | sed 's/^.*=//' | tr 'A-F' 'a-f')"
+    # WHY || true: --list-new exits non-zero when nothing is queued.
+    _new="$(mokutil --list-new 2>/dev/null || true)"
+    if [[ -n "$_fp" && "$_new" == *"$_fp"* ]]; then
         log "enrollment already pending — reboot to complete in MokManager (password: ${MOK_PW_SHOWN})"
         return 0
     fi
@@ -284,12 +296,16 @@ cmd_status() {
     echo ""
     echo "─── MOK enrollment ───────────────────────────────────────────────"
     if command -v mokutil >/dev/null 2>&1 && [[ -f "${CA_DER}" ]]; then
-        if mokutil --test-key "${CA_DER}" 2>/dev/null | grep -qi 'is already enrolled'; then
+        # Captured, not piped into grep -q: a SIGPIPE there reads as "no".
+        # WHY || true: both exit non-zero for "not enrolled" / "nothing new".
+        mok_enrolled="$(mokutil --test-key "${CA_DER}" 2>/dev/null || true)"
+        if [[ "${mok_enrolled,,}" == *"is already enrolled"* ]]; then
             echo "  kldload CA: ENROLLED in firmware MOK list ✓"
         else
             echo "  kldload CA: not enrolled"
         fi
-        if mokutil --list-new 2>/dev/null | grep -q .; then
+        mok_pending="$(mokutil --list-new 2>/dev/null || true)"
+        if [[ -n "$mok_pending" ]]; then
             echo "  enrollment pending (reboot to complete via MokManager)"
         fi
     else
@@ -300,7 +316,12 @@ cmd_status() {
     echo "─── ZFS kernel module signing ────────────────────────────────────"
     zfs_mod="$(modinfo -n zfs 2>/dev/null || true)"
     if [[ -n "${zfs_mod}" && -f "${zfs_mod}" ]]; then
-        zfs_sig="$(modinfo zfs 2>/dev/null | awk -F: '/^signer/{print $2; exit}' | sed 's/^ *//')"
+        # modinfo read whole, then searched: awk exiting at the first match
+        # sent modinfo a SIGPIPE, pipefail made that 141, and `status` died
+        # here, half printed (onyx, 2026-09-30).
+        local _mi
+        _mi="$(modinfo zfs 2>/dev/null || true)" # WHY || true: an absent module is reported below
+        zfs_sig="$(awk -F: '/^signer/{print $2; exit}' <<<"$_mi" | sed 's/^ *//')"
         if [[ -n "${zfs_sig}" ]]; then
             echo "  module:  ${zfs_mod}"
             echo "  signer:  ${zfs_sig}"

@@ -344,11 +344,14 @@ cmd_enroll_mok() {
     fi
 
     # Already pending from prior install? Let the user drive.
-    local pending subj
+    local pending fp
     # WHY || true: --list-new exits non-zero when nothing is queued.
     pending="$(mokutil --list-new 2>/dev/null || true)"
-    subj="$(openssl x509 -in "${ROOT_CRT}" -noout -subject | sed 's/^subject=//;s/ *//g')"
-    if [[ -n "$subj" && "$pending" == *"$subj"* ]]; then
+    # By SHA1 fingerprint, which mokutil prints lower-case with colons. This
+    # compared the subject with its spaces removed against mokutil's spaced
+    # "Subject:" line, which never matched (2026-09-30).
+    fp="$(openssl x509 -in "${ROOT_CRT}" -noout -fingerprint -sha1 | sed 's/^.*=//' | tr 'A-F' 'a-f')"
+    if [[ -n "$fp" && "$pending" == *"$fp"* ]]; then
         log "kldload CA already queued for enrollment — reboot into MokManager to finish"
         return 0
     fi
