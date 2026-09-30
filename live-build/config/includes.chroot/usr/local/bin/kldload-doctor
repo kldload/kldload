@@ -104,7 +104,7 @@ def _result(subsystem, name, status, expected, actual,
 def check_zfs_pool():
     rc, out, _ = _run(["zpool", "list", "-H", "-o", "health", "rpool"])
     if rc != 0:
-        return _result("zfs", "rpool exists", "fail",
+        return _result("zfs", "rpool health", "fail",
                        "rpool imported and ONLINE",
                        "rpool not imported",
                        severity="critical",
@@ -572,7 +572,7 @@ def check_gateway_api():
 
 def check_helm_releases():
     if not _has("helm"):
-        return _result("helm", "helm CLI", "skip", "", "helm not installed")
+        return _result("helm", "releases", "skip", "", "helm not installed")
     try:
         if not _apiserver_reachable():
             raise OSError("apiserver unreachable (port probe)")
@@ -681,7 +681,7 @@ def check_prometheus_targets():
         with urllib.request.urlopen("http://localhost:9090/api/v1/targets", timeout=4) as r:
             data = json.loads(r.read().decode())
     except Exception:
-        return _result("observability", "prometheus targets", "skip",
+        return _result("observability", "prometheus scrape", "skip",
                        "", "prometheus API unreachable")
     jobs_up = {}
     for t in data.get("data", {}).get("activeTargets", []):
@@ -962,7 +962,7 @@ def check_ollama():
                        remediation="systemctl start ollama")
     models = data.get("models", [])
     if not models:
-        return _result("ai", "ollama model loaded", "warn",
+        return _result("ai", "ollama", "warn",
                        "at least one model in memory",
                        "no models loaded -- the first prompt will wait for one to load",
                        severity="low",
