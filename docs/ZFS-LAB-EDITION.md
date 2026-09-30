@@ -290,17 +290,29 @@ snapshot.
 
 ### The ZFS-version axis
 
-"Version X" means packages, not a repo. klab's existing cloud-image goldens
-with dev tools (`klab golden-ztest`) are the **package factory**: clone one,
-check out the tag or ref (a pull request is just a ref), `make rpm` /
-`make deb` for the DKMS variant so the packages are kernel-independent, cache
-at `pkgs/<family>/<release>/<zfsver>/`. Built once, reused. The installer
-gets one field, `KLDLOAD_ZFS_SOURCE=<url>`, and `bootstrap.sh` installs ZFS
-from there instead of the mirror; the netboot server already serves
-directories over HTTP. This one piece of plumbing serves both tiers.
+"Version X" means packages, not a repo. The **package factory** is a
+container per family (`fedora:44`, `debian:13`; built 2026-09-30): check out
+the tag or ref (a pull request is just a ref), take the build dependencies
+from the package's own spec or control file (`dnf builddep` on the source
+RPM, `mk-build-deps` on the control), `make rpm-utils rpm-dkms` or
+`make native-deb-utils`, write the repository metadata (`createrepo_c`,
+`dpkg-scanpackages`), cache at `pkgs/<family>/<release>/<zfsver>/`. DKMS
+packages need no kernel, so the kernel stays an axis of its own, and a
+container needs no KVM, so the factory runs on a laptop. Built once, reused.
+2.4.4 took about eight minutes per family on onyx and produced `zfs-dkms`,
+`zfs-test` (the suite from the same ref) and the utilities.
 
-This also settles the three-overlapping-tools question: klab's cloud goldens
-are the factory, the installer's goldens are the subjects.
+The installer gets one field, `KLDLOAD_ZFS_SOURCE=<url>`. On RPM targets
+it is a repo at `priority=1`, which wins even when its version is older than
+the mirror's (dnf otherwise takes the newest across every repo; proven both
+ways in a container). On deb targets it is a flat repo pinned at 1001 by
+origin, and the packages asked for become `openzfs-*`: OpenZFS's native
+Debian packaging Conflicts with the distro names rather than Providing
+them. The netboot server already serves directories over HTTP, so the same
+field works on a bench. This one piece of plumbing serves both tiers.
+
+klab's cloud-image goldens are not part of this; the installer's goldens are
+the subjects and the containers are the factory.
 
 ### Results
 
