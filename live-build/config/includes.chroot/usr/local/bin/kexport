@@ -114,7 +114,11 @@ SRC="$DISK"
 _CLONE="" _SNAP="" _TMPRAW=""
 _cleanup_copy() {
     # each one is this run's own, named with its PID; say it if it stays
-    if [[ -n "$_CLONE" ]]; then zfs destroy "$_CLONE" || echo "[kexport][warn] could not remove the clone $_CLONE" >&2; fi
+    # -r: the clone lives under rpool/vms, and sanoid's schedule snapshots it
+    # like any machine if it runs mid-export -- then a plain destroy fails and
+    # the clone and its origin snapshot stay (onyx, 23:30, 2026-09-29). What
+    # is under this run's clone is this run's.
+    if [[ -n "$_CLONE" ]]; then zfs destroy -r "$_CLONE" || echo "[kexport][warn] could not remove the clone $_CLONE" >&2; fi
     if [[ -n "$_SNAP" ]]; then zfs destroy "$_SNAP" || echo "[kexport][warn] could not remove the snapshot $_SNAP" >&2; fi
     if [[ -n "$_TMPRAW" ]]; then rm -f -- "$_TMPRAW"; fi
 }
