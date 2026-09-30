@@ -180,12 +180,21 @@ fi
 # ─── [8] persistent journal ───────────────────────────────────────────
 echo
 echo "[8] persistent journal"
-_jstorage=$(journalctl --disk-usage 2>&1 | head -1)
-if [[ -d /var/log/journal ]] && ls /var/log/journal/*/*.journal 2>/dev/null | head -1 | grep -q journal; then
-    _pass "persistent journal active — $_jstorage"
+# Asked of kldload-journal-assert, which puts a probe through the journal and
+# looks for it in /var/log/journal alone. This checked that a .journal file
+# existed there, which old archives satisfy: onyx passed it for three weeks with
+# journald writing only to /run (2026-09-30). --fix runs the real repair.
+_ja="${KLDLOAD_JOURNAL_ASSERT:-/usr/local/sbin/kldload-journal-assert}" # the variable is for tests
+if [[ ! -x "$_ja" ]]; then
+    _fail "cannot ask: $_ja is not installed"
 else
-    _fail "journal is volatile — promtail loses events on reboot"
-    _hint "  mkdir -p /var/log/journal && systemd-tmpfiles --create --prefix /var/log/journal && systemctl restart systemd-journald"
+    ((FIX)) && _jarg=() || _jarg=(--check)
+    if _jout="$("$_ja" "${_jarg[@]}" 2>&1)"; then
+        _pass "${_jout##*$'\n'}"
+    else
+        _fail "${_jout##*$'\n'} — promtail loses events on reboot"
+        _hint "  kldload-obs-check --fix  (runs kldload-journal-assert, which rotates, flushes and restarts journald)"
+    fi
 fi
 
 # ─── [9] Grafana healthy + Loki datasource ───────────────────────────
