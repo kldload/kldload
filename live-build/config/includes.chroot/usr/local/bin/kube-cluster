@@ -3533,8 +3533,17 @@ cmd_status() {
         grep -E "${CLUSTER_NAME}|${GOLDEN}|NAME" || echo "  No zvols"
     echo ""
 
-    local cp_ip
-    cp_ip="$(get_vm_ip "${CP_NAME}" 2>/dev/null)" || true
+    # WHY not get_vm_ip: it polls 90 x 2 s for an address, so `status` on a
+    # host with no cluster sat for three minutes before saying so (onyx,
+    # 2026-09-30). A status asks once, and only of a control plane that runs.
+    local cp_ip=""
+    if [[ "$(virsh domstate "${CP_NAME}" 2>/dev/null)" == running ]]; then
+        if command -v kldload-vm-ip >/dev/null 2>&1; then
+            cp_ip="$(kldload-vm-ip "${CP_NAME}" 2>/dev/null)" || cp_ip="" # no address yet: said below
+        else
+            cp_ip="$(get_vm_ip "${CP_NAME}" 2>/dev/null)" || cp_ip=""
+        fi
+    fi
     if [[ -n "$cp_ip" ]]; then
         echo -e "${Y}Kubernetes (${CP_NAME} @ ${cp_ip}):${N}"
         _ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || echo "  Cannot reach API"
