@@ -1319,9 +1319,17 @@ demo_remove_nodes() {
         local count="$1"
     else
         # Args are node names — use them directly.
+        # SAFETY: only names kube-cluster gives its own nodes. The named form
+        # took ANY name -- a golden, a klab machine -- and the teardown below
+        # releases every snapshot hold and destroys the volume with -Rf
+        # (found 2026-09-30; the count form was always limited to workers).
         local n
         for n in "$@"; do
             [[ "$n" == "remove_nodes" ]] && continue
+            if [[ ! "$n" =~ ^kldload-(cp|w)(-[0-9]+)?$ ]]; then
+                echo -e "${Y}  ${n} is not a cluster node name (kldload-cp, kldload-cp-N, kldload-w-N) — refused.${N}" >&2
+                return 2
+            fi
             victims+="$n"$'\n'
         done
         victims="$(echo "$victims" | awk 'NF' | sort -u)"
