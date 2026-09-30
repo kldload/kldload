@@ -105,6 +105,12 @@ EOF
 }
 
 while [[ $# -gt 0 ]]; do
+    # An option given no value is a usage error; ${2:?} said "line 122: 2:
+    # parameter null or not set" and exited 1 (2026-09-30).
+    case "$1" in
+    --yes | --dry-run | -h | --help) ;;
+    --*) [[ -n "${2:-}" ]] || die "$1 needs a value" 2 ;;
+    esac
     case "$1" in
     --archive-host)
         ARCHIVE_HOST="${2:?}"
@@ -233,6 +239,41 @@ fi
 # A name that reaches sgdisk and zpool create gets checked before use, not
 # after: a mistake here is unrecoverable.
 [[ "$DISK" == /dev/* && -b "$DISK" ]] || die "not a block device: $DISK" 2
+# SAFETY: the target must be a whole disk that nothing on THIS host is using.
+# The header promised "carries no imported pool" and nothing checked it:
+# `--disk /dev/nvme0n1 --dry-run` on onyx, whose root pool lives on
+# nvme0n1p2, planned `sgdisk --zap-all /dev/nvme0n1` without a word, and
+# --yes would have run it (2026-09-30). Same checks as kldload-seal, against
+# the RESOLVED device and every partition of it, so a /dev/disk/by-id alias
+# or /dev/zvol/ link cannot slip past a string compare.
+REAL="$(readlink -f "$DISK")"
+_dtype="$(lsblk -dno TYPE "$REAL" 2>/dev/null || true)"
+case "$_dtype" in
+disk | loop) ;;
+*) die "$DISK ($REAL) is a ${_dtype:-device lsblk does not know}, not a whole disk" 2 ;;
+esac
+mapfile -t _nodes < <(lsblk -nrpo NAME "$REAL")
+_mounts="$(lsblk -nro MOUNTPOINTS "$REAL" | tr -d '[:space:]')"
+[[ -z "$_mounts" ]] ||
+    die "$DISK ($REAL) or a partition of it is mounted or is swap on this host — refusing" 2
+while read -r _v; do
+    for _n in "${_nodes[@]}"; do
+        [[ "$_v" == "$_n" ]] && die "$DISK ($_n) is a device of a pool imported on this host — refusing" 2
+    done
+done < <(zpool status -PL 2>/dev/null | awk '$1 ~ /^\/dev\// {print $1}')
+if command -v virsh >/dev/null 2>&1; then
+    while read -r _vm; do
+        [[ -n "$_vm" ]] || continue
+        while read -r _src; do
+            [[ -n "$_src" && "$(readlink -f "$_src")" == "$REAL" ]] &&
+                die "$DISK is attached to the running libvirt domain $_vm — shut it down first" 2
+        done < <(virsh -c qemu:///system domblklist "$_vm" 2>/dev/null | awk 'NR > 2 && NF >= 2 {print $2}')
+    done < <(virsh -c qemu:///system list --name 2>/dev/null)
+fi
+# SAFETY: the dataset name is pasted into a shell command run here or on the
+# archive host; only characters a ZFS name may hold get that far.
+[[ -z "$ARCHIVE" || "$ARCHIVE" =~ ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$ ]] ||
+    die "implausible --archive dataset: $ARCHIVE" 2
 [[ "$POOL" =~ ^[A-Za-z][A-Za-z0-9_.:-]*$ ]] || die "implausible pool name: $POOL" 2
 zpool list -H -o name 2>/dev/null | grep -qx "$POOL" &&
     die "a pool named $POOL is already imported here" 2
@@ -269,9 +310,11 @@ run udevadm settle 2>/dev/null || true
 #   /dev/sda        -> /dev/sda1
 #   /dev/nvme0n1    -> /dev/nvme0n1p1   (trailing digit takes a "p")
 #   /dev/zvol/...   -> /dev/zvol/...-part1  (used when restoring into a VM)
+#   /dev/disk/by-id/... -> ...-part1        (udev's names; a by-id name ending
+#                                            in a digit took a "p" before)
 part() {
     case "$DISK" in
-    /dev/zvol/*) printf '%s-part%s' "$DISK" "$1" ;;
+    /dev/zvol/* | /dev/disk/by-*) printf '%s-part%s' "$DISK" "$1" ;;
     *[0-9]) printf '%sp%s' "$DISK" "$1" ;;
     *) printf '%s%s' "$DISK" "$1" ;;
     esac
