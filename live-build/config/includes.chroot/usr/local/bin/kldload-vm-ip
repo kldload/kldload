@@ -38,8 +38,10 @@ trap 'echo "kldload-vm-ip: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 usage() {
-    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
-    exit "${1:-2}"
+    # asked for: stdout, 0; a usage error: stderr, 2
+    local rc="${1:-2}"
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0" >&$((rc == 0 ? 1 : 2))
+    exit "$rc"
 }
 case "${1:-}" in -h | --help | help) usage 0 ;; esac
 [[ $# -ge 1 ]] || usage 2
@@ -171,6 +173,10 @@ case "$1" in
         echo "kldload-vm-ip: $1 is ${_st%%$'\n'*}, so it has no address" >&2
         exit 1
     fi
-    resolve_one "$1" || exit 1
+    resolve_one "$1" && exit 0
+    if [[ -z "${_st:-}" && ! -r "/var/lib/kfire/instances/$1/instance.json" ]]; then
+        echo "kldload-vm-ip: no domain or kfire machine named $1" >&2
+    fi
+    exit 1
     ;;
 esac
