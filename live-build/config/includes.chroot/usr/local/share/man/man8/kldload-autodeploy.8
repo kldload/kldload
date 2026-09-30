@@ -1,0 +1,95 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-AUTODEPLOY 8
+.Os
+.Sh NAME
+.Nm kldload-autodeploy
+.Nd after first boot, bring up what the install asked for: Kubernetes, the lab's goldens, the local AI
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl -want
+.Sh DESCRIPTION
+.Pa kldload-autodeploy.service
+runs
+.Nm
+once, after
+.Xr kldload-firstboot 8 .
+It reads the install manifest for what was asked for and brings each part
+up in this order:
+.Bl -enum -compact
+.It
+the local AI, in the background: the GPU, Ollama through
+.Xr kldload-ollama-install 8 ,
+and the models the image carries; a model that must be downloaded waits
+for the next step to finish, since running both at once made first boot
+restart itself;
+.It
+Kubernetes, by
+.Xr kube-cluster 8 ,
+until the cluster is Ready or fails;
+.It
+the lab's goldens, the longest, last;
+.It
+the AI model warmed once it is there.
+.El
+.Pp
+Each part that finishes leaves a marker in
+.Pa /var/lib/kldload ,
+and
+.Pa all-ready
+when every part asked for has one; the web console's first-boot banner
+reads them, and
+.Pa current-phase
+says what is running.
+A part that fails is logged and does not stop the others.
+Running it again skips what already has a marker.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -want
+Print what this install asked for, as
+.Ql k8s= Ns Ar n Li klab= Ns Ar n Li ai= Ns Ar n ,
+and exit 0, doing none of it.
+The first-boot screen asks it whether to wait.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_AUTODEPLOY_PARALLEL_AI
+1 lets the model download run alongside the Kubernetes bootstrap.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/install-manifest.env
+What the install asked for.
+.It Pa /var/lib/kldload/
+The markers:
+.Pa ai-ready , k8s-ready , k8s-phase-done , klab-ready , all-ready ,
+.Pa current-phase .
+.It Pa /var/log/kldload/autodeploy.log
+Every phase.
+.El
+.Sh EXIT STATUS
+0 when it ran; each part's failure is in the log and in its missing
+marker, not in the exit status.
+.Sh EXAMPLES
+On a kldload desktop installed with Kubernetes, the lab and AI, on
+2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+# kldload-autodeploy --want
+k8s=1 klab=1 ai=1
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr klab 8 ,
+.Xr kldload-firstboot 8 ,
+.Xr kldload-ollama-install 8 ,
+.Xr kube-cluster 8
+.Sh HISTORY
+On 2026-06-15 a first boot with everything asked for restarted itself
+over and over: the model download ran alongside the cluster and the golden
+builds.
+On 2026-09-13 it piped Ollama's installer into a shell on a machine meant
+to be offline.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com

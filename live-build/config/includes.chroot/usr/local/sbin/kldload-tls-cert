@@ -62,6 +62,18 @@ flock 9
 # ignored. File may not exist on fresh installs — that's fine.
 EXTRA_SANS_FILE="${KLDLOAD_TLS_EXTRA_SANS:-/etc/kldload/tls-extra-sans.txt}"
 
+# The name the certificate is issued to, and the name the drift check looks
+# for: one function, so the two cannot disagree and regenerate forever.
+# WHY uname -n: `hostname` is a package of its own (Arch's base lacks it), and
+# without it every certificate was issued to "kldload-node" -- found running
+# this in a container that had no hostname binary, 2026-09-30.
+_fqdn() { hostname -f 2>/dev/null || hostname 2>/dev/null || uname -n; }
+_shortname() {
+    local n
+    n="$(_fqdn)"
+    printf '%s\n' "${n%%.*}"
+}
+
 # Generate once, reuse on every subsequent call. Regenerate if:
 #   1. cert/key missing
 #   2. cert expires within 24h
@@ -108,12 +120,25 @@ else
     fi
     # 3. drift on hostname (handles hostname change via hostnamectl)
     if [[ "$_regen" -eq 0 ]]; then
-        _cur_host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo kldload-node)"
+        _cur_host="$(_fqdn)"
         if ! grep -qF "DNS:${_cur_host}" <<<"$_san"; then
             _regen=1
         fi
     fi
-    # 4. drift on admin-supplied extra SANs
+    # 4. issued by a root that is no longer this machine's. `kldload-ca init
+    # --force` rotates the root and leaves every leaf signed by the old one,
+    # and nothing above looks at the issuer, so the console kept a
+    # certificate the new root does not vouch for until it next expired
+    # (found exercising the rotation in a container, 2026-09-30). Same
+    # condition as the issuing branch below, so a machine with no CA is
+    # never asked to verify against one.
+    if [[ "$_regen" -eq 0 && -x /usr/local/sbin/kldload-ca && -f /etc/kldload/ca/root/ca.crt ]]; then
+        # WHY >/dev/null 2>&1: only the verdict matters; its text is "OK" or the chain error.
+        if ! openssl verify -CAfile /etc/kldload/ca/root/ca.crt "$CRT" >/dev/null 2>&1; then
+            _regen=1
+        fi
+    fi
+    # 5. drift on admin-supplied extra SANs
     if [[ "$_regen" -eq 0 && -r "$EXTRA_SANS_FILE" ]]; then
         while IFS= read -r _line; do
             # strip comments + whitespace, skip blanks
@@ -150,8 +175,8 @@ if [[ "$_regen" -eq 1 ]]; then
     # Collect every SAN the webui might serve under: hostname, short
     # hostname, every non-loopback IP. DNS / IP SANs both matter —
     # Chrome and Firefox won't accept a cert that only has CN.
-    _hostname="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo kldload-node)"
-    _short="$(hostname -s 2>/dev/null || echo kldload)"
+    _hostname="$(_fqdn)"
+    _short="$(_shortname)"
     _ips=()
     # libvirt default network (virbr0) is deterministically 192.168.122.1
     # on every kldload install — add it unconditionally so the cert is

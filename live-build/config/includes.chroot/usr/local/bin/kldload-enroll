@@ -162,6 +162,14 @@ if [[ "${1:-}" == "--all" ]]; then
     _sweep_cluster=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
+        --role | --cluster)
+            [[ $# -ge 2 ]] || {
+                echo "$1 needs a value (try --help)" >&2
+                exit 2 # usage error; nothing was attempted
+            }
+            ;;
+        esac
+        case "$1" in
         --role)
             _sweep_role="$2"
             shift 2
@@ -262,6 +270,16 @@ CLUSTER=""
 FORCE_ID=""
 DO_WG=1
 while [[ $# -gt 0 ]]; do
+    # An option given last with no value was "$2: unbound variable", exit 1
+    # -- read as a failed enrollment, not a typo (2026-09-30).
+    case "$1" in
+    --ip | --role | --cluster | --id)
+        [[ $# -ge 2 ]] || {
+            echo "$1 needs a value (try --help)" >&2
+            exit 2 # usage error; nothing was attempted
+        }
+        ;;
+    esac
     case "$1" in
     --ip)
         IP="$2"
@@ -288,6 +306,34 @@ while [[ $# -gt 0 ]]; do
         exit 2 # usage error; nothing was attempted
         ;;
     esac
+done
+
+# SAFETY: every one of these is pasted into a command run as root on the
+# guest (hostnamectl set-hostname '<vm>', kube-network add-peer <ip> ...,
+# kube-network init <id>), or into the state DB. None was checked, and libvirt
+# allows a quote in a domain name (read against the code, 2026-09-30). The VM
+# name becomes the guest's hostname, so it must be one anyway.
+[[ "$VM" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,62})$ ]] ||
+    {
+        echo "not a usable VM name (it becomes the guest's hostname): $VM" >&2
+        exit 2
+    }
+[[ -z "$IP" || "$IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] ||
+    {
+        echo "--ip needs an IPv4 address: $IP" >&2
+        exit 2
+    }
+[[ -z "$FORCE_ID" || "$FORCE_ID" =~ ^[0-9]{1,3}$ ]] ||
+    {
+        echo "--id needs a number: $FORCE_ID" >&2
+        exit 2
+    }
+for _v in "$ROLE" "$CLUSTER"; do
+    [[ -z "$_v" || "$_v" =~ ^[A-Za-z0-9._-]{1,64}$ ]] ||
+        {
+            echo "--role and --cluster take letters, digits, dot, dash, underscore: $_v" >&2
+            exit 2
+        }
 done
 
 # Everything below needs root: virsh, /etc/wireguard, and the guest key.
@@ -334,6 +380,8 @@ _ssh() {
     # the rest of it — the enrollment ran, printed nothing, and every command
     # after it never executed. Measured on .120 (2026-08-23): a driver script
     # vanished after the first ssh and looked exactly like a hang.
+    # WARN: no host-key check -- a guest is cloned from a golden and gets a
+    # fresh key on every rebuild, so a pinned key would refuse every clone.
     ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 -o BatchMode=yes \
         -i /root/.ssh/id_ed25519 "root@${IP}" "$@" 2>/dev/null

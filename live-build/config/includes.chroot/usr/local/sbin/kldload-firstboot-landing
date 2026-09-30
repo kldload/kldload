@@ -20,6 +20,15 @@
 # Logs: /var/log/kldload/firstboot.log
 set -Eeuo pipefail
 
+# --help answers before anything runs (rule 9): --help ran the landing setup (the sandboxed
+# --help capture, 2026-09-30).
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
+
 LOG=/var/log/kldload/firstboot.log
 STATE=/var/lib/kldload/firstboot
 DONE_FILE="${STATE}/landing-done"
@@ -111,6 +120,17 @@ cat >/usr/local/sbin/kldload-landing-adduser <<'ADDUSER'
 set -euo pipefail
 
 USERNAME="${1:?Usage: kldload-landing-adduser <username> [--key <pubkey>]}"
+# SAFETY: only a landing user, never an account that already exists as
+# something else. For an existing account useradd was skipped and chpasswd
+# then set a random password on it -- `kldload-landing-adduser admin` would
+# have locked the operator out, `root` would have reset root's password
+# (read against the code, 2026-09-30; removeuser's twin was shown in a
+# container).
+[[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { echo "not a usable user name: $USERNAME" >&2; exit 2; }
+if id "$USERNAME" &>/dev/null && [[ "$(id -gn "$USERNAME")" != sftpusers ]]; then
+    echo "refusing: $USERNAME exists and is not a landing user (group sftpusers)" >&2
+    exit 1
+fi
 PUBKEY=""
 if [[ "${2:-}" == "--key" ]]; then
     PUBKEY="${3:?--key requires a value}"
@@ -184,6 +204,14 @@ cat >/usr/local/sbin/kldload-landing-removeuser <<'RMUSER'
 set -euo pipefail
 
 USERNAME="${1:?Usage: kldload-landing-removeuser <username> [--destroy-data]}"
+# SAFETY: only a landing user. This ran userdel on any name it was given --
+# `kldload-landing-removeuser admin` deleted the operator's account (shown in a
+# container, 2026-09-30).
+[[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { echo "not a usable user name: $USERNAME" >&2; exit 2; }
+if id "$USERNAME" &>/dev/null && [[ "$(id -gn "$USERNAME")" != sftpusers ]]; then
+    echo "refusing: $USERNAME is not a landing user (group sftpusers)" >&2
+    exit 1
+fi
 DESTROY="${2:-}"
 
 LANDING_ROOT=/srv/landing

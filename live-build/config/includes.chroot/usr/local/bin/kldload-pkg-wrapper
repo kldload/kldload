@@ -45,6 +45,17 @@ set -Eeuo pipefail
 # ---------------------------------------------------------------------------
 
 _self="$(basename "$0")"
+# Under its own name, --help describes the wrapper; under apt or dnf it goes to
+# the real tool untouched. It said "invoked under an unexpected name" and
+# exited 1 (the sandboxed --help capture, 2026-09-30).
+if [[ "$_self" == kldload-pkg-wrapper ]]; then
+    case "${1:-}" in
+    -h | --help)
+        sed -n '4,/^# ---/{/^# ---/q; s/^# \{0,1\}//; p}' "$0"
+        exit 0
+        ;;
+    esac
+fi
 
 # Resolve the real binary by absolute path. Never by PATH lookup: this script
 # IS earlier in PATH than the thing it wraps, and a lookup would re-enter here
@@ -149,11 +160,14 @@ _is_mutating() {
 
 # A simulated run changes nothing, so snapshotting one is pure noise in the
 # operator's snapshot list — and this list is meant to be readable at 3am.
+# --assumeno answers every question no, and a download-only run installs
+# nothing; both took a snapshot until 2026-09-30.
 _is_simulation() {
     local a
     for a in "$@"; do
         case "$a" in
         -s | --simulate | --dry-run | --just-print | --no-act | --recon) return 0 ;;
+        --assumeno | --downloadonly | --download-only) return 0 ;;
         --) break ;; # everything after -- is a package name, not a flag
         esac
     done

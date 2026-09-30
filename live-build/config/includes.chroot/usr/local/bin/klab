@@ -2591,6 +2591,11 @@ build_golden_single() {
         local _existing_log="${RESULTS_DIR}/goldens/${distro}-latest.log"
         local _existing_result=""
         [[ -f "$_existing_log" ]] && _existing_result="$(grep '  Result:' "$_existing_log" 2>/dev/null | tail -1 || echo "")"
+        # A regular golden's old "PARTIAL (no tests)" is not a defect (see
+        # the validation below): only ztest goldens need the suite.
+        if [[ "$_existing_result" == *"PARTIAL (no tests)"* && "${KLAB_ZFS_DEV:-0}" != 1 ]]; then
+            _existing_result=""
+        fi
         if [[ "$_existing_result" == *"FAIL"* || "$_existing_result" == *"PARTIAL"* ]]; then
             warn "Golden ${name} exists but validation was: ${_existing_result} — rebuilding"
         else
@@ -3117,7 +3122,13 @@ VALIDATE
     if [[ "$(golden_wants_zfs)" == "1" ]]; then
         _zfs_line_bin="${_v_zfs}"
         _zfs_line_mod="$([[ $_v_mod -ge 1 ]] && echo "LOADED" || echo "NOT LOADED")"
-        [[ "$_v_tests" != "OK" ]] && _result="PARTIAL (no tests)"
+        # Only a golden that was ASKED for the suite (golden-ztest exports
+        # KLAB_ZFS_DEV=1) is short without it. A regular golden leaves it out
+        # on purpose, and was judged PARTIAL for that -- which the build step
+        # reads as "rebuild": every `klab golden` re-run destroyed and rebuilt
+        # all of them, with -R, taking the blue and green sites cloned from
+        # them. onyx's five were all "PARTIAL (no tests)" (2026-09-30).
+        [[ "${KLAB_ZFS_DEV:-0}" == 1 && "$_v_tests" != "OK" ]] && _result="PARTIAL (no tests)"
         [[ "$_v_zfs" != "OK" || "$_v_mod" -lt 1 ]] && _result="FAIL (ZFS wanted, module not loaded)"
     else
         _zfs_line_bin="not wanted (desktop lineage — xfs on a zvol; KLAB_DESKTOP_ZFS=1 puts it back)"
@@ -4951,6 +4962,9 @@ cmd_status() {
             [[ -z "$_ksh" ]] && _ksh="-"
 
             local _sc="$G" _st="READY"
+            # a regular golden's "PARTIAL (no tests)" is not a defect: only
+            # ztest goldens carry the suite (see build_golden_single)
+            [[ "$_dkms" == *"PARTIAL (no tests)"* && "${KLAB_GOLDEN_KIND:-regular}" != ztest ]] && _dkms="PASS"
             if [[ "$_dkms" == *"FAIL"* ]]; then
                 _sc="$R"
                 _st="FAIL"

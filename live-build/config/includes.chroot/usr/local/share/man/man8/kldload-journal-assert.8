@@ -1,0 +1,143 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-JOURNAL-ASSERT 8
+.Os
+.Sh NAME
+.Nm kldload-journal-assert
+.Nd prove at every boot that the system journal is recording, and on disk, and repair it when not
+.Sh SYNOPSIS
+.Nm
+.Op Fl -check
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+On a kldload install
+.Pa /var/log
+is a ZFS dataset of its own, mounted after
+.Xr systemd-journald 8
+has started.
+If journald settles on the wrong place, the machine either keeps no
+journal at all while journald reports itself healthy, or keeps one only in
+.Pa /run ,
+which is erased at every shutdown and capped in size \(em so the boot that
+went wrong is exactly the one whose log is gone.
+.Pp
+.Nm
+asks two questions, each by round trip:
+.Bl -enum
+.It
+Does it record?
+A unique line is logged and must come back from
+.Xr journalctl 1
+within ten seconds.
+.It
+Does it record to disk?
+A second unique line must come back reading only
+.Pa /var/log/journal
+.Pq Ql journalctl -D .
+.El
+.Pp
+If either answer is no it says which, then rotates, flushes and restarts
+journald, and asks both again.
+It exits 0 when both are yes, and prints a WARNING and exits 1 when the
+repair did not make them so.
+.Pp
+.Pa kldload-journal-flush.service
+runs it at every boot, after ZFS has mounted.
+It must run as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -check
+Ask both questions and repair nothing: exit 0 when the journal records to
+disk, 1 otherwise, saying which.
+It creates nothing either, and needs no root.
+.Xr kldload-obs-check 8
+asks this way.
+.It Fl h , Fl -help
+Print the description at the top of the script and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_JOURNAL_PROBE_TIMEOUT
+Seconds to wait for a probe line; default 10.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/journal/ Ns Ar machine-id Ns Pa /
+Where the journal belongs.
+.It Pa /run/log/journal/
+Where journald keeps it until it is flushed, and loses it at shutdown.
+.It Pa /etc/systemd/journald.conf.d/persistent.conf
+.Ql Storage=auto ,
+which removes the race at its source; this tool is the second failsafe.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+The journal records, to disk, possibly after a repair.
+.It 1
+Still not, after the repair; or, with
+.Fl -check ,
+not.
+.It 2
+An unknown argument.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30:
+.Bd -literal -offset indent
+# kldload-journal-assert
+journal: recording persistently in /var/log/journal (root:systemd-journal)
+# (exited 0)
+# kldload-journal-assert --check
+journal: recording persistently in /var/log/journal (root:systemd-journal)
+# (exited 0)
+.Ed
+.Pp
+Minutes before, that desktop's journal had been in
+.Pa /run
+only, since 2026-09-08;
+.Ql journalctl --flush ,
+run by hand \(em the repair's second step \(em moved it to disk at once.
+To check any machine by hand:
+.Bd -literal -offset indent
+# logger -t check "probe-$$"; journalctl -D /var/log/journal -t check | tail -1
+# a line ending probe-<pid> means the journal is on disk
+.Ed
+.Sh SEE ALSO
+.Xr journalctl 1 ,
+.Xr logger 1 ,
+.Xr journald.conf 5 ,
+.Xr kldload-boot-assert 8 ,
+.Xr kldload-obs-check 8 ,
+.Xr systemd-journald 8
+.Sh HISTORY
+On 2026-08-26 a machine recorded nothing across two boots while journald
+was active; the first version of this tool checked that a journal file
+existed, found a stale one, and never repaired it.
+On 2026-08-28 another passed the recording probe while writing only to
+.Pa /run .
+.Pp
+On 2026-09-30, writing this page: a desktop had kept no journal on disk
+for three weeks \(em every boot from 2026-09-08 to 2026-09-28 gone, and
+the current one's first nine hours lost to the size cap on
+.Pa /run
+\(em while this tool reported success at each boot.
+Its test for
+.Dq on disk
+listed the journal files it could read, which included three weeks of old
+archives, and taking that list through a pipe it failed on every run in a
+way that read as the opposite; after a repair it re-checked only
+recording.
+Both questions are round trips now, and both are asked again after a
+repair.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A repair restarts journald; the few messages between the probe and the
+restart may be the last in
+.Pa /run
+before it is flushed.
+.Pp
+Why that desktop's journal stayed in
+.Pa /run
+from 2026-09-08 is not known: the logs that would say were the ones lost.
+A fresh install the same night recorded to disk.

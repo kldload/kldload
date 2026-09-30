@@ -31,7 +31,7 @@ _section "Packages the installer asked for"
 # installer's package list, and the install came up with no docker binary,
 # no dataset and no daemon.json — while every log line said success.
 if [[ -f /var/lib/kldload/packages-missing ]]; then
-    _n=$(grep -c . /var/lib/kldload/packages-missing 2>/dev/null || echo 0)
+    _n=$(grep -c . /var/lib/kldload/packages-missing 2>/dev/null) || _n=0
     _fail "profile packages" "$_n did not install: $(tr '\n' ' ' </var/lib/kldload/packages-missing)"
 else
     _pass "every profile package the installer asked for is present"

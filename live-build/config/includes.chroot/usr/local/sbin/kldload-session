@@ -115,7 +115,7 @@ cmd_open() {
     [[ -n "$kind" && -n "$target" ]] ||
         die "usage: kldload-session open <kind> <target> [--user NAME] [--title STR]"
 
-    local id port cmd ttyd_args
+    local id port cmd
     id="$(new_id)"
     port="$(pick_port)"
 
@@ -161,7 +161,12 @@ cmd_open() {
     pod-exec)
         [[ "$target" =~ ^[a-z0-9-]+/[a-z0-9-]+(/[a-z0-9-]+)?$ ]] ||
             die "pod-exec target must be <namespace>/<pod>[/<container>]"
-        local ns="${target%%/*}" rest="${target#*/}" pod="${rest%%/*}" container=""
+        # Two statements: in one `local`, every word is expanded before any is
+        # assigned, so pod="${rest%%/*}" saw an empty rest and every pod-exec
+        # session ran `kubectl exec -n <ns>  -- /bin/sh` with no pod
+        # (2026-09-30; SC2318, then shown in bash).
+        local ns="${target%%/*}" rest="${target#*/}"
+        local pod="${rest%%/*}" container=""
         [[ "$rest" == *"/"* ]] && container="--container ${rest##*/}"
         cmd="/usr/bin/kubectl exec -it -n ${ns} ${pod} ${container} -- /bin/sh"
         ;;
@@ -182,15 +187,21 @@ cmd_open() {
     # execute the remainder as a command. systemd's EnvironmentFile=
     # parser is more forgiving and would accept bare values, but bash
     # is stricter — single-quote-all is the portable fix.
+    # SAFETY: this file is SOURCED as root -- by close, by list and by
+    # kldload-session-run -- so every value is written with %q, which bash
+    # reads back as data. Only the command was escaped; the title, target and
+    # user went between bare single quotes, and a quote in --title would have
+    # run as root when the file was next sourced (read against the code,
+    # 2026-09-30; the web console's own titles never carried one).
     {
-        printf "KLDLOAD_SESSION_ID='%s'\n" "${id}"
-        printf "KLDLOAD_SESSION_KIND='%s'\n" "${kind}"
-        printf "KLDLOAD_SESSION_TARGET='%s'\n" "${target}"
-        printf "KLDLOAD_SESSION_PORT='%s'\n" "${port}"
-        printf "KLDLOAD_SESSION_CMD='%s'\n" "${cmd//\'/\'\\\'\'}"
-        printf "KLDLOAD_SESSION_TITLE='%s'\n" "${title:-${kind}: ${target}}"
-        printf "KLDLOAD_SESSION_USER='%s'\n" "${user}"
-        printf "KLDLOAD_SESSION_OPENED_AT='%s'\n" "$(ts)"
+        printf 'KLDLOAD_SESSION_ID=%q\n' "${id}"
+        printf 'KLDLOAD_SESSION_KIND=%q\n' "${kind}"
+        printf 'KLDLOAD_SESSION_TARGET=%q\n' "${target}"
+        printf 'KLDLOAD_SESSION_PORT=%q\n' "${port}"
+        printf 'KLDLOAD_SESSION_CMD=%q\n' "${cmd}"
+        printf 'KLDLOAD_SESSION_TITLE=%q\n' "${title:-${kind}: ${target}}"
+        printf 'KLDLOAD_SESSION_USER=%q\n' "${user}"
+        printf 'KLDLOAD_SESSION_OPENED_AT=%q\n' "$(ts)"
     } >"${SESSION_DIR}/${id}.env"
     chmod 0640 "${SESSION_DIR}/${id}.env"
 
@@ -293,6 +304,7 @@ cmd_close() {
 
     # shellcheck disable=SC1090
     local kind="?" target="?" user="?"
+    # shellcheck source=/dev/null # written by cmd_open with %q: data only
     if source "$env" 2>/dev/null; then
         kind="${KLDLOAD_SESSION_KIND:-?}"
         target="${KLDLOAD_SESSION_TARGET:-?}"

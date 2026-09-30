@@ -94,6 +94,10 @@ done
 [[ -n "$DATASET" || -n "$ROOT" ]] || usage
 [[ -z "$DATASET" || -z "$ROOT" ]] || die "--dataset and --root are mutually exclusive" 2
 [[ $EUID -eq 0 ]] || die "must run as root" 2
+# SAFETY: the name is written into /etc/hostname and used in the checks below;
+# anything else could carry a quote into eval (2026-09-30).
+[[ -z "$NEW_HOSTNAME" || "$NEW_HOSTNAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] ||
+    die "not a valid hostname: $NEW_HOSTNAME" 2
 
 # ─── refuse the running BE ───────────────────────────────────────────────────
 # Clearing the identity of the system you are running is not recoverable: the
@@ -109,7 +113,12 @@ fi
 
 # ─── mount if needed ─────────────────────────────────────────────────────────
 CLEANUP=""
-cleanup() { [[ -n "$CLEANUP" ]] && umount "$CLEANUP" 2>/dev/null || true; }
+# The mount point goes too; it was left behind in /tmp on every run.
+cleanup() {
+    [[ -n "$CLEANUP" ]] || return 0
+    umount "$CLEANUP" && rmdir "$CLEANUP" ||
+        say "WARNING: could not unmount $CLEANUP; unmount it and remove it by hand"
+}
 trap cleanup EXIT
 
 if [[ -n "$DATASET" ]]; then
@@ -178,7 +187,7 @@ if [[ -n "$NEW_HOSTNAME" ]]; then
 fi
 
 install -d -m 0755 "$ROOT/etc/kldload"
-printf 'restamped=%s\nfrom=%s\n' "$(date -Is)" "$(hostname)" >"$ROOT/etc/kldload/restamp.info"
+printf 'restamped=%s\nfrom=%s\n' "$(date -Is)" "$(uname -n)" >"$ROOT/etc/kldload/restamp.info"
 
 # ─── verify the OUTCOME ──────────────────────────────────────────────────────
 fail=0

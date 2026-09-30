@@ -250,7 +250,7 @@ echo
 [[ "$(mval KLDLOAD_ENABLE_SECURE_BOOT)" == 1 && "$_sb" != *enabled* ]] &&
     note_fail "Secure Boot was requested and firmware reports: ${_sb}"
 [[ "$_signer" == "" || "$_signer" == unsigned ]] &&
-    note_warn "the ZFS module is not signed — Secure Boot cannot be turned on later"
+    note_warn "the ZFS module is not signed — it must be signed before Secure Boot is turned on (kldload-secure-boot enable)"
 echo
 
 # ─── 4. Services ────────────────────────────────────────────────────────────

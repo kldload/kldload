@@ -12,6 +12,10 @@
 # for end-to-end workflows (deploy → clone → replicate → export to AWS).
 
 set -Eeuo pipefail
+# The system libvirt when a user runs this: plain virsh as a user asks that
+# user's session libvirt and sees no VMs (2026-09-30, the class fixed across
+# the kvm tools).
+export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 # This file's own options line is `set -u`, and that is the author's
 # intent. The 2026-09-15 strict sweep put `set -Eeuo pipefail` above it, which
@@ -54,7 +58,7 @@ ${B}${G}Topics${N}
   ${C}replication${N}   ZFS send/recv between datasets and between hosts
   ${C}export${N}        ship VMs as qcow2/vmdk/vhd/ova/raw to disk or AWS
   ${C}backup${N}        sanoid snapshots, boot environments, recovery
-  ${C}ai${N}            Bob (local LLM), model swap, voice, agentic mode
+  ${C}ai${N}            local models, Open WebUI, freeing the GPU
   ${C}observability${N} Grafana, Hubble, Tetragon, klab dashboards
   ${C}cockpit${N}       F-key console — what each cockpit answers and when to use it
   ${C}firstboot${N}     what runs unattended at first boot, where the logs are
@@ -341,7 +345,7 @@ ${B}${C}Boot environments${N}
   ${C}kbe${N}                          list / activate / destroy boot environments
   ${C}kbe create <name>${N}            snapshot the current root and make it bootable
   ${C}kbe activate <name>${N}          flip the next-boot target
-  ${C}kbe rollback${N}                 emergency: revert to the previous BE
+  ${C}rollback last${N}                emergency: boot the root as it was before the last transaction
 
 ${B}${C}Disaster recovery${N}
   ${C}krecovery${N}                    interactive recovery wizard (boot from rescue ISO)
@@ -357,37 +361,39 @@ EOF
 }
 
 _t_ai() {
+    # Only commands that exist. This listed bob, bob-do, bob-voice, bob-model
+    # and bob-agent, none of which ships (Bob's CLI was retired for Open
+    # WebUI, docs/bob-deprecation.md); checked against the tree and onyx on
+    # 2026-09-30.
     cat <<EOF
 
-${B}${G}── ai — Bob (local LLM), models, voice ────────────────────────────────────${N}
+${B}${G}── ai — local models, Open WebUI, the assistant ────────────────────────────${N}
 
-  Bob is a local AI assistant on Ollama + qwen3:14b by default.
-  No data leaves the box. The webui hosts a chat panel.
+  Ollama runs the models on this machine; nothing leaves it. Open WebUI is
+  the chat interface, with voice, a model picker and documents to ask about.
 
-  ${C}bob${N}                          interactive CLI session
-  ${C}bob-do "<task>"${N}              one-shot: ask Bob to do something
-  ${C}bob-voice${N}                    voice-driven Bob (whisper.cpp transcription)
-  ${C}bob-model${N}                    list / swap LLM models
-  ${C}bob-agent${N}                    agentic mode: Bob runs shell tools autonomously
-  ${C}ollama list${N}                  every model on disk
-  ${C}ollama pull <model>${N}          download another model
+  ${C}bobctl status${N}                 is the assistant's model loaded, free VRAM
+  ${C}bobctl off${N}                    free the GPU (for a game)
+  ${C}bobctl on${N}                     load the model back
+  ${C}kai-rag "<question>"${N}          ask about this machine, from the indexed docs
+  ${C}kai-index${N}                     index the documentation for kai-rag
+  ${C}ollama list${N}                   every model on disk
+  ${C}ollama pull <model>${N}           download another model
+  ${C}ollama ps${N}                     loaded models and their memory
 
 ${B}${Y}Examples${N}
-  ${D}# Ask Bob a question${N}
-  ${C}bob${N}
+  ${D}# Free the GPU before a game, and load the model after${N}
+  ${C}bobctl off${N}
+  ${C}bobctl on${N}
 
-  ${D}# One-shot${N}
-  ${C}bob-do "investigate disk usage and report"${N}
+  ${D}# Ask about this machine${N}
+  ${C}kai-rag "why is rpool nearly full?"${N}
 
-  ${D}# Switch to a smaller model on a small machine${N}
+  ${D}# A smaller model on a small machine${N}
   ${C}ollama pull qwen3:8b${N}
-  ${C}bob-model qwen3:8b${N}
 
-  ${D}# See model size + VRAM use${N}
-  ${C}ollama ps${N}
-
-${B}${Y}Bob in the webui${N}
-  Open ${C}https://<host>:8443/${N} and click the Bob panel (right side).
+${B}${Y}Open WebUI${N}
+  The desktop tile, or ${C}http://<host>:8080/${N} (kldload-ai-webui).
 
 EOF
 }
@@ -432,6 +438,9 @@ EOF
 # section leads with the question, names the kernel data source, and ends
 # with a demo line operators can read aloud to a customer.
 _t_cockpit() {
+    # The key list is read off kldload-console's `tmux bind -n` lines. It
+    # described the layout from before the 2026-05-20 F5-F12 reorganisation
+    # -- F3 a shell, F4 close-all, F5 logs -- until 2026-09-30.
     cat <<EOF
 
 ${B}${G}── cockpit — the F-key console (kernel + cluster on one keystroke) ──────${N}
@@ -442,114 +451,37 @@ F-key toggles one cockpit on or off. Press it once → cockpit windows
 appear. Press it again → they all disappear. Nav: ${C}Alt+←/→${N} or
 ${C}Alt+h/l${N} between windows, ${C}Alt+1..9${N} jumps direct.
 
-${B}${C}F1${N}  Help — this page (toggle popup)
-  This document, in a floating 90%×90% less(1) overlay. Press F1
-  again to dismiss, or q / Esc inside less. Appears once as a
-  welcome the first time the browser console attaches; after that
-  it's silent until you press F1.
+${B}${C}F1${N}   the home window (klab) and its greeting
+${B}${C}F2${N}   k9s — the cluster, interactively
+${B}${C}F3${N}   every kldload log in one stream (kldload-follow)
+${B}${C}F4${N}   the web console's own logs (kldload-webui, ttyd-k9s)
+${B}${C}F5${N}   disk: block I/O, filesystem and ZFS latency (bcc)
+${B}${C}F6${N}   syscalls and capabilities (bcc)
+${B}${C}F7${N}   TCP (bcc)
+${B}${C}F8${N}   Cilium: what the datapath is configured to do now
+${B}${C}F9${N}   top at every layer: processes, pods, ZFS vdevs, BPF programs
+${B}${C}F10${N}  ZFS
+${B}${C}F11${N}  live tracing: Hubble flows, Tetragon events, the kernel log
+${B}${C}F12${N}  what the kernel is short of: pressure, run-queue latency,
+       soft and hard interrupts, the BPF programs' cost
+  Each of F5-F12 opens its group of windows; press it again to close them.
 
-${B}${C}F2${N}  k9s — interactive cluster TUI
-  Best general-purpose K8s window: type ${Y}:pods${N}, ${Y}:nodes${N},
-  ${Y}:svc${N}, ${Y}:deploy${N}, ${Y}:events${N}, etc. Tab through, drill in.
+${B}${C}Shift+F<N>${N}
+  S-F1  pick a console           S-F7  kubectl top pods by memory
+  S-F2  cluster warning events   S-F8  cilium monitor --type drop
+  S-F3  root shell (sudo -i)     S-F9  zfs iostat -l -v
+  S-F4  dmesg --follow           S-F10 kinspect: pick two endpoints
+  S-F5  kldload-doctor loop      S-F11 TCP retransmits (tcpretrans)
+  S-F6  iotop                    S-F12 new TCP connections (tcpconnect)
 
-${B}${C}F3${N}  Terminal — new scratch shell every press
-  Not a toggle: F3 twice opens two shells. Close with ${C}Ctrl+q${N}
-  or with ${C}F4${N} (close everything).
-
-${B}${C}F4${N}  Close everything — kill every non-klab window in one keystroke
-  Wipes out every cockpit + every scratch shell, returns you to the
-  klab home pane. The "I'm done demoing, give me a clean slate"
-  button. The klab home is never killed.
-
-${B}${C}F5${N}  Logs — every kldload log in one ${C}tail -F${N}
-  Drives ${C}kldload-follow${N}, which multiplexes ${C}/var/log/kldload/*.log${N}
-  (firstboot, autodeploy, kube-bootstrap, klab-build, webui).
-  ${Y}Answers:${N} "did first-boot finish?", "why did the K8s join fail?"
-
-${B}${C}F6${N}  Syscall cockpit — what programs are doing to the kernel
-  5 windows: ${Y}execsnoop${N}, ${Y}opensnoop${N}, ${Y}killsnoop${N}, ${Y}syscount${N}, ${Y}capable${N}
-  Source: bcc-tools BPF programs attached to syscall tracepoints.
-  ${Y}Answers:${N} "what just ran?", "who killed my pod?", "what files is
-  X touching?", "which syscall is the hot path?", "what cap does a
-  container actually need (so I can drop the rest)?"
-  ${P}Demo line:${N} every ${Y}exec${N} on the box, named, with args and pid —
-  zero application instrumentation, kernel-resident, ~0% overhead.
-
-${B}${C}F7${N}  I/O + ZFS latency cockpit
-  7 windows: ${Y}biosnoop${N}, ${Y}biolatency${N}, ${Y}tcpconnect${N}, ${Y}tcpretrans${N},
-  ${Y}tcplife${N}, ${Y}fileslower${N}, ${Y}zfsdist${N}
-  Source: bcc-tools on block + TCP + VFS layers; ${Y}zfsdist${N} is a
-  bpftrace kprobe on zfs_read/zfs_write that yields a latency hist.
-  ${Y}Answers:${N} "is the disk slow?" (biolatency hist), "who issued the
-  slow op?" (biosnoop), "how long do TCP sessions live?" (tcplife),
-  "is anything being retransmitted?" (tcpretrans).
-  ${P}Demo line:${N} block-layer + transport + VFS + ZFS latency, all from
-  the live kernel — no log shipping, no APM, no agent.
-
-${B}${C}F8${N}  Kernel cockpit — Cilium / Tetragon / ZFS / cluster
-  15 windows, single command per window, full screen each:
-    ${Y}bpf-prog${N}      every BPF program loaded
-    ${Y}hubble${N}        L3/L4/L7 flow stream from the datapath
-    ${Y}cilium-lb${N}     in-kernel service→backend map (replaces kube-proxy)
-    ${Y}conntrack${N}     every connection the datapath is tracking
-    ${Y}bpf-maps${N}      Cilium's BPF map fullness (policy/identity/lb)
-    ${Y}cilium-status${N} agent verbose snapshot
-    ${Y}netpol${N}        Cilium identities + NetPols + CiliumNetPols
-    ${Y}tetragon${N}      every kernel event Tetragon shipped
-    ${Y}tracingpol${N}    TracingPolicies (kernel-rule analog of NetPol)
-    ${Y}zfs-internals${N} txg counter + ARC composition + zfs-dbgmsg
-    ${Y}zpool-io${N}      per-vdev I/O rate (zpool iostat 5)
-    ${Y}virsh-vms${N}     libvirt domains (klab + K8s + blue/green VMs)
-    ${Y}k8s-top${N}       kubectl top nodes + top 30 pods by CPU
-    ${Y}kernel-log${N}    live kernel ring buffer (dmesg / journalctl -kf)
-    ${Y}gpu${N}           nvidia-smi (only present if NVIDIA detected)
-  ${Y}Answers:${N} "is the cluster healthy from a kernel POV?", "is BPF
-  enforcement actually loaded?", "which pods are exchanging which
-  bytes?", "is ZFS hung on a txg?", "is my GPU pegged?"
-  ${P}Demo line:${N} this is the cluster's kernel state in fifteen windows
-  with one keystroke. Splunk doesn't have this. Datadog doesn't have
-  this. It's free because it's already in the kernel.
-
-${B}${C}F9${N}  Kubernetes events — live event stream
-  Runs ${C}kubectl get events -A --watch${N}. Anything K8s wants to tell
-  you (scheduling, image pulls, restarts, evictions) flows here.
-
-${B}${C}F10${N} htop — host CPU / memory / processes
-  The classic. Sorted by CPU by default; F6 inside htop re-sorts.
-
-${B}${C}F11${N} kernel-tcp — every TCP socket's kernel-side state
-  Two panes:
-    Top:    ${C}ss -tnHpi state established${N} through a custom awk
-            formatter that humanizes bytes, computes per-second rates
-            from a state file, colour-codes RTT (green<10ms, amber<50,
-            red≥50) and retransmits, draws a unicode sparkline of
-            rate-by-rank, and rolls up by process at the bottom.
-    Bottom: ${C}nethogs${N} for per-process bandwidth attribution.
-  ${Y}Answers:${N} "why is this specific connection slow?" (RTT/retrans),
-  "is BBR loaded per-socket?" (cubic vs bbr in the algo column), "is
-  the app the bottleneck or the wire?" (send-Q depth vs cwnd), "what
-  process is eating my pipe?" (nethogs).
-  ${P}Demo line:${N} every number on this screen came out of
-  ${C}struct tcp_sock${N} in the kernel — no APM agent, no sidecar, no
-  application instrumentation. The data has always been there; we're
-  just finally letting you read it. Run ${C}sudo kldload-loadtest${N}
-  and watch RTT spike → retrans yellow → cwnd collapse → recover, all
-  in this one pane.
-
-${B}${C}F12${N} nethogs — per-process bandwidth (alone, full screen)
-  Same tool as the bottom pane of F11, but on its own when you want
-  to dedicate the whole window to it.
-
-${B}${C}Shift+F<N>${N} (deep-dive variants)
-  S-F2  k8s warnings only       S-F6  iotop per-process disk I/O
-  S-F3  root shell (sudo -i)    S-F7  kubectl top pods by memory
-  S-F4  dmesg                   S-F8  cilium monitor --type drop
-  S-F5  kldload-doctor loop
+  The big all-up cockpits are commands, for the firehose:
+  ${C}_kcockpit${N} (15 windows)  ${C}_kebpf-io${N} (7)  ${C}_kebpf-syscalls${N} (5)
+  ${C}_ktcp-expanded${N}  and ${C}_kclose-all${N} to close every window but klab.
 
 ${B}${C}Alt+letter heads-up popups (auto-dismiss on Enter)${N}
   Alt+v VMs & net    Alt+c cluster      Alt+z ZFS         Alt+w WireGuard
   Alt+d disk/mem     Alt+u uptime       Alt+p iftop       Alt+n nethogs
-  Alt+b bob          (AI ops chat — ollama qwen3, toggles like F2 k9s)
+  Alt+b bob          (chat with the assistant's model, ollama run bob; toggles like F2 k9s)
 
 ${B}${C}Restart-loop guarantee (2026-05-19)${N}
   Every F4/F5/F6/F9 pane runs inside an infinite restart loop. If a

@@ -1,0 +1,275 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-AUTOINSTALL 8
+.Os
+.Sh NAME
+.Nm kldload-autoinstall
+.Nd install, redeploy or roll back a machine with nobody at it, when the live system is told to
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+runs at every boot of the kldload live system, from
+.Pa kldload-autoinstall.service .
+It does nothing unless it is told to, in one of these ways, checked in this
+order:
+.Bl -enum
+.It
+a
+.Ql kldload.seed= Ns Ar url
+on the kernel command line, which the netboot server puts there for a
+machine it has armed; the answers are fetched from
+.Ar url ;
+.It
+a seed disk: a FAT volume labelled
+.Ql KLDLOADSEED
+holding
+.Pa answers.env ;
+.It
+.Pa /etc/kldload/autoinstall.env
+built into the image;
+.It
+answers given one by one on the kernel command line, as
+.Ql kldload. Ns Ar key Ns = Ns Ar value ,
+which override any of the above.
+.El
+.Pp
+With none of them it logs that there was nothing and exits 0: it is safe to
+leave enabled.
+A seed URL that does not answer \(em the normal state of a machine nobody
+has armed \(em also stops it, with exit 0; it never falls back to another
+source, since a machine told to install from one place must not install
+something else instead.
+.Pp
+Then, by
+.Ql kldload.action= :
+.Bl -tag -width Ds
+.It Cm install
+The default.
+It fills in what the answers lack \(em the disk, if none is named, and the
+secrets \(em and hands them to
+.Xr kldload-install-target 8 .
+.It Cm deploy
+Receive a ZFS archive onto
+.Ql kldload.disk=
+instead of installing packages: from
+.Ql kldload.source= Ns Ar host : Ns Ar dataset
+over ssh, or from
+.Ql kldload.archive-url=
+over HTTP, with
+.Xr kldload-restore-machine 8 .
+.It Cm rollback
+Import the pool and list its boot environments, changing nothing; with
+.Ql kldload.be= ,
+make that one the pool's
+.Cm bootfs .
+.El
+.Ss Answers from the kernel command line
+Each value must match its key's pattern, or nothing is installed:
+the answers are read as root just before a disk is wiped.
+.Bl -column "k8sbootstrap" "KLDLOAD_ENABLE_SECURE_BOOT" -offset indent -compact
+.It Sy key Ta Sy sets
+.It distro Ta Ev KLDLOAD_DISTRO
+.It profile Ta Ev KLDLOAD_PROFILE
+.It hostname Ta Ev KLDLOAD_HOSTNAME
+.It disk Ta Ev KLDLOAD_DISK
+.It username Ta Ev KLDLOAD_USERNAME
+.It timezone Ta Ev KLDLOAD_TIMEZONE
+.It locale Ta Ev KLDLOAD_LOCALE
+.It keyboard Ta Ev KLDLOAD_KEYBOARD_LAYOUT
+.It suite Ta Ev KLDLOAD_SUITE
+.It zfs Ta Ev KLDLOAD_ENABLE_ZFS
+.It encrypt Ta Ev KLDLOAD_ZFS_ENCRYPT
+.It topology Ta Ev KLDLOAD_ZFS_TOPOLOGY
+.It secureboot Ta Ev KLDLOAD_ENABLE_SECURE_BOOT
+.It buildimages Ta Ev KLDLOAD_BUILD_IMAGES
+.It keepnetboot Ta Ev KLDLOAD_KEEP_NETBOOT
+.It kvm Ta Ev KLDLOAD_ENABLE_KVM
+.It k8s Ta Ev KLDLOAD_ENABLE_K8S
+.It k8sbootstrap Ta Ev KLDLOAD_K8S_BOOTSTRAP
+.It zfsdev Ta Ev KLDLOAD_KLAB_ZFS_DEV
+.It ai Ta Ev KLDLOAD_ENABLE_AI
+.It template Ta Ev KLDLOAD_TEMPLATE Pq Ql none No clears it
+.El
+.Pp
+An install must name a distribution.
+Any other
+.Ql kldload.\&
+key is ignored.
+.Ss Secrets
+Passwords are never taken from the kernel command line, which every user
+of the live system can read: a
+.Ql kldload.password= ,
+.Ql .passphrase= ,
+.Ql .rhel_user=
+or
+.Ql .rhel_pass=
+there is named in the log and dropped.
+A password the answers do not carry \(em the user's, the disk passphrase
+when encryption is on, the Red Hat login for RHEL \(em is asked for on the
+machine's own screen: it writes what it needs to
+.Pa /run/kldload/install-needs ,
+the install screen asks, and it waits up to an hour for
+.Pa /run/kldload/install-secrets .
+The values are never logged, and the answers file is kept mode 0600.
+.Ss Choosing the disk
+With no disk named, it looks at every whole disk and describes what is on
+it: a partition table, any signature
+.Xr blkid 8
+knows on the disk or its partitions, and
+.Fx
+GELI, which
+.Xr blkid 8
+cannot see and which is read from the disk's last sector.
+The live medium and the seed disk are never candidates.
+A disk is chosen only if it is the one empty disk; with no empty disk, a
+disk holding only kldload's own
+.Ql rpool
+and its EFI partition is chosen as a reinstall.
+More than one empty disk, or none usable, is a refusal.
+A disk that cannot be read is not empty.
+The disk is written into the answers by its
+.Pa /dev/disk/by-id
+name.
+.Sh ENVIRONMENT
+For testing; none is set in use.
+.Bl -tag -width Ds
+.It Ev KLDLOAD_AUTOINSTALL_CMDLINE
+Read this file instead of
+.Pa /proc/cmdline .
+.It Ev KLDLOAD_AUTOINSTALL_LOG
+Log here instead of
+.Pa /var/log/installer/autoinstall.log .
+.It Ev KLDLOAD_AUTOINSTALL_DRYRUN
+Print the answers assembled from the command line and exit 0, before the
+disk is chosen.
+It does not stop
+.Cm deploy
+or
+.Cm rollback ,
+which run before it.
+.It Ev KLDLOAD_AUTOINSTALL_STOP_BEFORE_EXEC
+Print the final answers and exit 0 where the installer would start.
+.It Ev KLDLOAD_AUTOINSTALL_RUNDIR
+Instead of
+.Pa /run/kldload ,
+for the secrets exchange.
+.It Ev KLDLOAD_SECRETS_TIMEOUT
+Seconds to wait for secrets; default 3600.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/installer/autoinstall.log
+Everything it says.
+.It Pa /etc/kldload/autoinstall.env
+Answers built into the image.
+.It Pa /run/kldload/install-needs , Pa install-secrets
+The request for secrets, and the answer.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Nothing to do, the seed URL did not answer, a rollback listing, or a
+rollback done; otherwise it does not return, but becomes the installer or
+the restore.
+.It 1
+Refused.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, as a user, with the test
+variables and a file standing in for the kernel command line.
+Nothing was installed.
+.Ss Answers from the command line
+.Bd -literal -offset indent
+$ cat cmdline
+BOOT_IMAGE=vmlinuz rd.live.image kldload.distro=debian kldload.profile=server kldload.hostname=node7 kldload.timezone=America/Denver kldload.kvm=1
+$ KLDLOAD_AUTOINSTALL_CMDLINE=cmdline KLDLOAD_AUTOINSTALL_LOG=ai.log KLDLOAD_AUTOINSTALL_DRYRUN=1 kldload-autoinstall
+[2026-09-30 01:18:09] [autoinstall] Scanning for KLDLOADSEED disk...
+[2026-09-30 01:18:10] [autoinstall] Building answers from the kernel cmdline (no seed file present)
+[2026-09-30 01:18:10] [autoinstall]   cmdline: KLDLOAD_DISTRO=debian
+[2026-09-30 01:18:10] [autoinstall]   cmdline: KLDLOAD_PROFILE=server
+[2026-09-30 01:18:10] [autoinstall]   cmdline: KLDLOAD_HOSTNAME=node7
+[2026-09-30 01:18:10] [autoinstall]   cmdline: KLDLOAD_TIMEZONE=America/Denver
+[2026-09-30 01:18:10] [autoinstall]   cmdline: KLDLOAD_ENABLE_KVM=1
+[2026-09-30 01:18:10] [autoinstall] Applied 5 answer(s) from the kernel cmdline
+KLDLOAD_DISTRO=debian
+KLDLOAD_PROFILE=server
+KLDLOAD_HOSTNAME=node7
+KLDLOAD_TIMEZONE=America/Denver
+KLDLOAD_ENABLE_KVM=1
+# (exited 0)
+.Ed
+.Ss A value that does not fit
+.Bd -literal -offset indent
+$ cat cmdline
+kldload.distro=fedora kldload.hostname=bad;name
+$ KLDLOAD_AUTOINSTALL_CMDLINE=cmdline KLDLOAD_AUTOINSTALL_LOG=ai.log KLDLOAD_AUTOINSTALL_DRYRUN=1 kldload-autoinstall
+\&...
+[2026-09-30 01:18:10] [autoinstall] REFUSING: kldload.hostname=bad;name does not match ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$
+[2026-09-30 01:18:10] [autoinstall]   An answers file is read as root just before a disk wipe. NOT installing.
+# (exited 1)
+.Ed
+.Ss A password on the command line
+.Bd -literal -offset indent
+$ cat cmdline
+kldload.distro=fedora kldload.password=hunter2
+$ KLDLOAD_AUTOINSTALL_CMDLINE=cmdline KLDLOAD_AUTOINSTALL_LOG=ai.log KLDLOAD_AUTOINSTALL_DRYRUN=1 kldload-autoinstall
+[2026-09-30 01:18:10] [autoinstall] Scanning for KLDLOADSEED disk...
+[2026-09-30 01:18:10] [autoinstall] REFUSED kldload.password= from the kernel cmdline: /proc/cmdline is world-readable; it will be asked on screen
+\&...
+KLDLOAD_DISTRO=fedora
+# (exited 0)
+.Ed
+.Ss Two seeds
+.Bd -literal -offset indent
+$ cat cmdline
+kldload.seed=http://a/x.env kldload.seed=http://b/y.env
+$ KLDLOAD_AUTOINSTALL_CMDLINE=cmdline KLDLOAD_AUTOINSTALL_LOG=ai.log KLDLOAD_AUTOINSTALL_DRYRUN=1 kldload-autoinstall
+[2026-09-30 01:18:10] [autoinstall] REFUSING: 2 kldload.seed= on the kernel cmdline — expected one. NOT installing.
+# (exited 1)
+.Ed
+.Ss A machine that is not armed
+.Bd -literal -offset indent
+$ cat cmdline
+kldload.seed=http://127.0.0.1:9/aa-bb-cc-dd-ee-ff.env
+$ KLDLOAD_AUTOINSTALL_CMDLINE=cmdline KLDLOAD_AUTOINSTALL_LOG=ai.log KLDLOAD_AUTOINSTALL_DRYRUN=1 kldload-autoinstall
+[2026-09-30 01:18:10] [autoinstall] Seed URL on cmdline: http://127.0.0.1:9/aa-bb-cc-dd-ee-ff.env
+curl: (7) Failed to connect to 127.0.0.1 port 9 after 0 ms: Could not connect to server
+# (exited 0)
+[2026-09-30 01:18:10] [autoinstall] Seed URL did not answer (not armed, or unreachable) — NOT installing
+.Ed
+.Pp
+The last line arrives after the exit: output goes to the log through
+.Xr tee 1 ,
+which can finish after the script.
+.Sh SEE ALSO
+.Xr kldload-install-target 8 ,
+.Xr kldload-netboot-server 8 ,
+.Xr kldload-restore-machine 8
+.Sh HISTORY
+Its disk choice once looked at five fixed device names and took any disk
+without a ZFS signature as empty; on 2026-09-11 a storage server's eight
+.Fx
+GELI disks, which Linux sees as blank, were the most attractive
+targets on the machine.
+The seed label it looked for, with a hyphen, is one character too long
+for FAT and could not be made (found 2026-09-07).
+Until 2026-09-23 passwords on the command line were used, and so were
+readable by every user of the live system.
+.Pp
+On 2026-09-30, writing this page: a seed URL that was not http or https
+exited 0, like a machine nobody had armed, and the second seed label was
+never looked for.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+.Ev KLDLOAD_AUTOINSTALL_DRYRUN
+does not make
+.Cm deploy
+or
+.Cm rollback
+safe to try: they act before it is looked at.
+.Pp
+.Cm rollback
+with
+.Ql kldload.be=
+imports the pool forced, past a claim by another system.

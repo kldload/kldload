@@ -47,14 +47,20 @@ want_for() { # want_for <rotational> -> the scheduler this device should use
     [[ "$1" == "1" ]] && echo bfq || echo none
 }
 
-changed=0 already=0 failed=0
+changed=0 already=0 failed=0 unwritable=0
 
 for q in /sys/block/*/queue/scheduler; do
-    [[ -w "$q" ]] || continue
     dev="$(basename "$(dirname "$(dirname "$q")")")"
     # Skip anything that is not a real disk: loop, zram, device-mapper and zvols
     # have a scheduler attribute and no business being tuned here.
     case "$dev" in loop* | zram* | dm-* | zd* | sr*) continue ;; esac
+    # Counted, not skipped in silence: as a user every disk is unwritable, and
+    # the summary read "0 changed, 0 already correct, 0 could not be set", like
+    # a machine with no disks (onyx, 2026-09-30).
+    if [[ ! -w "$q" ]]; then
+        unwritable=$((unwritable + 1))
+        continue
+    fi
 
     rot="$(cat "/sys/block/${dev}/queue/rotational" 2>/dev/null || echo 0)"
     want="$(want_for "$rot")"
@@ -84,4 +90,5 @@ done
 
 # Outcome, not exit code: say what happened to how many.
 echo "kldload-io-scheduler: ${changed} changed, ${already} already correct, ${failed} could not be set"
+((unwritable == 0)) || echo "kldload-io-scheduler: ${unwritable} disk(s) not writable here — run it as root"
 exit 0

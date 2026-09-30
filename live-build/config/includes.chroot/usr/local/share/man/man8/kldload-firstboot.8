@@ -1,0 +1,93 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-FIRSTBOOT 8
+.Os
+.Sh NAME
+.Nm kldload-firstboot
+.Nd finish an installed kldload machine at its first boot, for its profile
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Pa kldload-firstboot.service
+runs
+.Nm
+once, at the first boot of an installed machine; it is not meant to be
+run by hand.
+It reads the profile from the install manifest and finishes what the
+installer could not do from outside the running system:
+.Bl -bullet -compact
+.It
+the persistent journal, the ZFS debug-message drain, and the key the host
+uses to reach its own virtual machines;
+.It
+healing nets that install again anything the install-time transaction
+missed \(em optional packages, the web view's libraries, swap, desktop
+applications, the NVIDIA driver;
+.It
+the Secure Boot signing key made the same as the enrolled machine owner
+key, and the ZFSBootMenu command line that keeps nouveau away from an
+NVIDIA card;
+.It
+Grafana, the storage profile's shares, and the platform packages' version
+locks;
+.It
+the profile's own role \(em a hypervisor, storage, monitoring, a desktop
+\(em and restoring virtual machines at every boot where the profile runs
+them.
+.El
+.Pp
+Every failure it does not expect is logged with its line and command, and
+fails the unit, so that it shows in
+.Ql systemctl --failed
+as well as in the log.
+Steps that are allowed to fail say so where they are.
+.Xr kldload-autodeploy 8
+runs after it.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print what it does and exit 0, running nothing; any other argument is
+exit 2.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/install-manifest.env
+The profile and what was asked for.
+.It Pa /var/log/kldload/firstboot.log
+Everything it did, and the line of any failure.
+.It Pa /var/lib/kldload/firstboot-done
+Present once it has finished.
+.El
+.Sh EXIT STATUS
+0 when done; 1 on a failure, logged with its line; 2 when given an
+argument.
+.Sh EXAMPLES
+What went wrong at a first boot; not run for this page:
+.Bd -literal -offset indent
+# systemctl status kldload-firstboot
+# grep -E 'ERR:|FATAL|WARNING' /var/log/kldload/firstboot.log
+.Ed
+.Sh SEE ALSO
+.Xr kldload-apply-platform-holds 8 ,
+.Xr kldload-autodeploy 8 ,
+.Xr kldload-mok-repair 8 ,
+.Xr kldload-ollama-install 8
+.Sh HISTORY
+On 2026-06-13 a desktop came up half built with nothing to say why; every
+unexpected failure has named its line since.
+Until 2026-09-30
+.Fl -help
+ran a first boot.
+Until the same day it also masked dnf-automatic after enabling it, and on
+Fedora 44 named a timer that does not exist, so no automatic security update
+ever ran.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+On dnf systems it enables the daily security-only update timer,
+dnf-automatic-install.timer on dnf4 and dnf5-automatic.timer on dnf5, with
+its policy in
+.Pa /etc/dnf/automatic.conf .
+The versionlock on the kernel, driver and ZFS packages is what keeps those
+updates off the substrate.

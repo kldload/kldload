@@ -6,6 +6,15 @@
 
 set -Eeuo pipefail
 
+# --help answers before anything runs (rule 9): it started the tmux console (the sandboxed
+# --help capture, 2026-09-30).
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
+
 # Deliberately NOT errexit: this is the operator console. `kubectl get pods -A | awk | head -40` on a cluster with
 # more than 40 pods SIGPIPEs, and under errexit that kills the console.
 # The 2026-09-15 strict sweep added the line above to a file that had no set
@@ -503,15 +512,15 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
     tmux bind -n M-n run-shell "_ktoggle-win nethogs  'sudo nethogs 2>/dev/null || (echo need-nethogs; sleep 99)'"
 
     # ── Bob: AI ops chat in the cockpit (Alt+B) ──────────────────────
-    # Drops into the `bob` CLI as a toggle-window — press once to open,
-    # press again to close. Same pattern as F2 (k9s) and Alt+v (VMs).
-    # Bob reads /etc/bob/personas.json + /usr/local/share/klab-bob/* and
-    # talks to ollama on localhost:11434 (qwen3:14b on AI-enabled installs).
-    # If ollama isn't up yet, `bob` prints a one-line "starting" status and
-    # polls — no crash loop. This is the "integration with bob" the .140
-    # workstation operator asked for: cockpit-level access to Bob next to
-    # the kernel/cluster heads-up popups, not buried in a separate web tab.
-    tmux bind -n M-b run-shell "_ktoggle-win bob      'bash -lc \"bob 2>&1 || (echo Bob needs ollama running; sleep 99)\"'"
+    # A chat with the assistant's model as a toggle-window -- press once to
+    # open, again to close; the same pattern as F2 (k9s) and Alt+v (VMs).
+    # `ollama run bob`: an AI install creates that model (kldload-autodeploy,
+    # `ollama create bob`). This ran a `bob` CLI that no longer ships -- Bob's
+    # CLI was retired for Open WebUI -- so the window only ever said "Bob
+    # needs ollama running" (2026-09-30).
+    # `ollama show` first: `ollama run` PULLS a model it lacks, and would
+    # fetch whatever the public registry calls "bob".
+    tmux bind -n M-b run-shell "_ktoggle-win bob      'bash -lc \"{ ollama show bob >/dev/null 2>&1 && ollama run bob; } || (echo no bob model here -- ollama list shows the models; sleep 99)\"'"
 
     tmux set -g default-terminal "xterm-256color"
     tmux set -g mouse on

@@ -2,7 +2,20 @@
 # kai-index — index documentation for the AI assistant
 set -euo pipefail
 
+# --help answers before anything runs (rule 9): its argument is the directory to index, so --help was indexed as one (the sandboxed
+# --help capture, 2026-09-30).
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
+
 DOCS_DIR="${1:-/usr/local/share/kldload-ai/html}"
+[[ "$DOCS_DIR" != -* ]] || {
+    echo "kai-index: unknown option: $DOCS_DIR (usage: kai-index [DIR])" >&2
+    exit 2
+}
 RAG_URL="http://localhost:8400"
 
 echo "Indexing documentation from: ${DOCS_DIR}"
@@ -17,8 +30,8 @@ fi
 # Index local docs
 RESULT=$(curl -sf -X POST "${RAG_URL}/index" \
     -H 'Content-Type: application/json' \
-    -d "{\"source_dir\": \"${DOCS_DIR}\"}")
+    -d "$(jq -n --arg d "$DOCS_DIR" '{source_dir: $d}')")
 
 echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
 echo ""
-echo "Done. Test with: kai 'what is OpenZFS?'"
+echo "Done. Test with: kai-rag 'what is OpenZFS?'"

@@ -1,0 +1,70 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-WAIT-FOR-IP 8
+.Os
+.Sh NAME
+.Nm kldload-wait-for-ip
+.Nd wait up to thirty seconds for an IPv4 address other than loopback
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+returns as soon as the machine has an IPv4 address outside 127.0.0.0/8,
+checking once a second, and gives up after thirty.
+.Pp
+It exists for
+.Pa kldload-tls-cert.service ,
+which runs it first: at first boot the certificate would otherwise be made
+before DHCP has answered, naming no address a browser can reach.
+Networking being
+.Dq online
+to systemd does not yet mean an address is bound.
+.Pp
+It exits 0 either way; the caller goes on regardless.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the description at the top of the script and exit 0.
+.El
+.Sh EXIT STATUS
+0.
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, which had an address:
+.Bd -literal -offset indent
+$ time kldload-wait-for-ip
+
+real	0m0.015s
+user	0m0.005s
+sys	0m0.007s
+# (exited 0)
+.Ed
+.Pp
+With a stand-in for
+.Xr ip 8
+that reports only loopback, and the wait cut to two seconds, the line it
+prints when it gives up:
+.Bd -literal -offset indent
+kldload-wait-for-ip: no IPv4 address after 30 s; going on without one
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kldload-wait-for-ip: no IPv4 address after 30 s; going on without one"
+The certificate made next will name no LAN address; it is made again when
+one arrives.
+.El
+.Sh SEE ALSO
+.Xr systemd.special 7 ,
+.Xr ip 8 ,
+.Xr kldload-tls-cert 8
+.Sh HISTORY
+On 2026-09-30, writing this page: it gave up without a word, and its test
+could read
+.Dq no address
+while one was bound, when an early
+.Xr grep 1
+exit broke the pipe in front of it.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+IPv6 addresses do not count.

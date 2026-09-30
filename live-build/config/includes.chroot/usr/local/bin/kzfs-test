@@ -3,7 +3,7 @@
 # kzfs-test — OpenZFS Test Lab
 # ══════════════════════════════════════════════════════════════════════════
 #
-# OpenZFS Test Lab — runs zfs-tests.sh across 7 Linux distros in parallel
+# OpenZFS Test Lab — runs zfs-tests.sh across 6 Linux distros in parallel
 # using ZFS instant clones on KVM. Each distro VM is cloned from a sealed
 # golden image in ~75ms, booted, tested, and destroyed.
 #
@@ -694,7 +694,8 @@ echo "zfs module: $(lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || e
 echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
 echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
 echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
-echo "network:    $(ip -4 addr show | grep -c 'inet.*scope global' || echo 0) interfaces"
+# grep -c prints 0 AND exits 1 on no match; the 0 is the answer (an `|| echo 0` printed it twice)
+echo "network:    $(ip -4 addr show | grep -c 'inet.*scope global' || true) interfaces"
 echo "DNF test setup complete"
 DNFSETUP
         ;;
@@ -2509,7 +2510,7 @@ Usage:
   kzfs-test results [run-id]               Display test matrix
   kzfs-test destroy [--all]                Destroy test VMs (--all includes goldens)
 
-Distros: centos rocky fedora debian ubuntu arch alpine
+Distros: centos rocky fedora debian ubuntu rhel
 
 ZFS Version Flags (for golden/run):
   --zfs-version 2.3.0               Build from release tarball
@@ -2519,7 +2520,7 @@ ZFS Version Flags (for golden/run):
 
 Examples:
   kzfs-test                                # Interactive menu
-  kzfs-test golden all                     # Build all 7 golden images
+  kzfs-test golden all                     # Build all 6 golden images
   kzfs-test golden centos --zfs-version 2.3.0  # Golden with specific ZFS
   kzfs-test golden all --zfs-git @master   # All goldens from git master
   kzfs-test verify                         # Quick check all goldens work

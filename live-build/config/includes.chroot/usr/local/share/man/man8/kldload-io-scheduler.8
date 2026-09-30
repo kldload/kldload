@@ -1,0 +1,84 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-IO-SCHEDULER 8
+.Os
+.Sh NAME
+.Nm kldload-io-scheduler
+.Nd set each disk's I/O scheduler once the disks have settled
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+kldload's policy for the kernel's I/O scheduler is:
+.Bl -column "rotating disks" "none" -offset indent
+.It solid-state disks Ta Ql none Ta
+the device's own queues do the work
+.It rotating disks Ta Ql bfq Ta
+fair queuing, better latency under mixed load
+.El
+.Pp
+A udev rule,
+.Pa 60-kldload-scheduler.rules ,
+sets it as each disk appears.
+On a machine with several disks that write races the disk still being
+claimed; the kernel answers
+.Dq Device or resource busy ,
+and udev does not try again.
+.Nm
+applies the same policy after boot, to every disk that is not on it, and
+reports each change.
+Loop, zram, device-mapper, optical devices and ZFS volumes are left alone.
+.Pp
+It changes nothing already right, so it is safe to run at any time.
+.Pa kldload-io-scheduler.service
+runs it at boot.
+It needs root to change anything; as a user it says so.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the description at the top of the script and exit 0.
+.El
+.Sh EXIT STATUS
+0, even when a scheduler could not be set: that costs performance, never
+a boot.
+2 for any argument.
+.Sh EXAMPLES
+Printed on a kldload desktop with two NVMe drives on 2026-09-30:
+.Bd -literal -offset indent
+$ kldload-io-scheduler
+kldload-io-scheduler: 0 changed, 0 already correct, 0 could not be set
+kldload-io-scheduler: 2 disk(s) not writable here — run it as root
+# (exited 0)
+# kldload-io-scheduler
+kldload-io-scheduler: 0 changed, 2 already correct, 0 could not be set
+# (exited 0)
+$ cat /sys/block/nvme0n1/queue/scheduler
+[none] mq-deadline kyber bfq
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kldload-io-scheduler: DEV: OLD -> NEW (rotational=N)"
+Changed.
+.It "kldload-io-scheduler: DEV: 'bfq' not available (offers: LIST) — left on 'OLD'"
+This kernel does not offer the scheduler for that device.
+.It "kldload-io-scheduler: DEV: could not set 'NEW' (still 'OLD') — LIST"
+The kernel refused the write.
+.El
+.Sh SEE ALSO
+.Xr zfs 4 ,
+.Xr udev 7
+.Sh HISTORY
+On 2026-09-16 a server's six of seven SCSI disks kept
+.Ql mq-deadline ,
+with one
+.Dq Device or resource busy
+per disk per boot in the journal, from the distribution's own scheduler
+rule as much as from kldload's; setting the same value by hand after boot
+worked at once.
+.Pp
+On 2026-09-30, writing this page: run as a user it touched nothing and
+said
+.Dq 0 changed, 0 already correct, 0 could not be set ,
+as if there were no disks.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com

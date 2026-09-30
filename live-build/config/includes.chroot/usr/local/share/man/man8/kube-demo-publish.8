@@ -1,0 +1,98 @@
+.Dd September 30, 2026
+.Dt KUBE-DEMO-PUBLISH 8
+.Os
+.Sh NAME
+.Nm kube-demo-publish
+.Nd open the demo to browsers on the network, from this host's LAN address
+.Sh SYNOPSIS
+.Nm
+.Op Fl -port Ar n
+.Nm
+.Fl -status | -off
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The demo's address comes from MetalLB, on the cluster's own network,
+which on a single kldload host sits behind libvirt: reachable from the
+host and nowhere else, and on most machines the same 192.168.122.0/24 a
+visitor's own laptop uses.
+.Nm
+reads the address the demo's
+.Ql web
+Service was given and forwards a port on the host's LAN address to it,
+with a systemd socket and
+.Xr systemd-socket-proxyd 8 ,
+which every distribution here has.
+It then fetches the page through the LAN address, as a browser would, and
+prints the address to open only when that returns 200.
+.Pp
+The Service's address is written into the unit; run it again after the
+Service is recreated.
+Running it again is safe.
+It runs itself under
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -port Ar n
+The port to listen on; default 8088.
+.It Fl -status
+Whether the forwarder is running, and where it forwards.
+.It Fl -off
+Stop and remove the forwarder.
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev NS
+The demo's namespace; default
+.Ql demo .
+.It Ev KUBECONFIG
+Default
+.Pa /root/.kube/config .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/systemd/system/kldload-demo-publish.socket , Pa .service
+The forwarder.
+.El
+.Sh EXIT STATUS
+0 when the page answered through the LAN address, or for
+.Fl -status
+and
+.Fl -off ;
+1 when the Service has no address or the page did not answer; 2 when
+the port is not a port.
+.Sh EXAMPLES
+On a kldload desktop with no demo, on 2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+# kube-demo-publish --status
+inactive
+# (exited 0)
+$ kube-demo-publish --port 70000
+kube-demo-publish: --port needs a port number, 1-65535: 70000
+# (exited 2)
+$ kube-demo-publish --frob
+FATAL: unknown argument: --frob (try --help)
+# (exited 1)
+.Ed
+.Pp
+Publishing; not run for this page:
+.Bd -literal -offset indent
+# kube-demo-publish --port 9000
+# prints the address to open once the page has answered through it
+.Ed
+.Sh SEE ALSO
+.Xr systemd.socket 5 ,
+.Xr kube-demo 8 ,
+.Xr kube-demo-image 8 ,
+.Xr systemd-socket-proxyd 8
+.Sh HISTORY
+On 2026-09-30, writing this page: the port and the Service's address went
+into the unit files unchecked.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It listens on every address of the host, not only the LAN one.

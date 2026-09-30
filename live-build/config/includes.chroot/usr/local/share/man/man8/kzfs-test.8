@@ -1,0 +1,137 @@
+.Dd September 30, 2026
+.Dt KZFS-TEST 8
+.Os
+.Sh NAME
+.Nm kzfs-test
+.Nd run the OpenZFS test suite across six distributions from cached golden images
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Cm golden
+.Op Ar distro | Cm all
+.Op Ar zfs-source
+.Nm
+.Cm verify
+.Op Ar distro | Cm all
+.Nm
+.Cm run
+.Op Fl -quick | -full
+.Op Fl -distro Ar list
+.Op Ar zfs-source
+.Nm
+.Cm status
+.Nm
+.Cm results
+.Op Ar run-id
+.Nm
+.Cm destroy
+.Op Fl -all
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+builds a golden image of each of CentOS, Rocky, Fedora, Debian, Ubuntu
+and RHEL with ZFS and its test suite, once, and then runs
+.Ql zfs-tests.sh
+in clones of them, several distributions at a time, recording a matrix of
+results.
+ZFS can come from the distribution, a release, a git branch or a local
+tarball, so a change can be tried across every distribution before it
+is sent upstream.
+With no command it shows a menu.
+It runs itself under
+.Xr sudo 8 .
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm golden Op Ar distro | Cm all
+Build the goldens; kept once built.
+.It Cm verify Op Ar distro | Cm all
+Boot a clone of each golden and check ZFS and the suite are there.
+.It Cm run Oo Fl -quick | Fl -full Oc Op Fl -distro Ar list
+Run the suite: a subset of about fifteen minutes, or all of it; on every
+distribution, or those named with commas.
+.It Cm status
+The goldens, the test machines and the last results.
+.It Cm results Op Ar run-id
+A run's matrix.
+.It Cm destroy Op Fl -all
+Remove the test machines; with
+.Fl -all ,
+the goldens too.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -zfs-version Ar v
+ZFS from a release tarball.
+.It Fl -zfs-git Ar owner/repo@branch , Fl -zfs-git Ar @branch
+ZFS from a git branch; the short form is a branch of openzfs/zfs.
+.It Fl -zfs-tarball Ar path
+ZFS from a local tarball.
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/kzfs-test/
+Golden build logs and one directory per run.
+.El
+.Sh EXIT STATUS
+0 when done; 1 on a failure, named.
+.Sh EXAMPLES
+On a kldload desktop with no goldens built, on 2026-09-30, with this
+release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+# kzfs-test status
+══════════════════════════════════════════════════════════════════════════════════════════════
+  OpenZFS Test Lab — Status
+  Host: onyx • 24 cores • 31GB RAM • ZFS source: repo
+══════════════════════════════════════════════════════════════════════════════════════════════
+
+  Golden Images:
+
+  DISTRO     STATUS   SIZE       KERNEL                       ZFS              DKMS     TESTS  KSH
+  ────────── ──────── ────────── ──────────────────────────── ──────────────── ──────── ────── ──────
+  centos     —      -          -                            -                -        -      -
+  rocky      —      -          -                            -                -        -      -
+  fedora     —      -          -                            -                -        -      -
+  debian     —      -          -                            -                -        -      -
+  ubuntu     —      -          -                            -                -        -      -
+  rhel       —      -          -                            -                -        -      -
+  ────────── ──────── ────────── ──────────────────────────── ──────────────── ──────── ────── ──────
+  Ready: 0  Failed: 0  Not built: 6  Total: 6
+
+  Storage: 75G used / 150G available on rpool/vms
+
+  Test VMs:
+    No test VMs running
+
+  Results:
+    No test runs yet
+
+  Logs: /root/kzfs-test/
+    Golden logs: 0 distros
+══════════════════════════════════════════════════════════════════════════════════════════════
+# (exited 0)
+.Ed
+.Pp
+A run; not done for this page:
+.Bd -literal -offset indent
+# kzfs-test golden all
+# kzfs-test run --quick --distro centos,debian
+# kzfs-test golden all --zfs-git @master
+.Ed
+.Sh SEE ALSO
+.Xr klab 8 ,
+.Xr klab-vm-debug-bundle 8 ,
+.Xr kzfs-lab 8
+.Sh HISTORY
+On 2026-09-30, writing this page: its help offered Arch and Alpine,
+which it has never accepted.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A golden whose last validation failed is rebuilt with
+.Ql zfs destroy -R ,
+which takes every clone of it, whoever made them.

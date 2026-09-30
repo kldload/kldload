@@ -2461,17 +2461,26 @@ fi
 # shadowed-inode bug from .132 2026-08-26. The race is that systemd-journal-flush
 # is ordered on local-fs.target, which on a ZFS root does not guarantee
 # rpool/var/log is mounted. So the assert has to notice and repair after the mount.
+#
+# 2026-09-30: the persistence test was `journalctl --header | grep -q` for a
+# file under /var/log/journal. --header lists archives too, so onyx passed it
+# for three weeks with journald writing only to /run; and the pipe returned
+# 141 on every run. It is a probe read back through `journalctl -D
+# /var/log/journal` now, and both questions are asked again after a repair --
+# which is what this gate requires (it used to require the header check).
 _ja="$ROOT/live-build/config/includes.chroot/usr/local/sbin/kldload-journal-assert"
 _ja_ok=0
 grep -qF 'journal_is_persistent()' "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
-grep -qF "grep -q '^File path: /var/log/journal/'" "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
-grep -qF 'if journal_records && journal_is_persistent; then' "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
+grep -qF 'journalctl -D /var/log/journal' "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
+# both conditions on the success path, and again after the repair
+_ja_both="$(grep -cF 'if journal_records && journal_is_persistent; then' "$_ja" 2>/dev/null || true)"
+((${_ja_both:-0} >= 2)) && _ja_ok=$((_ja_ok + 1))
 grep -qF 'Storage=auto' "$ROOT/live-build/config/includes.chroot/etc/systemd/journald.conf.d/persistent.conf" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
 if ((_ja_ok == 4)); then
     _pass "journal assert proves persistence, not just that journald records"
 else
     _fail "journal assert proves persistence, not just that journald records" \
-        "need journal_is_persistent(), the /var/log/journal header check, both conditions gating the success path, and Storage=auto retained — have $_ja_ok/4"
+        "need journal_is_persistent(), a probe read back with journalctl -D /var/log/journal, both conditions on the success path AND after the repair, and Storage=auto retained — have $_ja_ok/4"
 fi
 
 # A desktop must ship GPU firmware for the card it might actually meet.
@@ -3091,6 +3100,25 @@ else
     fi
 fi
 
+# ── No references to the assistant or its vendor in the tree ───────────────
+# The pre-commit hook is the first line; this is the second. On 2026-09-30 a
+# man page example carried an assistant's scratch path under /tmp into a
+# pushed commit and the hook let it through, for a reason not found (the same
+# hook blocks the same file in every test since). The words are assembled
+# here, not written, so this gate does not match itself. Exempt: the ignore
+# rules, the hook (it must name the words to search for them), and
+# ci/README.md's rsync --exclude -- tools told what to skip, not attribution.
+_section "No assistant references"
+_aw="cl""aude|anth""ropic"
+# WHY || true: git grep exits 1 when nothing matches, which is the pass.
+_cref="$(cd "$ROOT" && git grep -nIiE "$_aw" -- . ':!.gitignore' ':!.githooks/pre-commit' 2>/dev/null |
+    grep -vE "^ci/README\.md:[0-9]+:.*--exclude='\.(${_aw%%|*})'" || true)"
+if [[ -n "$_cref" ]]; then
+    _fail "assistant reference in tracked files" "$(printf '%s\n' "$_cref" | head -5 | cut -c1-160)"
+else
+    _pass "no assistant reference in tracked files"
+fi
+
 # ── grep -q pipeline ratchet ─────────────────────────────────────────────────
 # `producer | grep -q PATTERN` under pipefail: grep -q exits at its first
 # match, the producer's next write takes SIGPIPE, and the pipeline is 141 --
@@ -3129,6 +3157,28 @@ fi
 # and "$(link add)"; every join ran both on the host, as root (2026-09-29,
 # harmless only because they had no arguments). tests/dq-comment-scan.py asks
 # shfmt's syntax tree, not a regex. Zero exist; any is a failure.
+_section "Two-line counts"
+# `$(grep -c ... || echo 0)`: grep -c prints 0 AND exits 1 when nothing
+# matches, so the echo adds a second 0. "0\n0" made a debug bundle's
+# meta.json invalid, broke a status table and failed arithmetic (the
+# 2026-08-22 incident; nine more sites found and fixed 2026-09-30). Zero
+# tolerance: assign and fall back instead, x="$(... | grep -c y)" || x=0.
+if [[ ${#SHELL_SCRIPTS[@]} -eq 0 ]]; then
+    _warn "two-line counts" "no scripts — gate did not run"
+else
+    _tl=""
+    for f in "${SHELL_SCRIPTS[@]}"; do
+        # grep exits 1 on a clean file; the loop collects only real hits
+        _tl+="$(grep -nHE 'grep -c[^|#]*[|][|][[:space:]]*echo[[:space:]]+0' "$ROOT/$f" 2>/dev/null |
+            grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')" || :
+    done
+    if [[ -n "$_tl" ]]; then
+        _fail "two-line counts" "a count with an echo-0 fallback prints 0 twice on no match: $(printf '%s' "$_tl" | head -3 | cut -c1-140)"
+    else
+        _pass "two-line counts: none in ${#SHELL_SCRIPTS[@]} scripts"
+    fi
+fi
+
 _section "Comments the host executes"
 if [[ ${#SHELL_SCRIPTS[@]} -eq 0 ]] || ! command -v shfmt >/dev/null 2>&1; then
     _warn "executed comments" "no scripts or no shfmt — gate did not run"

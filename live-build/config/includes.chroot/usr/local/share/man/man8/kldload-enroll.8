@@ -1,0 +1,188 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-ENROLL 8
+.Os
+.Sh NAME
+.Nm kldload-enroll
+.Nd put a virtual machine on the WireGuard mesh and in the estate inventory, whatever made it
+.Sh SYNOPSIS
+.Nm
+.Ar vm
+.Op Fl -ip Ar address
+.Op Fl -role Ar role
+.Op Fl -cluster Ar cluster
+.Op Fl -id Ar n
+.Op Fl -no-wg
+.Nm
+.Fl -all
+.Op Fl -role Ar role
+.Op Fl -cluster Ar cluster
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+For the libvirt domain
+.Ar vm ,
+.Nm :
+.Bl -enum -compact
+.It
+finds its address, through
+.Xr kldload-vm-ip 8 ,
+unless
+.Fl -ip
+gives it;
+.It
+records it in the state database, with its role and cluster, which is
+what the Ansible inventory is made from;
+.It
+over ssh as root, sets the guest's host name to
+.Ar vm ,
+gives it a mesh node id and runs
+.Ql kube-network init
+there \(em carrying the host's own
+.Ql kube-network
+across when the guest has WireGuard but not the script;
+.It
+peers the host and the guest with each other on both mesh planes,
+.Ql 10.250.0. Ns Ar id
+and
+.Ql 10.251.0. Ns Ar id ,
+checks that the host's mesh now carries the guest's address, and records
+the enrolment so that
+.Xr kvm-delete 8
+can take it off the mesh again.
+.El
+.Pp
+A guest that already has a node id keeps it, and only missing peers are
+added: running it again is how an enrolment is repaired.
+Ids are given from 150 up, clear of the bands
+.Xr kube-cluster 8
+uses; the host is 100.
+.Pp
+It refuses a golden \(em by name, or by an
+.Ql @golden
+snapshot of its volume \(em since a golden's key and id would be copied
+into every clone.
+It leaves a node of a Kubernetes cluster that
+.Xr kube-cluster 8
+has not yet put on the mesh to it, since that tool gives the control
+plane id 1.
+.Pp
+It runs itself under
+.Xr sudo 8 .
+The names and values it is given are checked before that: the name
+becomes the guest's host name and all of them reach commands run as root
+on the guest.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -all
+Enrol every running virtual machine, one at a time, and print one line
+for each that did not enrol, with why, then the counts.
+.Pa kldload-enroll-sweep.timer
+runs this three minutes after boot and every ten minutes after, so a
+machine made by any tool is enrolled once it has an address.
+.It Fl -ip Ar address
+The guest's IPv4 address, for a machine libvirt's leases do not know.
+.It Fl -role Ar role , Fl -cluster Ar cluster
+Its role and cluster in the inventory.
+Without
+.Fl -role
+a machine keeps the role it has; a new one is
+.Ql vm .
+.It Fl -id Ar n
+This mesh node id, instead of the next free one.
+.It Fl -no-wg
+The inventory only; no mesh.
+.It Fl h , Fl -help
+Print the header comment and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/mesh/enrolled/ Ns Ar vm
+The machine's node id and public key.
+.It Pa /root/.ssh/id_ed25519
+The key it reaches guests with.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Enrolled, or already enrolled.
+.It 1
+No address for the machine.
+.It 2
+A usage error; nothing was attempted.
+.It 3
+The machine is a golden; or the mesh step failed after the inventory row
+was written.
+.It 4
+A cluster node left to
+.Xr kube-cluster 8 .
+.El
+.Pp
+With
+.Fl -all :
+0 when every machine it tried is on the mesh, 1 when any ended
+incomplete; one with no address, a golden or a cluster node does not
+count against it.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with no machines running:
+.Bd -literal -offset indent
+$ journalctl -u kldload-enroll-sweep.service -n 4 -o cat
+Starting kldload-enroll-sweep.service - Enrol every running VM into the kldload estate (name, mesh, inventory)...
+[enroll] sweep: 0 on the mesh, 0 without an address, 0 incomplete, 0 golden(s) left alone, 0 cluster node(s) left to kube-cluster
+kldload-enroll-sweep.service: Deactivated successfully.
+Finished kldload-enroll-sweep.service - Enrol every running VM into the kldload estate (name, mesh, inventory).
+# (exited 0)
+.Ed
+.Pp
+What it refuses before doing anything, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+$ kldload-enroll k8s-golden
+[enroll] k8s-golden is a golden (by name or its @golden snapshot) -- not enrolling it: a golden's mesh identity would be copied into every clone
+# (exited 3)
+$ kldload-enroll 'bad;name'
+not a usable VM name (it becomes the guest's hostname): bad;name
+# (exited 2)
+$ kldload-enroll web01 --id 12x
+--id needs a number: 12x
+# (exited 2)
+$ kldload-enroll web01 --ip
+--ip needs a value (try --help)
+# (exited 2)
+.Ed
+.Pp
+Enrolling; not run for this page, since no machine was running:
+.Bd -literal -offset indent
+# kldload-enroll web01 --role web --cluster shop
+# kldload-enroll --all
+.Ed
+.Sh SEE ALSO
+.Xr kfire 8 ,
+.Xr kldload-vm-ip 8 ,
+.Xr kspawn 8 ,
+.Xr kube-cluster 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-create 8 ,
+.Xr kvm-delete 8
+.Sh HISTORY
+Until 2026-08-22 only
+.Xr kube-cluster 8
+put machines on the mesh; everything else made them and stopped.
+That day the first sweep enrolled one machine of ten and reported
+success: each enrolment read the rest of the sweep's list as its input.
+On 2026-09-23 the sweep enrolled a golden while it was being built, and
+six cluster nodes cloned from it shared one key and one id; later that
+day it numbered three cluster nodes before
+.Xr kube-cluster 8
+could, the control plane among them, and the cluster lost its API
+address.
+.Pp
+On 2026-09-30, writing this page: an option given last with no value
+failed as an unbound variable, exit 1 \(em the code for a machine with
+no address.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Enrolling needs ssh to the guest as root with the host's key, which
+kldload's goldens carry; a machine made some other way is recorded in the
+inventory and left off the mesh, with exit 3.

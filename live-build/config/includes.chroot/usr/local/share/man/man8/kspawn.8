@@ -1,0 +1,309 @@
+.Dd September 30, 2026
+.Dt KSPAWN 8
+.Os
+.Sh NAME
+.Nm kspawn
+.Nd make a named group of virtual machines from a klab golden, and take it away again
+.Sh SYNOPSIS
+.Nm
+.Cm spawn
+.Fl -name Ar cluster
+.Fl -distro Ar distro
+.Op Fl -count Ar n
+.Op Fl -cpu Ar n
+.Op Fl -ram Ar mb
+.Op Fl -disk Ar gb
+.Op Fl -role Ar role
+.Nm
+.Cm list
+.Nm
+.Cm status | destroy
+.Ar cluster
+.Nm
+.Cm ssh
+.Ar cluster
+.Op Ar n
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+makes
+.Ar n
+virtual machines at once, each a ZFS clone of one of klab's goldens,
+.Ar pool Ns Pa /vms/klab-golden- Ns Ar distro Ns Pa @golden ,
+so they take no time to copy and no space until they change.
+Each is named
+.Ql kspawn- Ns Ar cluster Ns - Ns Ar NN ,
+gets a cloud-init seed that sets its host name and lets root in with this
+machine's key, and is started on libvirt's
+.Ql default
+network.
+The machines of a cluster are made in parallel.
+.Pp
+What was made is recorded in
+.Pa /var/lib/kspawn/clusters/ Ns Ar cluster Ns Pa /manifest.json ,
+which the other commands read, and in kldload's state database, so the
+Ansible inventory
+.Xr kldload-inventory 8
+sees the nodes at once.
+Each node that got an address is then put on the WireGuard mesh with
+.Xr kldload-enroll 8 .
+.Pp
+A cluster name is lowercase letters, digits and dashes, at most 31
+characters.
+Every command but
+.Fl -help
+re-runs itself with
+.Xr sudo 8 .
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm spawn
+Make the cluster.
+A node that could not be made is removed \(em its clone and its seed \(em
+and its error printed, and the command exits 1.
+A node that is made but has no address after three minutes is kept, and
+shown without one.
+.Bl -tag -width Ds
+.It Fl -name Ar cluster
+Required; must not exist yet.
+.It Fl -distro Ar distro
+Required; one whose golden exists:
+.Ql centos ,
+.Ql rocky ,
+.Ql fedora ,
+.Ql debian
+or
+.Ql ubuntu .
+.It Fl -count Ar n
+Nodes; default 3.
+.It Fl -cpu Ar n
+Virtual CPUs each; default 2.
+.It Fl -ram Ar mb
+Memory each, in MB; default 2048.
+.It Fl -disk Ar gb
+Grow each node's disk to this many GB; the default, 0, keeps the golden's.
+It is never shrunk.
+.It Fl -role Ar role
+The role recorded, and given to the inventory; default
+.Ql worker .
+.El
+.It Cm list
+Every cluster, its distribution, node count and when it was made.
+.It Cm status Ar cluster
+The manifest, then each node's state and address as libvirt sees them now.
+.It Cm ssh Ar cluster Op Ar n
+Log in to node
+.Ar n
+(default 1) as root.
+.It Cm destroy Ar cluster
+Remove every node with
+.Ql kvm-delete Ar node Fl -force
+\(em the machine, its clone, its seed, its row in the state database and
+its mesh peer \(em and then the cluster's record.
+With a
+.Ev POOL
+other than
+.Ql rpool ,
+which
+.Xr kvm-delete 8
+does not know,
+.Nm
+removes the machine, clone, seed and row itself, and not the mesh peer.
+Only what
+.Cm spawn
+would have made for that cluster is touched, whatever the manifest says;
+anything else is reported and left.
+If a step fails the record is kept, so
+.Cm destroy
+can be run again.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev POOL
+The pool holding the goldens and the clones; default
+.Ql rpool .
+.It Ev NETWORK
+The libvirt network; default
+.Ql default .
+.It Ev SSH_KEY
+The key put in the nodes and used by
+.Cm ssh ;
+default
+.Pa /root/.ssh/id_ed25519 ,
+made if missing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kspawn/clusters/ Ns Ar cluster Ns Pa /manifest.json
+The record of a cluster.
+.It Pa /var/lib/libvirt/isos/kspawn- Ns Ar cluster Ns - Ns Ar NN Ns Pa -seed.iso
+A node's cloud-init seed.
+.It Ar pool Ns Pa /vms/kspawn- Ns Ar cluster Ns - Ns Ar NN
+A node's disk.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done; for
+.Cm spawn ,
+every node came up.
+.It 1
+A node or a step failed, or a name or number was refused.
+.It 2
+An unknown command.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, with a throwaway cluster
+.Ql kst ,
+removed afterwards.
+.Xr kldload-enroll 8
+was replaced for the test by one that declines, so no mesh peer was left
+behind.
+.Ss Making a cluster
+.Bd -literal -offset indent
+# kspawn spawn --name kst --distro debian --count 1 --ram 1024
+[kspawn] ══ Spawning cluster 'kst' ══
+[kspawn]   distro=debian runtime=kvm role=worker
+[kspawn]   nodes=1 cpu=2 ram=1024MB disk=0GB
+[kspawn]   registered 1/1 node(s) — visible to kldload-inventory
+[kspawn]   kspawn-kst-01: mesh enrollment incomplete — run 'kldload-enroll kspawn-kst-01'
+[kspawn]   WireGuard: enrolled 0/1 node(s) on the mesh
+[kspawn] ══ Cluster 'kst' ready ══
+
+  kspawn-kst-01                    192.168.122.150
+
+[kspawn] Manifest: /var/lib/kspawn/clusters/kst/manifest.json
+[kspawn] SSH into a node: kspawn ssh kst 1
+# (exited 0)
+.Ed
+.Ss Looking at it
+.Bd -literal -offset indent
+# kspawn list
+  kst                  debian     kvm          1 nodes   2026-09-30T00:59:17-07:00
+# (exited 0)
+# kspawn status kst
+[kspawn] Cluster: kst
+  {
+    "cluster": "kst",
+    "distro": "debian",
+    "runtime": "kvm",
+    "role": "worker",
+    "created": "2026-09-30T00:59:17-07:00",
+    "nodes": [
+      {"name":"kspawn-kst-01","zvol":"rpool/vms/kspawn-kst-01","seed":"/var/lib/libvirt/isos/kspawn-kst-01-seed.iso","ip":"192.168.122.150"}
+    ]
+  }
+
+[kspawn] Live node state:
+  kspawn-kst-01                    running      192.168.122.150
+# (exited 0)
+.Ed
+.Ss Running something on a node
+.Bd -literal -offset indent
+# echo 'hostname; uptime' | kspawn ssh kst 1
+Pseudo-terminal will not be allocated because stdin is not a terminal.
+Warning: Permanently added '192.168.122.150' (ED25519) to the list of known hosts.
+Linux kspawn-kst-01 6.12.107+deb13-cloud-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.107-1 (2026-08-29) x86_64
+\&...
+kspawn-kst-01
+ 08:00:01 up 0 min,  1 user,  load average: 0.00, 0.00, 0.00
+# (exited 0)
+.Ed
+.Pp
+The lines left out are the golden's login banner.
+.Ss Taking it away
+A second cluster of two nodes, made the same way:
+.Bd -literal -offset indent
+# kspawn destroy kst
+[kspawn] Destroying cluster 'kst'...
+[kspawn]   kvm-delete kspawn-kst-01 --force
+Force-stopping VM (running)...
+Removing VM definition...
+Destroying ZFS zvol: rpool/vms/kspawn-kst-01
+
+Deleted 'kspawn-kst-01'
+[kspawn]   kvm-delete kspawn-kst-02 --force
+Force-stopping VM (running)...
+Removing VM definition...
+Destroying ZFS zvol: rpool/vms/kspawn-kst-02
+
+Deleted 'kspawn-kst-02'
+[kspawn] Cluster 'kst' destroyed.
+# (exited 0)
+.Ed
+.Ss A node that fails
+Before the fix to the seed's bus, on the same machine:
+.Bd -literal -offset indent
+# kspawn spawn --name kst --distro debian --count 1 --ram 1024
+\&...
+[kspawn]   node-1 failed:
+      [kspawn]   [kspawn-kst-01] cloning from rpool/vms/klab-golden-debian@golden...
+      [kspawn]   [kspawn-kst-01] virt-install (2 CPU, 1024MB, debian12)...
+      ERROR    unsupported configuration: IDE controllers are unsupported for this QEMU binary or machine type
+\&...
+      [kspawn]   [kspawn-kst-01] virt-install failed (its message is above); removing its clone and seed
+.Ed
+.Ss What it refuses
+In a Fedora 44 container.
+The last manifest was written by hand to name things
+.Nm
+did not make:
+.Bd -literal -offset indent
+# kspawn destroy ../..
+[kspawn] FATAL: cluster name must be lowercase letters, digits and dashes, 1-31 long: '../..'
+# (exited 1)
+# kspawn spawn --name web --distro debian --count three
+[kspawn] FATAL: --count needs a whole number, got 'three'
+# (exited 1)
+# kspawn destroy empty
+[kspawn] FATAL: no manifest in /var/lib/kspawn/clusters/empty; nothing is destroyed without one (remove the directory by hand)
+# (exited 1)
+# kspawn destroy evil
+[kspawn] Destroying cluster 'evil'...
+[kspawn]   manifest names 'important-vm', which is not a node of evil; left alone
+[kspawn]   manifest names zvol 'rpool/data', which is not one spawn makes; left alone
+[kspawn] 2 step(s) failed; the manifest is kept at /var/lib/kspawn/clusters/evil so destroy can be run again
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr ssh 1 ,
+.Xr virt-install 1 ,
+.Xr klab 8 ,
+.Xr kldload-db 8 ,
+.Xr kldload-enroll 8 ,
+.Xr kldload-inventory 8 ,
+.Xr kvm-clone 8 ,
+.Xr zfs-clone 8
+.Sh HISTORY
+It was written as the first of several runtimes; only KVM was ever
+built, and
+.Fl -runtime
+accepts only
+.Ql kvm .
+.Pp
+On 2026-09-30, writing this page, it was found that no cluster could ever
+have been made: a clone that
+worked was taken for one that failed, the seed needed a program Fedora
+does not ship and was attached to a controller the machine does not
+have, and
+.Cm ssh
+used the node's name as its address.
+.Cm destroy
+left each node's mesh peer on the host; it uses
+.Xr kvm-delete 8
+since.
+In a container,
+.Ql kspawn destroy ../../libvirt
+removed
+.Pa /var/lib/libvirt ,
+said the cluster was destroyed, and exited 0; names are checked since.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Root on every node accepts this machine's key, and
+.Cm ssh
+does not check the node's host key.
+.Pp
+The goldens are klab's; without
+.Ql klab golden Ar distro
+there is nothing to clone.

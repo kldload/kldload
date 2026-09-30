@@ -1,0 +1,100 @@
+.Dd September 30, 2026
+.Dt KLAB-VM-DEBUG-BUNDLE 8
+.Os
+.Sh NAME
+.Nm klab-vm-debug-bundle
+.Nd capture a lab test machine's ZFS and kernel state as a bundle and an OpenZFS issue ready to file
+.Sh SYNOPSIS
+.Nm
+.Ar distro run-id
+.Op Ar address
+.Op Fl -deep
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+When a lab test run goes wrong,
+.Nm
+connects to the test machine
+.Ql klab-test- Ns Ar distro
+\(em at
+.Ar address ,
+or the one libvirt knows for it \(em and collects, each command under a
+timeout and several at once, in under a minute:
+the kernel, its command line, modules and DKMS state;
+.Ql zfs version ,
+pool status, events and history, every property of every dataset, a
+15-second per-device I/O sample,
+.Ql zdb -C
+and
+.Ql zdb -h ;
+every ZFS module parameter and kstat; the kernel log and the last two
+hours of the journal; every process, and the kernel stack of every task in
+uninterruptible sleep; the disks' SMART data; the installed packages; and
+the host's side of the test.
+A section that fails is marked in its file and the rest goes on: a
+partial bundle is more use than none.
+.Pp
+It writes the bundle as a tar archive and fills in an issue template for
+the OpenZFS tracker with the kernel, ZFS version, counts and last test.
+.Xr klab 8
+runs it when a run ends with failures, and when its watchdog finds a
+test's log has stopped growing, before killing the test.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -deep
+Also a 30-second
+.Xr perf 1
+profile with folded stacks, and 30 seconds of ZFS tracepoints.
+.It Fl h , Fl -help
+Print the header comment and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/klab/ Ns Ar run-id Ns Pa / Ns Ar distro Ns Pa -debug-bundle.tar.gz
+The bundle; its path is printed on standard output.
+.It Pa /root/klab/ Ns Ar run-id Ns Pa / Ns Ar distro Ns Pa -ISSUE.md
+The issue, ready to paste.
+.El
+.Sh EXIT STATUS
+0 when the bundle is written; 1 when the machine has no address, which
+still writes a bundle saying so; 2 when
+.Ar distro ,
+.Ar run-id
+or
+.Ar address
+is not usable.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+$ klab-vm-debug-bundle debian ../../etc
+klab-vm-debug-bundle: not a usable distro or run id: ../../etc
+# (exited 2)
+$ klab-vm-debug-bundle debian 20260930-0100 '1.2.3.4 -oProxyCommand=id'
+klab-vm-debug-bundle: not an IP address: 1.2.3.4 -oProxyCommand=id
+# (exited 2)
+.Ed
+.Pp
+Collecting; not run for this page, as no test machine was up:
+.Bd -literal -offset indent
+# klab-vm-debug-bundle debian <run-id> --deep
+.Ed
+.Sh SEE ALSO
+.Xr klab 8 ,
+.Xr kzfs-test 8 ,
+.Xr zdb 8 ,
+.Xr zpool-events 8
+.Sh HISTORY
+On 2026-09-30, writing this page: a run with no failures put
+.Dq 0
+twice, on two lines, into the bundle's
+.Pa meta.json ,
+which then was not JSON; and the run id and address went unchecked into
+paths and an ssh command line.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It logs in to the test machine as root with the lab's fixed password and
+does not check its host key; the lab's machines are built to be thrown
+away.

@@ -1,0 +1,227 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-SNAPSHOTS 7
+.Os
+.Sh NAME
+.Nm kldload-snapshots
+.Nd which ZFS snapshots a kldload machine takes by itself, when, how many it keeps, and what they are for
+.Sh DESCRIPTION
+A kldload machine snapshots its running boot environment before every
+package transaction and every hour, and its
+.Pa /srv
+every fifteen minutes, and prunes each kind to a fixed number.
+Those snapshots are what
+.Xr kldload-rollback 8
+turns into a boot environment when an update goes wrong.
+.Pp
+Each snapshot's name says who took it:
+.Ar dataset Ns @ Ns Ar kind Ns - Ns Ar YYYYMMDD Ns - Ns Ar HHMMSS .
+.Bl -column "apt-pre, apt-post" "running boot environment" "keep" -offset indent
+.It Sy kind Ta Sy of Ta Sy keep Ta Sy taken by
+.It apt-pre, apt-post Ta running boot environment Ta 10 Ta
+apt, before and after each transaction
+.It dnf-pre Ta running boot environment Ta 10 Ta
+.Ql dnf
+and
+.Ql yum ,
+before each transaction that changes the system
+.It kpkg Ta running boot environment Ta 10 Ta
+.Xr kpkg 8 ,
+where the wrapper below is absent
+.It auto Ta running boot environment Ta 48 Ta
+.Xr kldload-snapshot 8 ,
+hourly
+.It srv Ta Ar pool Ns /srv Ta 4 Ta
+every 15 minutes
+.It manual Ta any Ta 10 Ta
+.Ql snapshot-create.sh manual Op Ar dataset
+.El
+.Pp
+The newest are kept; each taker prunes its own kind after taking one.
+A snapshot that a boot environment was cloned from \(em every one a
+rollback used \(em cannot be destroyed while the clone exists, and is kept
+and said so, not counted as removed.
+.Pp
+Snapshots kldload does not take \(em
+.Xr sanoid 8 Ns 's
+.Ql autosnap_ ,
+the install snapshot, anything made by hand \(em are neither pruned nor
+judged by any of this.
+.Ss How the transactions are caught
+On Debian and Ubuntu, apt's own hooks,
+.Pa /etc/apt/apt.conf.d/00-kldload-snapshot-pre
+and
+.Pa -post ,
+run
+.Ql snapshot-create.sh apt-pre
+and
+.Ql apt-post ;
+they fire for anything that runs apt or dpkg.
+On every family,
+.Pa /usr/local/bin/apt
+and
+.Pa dnf
+are
+.Pa kldload-pkg-wrapper ,
+which takes the pre-transaction snapshot for the verbs that change the
+system and then runs the real tool with the arguments untouched; and adds
+.Ql apt rollback
+and
+.Ql dnf rollback ,
+which are
+.Xr kldload-rollback 8 .
+A pre-transaction snapshot that fails does not stop the transaction:
+apt's hook and the wrapper both say, loudly, that it goes ahead without a
+rollback point.
+Two apt hooks asking for the same name in one second is not a failure; the
+snapshot is reused.
+.Ss The tools
+.Bl -tag -width Ds
+.It Nm snapshot-create.sh Ar kind Op Ar dataset
+Take one snapshot of
+.Ar kind
+.Po
+.Ql apt-pre ,
+.Ql apt-post ,
+.Ql dnf-pre ,
+.Ql dnf-post ,
+.Ql srv
+or
+.Ql manual ,
+the default
+.Pc ,
+then prune that kind.
+.Ar dataset
+is for
+.Ql manual
+only.
+A dataset that does not exist is skipped with exit 0; an unknown kind is
+exit 1.
+.It Nm snapshot-prune.sh Ar dataset Ar prefix Ar keep
+Destroy the oldest snapshots of
+.Ar dataset
+whose names start
+.Ar prefix ,
+leaving
+.Ar keep .
+It exits 0 when a snapshot cannot be destroyed, and says which and why:
+it runs inside the package manager's hook, where a failure would stop the
+install.
+.It Nm snapshot-policy.sh Op Fl v
+For the running boot environment and
+.Ar pool Ns /srv ,
+one line per kind: count, limit, oldest, newest, and whether it is over;
+and one line counting the snapshots kldload does not manage.
+.Fl v
+lists the managed ones.
+Exit 1 when a kind is over its limit.
+.El
+.Pp
+All three log to
+.Pa /var/log/kldload/snapshots.log
+and need root.
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_ROOT_SNAP_KEEP
+How many hourly
+.Ql auto
+snapshots
+.Xr kldload-snapshot 8
+keeps; default 48.
+.It Ev KLDLOAD_LOG_DIR
+Log somewhere other than
+.Pa /var/log/kldload ;
+for tests.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/kldload/snapshots.log
+What was taken and pruned, and why a prune kept something.
+.It Pa /etc/apt/apt.conf.d/00-kldload-snapshot-pre , Pa 00-kldload-snapshot-post
+apt's hooks.
+.It Pa kldload-snapshot.timer , Pa kldload-srv-snapshot.timer
+The hourly and fifteen-minute takers.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30.
+.Ss What the machine has
+.Bd -literal -offset indent
+# snapshot-policy.sh
+DATASET                      KIND               COUNT LIMIT  OLDEST           NEWEST           STATE
+rpool/ROOT/onyx              auto                  35    48  2026-09-28 15:00 2026-09-30 01:00 ok
+rpool/ROOT/onyx              dnf-pre               10    10  2026-09-20 10:06 2026-09-27 10:38 ok
+rpool/ROOT/onyx              kpkg                   3    10  2026-08-30 07:07 2026-09-19 23:17 ok
+rpool/ROOT/onyx              (not kldload's)       17     -  sanoid, the install snapshot, or by hand -- not judged here
+rpool/srv                    srv                    4     4  2026-09-30 00:57 2026-09-30 01:42 ok
+rpool/srv                    (not kldload's)       17     -  sanoid, the install snapshot, or by hand -- not judged here
+# (exited 0)
+.Ed
+.Ss A snapshot a clone was made from
+On a throwaway dataset with four
+.Ql apt-pre
+snapshots, the oldest cloned, pruned to two:
+.Bd -literal -offset indent
+# snapshot-prune.sh rpool/prtest-4056666 apt-pre 2
+\&...
+2026-09-30T01:45:56 [snapshot-prune] Kept: rpool/prtest-4056666@apt-pre-20260101-000000 -- a boot environment or clone was made from it
+2026-09-30T01:45:56 [snapshot-prune] Deleted: rpool/prtest-4056666@apt-pre-20260102-000000
+2026-09-30T01:45:56 [snapshot-prune] Prune complete: 1 deleted, 1 kept (cloned from), 0 failed; 3 remain
+.Ed
+.Ss Two takers in one second
+Two
+.Ql manual
+snapshots of a throwaway dataset started together:
+.Bd -literal -offset indent
+2026-09-30T01:46:18 [snapshot-create] Creating snapshot: rpool/sctest-4058657@manual-20260930-014618
+2026-09-30T01:46:18 [snapshot-create] Creating snapshot: rpool/sctest-4058657@manual-20260930-014618
+2026-09-30T01:46:18 [snapshot-create] Snapshot created: rpool/sctest-4058657@manual-20260930-014618
+2026-09-30T01:46:18 [snapshot-create] Snapshot rpool/sctest-4058657@manual-20260930-014618 already exists (two apt hooks in one second) — reusing it
+.Ed
+.Ss Over the limit
+A throwaway dataset with twelve
+.Ql dnf-pre
+snapshots, standing in for the root:
+.Bd -literal -offset indent
+rpool/pptest-4074087         dnf-pre               12    10  2026-09-30 01:47 2026-09-30 01:47 OVER LIMIT
+\&...
+1 kind(s) over the limit. The next snapshot of that kind prunes it; to prune now:
+  snapshot-prune.sh <dataset> <kind>- <limit>
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr kldload-rollback 8 ,
+.Xr kldload-snapshot 8 ,
+.Xr kpkg 8 ,
+.Xr ksnap 8 ,
+.Xr sanoid 8 ,
+.Xr zfs-snapshot 8
+.Sh HISTORY
+On 2026-09-20 a pre-transaction snapshot that failed on a duplicate name
+aborted the apt transaction that was to install Ansible, and with it a
+whole Kubernetes cluster's first boot; the hooks warn and go on since.
+On 2026-09-26 the hourly snapshots were found never pruned.
+.Pp
+On 2026-09-30, writing this page: a prune counted a snapshot it could not
+destroy as removed; the policy report listed 6,200 lines on a desktop and
+called a backup replica over the limit; and a failed snapshot's error was
+written to a fixed name in
+.Pa /tmp .
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Nothing takes
+.Ql dnf-post
+snapshots; the kind exists for the day something does.
+.Pp
+Fifteen-minute
+.Pa /srv
+snapshots kept four deep are one hour of history.
+Longer is
+.Xr sanoid 8 Ns 's
+job.
+.Pp
+Only the running boot environment is snapshotted before a transaction:
+a package that writes under
+.Pa /home
+or
+.Pa /srv
+is not undone by rolling back.

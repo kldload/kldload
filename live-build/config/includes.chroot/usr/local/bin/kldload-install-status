@@ -24,6 +24,7 @@
 #          at /root/kldload-install-logs/autoinstall.log on the installed system
 # Outputs: one line on stdout. --watch repaints until the install finishes.
 # Exit   : 0 running or finished cleanly · 1 the install FAILED · 2 usage
+#          · 3 the log exists but cannot be read here (run as root)
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 
@@ -43,6 +44,7 @@ usage: kldload-install-status [-w|--watch] [-v|--verbose]
 
 EXIT STATUS
   0  running, or finished cleanly   1  the install failed   2  usage
+  3  the install log cannot be read here (run as root)
 EOF
     exit "$rc"
 }
@@ -78,7 +80,26 @@ _plain() { sed -e 's/\x1b\[[0-9;]*m//g'; }
 # read -- a status tool that invents a number is worse than one that omits it.
 _line() {
     local log phase done_n what pkgs alloc since now el rc=0
+    # An installed machine is not installing. Read as if it were, onyx said
+    # "[1/6] starting · 2323 pkgs · 1.61T · 43952m23s" a month after its
+    # install: the host's own packages, the pool as it is today, and a month
+    # as the elapsed time (2026-09-30). Its install is over; say when.
+    if [[ ! -d /run/initramfs/live ]] && grep -qs '^KLDLOAD_INSTALLED=1' /etc/kldload/install-manifest.env; then
+        local d p w
+        d="$(sed -n 's/^KLDLOAD_DISTRO="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/kldload/install-manifest.env)"
+        p="$(sed -n 's/^KLDLOAD_PROFILE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/kldload/install-manifest.env)"
+        w="$(sed -n 's/^KLDLOAD_INSTALL_DATE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/kldload/install-manifest.env)"
+        printf 'installed%s%s%s — nothing is installing now\n' "${d:+ ${d}}" "${p:+ ${p}}" "${w:+ on ${w}}"
+        return 0
+    fi
     log="$(_log)" || {
+        # Absent and unreadable are different answers. As a user the copy
+        # under /root, and the manifest, cannot even be looked at, and this said
+        # "nothing has run on this machine" on onyx (2026-09-30).
+        if ((EUID != 0)); then
+            printf 'no install log readable as %s — run as root\n' "$(id -un)" >&2
+            return 3
+        fi
         printf 'no install log found — nothing has run on this machine\n'
         return 0
     }

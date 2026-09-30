@@ -1,0 +1,88 @@
+.Dd September 30, 2026
+.Dt KUBE-DEMO-IMAGE 8
+.Os
+.Sh NAME
+.Nm kube-demo-image
+.Nd build the demo storefront's image here and put it on every node of the cluster
+.Sh SYNOPSIS
+.Nm
+.Op Ar tag
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The demo's application image is built on this machine, not pulled from a
+registry, so the demo runs with the network unplugged.
+.Nm :
+.Bl -enum -compact
+.It
+compiles the application's Python, and checks its JavaScript's syntax in
+a Node container when that image is present \(em saying the check was
+skipped when it is not;
+.It
+builds
+.Ql localhost/kldload-demo: Ns Ar tag
+with
+.Xr podman 1 ,
+default tag
+.Ql 1.0.0 ,
+and imports the application inside the built image, which catches what
+compiling cannot;
+.It
+saves it as one OCI archive and copies it to every node over ssh,
+importing it into containerd's
+.Ql k8s.io
+namespace, where the kubelet looks, on all nodes at once;
+.It
+asks each node whether it has the image, and names every node that does
+not.
+.El
+.Pp
+The demo's chart asks for the image with
+.Ql imagePullPolicy: Never ,
+so a node without it fails at once rather than trying a registry.
+It runs itself under
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev DEMO_DIR
+Default
+.Pa /usr/local/share/kldload/demo .
+.It Ev KUBECONFIG
+Default
+.Pa /root/.kube/config .
+.El
+.Sh EXIT STATUS
+0 when every node has the image; 1 on a failure, named; 2 when
+.Ar tag
+is not an image tag.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+$ kube-demo-image '1.0'\e''; id'
+[demo-image] not an image tag: 1.0'; id
+# (exited 2)
+.Ed
+.Pp
+Building; not run for this page, since there was no cluster:
+.Bd -literal -offset indent
+# kube-demo-image 1.0.1
+.Ed
+.Sh SEE ALSO
+.Xr podman 1 ,
+.Xr ctr 8 ,
+.Xr kube-demo 8 ,
+.Xr kube-demo-publish 8
+.Sh HISTORY
+The demo pulled its application from Docker Hub until those tags were
+removed upstream and every new install's demo broke.
+On 2026-09-30, writing this page: the tag went unchecked into a command
+every node runs as root.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com

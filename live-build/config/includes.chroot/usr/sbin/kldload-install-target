@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# --help answers first (rule 9): before the EXIT trap, the pkexec re-exec and
+# the log directory below. It was answered only in main(), after pkexec, so
+# asking how to use the installer asked for a password, and as a user it died
+# on mkdir /var/log/installer (the sandboxed --help capture, 2026-09-30).
+usage() {
+    cat <<'EOU'
+Usage:
+  kldload-install-target --config /path/to/answers.env
+  kldload-install-target --guided
+EOU
+}
+for _a in "$@"; do
+    if [[ "$_a" == -h || "$_a" == --help ]]; then
+        usage
+        exit 0
+    fi
+done
+
 # Emergency cleanup — unmount /target if we abort mid-install.
 #
 # Trap is EXIT-only, intentionally NOT ERR. With `set -E` + nested $(...)
@@ -1969,14 +1987,6 @@ cleanup() {
     umount -lf "${KLDLOAD_TARGET_MNT}" 2>/dev/null || true
     [[ "$rc" -ne 0 ]] && k_log "Install FAILED (exit ${rc})"
     return "$rc"
-}
-
-usage() {
-    cat <<'EOU'
-Usage:
-  kldload-install-target --config /path/to/answers.env
-  kldload-install-target --guided
-EOU
 }
 
 # ── UI helpers ────────────────────────────────────────────────────────────────

@@ -27,6 +27,19 @@ if [[ -f "${MANIFEST}" ]] && grep -q 'KLDLOAD_INSTALLED=1' "${MANIFEST}" 2>/dev/
     echo "kldload-poof only runs in live mode. Installed systems use ZFS encryption and boot environments." >&2
     exit 1
 fi
+# SAFETY: and it must SEE a live boot, not merely miss the installed marker.
+# What follows shreds the CA root key (the TLS root and the Secure Boot signing
+# key), blanks WireGuard keys and stops sshd; with only the negative test, an
+# installed machine whose manifest was missing or damaged read as live
+# (2026-09-30, read against the code). Every kldload live boot, from the ISO
+# or the netboot server, has root=live: and rd.live.image on its command
+# line, and dracut mounts the medium at /run/initramfs/live.
+_cmdline="$(cat "${KLDLOAD_POOF_CMDLINE:-/proc/cmdline}" 2>/dev/null || true)" # the variable is for tests
+if [[ " ${_cmdline} " != *" rd.live.image "* && " ${_cmdline} " != *" root=live:"* &&
+    ! -d "${KLDLOAD_POOF_LIVEDIR:-/run/initramfs/live}" ]]; then
+    echo "kldload-poof: this is not a live boot (no rd.live.image or root=live: on the kernel command line); refusing" >&2
+    exit 1
+fi
 
 log "Starting live session scrub"
 SCRUBBED=()
@@ -51,7 +64,9 @@ fi
 
 # ── 2. In-memory SSH host keys ─────────────────────────────────────────────────
 
-log "Scrubbing SSH host keys..."
+# The host keys themselves stay: they are the live image's, the same on every
+# boot of it. This stops the daemon; the log said "Scrubbing SSH host keys".
+log "Stopping SSH (the live image's host keys are not removed)..."
 ssh-keygen -R localhost 2>/dev/null || true
 if systemctl stop ssh 2>/dev/null || systemctl stop sshd 2>/dev/null; then
     log "  SSH daemon stopped"
@@ -110,9 +125,14 @@ SCRUBBED+=("fs:sync")
 # ── 7. Drop page cache ────────────────────────────────────────────────────────
 
 log "Dropping page cache..."
-echo 3 >/proc/sys/vm/drop_caches
-SCRUBBED+=("mem:drop_caches")
-log "  Page cache dropped"
+# A failure here is reported and the summary still printed: it was the last
+# step, and under set -e it hid everything already done.
+if { echo 3 >/proc/sys/vm/drop_caches; } 2>/dev/null; then
+    SCRUBBED+=("mem:drop_caches")
+    log "  Page cache dropped"
+else
+    log "  WARNING: could not drop the page cache (read-only /proc/sys?)"
+fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
@@ -123,4 +143,4 @@ for item in "${SCRUBBED[@]}"; do
 done
 log "────────────────────────────────────────────────"
 echo ""
-echo "Live session scrubbed. All ephemeral keys and credentials have been cleared."
+echo "Live session scrubbed: ${#SCRUBBED[@]} item(s), listed above and in ${LOG_FILE}."

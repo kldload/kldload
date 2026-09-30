@@ -4192,7 +4192,7 @@ fi
 if command -v mokutil >/dev/null 2>&1; then
     mokutil --revoke-import 2>/dev/null && echo "  Pending MOK imports cleared" || true
     mokutil --revoke-delete 2>/dev/null && echo "  Pending MOK deletes cleared" || true
-    ENROLLED=$(mokutil --list-enrolled 2>/dev/null | grep -c 'SHA1' || echo 0)
+    ENROLLED=$(mokutil --list-enrolled 2>/dev/null | grep -c 'SHA1' || true)
     echo "  MOK keys enrolled: $ENROLLED (preserved for Secure Boot)"
 fi
 """
@@ -6336,13 +6336,11 @@ def _get_ssl_context():
     Returns None on any failure (falls back to plain HTTP).
 
     kldload-tls-cert writes webui.crt + webui.key to /var/lib/kldload/tls/
-    and echoes the concatenated PEM blocks on stdout. The script's side
-    effect is what we care about — we load straight from the on-disk
-    files, which is simpler and avoids trying to split `-----BEGIN …`
-    blocks out of the echo'd blob. (The previous logic tried to parse
-    stdout as `key_path crt_path` which never matched — kldload-tls-cert
-    prints PEM content, not paths — so every boot silently fell back to
-    HTTP and the browser could not connect after caching the https URL.)
+    and, since 2026-09-30, prints nothing unless given --emit. The pair is
+    loaded straight from those files. (An earlier version parsed stdout as
+    `key_path crt_path`, which never matched -- the tool printed PEM, not
+    paths -- so every boot silently fell back to HTTP and the browser could
+    not connect after caching the https URL.)
     """
     crt_dir = os.environ.get("KLDLOAD_TLS_CERT_DIR", "/var/lib/kldload/tls")
     crt_path = f"{crt_dir}/webui.crt"

@@ -21,6 +21,10 @@
 # Reliable path is BYOL: point --iso at your own Win11/Server media (path or URL).
 # The default eval auto-fetch depends on Microsoft's endpoints (Mido tracks them).
 set -euo pipefail
+# The system libvirt, whoever runs this: plain virsh as a user asks that user's
+# session libvirt, where --self-test found "network 'default' not found" on
+# onyx (2026-09-30), the same class fixed in kldload-networks and others.
+export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 POOL="${KVMWIN_POOL:-rpool/vms}" # ZFS parent for golden + VM zvols
@@ -280,8 +284,22 @@ build_golden() {
 }
 
 # ── Per-VM (instant ZFS clone of the golden) ─────────────────────────────────
+# SAFETY: kvm-win touches only zvols it made, which carry this property.
+# create used to `zfs destroy -r` any existing rpool/vms/NAME before cloning
+# (when no domain had that name), and destroy --purge destroyed rpool/vms/NAME
+# for any NAME -- another VM's disk, an appliance's data, a klab golden. Read
+# against the code 2026-09-30; the same shape as the kvm-demo wipe of
+# 2026-09-29. A VM made before the mark existed has none: its zvol is left for
+# `zfs destroy` by hand.
+KVMWIN_MARK="com.kldload:kvm-win"
+_valid_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "not a usable VM name: '$1'"
+}
+_is_ours() { [[ "$(zfs get -H -o value "$KVMWIN_MARK" "$1" 2>/dev/null)" =~ ^(win11|server)$ ]]; }
+
 create_vm() {
     local name="$1" os="$2" ram="$3" cpus="$4" disk="$5"
+    _valid_name "$name"
     _validate_os "$os"
     check_prereqs
     local gz
@@ -291,8 +309,13 @@ create_vm() {
     ram="${ram:-${RAM[$os]}}"
     cpus="${cpus:-2}"
     local clone="${POOL}/${name}" vars="${WORK}/${name}-VARS.fd"
-    zfs list "$clone" >/dev/null 2>&1 && zfs destroy -r "$clone" 2>/dev/null || true
-    zfs clone "${gz}@golden" "$clone"
+    if zfs list "$clone" >/dev/null 2>&1; then
+        # Only a leftover of our own failed create is cleared; anything else
+        # with that name is somebody's disk.
+        _is_ours "$clone" || die "${clone} exists and kvm-win did not make it — pick another name"
+        zfs destroy -r "$clone" || die "could not clear the leftover ${clone}"
+    fi
+    zfs clone -o "${KVMWIN_MARK}=${os}" "${gz}@golden" "$clone"
     cp -f "$OVMF_VARS" "$vars"
     log "spawning ${name} (${os}, ${ram}MB/${cpus}vcpu) as an instant clone of ${gz}@golden"
     virt-install --name "$name" --memory "$ram" --vcpus "$cpus" --machine q35 \
@@ -319,10 +342,21 @@ demo_sccm() {
 }
 
 destroy_vm() {
-    local name="$1" purge="$2"
-    virsh destroy "$name" 2>/dev/null || true
-    virsh undefine "$name" --nvram 2>/dev/null || true
-    [[ "$purge" == "--purge" ]] && zfs destroy -r "${POOL}/${name}" 2>/dev/null || true
+    local name="$1" purge="$2" z
+    _valid_name "$name"
+    z="${POOL}/${name}"
+    if [[ "$purge" == "--purge" ]] && zfs list "$z" >/dev/null 2>&1 && ! _is_ours "$z"; then
+        die "${z} was not made by kvm-win (no ${KVMWIN_MARK}); nothing destroyed"
+    fi
+    # WHY || true: destroy fails on a VM that is already off; undefine is the
+    # step that matters, and it is checked.
+    virsh destroy "$name" >/dev/null 2>&1 || true
+    if virsh dominfo "$name" >/dev/null 2>&1; then
+        virsh undefine "$name" --nvram >/dev/null || die "could not undefine ${name}"
+    fi
+    if [[ "$purge" == "--purge" ]] && zfs list "$z" >/dev/null 2>&1; then
+        zfs destroy -r "$z" || die "could not destroy ${z}"
+    fi
     ok "destroyed ${name}${purge:+ (zvol purged)}"
 }
 
@@ -412,9 +446,21 @@ demo)
     demo_sccm
     ;;
 list)
-    virsh list --all | grep -iE 'win-|Name|---' || true
-    echo
-    zfs list -r "$POOL" 2>/dev/null | grep -iE 'win-|NAME' || true
+    # By the mark, not by a "win-" in the name: `kvm-win create myvm` never
+    # showed here (2026-09-30). Goldens are win-<os>-golden; VMs carry the mark.
+    printf '%-24s %-8s %-10s %s\n' NAME OS STATE ZVOL
+    for _g in win11 server; do
+        _z="$(golden_zvol "$_g")"
+        zfs list -H -o name "${_z}@golden" >/dev/null 2>&1 &&
+            printf '%-24s %-8s %-10s %s\n' "(golden)" "$_g" "-" "${_z}@golden"
+    done
+    while IFS=$'\t' read -r _z _os; do
+        [[ "$_os" =~ ^(win11|server)$ ]] || continue
+        _n="${_z##*/}"
+        _st=undefined
+        virsh dominfo "$_n" >/dev/null 2>&1 && _st="$(virsh domstate "$_n" 2>/dev/null | head -1)"
+        printf '%-24s %-8s %-10s %s\n' "$_n" "$_os" "$_st" "$_z"
+    done < <(zfs get -H -r -t volume -o name,value "$KVMWIN_MARK" "$POOL" 2>/dev/null)
     ;;
 destroy)
     name="${1:-}"

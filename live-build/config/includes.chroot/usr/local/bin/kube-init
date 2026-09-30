@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # kube-init — bootstrap a Kubernetes control plane with Cilium CNI
 # Run on the first control plane node after kube-setup
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kube-init: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate to root
 # --help answers before the root re-exec: asking what a tool does must never
@@ -29,8 +30,8 @@ Environment:
   CILIUM_VERSION      Default: whatever this ISO locked at build time.
   METALLB_VERSION     Default: the lock's metallb chart; 0.14.9 without a lock.
   METALLB_POOL        address range for MetalLB, e.g. 192.168.122.240-250.
-                      EMPTY by default, which means MetalLB is not configured
-                      and a LoadBalancer service will stay pending.
+                      Empty by default, which takes .200-.220 of this node's
+                      /24 (e.g. 192.168.122.200-192.168.122.220).
   METALLB_POOL_NAME   Default kldload-pool.
   KUBE_VIP_ADDRESS    the floating apiserver VIP. Empty by default, in which
                       case this node's own address is used and there is no
@@ -160,8 +161,13 @@ snapshot_before_init() {
         pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
         if [[ -n "$pool" ]]; then
             local snap="${pool}@pre-kube-init-$(date -u +%Y%m%dT%H%M%SZ)"
-            zfs snapshot -r "$snap" 2>/dev/null || true
-            log "ZFS snapshot created: $snap (rollback point)"
+            # A failed snapshot is said, not logged as created (2026-09-30,
+            # the same line kube-reset and kube-join had).
+            if zfs snapshot -r "$snap"; then
+                log "ZFS snapshot created: $snap (rollback point)"
+            else
+                warn "could not take $snap -- there is no rollback point for this init"
+            fi
         fi
     fi
 }

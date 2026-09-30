@@ -1,0 +1,181 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-HBA 8
+.Os
+.Sh NAME
+.Nm kldload-hba
+.Nd report the storage controllers, their firmware and the drives behind them, without vendor tools
+.Sh SYNOPSIS
+.Nm
+.Op Cm status | drives | enclosures | json
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+Before a pool is trusted to a machine, its storage controllers' firmware
+matters, and the programs that normally report it for SAS and RAID cards
+are proprietary downloads that a darksite mirror may not carry.
+.Nm
+reports everything the kernel itself knows, from
+.Pa /sys ,
+.Xr lspci 8
+and
+.Xr smartctl 8 ,
+and says what only a vendor tool could add.
+It changes nothing: it never writes to a controller, and it does not
+flash firmware.
+.Pp
+Controllers are found by PCI class \(em SCSI, RAID, SAS, SATA and NVMe \(em
+never by vendor name.
+A machine with no SAS or RAID card, which is every desktop board, is
+normal, and said so.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm status
+The default.
+Each storage controller with its PCI address, class, driver and name; for
+each SCSI host under it, the firmware and BIOS versions and board name
+where the driver exposes them, and whether the card is in IT or RAID mode,
+inferred from which driver took it; otherwise the number of drives behind
+it.
+Then the SES enclosures, and what cannot be known without a vendor tool.
+.It Cm drives
+Every physical drive: its most specific
+.Pa /dev/disk/by-id
+name, model, serial, firmware revision and SMART health, and a count.
+Volumes, loop, RAM, device-mapper and optical devices are left out.
+Serial, firmware and health need
+.Xr smartctl 8 ,
+and so need root.
+.It Cm enclosures
+For each SES enclosure, each slot, the drive in it and the slot's status:
+which bay holds which disk.
+.It Cm json
+Controllers, drives and enclosures as one JSON object on standard output,
+for an inventory or a label printer.
+Every text field is escaped.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help , Cm help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev SYS_PCI , Ev SYS_HOST , Ev SYS_ENCL
+Read these instead of
+.Pa /sys/bus/pci/devices ,
+.Pa /sys/class/scsi_host
+and
+.Pa /sys/class/enclosure ;
+for testing against a copy.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+The report ran.
+.It 1
+A step failed.
+.It 2
+An unknown command.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30.
+.Ss A desktop board
+.Bd -literal -offset indent
+# kldload-hba status
+CONTROLLERS
+  0000:01:00.0 NVMe  nvme           Samsung Electronics Co Ltd NVMe SSD Controller PM9A1/PM9A3
+  0000:02:00.1 SATA  ahci           Advanced Micro Devices, Inc. [AMD] 500 Series Chipset SATA
+      host0    0 drive(s); this driver exposes no firmware version in sysfs
+\&...
+      host5    0 drive(s); this driver exposes no firmware version in sysfs
+  0000:38:00.0 NVMe  nvme           Sandisk Corp WD Black SN850X NVMe SSD (rev 01)
+
+ENCLOSURES
+  none (no SES backplane — expected on a desktop board)
+
+WHAT THIS CANNOT TELL YOU
+  No SAS/RAID HBA on this machine, so there is no vendor firmware to read.
+# (exited 0)
+.Ed
+.Ss Drives, without their serial numbers
+.Cm drives
+prints serials, and by-id names that contain them; this page does not.
+The same facts, from the JSON:
+.Bd -literal -offset indent
+# kldload-hba json | jq -r '.drives[] | [.kernel, .model, .firmware, .health] | @tsv'
+nvme0n1	Samsung SSD 980 PRO 2TB	5B2QGXA7	PASSED
+nvme1n1	WD_BLACK SN850X 4000GB	624361WD	PASSED
+# kldload-hba json | jq -c '.controllers[]'
+{"pci":"0000:01:00.0","class":"NVMe","driver":"nvme","fw":"","bios":"","board":"","hba":false}
+{"pci":"0000:02:00.1","class":"SATA","driver":"ahci","fw":"","bios":"","board":"","hba":false}
+{"pci":"0000:38:00.0","class":"NVMe","driver":"nvme","fw":"","bios":"","board":"","hba":false}
+# kldload-hba json | jq -c '.enclosures'
+[]
+.Ed
+.Pp
+As a user, the columns that need
+.Xr smartctl 8
+are
+.Ql -
+and it says why:
+.Bd -literal -offset indent
+$ kldload-hba json 2>err | jq -r '.drives[] | [.kernel, .model, .firmware, .health] | @tsv'
+nvme0n1	Samsung SSD 980 PRO 2TB	-	-
+nvme1n1	WD_BLACK SN850X 4000GB	-	-
+$ cat err
+kldload-hba: not root: serial, firmware and health need smartctl as root
+.Ed
+.Ss Enclosures
+The desktop has none:
+.Bd -literal -offset indent
+# kldload-hba enclosures
+No SES enclosures. On a desktop board this is normal; on a Storinator it
+means the backplane is not presenting SES, which is worth chasing.
+# (exited 0)
+.Ed
+.Pp
+Against a made-up enclosure of two slots, one holding
+.Pa sdz ,
+built under a scratch directory
+.Ar dir :
+.Bd -literal -offset indent
+$ SYS_ENCL=dir/encl kldload-hba enclosures
+0:0:9:0
+  slot 1    sdz        status=OK
+  slot 2    -          status=not installed
+.Ed
+.Ss A mistake
+.Bd -literal -offset indent
+$ kldload-hba frob
+kldload-hba: unknown subcommand: frob
+# (exited 2)
+.Ed
+.Sh SEE ALSO
+.Xr jq 1 ,
+.Xr lspci 8 ,
+.Xr lsscsi 8 ,
+.Xr sg_ses 8 ,
+.Xr smartctl 8 ,
+.Xr zpool 8
+.Sh HISTORY
+On 2026-09-11 on a desktop it counted the ZFS volumes behind a hundred
+virtual machines as drives, and died after two real ones on
+.Xr smartctl 8 Ns 's
+exit status, which is a bit mask.
+On 2026-09-12 on a server with five identical drives, its fixed-width
+column cut every by-id name where the serial begins, printing five paths
+that did not exist and looked alike; and the JSON had no drives or
+enclosures at all.
+.Pp
+On 2026-09-30, writing this page: every enclosure slot's status printed
+empty, firmware and board text went into the JSON unescaped, and the
+columns a user cannot read were blank without a word.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+NVMe drives are their own controllers and have no SCSI host, so
+.Cm status
+shows no drive count or firmware under them; the firmware is in
+.Cm drives .
+.Pp
+IT or RAID mode is inferred from the driver, not read from the card.

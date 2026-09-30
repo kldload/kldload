@@ -1,0 +1,111 @@
+.Dd September 30, 2026
+.Dt ZEXPLORE-API 8
+.Os
+.Sh NAME
+.Nm zexplore-api ,
+.Nm zexplore-txn
+.Nd let a virtual machine snapshot, roll back and commit its own ZFS volume, and nothing else
+.Sh SYNOPSIS
+.Nm zexplore-api
+.Op Fl -unix Ar path
+.Op Fl -vsock Ar port
+.Op Fl -tcp Ar host : Ns Ar port
+.Nm zexplore-api
+.Fl -selftest
+.Nm zexplore-txn
+.Op Fl -cid Ar cid
+.Op Fl -port Ar port
+.Op Fl -unix Ar path
+.Op Fl -tcp Ar host : Ns Ar port
+.Op Fl -vm Ar vm
+.Op Fl -json
+.Cm begin | rollback | commit | list
+.Sh DESCRIPTION
+ZFS snapshots are nearly instant, so
+.Dq snapshot, try something, roll back or keep it
+can be a transaction: a database migration undone in milliseconds, a test
+machine reset to its golden state.
+The host owns the volumes, so
+.Nm zexplore-api ,
+on the host, does it for a guest that asks, and only to that guest's own
+volumes.
+.Pp
+Each request is one line of JSON.
+The daemon works out who is asking \(em a guest by the vsock address its
+connection comes from, matched to the libvirt domain with that address; a
+local caller as root, or by a per-machine token \(em and allows only the
+caller's primary volume,
+.Ar base Ns Pa / Ns Ar vm ,
+and its data volumes,
+.Ar base Ns Pa / Ns Ar vm Ns Pa - Ns Ar name ;
+a volume that another domain's name claims belongs to that domain.
+When libvirt cannot be asked, a data volume is refused.
+Every operation is appended to the audit log.
+.Pp
+.Nm zexplore-txn ,
+in the guest, asks:
+.Bl -tag -width Ds
+.It Cm begin
+Snapshot the volume and open a transaction.
+.It Cm rollback
+Roll the volume back to the transaction's snapshot.
+.It Cm commit
+Keep the change and drop the snapshot.
+.It Cm list
+This machine's open transactions.
+.El
+.Pp
+.Pa zexplore-api.service
+listens on
+.Pa /run/zexplore-api.sock
+and vsock port 9455.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -unix Ar path , Fl -vsock Ar port , Fl -tcp Ar host : Ns Ar port
+Where to listen, or where
+.Nm zexplore-txn
+connects; TCP accepts only a token.
+.It Fl -selftest
+Check the volume scope rule against invented domain lists, touching no
+socket, ZFS or libvirt, and exit.
+.It Fl -cid Ar cid
+The host's vsock address; default 2.
+.It Fl -vm Ar vm
+Name the machine outright; root on the unix socket only.
+.It Fl -json
+The reply as it came.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev ZEXPLORE_VM_BASE
+Where the machines' volumes are; default
+.Pa rpool/vms .
+.It Ev ZEXPLORE_TXN_STATE
+Transactions and tokens; default
+.Pa /var/lib/kldload/zexplore .
+.It Ev ZEXPLORE_AUDIT
+Default
+.Pa /var/log/kldload/zexplore-txn.log .
+.El
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with this release's
+.Nm zexplore-api
+first on the path:
+.Bd -literal -offset indent
+$ zexplore-api --selftest
+selftest: 14/14 cases hold
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr kvm-clone 8 ,
+.Xr kvm-create 8 ,
+.Xr zfs-rollback 8
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Rolling back a volume the guest has mounted and is writing corrupts it.
+Keep the data being rolled back on a separate volume and unmount it
+first, or roll the operating system's own volume back by restarting the
+machine onto it.
+The daemon refuses to roll back a volume a running machine has open
+unless forced, and otherwise trusts the guest to have stopped writing.

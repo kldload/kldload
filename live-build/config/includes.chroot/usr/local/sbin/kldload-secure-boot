@@ -31,6 +31,13 @@ CA_KEY="/etc/kldload/ca/root/ca.key"
 CA_DER="/etc/kldload/ca/root/ca.der"
 MOK_DIR="/var/lib/dkms"
 MOK_PW="${KLDLOAD_MOK_PASSWORD:-kldload}"
+# What the log says the password is: the default is published (README), but
+# one the operator chose stays out of the journal (2026-09-30).
+if [[ -n "${KLDLOAD_MOK_PASSWORD:-}" ]]; then
+    MOK_PW_SHOWN="the one in KLDLOAD_MOK_PASSWORD"
+else
+    MOK_PW_SHOWN="${MOK_PW}"
+fi
 
 log() { echo "[kldload-secure-boot] $*" >&2; }
 die() {
@@ -54,11 +61,11 @@ _materialize_mok_from_ca() {
     # Copy CA material into the legacy MOK paths so DKMS framework.conf.d
     # and existing consumers work without editing their configs.
     mkdir -p "${MOK_DIR}"
-    cp "${CA_KEY}" "${MOK_DIR}/mok.key"
-    cp "${CA}" "${MOK_DIR}/mok.pub"
-    cp "${CA_DER}" "${MOK_DIR}/mok.der"
-    chmod 0600 "${MOK_DIR}/mok.key"
-    chmod 0644 "${MOK_DIR}/mok.pub" "${MOK_DIR}/mok.der"
+    # install -m, not cp then chmod: the key is created 0600 rather than
+    # keeping whatever mode an older copy had until the chmod ran.
+    install -m 0600 "${CA_KEY}" "${MOK_DIR}/mok.key"
+    install -m 0644 "${CA}" "${MOK_DIR}/mok.pub"
+    install -m 0644 "${CA_DER}" "${MOK_DIR}/mok.der"
     log "MOK materialized from kldload-ca root at ${MOK_DIR}/mok.{key,pub,der}"
 }
 
@@ -115,6 +122,22 @@ _resign_loaded_zfs() {
         log "zfs module not installed — skipping re-sign"
         return 0
     fi
+    # SAFETY: only an uncompressed .ko is signed in place. sign-file appends
+    # the signature to whatever file it is given; given zfs.ko.xz it exits 0
+    # and leaves "Compressed data is corrupt" (a copy of onyx's module,
+    # 2026-09-30). Fedora compresses modules, so `enable` would have broken
+    # the on-disk ZFS module while reporting success -- harmless until the
+    # next initramfs rebuild copied it in and the root pool stopped
+    # importing. A compressed module is left for DKMS, whose sign helper was
+    # just installed and signs the .ko before compressing it.
+    case "${mod}" in
+    *.ko) ;;
+    *)
+        log "ZFS module is compressed (${mod##*.}) — NOT signed in place, which would corrupt it."
+        log "  DKMS signs it when it next builds it: run 'dkms autoinstall -k ${kver}' or wait for the next kernel."
+        return 0
+        ;;
+    esac
     # sign-file rewrites in place. If the module is under /lib/modules,
     # that's fine — it's already the on-disk canonical path.
     if "${sign_file}" sha256 "${CA_KEY}" "${CA}" "${mod}" 2>/dev/null; then
@@ -125,20 +148,36 @@ _resign_loaded_zfs() {
 }
 
 _resign_zbm() {
-    # sbsign the ZFSBootMenu binary on the EFI partition so firmware
-    # running with SB on accepts it. kldload installs ZBM at
-    # \EFI\kldload\zbm.EFI with a fallback copy at \EFI\BOOT\BOOTX64.EFI.
-    # Re-sign both if found.
-    local target signed
+    # sbsign the ZFSBootMenu binary on the EFI partition so firmware running
+    # with Secure Boot accepts it through shim.
+    #
+    # SAFETY: never a file that carries a Microsoft signature. That is shim,
+    # and firmware trusts shim ONLY through that signature; the MOK is checked
+    # by shim, not by firmware. This list used to include EFI/BOOT/BOOTX64.EFI
+    # unconditionally, and the loop below strips every signature before
+    # signing -- on onyx that file IS shim (byte-identical to
+    # EFI/fedora/shimx64.efi, signed by the Microsoft UEFI CA), so `enable`
+    # would have left the removable-media fallback unbootable with Secure Boot
+    # on, the path firmware takes when its boot entries are lost. Meanwhile
+    # the real ZFSBootMenu image, EFI/zbm/BOOTX64.EFI where the installer
+    # puts it, was not in the list at all and was never re-signed.
+    # (read on onyx 2026-09-30; tested against copies in a scratch ESP)
+    local target signed esp="${KLDLOAD_ESP:-/boot/efi}"
     if ! command -v sbsign >/dev/null 2>&1; then
         log "sbsign not installed — cannot re-sign ZBM. Install 'sbsigntools' and retry."
         return 0
     fi
 
-    for target in /boot/efi/EFI/kldload/zbm.EFI \
-        /boot/efi/EFI/BOOT/BOOTX64.EFI \
-        /boot/efi/EFI/kldload/BOOTX64.EFI; do
+    for target in "${esp}/EFI/zbm/BOOTX64.EFI" \
+        "${esp}/EFI/kldload/zbm.EFI" \
+        "${esp}/EFI/kldload/BOOTX64.EFI" \
+        "${esp}/EFI/BOOT/BOOTX64.EFI"; do
         [[ -f "${target}" ]] || continue
+        if command -v sbverify >/dev/null 2>&1 &&
+            [[ "$(sbverify --list "${target}" 2>/dev/null)" == *"O=Microsoft Corporation"* ]]; then
+            log "left ${target} alone: it carries a Microsoft signature (shim)"
+            continue
+        fi
         # Strip ALL existing signatures first — sbsign appends rather than
         # replaces, so every repeated `kldload-secure-boot enable` run was
         # stacking another signature onto the same PE. Multi-signature
@@ -174,22 +213,34 @@ _queue_mok_enrollment() {
         return 1
     fi
 
-    # Already enrolled with this exact cert? Short-circuit.
-    if mokutil --test-key "${CA_DER}" 2>/dev/null | grep -qi 'is already enrolled'; then
+    # Already enrolled with this exact cert? Short-circuit. Output captured,
+    # not piped to grep -q (a SIGPIPE there reads as "not enrolled").
+    local _t _new _fp
+    # WHY || true: --test-key exits non-zero for a key that is not enrolled,
+    # which is an answer, not a failure.
+    _t="$(mokutil --test-key "${CA_DER}" 2>/dev/null || true)"
+    if [[ "${_t,,}" == *"is already enrolled"* ]]; then
         log "kldload CA already enrolled in MOK list — nothing to queue"
         return 0
     fi
 
-    # Already queued and waiting for MokManager? Surface that.
-    if mokutil --list-new 2>/dev/null | grep -q "$(openssl x509 -in "${CA}" -noout -subject_hash 2>/dev/null)"; then
-        log "enrollment already pending — reboot to complete in MokManager (password: ${MOK_PW})"
+    # Already queued and waiting for MokManager? Matched by SHA1 fingerprint,
+    # which mokutil prints lower-case with colons. It matched an OpenSSL
+    # subject hash, which mokutil never prints, so this never fired and a
+    # second `enable` queued the key again (shown against onyx's enrolled list,
+    # 2026-09-30: the fingerprint finds an enrolled key, the hash finds nothing).
+    _fp="$(openssl x509 -in "${CA}" -noout -fingerprint -sha1 2>/dev/null | sed 's/^.*=//' | tr 'A-F' 'a-f')"
+    # WHY || true: --list-new exits non-zero when nothing is queued.
+    _new="$(mokutil --list-new 2>/dev/null || true)"
+    if [[ -n "$_fp" && "$_new" == *"$_fp"* ]]; then
+        log "enrollment already pending — reboot to complete in MokManager (password: ${MOK_PW_SHOWN})"
         return 0
     fi
 
     if printf '%s\n%s\n' "${MOK_PW}" "${MOK_PW}" |
         mokutil --ignore-keyring --import "${CA_DER}" >/dev/null 2>&1; then
         log "MOK enrollment queued"
-        log "Password for MokManager on next reboot: ${MOK_PW}"
+        log "Password for MokManager on next reboot: ${MOK_PW_SHOWN}"
         log "Reboot. At the blue MokManager screen: Enroll MOK → Continue → password → Yes → reboot"
     else
         log "ERROR: mokutil --import failed"
@@ -261,12 +312,16 @@ cmd_status() {
     echo ""
     echo "─── MOK enrollment ───────────────────────────────────────────────"
     if command -v mokutil >/dev/null 2>&1 && [[ -f "${CA_DER}" ]]; then
-        if mokutil --test-key "${CA_DER}" 2>/dev/null | grep -qi 'is already enrolled'; then
+        # Captured, not piped into grep -q: a SIGPIPE there reads as "no".
+        # WHY || true: both exit non-zero for "not enrolled" / "nothing new".
+        mok_enrolled="$(mokutil --test-key "${CA_DER}" 2>/dev/null || true)"
+        if [[ "${mok_enrolled,,}" == *"is already enrolled"* ]]; then
             echo "  kldload CA: ENROLLED in firmware MOK list ✓"
         else
             echo "  kldload CA: not enrolled"
         fi
-        if mokutil --list-new 2>/dev/null | grep -q .; then
+        mok_pending="$(mokutil --list-new 2>/dev/null || true)"
+        if [[ -n "$mok_pending" ]]; then
             echo "  enrollment pending (reboot to complete via MokManager)"
         fi
     else
@@ -277,7 +332,13 @@ cmd_status() {
     echo "─── ZFS kernel module signing ────────────────────────────────────"
     zfs_mod="$(modinfo -n zfs 2>/dev/null || true)"
     if [[ -n "${zfs_mod}" && -f "${zfs_mod}" ]]; then
-        zfs_sig="$(modinfo zfs 2>/dev/null | awk -F: '/^signer/{print $2; exit}' | sed 's/^ *//')"
+        # modinfo read whole, then searched: awk exiting at the first match
+        # sent modinfo a SIGPIPE, pipefail made that 141, and `status` died
+        # here, half printed (onyx, 2026-09-30).
+        local _mi
+        # WHY || true: an absent module is reported below
+        _mi="$(modinfo zfs 2>/dev/null || true)"
+        zfs_sig="$(awk -F: '/^signer/{print $2; exit}' <<<"$_mi" | sed 's/^ *//')"
         if [[ -n "${zfs_sig}" ]]; then
             echo "  module:  ${zfs_mod}"
             echo "  signer:  ${zfs_sig}"
@@ -342,9 +403,14 @@ main() {
     disable) cmd_disable ;;
     status) cmd_status ;;
     reenroll) cmd_reenroll ;;
-    -h | --help | help | "") usage ;;
+    -h | --help | help) usage ;;
+    "")
+        usage >&2
+        exit 2
+        ;;
     *)
-        usage
+        echo "kldload-secure-boot: unknown command: $cmd" >&2
+        usage >&2
         exit 2
         ;;
     esac

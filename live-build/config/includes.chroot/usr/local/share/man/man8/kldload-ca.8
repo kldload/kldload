@@ -1,0 +1,404 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-CA 8
+.Os
+.Sh NAME
+.Nm kldload-ca
+.Nd the machine's own certificate authority: one root, and the certificates it signs
+.Sh SYNOPSIS
+.Nm
+.Cm init
+.Op Fl -force
+.Nm
+.Cm issue
+.Ar name
+.Op Fl -dns Ar host ...
+.Op Fl -ip Ar address ...
+.Op Fl -days Ar n
+.Op Fl -eku Ar usages
+.Nm
+.Cm renew
+.Ar name
+.Nm
+.Cm info | dump-root | dump-der
+.Nm
+.Cm trust-install | enroll-mok
+.Nm
+.Cm sign-module
+.Ar kernel-version
+.Ar module
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+Every kldload install makes its own certificate authority, once, while it
+is installed: a root key and a ten-year root certificate under
+.Pa /etc/kldload/ca/root .
+It signs the web console's certificate, through
+.Xr kldload-tls-cert 8 ,
+and a certificate for each virtual machine that vmxplore enrols.
+Trusting the one root \(em in the system, in a browser, on another
+machine \(em trusts all of them.
+The root certificate is served at
+.Lk https://host:8443/kldload-ca.crt
+for that.
+.Pp
+The root's key is also the Secure Boot machine owner key:
+.Xr kldload-secure-boot 8
+enrols it and signs kernel modules with it.
+.Pp
+A new install makes a new root; a machine that is wiped and reinstalled
+does not share a trust root with what it replaced.
+Every command but
+.Cm info ,
+.Cm dump-root
+and
+.Cm dump-der
+needs root.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm init Op Fl -force
+Make the root, if there is none; otherwise show it, as
+.Cm info
+does.
+With
+.Fl -force ,
+move the existing root aside to
+.Pa root.archived\&. Ns Ar YYYYMMDD-HHMMSS
+and make a new one.
+Certificates already issued stay signed by the old root;
+.Xr kldload-tls-cert 8
+re-issues the console's on its next run.
+.It Cm issue Ar name Oo Fl -dns Ar host Oc ... Oo Fl -ip Ar address Oc ... Op Fl -days Ar n Op Fl -eku Ar usages
+Make a key and a certificate for
+.Ar name ,
+signed by the root and valid for each
+.Ar host
+and
+.Ar address ,
+for
+.Ar n
+days (default 90), for the extended key usages given (default
+.Ql serverAuth,clientAuth ) .
+They are written to
+.Pa leaves/ Ns Ar name Ns Pa .key
+and
+.Pa .crt ,
+replacing any from before.
+.Ar name
+is letters, digits, dots, dashes and underscores, starting with a letter
+or digit.
+The arguments are saved for
+.Cm renew .
+.It Cm renew Ar name
+Issue
+.Ar name
+again with the arguments it was last issued with.
+.It Cm info
+The root's fingerprint, subject and validity, and every certificate
+issued with its expiry.
+.It Cm dump-root , Cm dump-der
+Print the root certificate, as PEM or as DER.
+.It Cm trust-install
+Add the root to the system trust store, with the tool this distribution
+has
+.Po
+.Xr update-ca-trust 8 ,
+.Xr update-ca-certificates 8
+or
+.Xr trust 1
+.Pc ,
+and, where
+.Xr certutil 1
+is installed, to the browser store of every ordinary user
+(uid 1000 and up) whose home exists.
+It fails if no system store could be updated.
+First boot runs it.
+.It Cm enroll-mok
+Queue the root for Secure Boot enrolment with
+.Xr mokutil 1 ,
+unless it is enrolled or queued already; the next boot stops in
+MokManager to confirm it.
+The password is
+.Ev KLDLOAD_MOK_PASSWORD ,
+or
+.Ql kldload .
+Nothing in kldload calls this;
+.Xr kldload-secure-boot 8
+does the enrolment itself.
+.It Cm sign-module Ar kernel-version Ar module
+Sign a kernel module with the root key, using that kernel's
+.Pa sign-file ,
+for use as DKMS's signing helper.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help , Cm help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_CA_DIR
+Where the authority lives, instead of
+.Pa /etc/kldload/ca .
+.It Ev KLDLOAD_MOK_PASSWORD
+The one-time password MokManager asks for.
+A password set here is not written to the log; the default is.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/ca/root/ca.key
+The root key, mode 0600.
+.It Pa /etc/kldload/ca/root/ca.crt , Pa ca.der
+The root certificate, readable by anyone.
+.It Pa /etc/kldload/ca/root/fingerprint , Pa serial , Pa ca.conf , Pa openssl.log
+Its SHA-256 fingerprint, the serial counter, the request
+.Cm init
+made, and
+.Xr openssl 1 Ns 's
+messages.
+.It Pa /etc/kldload/ca/leaves/ Ns Ar name Ns Pa .key , Pa .crt
+An issued key, mode 0640, group root, and its certificate.
+.It Pa /etc/kldload/ca/leaves/ Ns Ar name Ns Pa .sans , Pa .cnf
+The arguments
+.Cm renew
+replays, and the request.
+.El
+.Pp
+The directories are
+.Pa /etc
+and not
+.Pa /var/lib
+because
+.Pa /var/lib/kldload
+is a dataset of its own, mounted at first boot over whatever the
+installer wrote there.
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done, or nothing to do.
+.It 1
+An error, named on standard error.
+.It 2
+No command, or an unknown one.
+.El
+.Sh EXAMPLES
+.Ss What a desktop has
+Printed on a kldload desktop on 2026-09-30:
+.Bd -literal -offset indent
+$ kldload-ca info
+root:     /etc/kldload/ca/root/ca.crt
+fingerprint (sha256):
+  8C:4B:71:8A:57:E0:4F:EE:1C:AE:32:D0:99:F5:D1:31:CB:48:DE:E0:A6:90:0C:8A:96:88:D1:1D:0F:1C:3C:50
+subject:
+  subject=CN=kldload-ca kldload-20260830133807-9d6d682dda61b0f5, O=kldload, OU=kldload PKI
+validity:
+  notBefore=Aug 30 13:38:07 2026 GMT
+  notAfter=Aug 27 13:38:07 2036 GMT
+leaves:
+  adg                   expires Dec  3 02:19:51 2026 GMT
+  app-adguard-ho        expires Dec  4 20:04:20 2026 GMT
+\&...
+  webui                 expires Sep  8 23:50:19 2027 GMT
+  write                 expires Dec  3 02:18:17 2026 GMT
+# (exited 0)
+.Ed
+.Pp
+It listed 98 certificates.
+.Ss From nothing
+The rest was printed on 2026-09-30 in a Fedora 44 container named
+.Ql demo.example.net .
+.Bd -literal -offset indent
+# kldload-ca info
+no kldload CA initialized (run: kldload-ca init)
+# (exited 0)
+# kldload-ca init
+[kldload-ca] generating root CA: CN='kldload-ca demo-20260930074937-841c461a589a0035'
+[kldload-ca] root CA ready.
+[kldload-ca]   cert:        /etc/kldload/ca/root/ca.crt
+[kldload-ca]   der:         /etc/kldload/ca/root/ca.der
+[kldload-ca]   fingerprint: 72:31:90:DB:0A:E0:1E:8E:32:85:8B:E1:60:F0:B3:D8:BE:AE:2F:60:45:2F:AF:5C:BC:40:B3:74:5E:88:9A:46
+# (exited 0)
+# ls -l /etc/kldload/ca/root
+total 35
+-rw-r--r-- 1 root root  436 Sep 30 07:49 ca.conf
+-rw-r--r-- 1 root root 2102 Sep 30 07:49 ca.crt
+-rw-r--r-- 1 root root 1511 Sep 30 07:49 ca.der
+-rw------- 1 root root 3272 Sep 30 07:49 ca.key
+-rw-r--r-- 1 root root   96 Sep 30 07:49 fingerprint
+-rw-r--r-- 1 root root 1772 Sep 30 07:49 openssl.log
+-rw-r--r-- 1 root root    3 Sep 30 07:49 serial
+.Ed
+.Pp
+Run again, it changes nothing:
+.Bd -literal -offset indent
+# kldload-ca init
+[kldload-ca] root CA already exists at /etc/kldload/ca/root — use --force to rotate
+root:     /etc/kldload/ca/root/ca.crt
+\&...
+leaves:
+  (none)
+# (exited 0)
+.Ed
+.Ss Issuing, and renewing
+.Bd -literal -offset indent
+# kldload-ca issue demo --dns demo.example.net --ip 192.0.2.10 --days 30
+[kldload-ca] issued: /etc/kldload/ca/leaves/demo.crt (expires Oct 30 07:49:38 2026 GMT)
+[kldload-ca]   key:  /etc/kldload/ca/leaves/demo.key
+[kldload-ca]   sans:     DNS:demo.example.net, IP Address:192.0.2.10
+# (exited 0)
+# cat /etc/kldload/ca/leaves/demo.sans
+NAME demo
+DAYS 30
+EKU serverAuth,clientAuth
+DNS demo.example.net
+IP 192.0.2.10
+# kldload-ca renew demo
+[kldload-ca] issued: /etc/kldload/ca/leaves/demo.crt (expires Oct 30 07:49:38 2026 GMT)
+[kldload-ca]   key:  /etc/kldload/ca/leaves/demo.key
+[kldload-ca]   sans:     DNS:demo.example.net, IP Address:192.0.2.10
+# (exited 0)
+.Ed
+.Ss The console's certificate
+.Bd -literal -offset indent
+# kldload-tls-cert
+[kldload-ca] issued: /etc/kldload/ca/leaves/webui.crt (expires Sep 30 07:49:38 2027 GMT)
+[kldload-ca]   key:  /etc/kldload/ca/leaves/webui.key
+[kldload-ca]   sans:     DNS:demo.example.net, DNS:demo, DNS:localhost, DNS:kldload.local, IP Address:127.0.0.1, IP Address:0:0:0:0:0:0:0:1, IP Address:192.168.122.1
+# (exited 0)
+# openssl x509 -in /var/lib/kldload/tls/webui.crt -noout -subject -issuer -enddate
+subject=CN=webui, O=kldload, OU=kldload services
+issuer=CN=kldload-ca demo-20260930074937-841c461a589a0035, O=kldload, OU=kldload PKI
+notAfter=Sep 30 07:49:38 2027 GMT
+.Ed
+.Ss Putting the root in the trust store
+The container had no
+.Xr certutil 1 :
+.Bd -literal -offset indent
+# kldload-ca trust-install
+[kldload-ca] installed into /etc/pki/ca-trust (RH/CentOS/Fedora/Rocky)
+[kldload-ca] certutil not present — browsers will NOT trust this CA
+[kldload-ca]   install libnss3-tools (Debian/Ubuntu) or nss-tools (RHEL/Fedora), then re-run
+# (exited 0)
+.Ed
+.Ss The root, to trust it somewhere else
+.Bd -literal -offset indent
+# kldload-ca dump-root | openssl x509 -noout -subject
+subject=CN=kldload-ca demo-20260930074937-841c461a589a0035, O=kldload, OU=kldload PKI
+.Ed
+.Ss A new root (--force)
+.Bd -literal -offset indent
+# kldload-ca init --force
+[kldload-ca] rotating root CA (--force) — old material archived
+[kldload-ca] generating root CA: CN='kldload-ca demo-20260930074941-0afc06077f06ef36'
+[kldload-ca] root CA ready.
+[kldload-ca]   cert:        /etc/kldload/ca/root/ca.crt
+[kldload-ca]   der:         /etc/kldload/ca/root/ca.der
+[kldload-ca]   fingerprint: 54:F3:76:07:70:32:1A:98:39:43:31:16:FA:C3:A2:90:49:09:3C:BC:68:BD:23:34:ED:E9:4F:6B:81:7C:CE:52
+# (exited 0)
+# ls /etc/kldload/ca
+leaves
+root
+root.archived.20260930-074941
+.Ed
+.Ss Where there is no Secure Boot tooling
+.Bd -literal -offset indent
+# kldload-ca enroll-mok
+[kldload-ca] mokutil not installed — skipping MOK enrollment (non-SB system)
+# (exited 0)
+# kldload-ca sign-module 7.2.2-300.fc44.x86_64 /nonexistent.ko
+[kldload-ca] sign-file not found for 7.2.2-300.fc44.x86_64 — module unsigned
+# (exited 0)
+.Ed
+.Ss Mistakes
+.Bd -literal -offset indent
+# kldload-ca issue demo --dns
+[kldload-ca] error: --dns needs a value
+# (exited 1)
+# kldload-ca issue ../x
+[kldload-ca] error: invalid leaf name: ../x
+# (exited 1)
+# kldload-ca renew nosuch
+[kldload-ca] error: no SAN record for nosuch at /etc/kldload/ca/leaves/nosuch.sans
+# (exited 1)
+# kldload-ca frob
+kldload-ca: unknown command: frob
+kldload-ca — per-install PKI root
+\&...
+# (exited 2)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "[kldload-ca] error: root CA missing — run: kldload-ca init"
+A command that needs the root found none.
+.It "[kldload-ca] error: update-ca-trust extract failed — host trust bundle is OUT OF SYNC with the anchors dir."
+The root was copied into the store's directory but the bundle programs
+read was not rebuilt; they do not trust it yet.
+The same message names
+.Xr update-ca-certificates 8
+and
+.Xr trust 1
+on their distributions.
+.It "[kldload-ca] error: no usable system trust store — anchor dir present without its refresh tool, or an unsupported distro?"
+.It "[kldload-ca] WARNING: mokutil --import failed"
+Exit 1.
+.It "kldload-ca: FAIL at line N: command"
+Any other step that failed.
+.El
+.Sh SEE ALSO
+.Xr certutil 1 ,
+.Xr mokutil 1 ,
+.Xr openssl-x509 1 ,
+.Xr kldload-secure-boot 8 ,
+.Xr kldload-tls-cert 8 ,
+.Xr update-ca-trust 8
+.Sh HISTORY
+It replaced a self-signed certificate per service, which raced each other
+through 1.0.5.
+Its directory moved from
+.Pa /var/lib/kldload/ca
+to
+.Pa /etc/kldload/ca
+when the dataset mounted over
+.Pa /var/lib/kldload
+at first boot was found hiding the root the installer had made, so first
+boot made a second one that did not match the enrolled key.
+.Pp
+On 2026-09-30, writing this page:
+.Cm init Fl -force
+left the new root's directory readable by root alone, so the root could no
+longer be downloaded from the console; the header claimed a Kubernetes
+authority and a distribution to virtual machines by Ansible, neither of
+which exists; a password set in
+.Ev KLDLOAD_MOK_PASSWORD
+was written to the log; and a missing command printed the usage and
+exited 0.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+One key is both the root of every TLS certificate and the Secure Boot
+signing key: whoever has
+.Pa ca.key
+can both impersonate the machine's services and sign a kernel module it
+will load.
+.Xr kldload-secure-boot 8
+keeps a second copy of it, for DKMS, at
+.Pa /var/lib/dkms/mok.key .
+.Pp
+Nothing removes an issued certificate: a virtual machine that is destroyed
+leaves its key in
+.Pa leaves/ ,
+and
+.Cm info
+lists it until it is deleted by hand.
+There is no revocation.
+.Pp
+.Cm sign-module
+exits 0 when the kernel's
+.Pa sign-file
+is not found, leaving the module unsigned; with Secure Boot on, the
+module then will not load.
+.Pp
+A new root is not trusted anywhere until
+.Cm trust-install
+runs again, and a new root is not enrolled for Secure Boot until
+.Xr kldload-secure-boot 8
+enrols it; modules signed with it will not load until then.

@@ -1,0 +1,127 @@
+.Dd September 30, 2026
+.Dt KINSPECT 8
+.Os
+.Sh NAME
+.Nm kinspect
+.Nd watch two virtual machines or pods, and the traffic between them, in one tmux window
+.Sh SYNOPSIS
+.Nm
+.Ar vm1 vm2
+.Nm
+.Fl -pod Ar namespace Ns / Ns Ar pod1 namespace Ns / Ns Ar pod2
+.Nm
+.Fl -ip Ar address1 address2
+.Nm
+.Op Fl h | -help
+.Sh DESCRIPTION
+.Nm
+finds the two endpoints' addresses \(em libvirt domains through
+.Xr kldload-vm-ip 8 ,
+pods through
+.Xr kubectl 1 ,
+or as given \(em and opens a window named
+.Ql inspect
+in the tmux session the web console's terminal drawer uses, replacing
+any window of that name.
+The window has three panes:
+.Bl -tag -width Ds
+.It The flows, across the top
+.Ql hubble observe
+for the two addresses when the cluster runs Cilium; otherwise
+.Xr tcpdump 8
+on
+.Ql virbr0 ,
+through
+.Xr sudo 8 .
+.It One pane per endpoint, below
+Established TCP sessions, link counters, load and the busiest processes,
+refreshed every second, run on the endpoint itself: over ssh as root for
+a machine or an address, through
+.Ql kubectl exec
+for a pod.
+A pane that cannot reach its endpoint says so.
+.El
+.Pp
+The addresses are typed into the panes' shells, so anything that does
+not look like an address is refused.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -pod
+The two arguments are pods, as
+.Ar namespace Ns / Ns Ar pod .
+.It Fl -ip
+The two arguments are addresses; nothing is looked up.
+.It Fl h , Fl -help
+Print the header comment and exit 0; so does no argument at all.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_TMUX_SESSION
+The tmux session; default
+.Ql kldload .
+.It Ev SSH_KEY
+The key for the endpoints; default
+.Pa /root/.ssh/id_ed25519 .
+.It Ev LIBVIRT_DEFAULT_URI
+Default
+.Ql qemu:///system ,
+whoever runs it.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+The window is open.
+.It 1
+An endpoint has no address, or what it resolved to is not one.
+.It 2
+Not two endpoints.
+.El
+.Sh EXAMPLES
+Typical use, from the terminal drawer:
+.Bd -literal -offset indent
+# kinspect web01 db01
+# kinspect --pod shop/api-7d9f shop/postgres-0
+.Ed
+.Pp
+What it refuses, on a kldload desktop on 2026-09-30 with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+$ kinspect web01
+kinspect: need two vms (got 1)
+# (exited 2)
+$ kinspect no-such-vm other-vm
+kinspect: could not resolve no-such-vm to an IP
+# (exited 1)
+$ kinspect --ip 10.0.0.5 '10.0.0.6;id'
+kinspect: not an IP address: 10.0.0.6;id
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr kubectl 1 ,
+.Xr tmux 1 ,
+.Xr kldload-session 8 ,
+.Xr kldload-vm-ip 8 ,
+.Xr tcpdump 8
+.Sh HISTORY
+On 2026-09-30, writing this page, against a container running
+.Xr sshd 8 :
+the two endpoint panes ran on the host, not the endpoints, and showed
+the host's own sessions and processes under the endpoints' names; kldload's
+tmux configuration numbers panes from 1, so the flows pane was never
+made; and
+.Fl -pod
+never found a pod, the namespace and name coming out empty.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The endpoint panes need ssh as root with
+.Ev SSH_KEY ,
+which only root can read, and host keys are not checked, since clones
+get new ones.
+.Pp
+.Xr tcpdump 8
+sees only what crosses
+.Ql virbr0 ,
+libvirt's default network; machines on another bridge show nothing
+there.

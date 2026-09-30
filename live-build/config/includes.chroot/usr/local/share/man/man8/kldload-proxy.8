@@ -1,0 +1,63 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-PROXY 8
+.Os
+.Sh NAME
+.Nm kldload-proxy
+.Nd the web console's former single-port TLS proxy, kept to start by hand if nginx will not
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+A browser trusts a certificate per host and port, so a console that sent
+it to Grafana on one port and a terminal on another asked it to accept
+the certificate again for each, and blocked the frames outright.
+.Nm
+listens on port 8443 with the machine's certificate and forwards by path
+to services on loopback:
+.Pa /grafana/
+to Grafana on 3000,
+.Pa /k9s/
+to the k9s terminal on 7681, and everything else to the web console on
+8444, WebSockets included.
+.Pp
+.Xr nginx 8
+has done this since 1.0.6.
+.Nm
+and its unit remain as a way back: the unit is not enabled and nothing
+starts it.
+Stop nginx before starting it, since both want port 8443.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0, serving nothing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/tls/webui.crt , Pa webui.key
+The certificate, from
+.Xr kldload-tls-cert 8 .
+.It Pa /usr/lib/systemd/system/kldload-proxy.service
+Its unit, which makes the certificate first.
+.El
+.Sh EXIT STATUS
+It serves until stopped; non-zero when it cannot bind the port or read
+the certificate.
+.Sh EXAMPLES
+Falling back to it; not run for this page:
+.Bd -literal -offset indent
+# systemctl stop nginx
+# systemctl start kldload-proxy
+.Ed
+.Sh SEE ALSO
+.Xr kldload-session 8 ,
+.Xr kldload-tls-cert 8 ,
+.Xr nginx 8
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Paths the web console gained after 1.0.6 \(em
+.Pa /s/
+sessions and
+.Pa /app/
+tools \(em are routed only by nginx.

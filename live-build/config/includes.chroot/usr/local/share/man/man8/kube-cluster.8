@@ -1,0 +1,223 @@
+.Dd September 30, 2026
+.Dt KUBE-CLUSTER 8
+.Os
+.Sh NAME
+.Nm kube-cluster
+.Nd build a highly available Kubernetes cluster of ZFS-cloned virtual machines on this host, and run it
+.Sh SYNOPSIS
+.Nm
+.Cm bootstrap
+.Op Fl -cps Ar n
+.Op Fl -workers Ar n
+.Op Fl -ram Ar mb
+.Op Fl -cpus Ar n
+.Op Fl -disk Ar gb
+.Op Fl -image Ar path
+.Nm
+.Cm golden | status | stop | mesh-repair | vip-float
+.Nm
+.Cm start
+.Op Ar n
+.Nm
+.Cm scale
+.Ar n
+.Nm
+.Cm destroy
+.Op Fl -all
+.Op Fl -yes
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Cm bootstrap
+builds a cluster in one command:
+.Bl -enum -compact
+.It
+a cloud image of the host's family \(em Debian or Ubuntu, or Fedora for
+every RPM host \(em imported to a ZFS volume and booted with cloud-init;
+.It
+.Xr kube-setup 8
+inside it, from the host's darksite when there is one, so the build
+needs no internet; then shut down and snapshotted as the golden, kept
+for next time;
+.It
+the control planes and workers cloned from the golden, in well under a
+second each, and booted;
+.It
+the WireGuard mesh among them and the host;
+.It
+.Xr kube-init 8
+on the first control plane, then the others and the workers joined with
+.Ql kubeadm join ,
+driven from this host with a fresh token for each attempt;
+.It
+.Xr kube-smoke-test 8
+on the control plane.
+.El
+.Pp
+Three control planes is the default, so that losing one loses nothing,
+behind an API address that kube-vip moves between them.
+The count is cut to an odd number that fits the host's memory; the start
+of a run says what was chosen.
+With no workers the control planes run the workloads.
+.Pp
+The cluster's machines do not start when the host does, so that a first
+boot does not start them all at once;
+.Cm start
+does.
+It runs itself under
+.Xr sudo 8 .
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm bootstrap
+As above.
+.It Cm golden
+Build only the golden.
+.It Cm status
+The cluster's machines and volumes, and the nodes when the control plane
+is running.
+.It Cm start Op Ar n
+Start the cluster and wait for it to be Ready; with
+.Ar n ,
+only that many workers.
+.It Cm stop
+Shut it down, workers first; the machines and volumes stay.
+.It Cm scale Ar n
+Add
+.Ar n
+workers, then repair the mesh.
+.It Cm mesh-repair , Cm mesh
+Make every node a peer of every other and of the host, and drop peers of
+nodes that no longer exist; only differences are touched.
+.It Cm vip-float
+Move a cluster of several control planes from the fixed API address to
+one kube-vip moves to whichever control plane leads.
+.It Cm destroy
+Remove the cluster's machines and volumes, after typing
+.Ql destroy ;
+the golden is kept unless
+.Fl -all
+is given.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -cps Ar n , Fl -control-planes Ar n
+Control planes; default 3.
+.It Fl -workers Ar n
+Workers; default 0.
+.It Fl -ram Ar mb , Fl -cpus Ar n , Fl -disk Ar gb
+Each node's size; default 4096 MB, 2 processors, 40 GB.
+.It Fl -image Ar path
+The cloud image, instead of finding one.
+.It Fl -all
+With
+.Cm destroy ,
+the golden too.
+.It Fl -yes , Fl y
+With
+.Cm destroy ,
+no question; for a script, the web console or ssh.
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev CLUSTER_NAME
+The machines' name prefix; default
+.Ql kldload .
+.It Ev KUBE_VIP_ADDRESS , Ev METALLB_POOL , Ev METALLB_POOL_NAME , Ev POD_CIDR , Ev SVC_CIDR
+Passed to
+.Xr kube-init 8 .
+.It Ev KUBE_CLUSTER_YES
+1 is
+.Fl -yes .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/darksite/
+The host's darksite, lent to the golden build.
+.It Pa /root/.kube/config
+The cluster's admin configuration, on the host.
+.It Pa /var/log/kldload/
+One log per node joined.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done as asked.
+.It 1
+No cluster, or a failure, named.
+.It 2
+A usage error, or
+.Cm destroy
+with no terminal to ask on and no
+.Fl -yes .
+Anything but
+.Ql destroy
+typed at its question stops it with exit 0.
+.It 3
+.Cm bootstrap :
+the cluster is up with problems \(em a worker, readiness, the smoke test
+\(em named at the end.
+.El
+.Sh EXAMPLES
+On a kldload desktop with no cluster, on 2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+# kube-cluster status
+══════════════════════════════════════════════════════════════
+  Kubernetes Cluster Status
+══════════════════════════════════════════════════════════════
+
+VMs:
+NAME                 STATE        RAM        VCPUS  ZVOL USED
+NAME        USED  AVAIL
+
+ZFS:
+NAME                            USED  REFER  VOLSIZE
+
+Kubernetes: control plane not running
+
+══════════════════════════════════════════════════════════════
+# (exited 0)
+.Ed
+.Pp
+Building and using one; not run for this page:
+.Bd -literal -offset indent
+# kube-cluster bootstrap --workers 3
+# kube-cluster stop
+# kube-cluster start 1
+# kube-cluster destroy --yes
+.Ed
+.Pp
+The reference shape, three control planes and three workers, took six
+and three quarter minutes on a lab host.
+.Sh SEE ALSO
+.Xr kube-bluegreen 8 ,
+.Xr kube-init 8 ,
+.Xr kube-network 8 ,
+.Xr kube-setup 8 ,
+.Xr kube-smoke-test 8 ,
+.Xr kube-status 8
+.Sh HISTORY
+On 2026-09-27 a golden said to be built offline was found fetching
+containerd, kubeadm, Helm and every image from the internet; it builds
+from the host's darksite now.
+On 2026-09-30, writing this page: the host's own command-line tools, when
+the darksite had none, came from the network unverified \(em Helm by piping
+a script from a branch head into
+.Xr bash 1
+as root; and
+.Cm status
+waited three minutes to report that there was no cluster.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+.Cm destroy
+also removes host-wide state the cluster used: the host's WireGuard
+keys, its kubeconfig, its
+.Pa /etc/hosts
+entries.
+Rebuilding a golden destroys it with
+.Ql zfs destroy -R ,
+which takes every clone of it, whoever made them.

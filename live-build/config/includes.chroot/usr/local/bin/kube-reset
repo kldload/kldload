@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # kube-reset — tear down Kubernetes on this node (safely, with ZFS rollback option)
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kube-reset: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate to root
 # --help answers before the root re-exec below: asking a tool what it does
@@ -19,8 +20,11 @@ Takes no options. Needs root.
 
 What it removes, in order:
   - a recursive ZFS snapshot of the root pool FIRST, named
-    <pool>@pre-kube-reset-<utc-timestamp>, so the whole thing is reversible
-    with zfs rollback -r
+    <pool>@pre-kube-reset-<utc-timestamp>; if it cannot be taken, nothing
+    else is done. Undo with `rollback to pre-kube-reset-<timestamp>` for the
+    boot environment, and `zfs rollback` of each dataset that holds etcd,
+    kubelet or containerd state. On a root that is not ZFS there is no
+    snapshot, and it says so.
   - kubeadm reset -f
   - /etc/kubernetes, /var/lib/kubelet, /var/lib/etcd, /root/.kube/config
   - iptables, ip6tables and CNI state left behind by kube-proxy or Cilium
@@ -51,7 +55,8 @@ echo "  - Removes /etc/kubernetes, /var/lib/etcd, /var/lib/kubelet state"
 echo "  - Cilium and all pods will be destroyed"
 echo -e "\033[0m"
 
-read -r -p "Type 'reset' to continue: " confirm
+# no terminal, or end of input, is not a yes
+read -r -p "Type 'reset' to continue: " confirm || confirm=""
 [[ "$confirm" == "reset" ]] || {
     echo "Aborted."
     exit 0
@@ -62,10 +67,18 @@ if command -v zfs >/dev/null 2>&1; then
     pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
     if [[ -n "${pool:-}" ]]; then
         snap="${pool}@pre-kube-reset-$(date -u +%Y%m%dT%H%M%SZ)"
-        zfs snapshot -r "$snap" 2>/dev/null || true
-        log "ZFS snapshot: $snap (rollback with: zfs rollback -r $snap)"
+        # WHY fatal: this snapshot is the whole of "safely". It was `|| true`
+        # and then logged as taken, so a pool that refused it (full, a name
+        # clash) lost etcd with nothing to go back to (2026-09-30).
+        zfs snapshot -r "$snap" || die "could not take ${snap}; nothing has been removed"
+        log "ZFS snapshot: $snap, of every dataset in ${pool}"
+        # `zfs rollback -r <pool>@snap` was the hint here; it rolls back the
+        # pool's top dataset only, which on kldload holds nothing.
+        log "  undo: rollback to ${snap#*@}   (the boot environment)"
+        log "        zfs rollback <dataset>@${snap#*@}   (each etcd/kubelet/containerd dataset)"
     fi
 fi
+[[ -n "${snap:-}" ]] || warn "the root is not on ZFS: no snapshot, and this cannot be undone"
 
 log "Running kubeadm reset..."
 kubeadm reset -f 2>/dev/null || true

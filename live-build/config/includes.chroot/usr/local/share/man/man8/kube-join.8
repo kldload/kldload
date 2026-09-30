@@ -1,0 +1,123 @@
+.Dd September 30, 2026
+.Dt KUBE-JOIN 8
+.Os
+.Sh NAME
+.Nm kube-join
+.Nd join this machine to a kldload Kubernetes cluster, as a worker or another control plane
+.Sh SYNOPSIS
+.Nm
+.Op Fl -control-plane
+.Ar endpoint
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+joins this machine to the cluster whose control plane answers at
+.Ar endpoint
+\(em the cluster's control-plane address, set by
+.Xr kube-init 8 ,
+so that the join does not depend on one node; a node's own address
+works too.
+In order it:
+.Bl -enum -compact
+.It
+checks that kubeadm and containerd are here and the machine is not
+already in a cluster;
+.It
+snapshots every dataset of the root's pool, as
+.Ar pool Ns Pa @pre-kube-join- Ns Ar timestamp ,
+and warns if it cannot;
+.It
+fetches the join command from the control plane over ssh as root: the
+one
+.Xr kube-init 8
+saved, or a fresh one;
+.It
+checks that it is exactly kubeadm's
+.Ql kubeadm join host:port --token token --discovery-token-ca-cert-hash sha256:hash ,
+and refuses anything else;
+.It
+runs
+.Ql kubeadm join
+with those values.
+.El
+.Pp
+With
+.Fl -control-plane
+it first checks that the cluster was made with a control-plane address,
+without which kubeadm cannot add a control plane; fetches a new
+certificate key, since kubeadm's lasts about two hours; joins as a
+control plane advertising this machine's address toward
+.Ar endpoint ;
+copies the admin configuration to root and the first ordinary user; and
+lets workloads run on the new control plane, as
+.Xr kube-init 8
+does for the first.
+.Pp
+It runs itself under
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -control-plane , Fl -cp
+Join as another control plane.
+etcd wants an odd number of them: go from one to three.
+.It Fl h , Fl -help
+Print usage and exit 0, without root.
+.El
+.Sh EXIT STATUS
+0 when joined; 1 on a failure or refusal, named, and on a usage error.
+.Sh EXAMPLES
+In a Fedora 44 container, with
+.Xr ssh 1
+replaced by a script that answers as a control plane would, but with
+.Ql ; touch /pwned
+on the end, and kubeadm by one that records its arguments:
+.Bd -literal -offset indent
+# kube-join 10.0.0.1
+[kube-join] Fetching join command from 10.0.0.1...
+[kube-join] the join command from 10.0.0.1 is not kubeadm's -- refusing to run it: kubeadm join 10.0.0.1:6443 --token abcdef.0123456789abcdef --discovery-token-ca-cert-hash sha256:bbbbbbbbbbbbbbbbbbbbbbb
+# (exited 1)
+.Ed
+.Pp
+Nothing was run: no
+.Pa /pwned ,
+and kubeadm was never called.
+With the
+.Ql ; touch /pwned
+taken off, kubeadm was called with exactly
+.Ql join 10.0.0.1:6443 --token abcdef.0123456789abcdef --discovery-token-ca-cert-hash sha256:bbb\&...
+and it exited 0.
+.Pp
+Joining for real; not run for this page:
+.Bd -literal -offset indent
+# kube-join 192.168.122.240
+# kube-join --control-plane 192.168.122.240
+.Ed
+.Sh SEE ALSO
+.Xr kubeadm 1 ,
+.Xr kube-cluster 8 ,
+.Xr kube-init 8 ,
+.Xr kube-network 8 ,
+.Xr kube-reset 8
+.Sh HISTORY
+On 2026-09-30, writing this page: the join command fetched from the
+control plane was run with
+.Ql eval
+as root, so whatever answered at
+.Ar endpoint
+could run any command on the joining machine \(em shown in a container,
+where the installed version ran the
+.Ql touch
+and reported a successful join.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The ssh to the control plane does not check its host key, and falls back
+to a fixed root password: a machine that answers at
+.Ar endpoint
+in its place can still hand over a join command for a cluster of its
+own, and this machine would join it.
+.Xr kube-cluster 8 ,
+which builds clusters from goldens, joins its workers itself and does not
+use
+.Nm .

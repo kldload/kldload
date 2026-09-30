@@ -59,6 +59,15 @@ case "${1:-}" in
     ;;
 esac
 
+# SAFETY: the tag is pasted into a command every node runs as root (the
+# verify below); a quote in it was a command there. The OCI tag grammar, and
+# nothing else (2026-09-30).
+[[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] ||
+    {
+        printf '[demo-image] not an image tag: %s\n' "$TAG" >&2
+        exit 2
+    }
+
 [[ $EUID -eq 0 ]] || exec sudo -E "$0" "$@"
 [[ -d "$APP_DIR" ]] || _die "app dir not found: $APP_DIR"
 command -v podman >/dev/null || _die "podman is required to build the demo image"

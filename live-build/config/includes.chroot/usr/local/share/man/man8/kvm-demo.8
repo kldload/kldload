@@ -1,0 +1,98 @@
+.Dd September 30, 2026
+.Dt KVM-DEMO 8
+.Os
+.Sh NAME
+.Nm kvm-demo
+.Nd short live demonstrations of virtual machines, containers and GPUs on ZFS
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Ar demo
+.Nm
+.Fl -list | h | -help
+.Sh DESCRIPTION
+With no argument
+.Nm
+shows a menu of demonstrations and runs the one chosen; with one it runs
+that demonstration and exits, without waiting for Enter, which is how the
+web console's Demos panel drives it.
+.Pp
+The demonstrations:
+.Bl -tag -width "21-24" -compact
+.It 1\(en5
+Build a golden machine and clone four, list them with their ZFS use,
+snapshot all, roll one back, destroy them.
+.It 6\(en10
+The NVIDIA GPU, two Ollama instances sharing it, both answering at once,
+the processes on it, and removing them.
+.It 11\(en14
+nginx, redis and postgres on ZFS datasets tuned for each, a snapshot of
+the whole stack, their ZFS use, and removing them.
+.It 15\(en20
+The pool and datasets, WireGuard, two five-second eBPF traces, system
+health, and the replication commands.
+.It 21\(en24
+A golden from a cloud image, four machines from it with their own host
+names through cloud-init, the fleet, and destroying it.
+.It 99
+Clone, snapshot and show the result on one screen.
+.It 0
+Remove everything the demonstrations made.
+.El
+.Pp
+It removes only what it made: every volume carries the ZFS property
+.Ql com.kldload:demo=kvm-demo ,
+every container the label
+.Ql com.kldload.demo=kvm-demo ,
+and a machine or container of the same name that lacks them is left
+alone.
+It needs root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -list
+The demonstrations the one-argument form accepts.
+.It Fl h , Fl -help
+Print the header comment and exit 0.
+.El
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+$ kvm-demo --list
+0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 99
+# (exited 0)
+.Ed
+.Pp
+Running one; not run for this page, since it makes volumes and machines:
+.Bd -literal -offset indent
+# kvm-demo 99
+.Ed
+.Sh SEE ALSO
+.Xr kube-demo 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-create 8 ,
+.Xr kvm-snap 8
+.Sh HISTORY
+Until 2026-09-30 its cleanups destroyed every volume under
+.Pa rpool/vms
+but the ISOs, with every clone of them \(em the goldens, the Kubernetes
+cluster, the lab \(em and removed machines by generic names such as
+.Ql web-1 .
+Writing this page the same day: the one-screen proof still removed
+machines named
+.Ql proof-1
+by name, and the GPU cleanup killed whatever listened on Ollama's port
+11434 \(em on a kldload desktop, the host's own Ollama \(em and removed
+containers by fixed names; and
+.Fl -list
+named four demonstrations that did not exist and left out two that did.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Volumes and containers a version before 2026-09-30 made carry no mark
+and are left for removing by hand.
+.Pp
+The Ollama demonstration uses port 11434, which the host's own Ollama
+already holds on a machine installed with AI; its first instance does not
+start there.

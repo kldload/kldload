@@ -98,6 +98,15 @@ while (($#)); do
     esac
 done
 
+# SAFETY: the port and the VIP are written into unit files systemd runs as
+# root; a newline in either is a directive there, ExecStartPre= included.
+# Checked before anything is written (2026-09-30).
+[[ "$PORT" =~ ^[0-9]{1,5}$ ]] && ((10#$PORT >= 1 && 10#$PORT <= 65535)) ||
+    {
+        printf 'kube-demo-publish: --port needs a port number, 1-65535: %s\n' "$PORT" >&2
+        exit 2
+    }
+
 if [[ $EUID -ne 0 ]]; then
     _args=(--port "$PORT")
     [[ $ACTION == off ]] && _args+=(--off)
@@ -139,6 +148,7 @@ command -v kubectl >/dev/null || _die "kubectl not found"
 # a clear fatal on the very next line rather than a bare non-zero exit.
 VIP="$(kubectl -n "$NS" get svc web -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
 [[ -n "$VIP" ]] || _die "the demo's web Service has no LoadBalancer IP yet. Deploy it first (kube-demo), then re-run."
+[[ "$VIP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || _die "the web Service's LoadBalancer address is not an IPv4 address: ${VIP}"
 
 HOST_IP="$(_host_ip)"
 [[ -n "$HOST_IP" ]] || _die "could not determine this host's LAN address"
@@ -152,8 +162,8 @@ Description=kldload demo — public listener on :${PORT}
 
 [Socket]
 ListenStream=0.0.0.0:${PORT}
-# The proxy is per-connection; without this each browser tab would need its own
-# unit instance to be started by hand.
+# One proxy for every connection: systemd-socket-proxyd takes the listening
+# socket itself; Accept=yes would start an instance per connection.
 Accept=no
 
 [Install]

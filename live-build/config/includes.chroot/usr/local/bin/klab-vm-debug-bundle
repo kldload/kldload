@@ -36,6 +36,10 @@
 # none. Commands run in parallel where safe to keep total time < 60s.
 
 set -Eeuo pipefail
+# The system libvirt when a user runs this: plain virsh as a user asks that
+# user's session libvirt and sees no VMs (2026-09-30, the class fixed across
+# the kvm tools).
+export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 # This file's own options line is `set -uo pipefail`, and that is the author's
 # intent. The 2026-09-15 strict sweep put `set -Eeuo pipefail` above it, which
@@ -66,6 +70,20 @@ set -- "${_args[@]}"
 distro="${1:?usage: klab-vm-debug-bundle <distro> <run_id> [vm_ip] [--deep]}"
 run_id="${2:?usage: klab-vm-debug-bundle <distro> <run_id> [vm_ip] [--deep]}"
 vm_ip="${3:-}"
+
+# SAFETY: distro and run_id become paths that are created, archived and
+# rm -rf'd under /root/klab, and vm_ip goes into the unquoted $_sh below,
+# where a space would be another ssh option. None was checked (2026-09-30).
+for _v in "$distro" "$run_id"; do
+    [[ "$_v" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$_v" != *..* ]] || {
+        echo "klab-vm-debug-bundle: not a usable distro or run id: $_v" >&2
+        exit 2
+    }
+done
+[[ -z "$vm_ip" || "$vm_ip" =~ ^[0-9A-Fa-f.:]+$ ]] || {
+    echo "klab-vm-debug-bundle: not an IP address: $vm_ip" >&2
+    exit 2
+}
 
 vm_name="klab-test-${distro}"
 run_dir="/root/klab/${run_id}"
@@ -317,9 +335,13 @@ _kernel="$(_TMO=5 _run 'uname -r' | head -1 | tr -d '\n')"
 _zfsv="$(grep -A1 '=== zfs version ===' "$out_dir/zfs.txt" | head -2 | tail -1 | tr -d '\n')"
 _ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 _ts_epoch="$(date +%s)"
-_dstate_count="$(grep -c '^[0-9]' <<<"$_dstate_pids" 2>/dev/null || echo 0)"
-_fail_count="$(grep -c '\[FAIL\]' "$out_dir/test.log" 2>/dev/null || echo 0)"
-_pass_count="$(grep -c '\[PASS\]' "$out_dir/test.log" 2>/dev/null || echo 0)"
+# NOT `$(grep -c ... || echo 0)`: with no match grep -c prints 0 AND exits 1,
+# so the echo added a second 0 and meta.json got "0\n0" -- invalid JSON --
+# in every bundle from a run with no failures (2026-09-30; the 2026-08-22
+# two-line-count incident).
+_dstate_count="$(grep -c '^[0-9]' <<<"$_dstate_pids" 2>/dev/null)" || _dstate_count=0
+_fail_count="$(grep -c '\[FAIL\]' "$out_dir/test.log" 2>/dev/null)" || _fail_count=0
+_pass_count="$(grep -c '\[PASS\]' "$out_dir/test.log" 2>/dev/null)" || _pass_count=0
 _last_test="$(tac "$out_dir/test.log" 2>/dev/null | grep -m1 '/functional/' | sed -E 's|.*/functional/([^ ]+).*|\1|' || echo unknown)"
 _status="$(cat "$out_dir/host-status.txt" 2>/dev/null || echo unknown)"
 

@@ -51,13 +51,16 @@ G=$'\e[1;32m' R=$'\e[1;31m' Y=$'\e[1;33m' C=$'\e[1;36m' N=$'\e[0m'
 
 usage() {
     cat <<EOF
-Usage: kldload-mok-repair [status|repair]
+Usage: kldload-mok-repair [status | repair [--force]]
 
   status   Show Secure Boot state, enrolled MOKs (stale kldload keys
-           flagged), pending requests, and whether the boot chain's
-           signature matches an enrolled key. Default.
+           flagged), pending requests, whether the boot chain's
+           signature matches an enrolled key, and any loaded module
+           signed by a different enrolled key. Default.
   repair   Queue a MOK-list reset + import of the current install's key,
            then print the MokManager walkthrough (password: ${PASS}).
+           Refused while a loaded module is signed by another enrolled
+           key, which the reset would stop loading; --force goes ahead.
 
 Works on an installed system or from the live ISO (rescue): live mode
 finds the installed pool, imports it read-only, and uses its key.
@@ -126,6 +129,30 @@ find_mok_der() {
     zpool export "$pool" >&2 || true
 }
 
+# _foreign_signed <der> — loaded modules signed by an ENROLLED MOK other than
+# <der>'s, one "module (signer)" per line; nothing when there are none.
+#
+# WHY: repair resets the whole MOK list and enrols one key. A module signed by
+# any other enrolled key -- an earlier install's, DKMS's own default key --
+# stops loading at the next boot with Secure Boot on; for ZFS or NVIDIA that is
+# no root pool or no display. In-tree modules are signed by the distribution's
+# key in the kernel's built-in keyring, which a MOK reset does not touch, so
+# only signers that ARE enrolled MOKs count. (Added 2026-09-30: the header
+# called the reset safe because shim carries Fedora's certificate, and onyx's
+# list also held a "DKMS module signing key".)
+_foreign_signed() {
+    local der="$1" cur enrolled m sig
+    cur="$(openssl x509 -inform der -in "$der" -noout -subject 2>/dev/null | sed -n 's/.*CN *= *//p')"
+    enrolled="$(mokutil --list-enrolled 2>/dev/null | sed -n 's/^ *Subject:.*CN *= *//p' || true)"
+    [[ -n "$enrolled" ]] || return 0
+    while read -r m _; do
+        sig="$(modinfo -F signer "$m" 2>/dev/null || true)"
+        [[ -n "$sig" && "$sig" != "$cur" ]] || continue
+        grep -qxF -- "$sig" <<<"$enrolled" && printf '%s (%s)\n' "$m" "$sig"
+    done </proc/modules
+    return 0
+}
+
 # ─── status ──────────────────────────────────────────────────────────────
 cmd_status() {
     echo "${C}── Secure Boot ─────────────────────────────${N}"
@@ -167,6 +194,17 @@ cmd_status() {
         *"is already enrolled"*)
             echo "${G}✓ this key is already enrolled — Secure Boot should verify the boot chain.${N}"
             ;;
+        esac
+        local _fs
+        _fs="$(_foreign_signed "$der")"
+        if [[ -n "$_fs" ]]; then
+            echo "${Y}⚠ loaded modules signed by ANOTHER enrolled key — a repair would stop them loading:${N}"
+            sed 's/^/    /' <<<"$_fs"
+        else
+            echo "Loaded modules signed by another enrolled key: none"
+        fi
+        case "$_tk" in
+        *"is already enrolled"*) ;;
         *"already in the enrollment request"*)
             echo "${Y}⏳ this key is QUEUED for enrollment — nothing to repair, you just have to finish it:${N}"
             echo "   reboot → ${R}press a key within ~10s${N} at the blue MOK screen →"
@@ -194,6 +232,16 @@ cmd_repair() {
         echo "${R}Cannot repair: no mok.der found on this system or any local pool.${N}"
         exit 1
     }
+    local _fs
+    _fs="$(_foreign_signed "$der")"
+    if [[ -n "$_fs" && "${FORCE:-0}" != 1 ]]; then
+        echo "${R}Not repairing: these loaded modules are signed by another enrolled key,${N}"
+        echo "${R}and the reset would stop them loading with Secure Boot on:${N}"
+        sed 's/^/    /' <<<"$_fs"
+        echo "Rebuild them with DKMS (which signs with the install key) first, or run"
+        echo "  kldload-mok-repair repair --force"
+        exit 1
+    fi
     # ORDER IS LOAD-BEARING: `mokutil --reset` clears MokNew, so it wipes any
     # pending import. Reset FIRST, import SECOND — doing it by hand in the
     # other order silently discards the enrollment (fiend 2026-08-03).
@@ -233,7 +281,10 @@ EOF
 
 case "${1:-status}" in
 status) preflight && cmd_status ;;
-repair) preflight && cmd_repair ;;
+repair)
+    [[ "${2:-}" == --force ]] && FORCE=1
+    preflight && cmd_repair
+    ;;
 -h | --help) usage 0 ;;
 *) echo "unknown command: $1" >&2 && usage 1 ;;
 esac

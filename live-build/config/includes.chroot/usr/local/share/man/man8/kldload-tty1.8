@@ -1,0 +1,62 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-TTY1 8
+.Os
+.Sh NAME
+.Nm kldload-tty1
+.Nd start the first console: the install menu on the live medium when asked for, a login everywhere else
+.Sh SYNOPSIS
+.Nm
+.Op Ar tty
+.Sh DESCRIPTION
+The drop-in for
+.Pa getty@tty1.service
+runs
+.Nm
+in place of
+.Xr agetty 8 .
+On the live medium booted with
+.Ql kldload.tui=1
+on the kernel command line it logs root in with no password, and root's
+login profile starts
+.Ql kld install ;
+in every other case it is the ordinary login prompt.
+The same drop-in reaches installed systems, so it decides when the
+console opens rather than through the unit's conditions, and the worst it
+can do is a normal login.
+.Sh ENVIRONMENT
+For tests only:
+.Bl -tag -width Ds
+.It Ev KLDLOAD_TTY1_CMDLINE
+A file to read instead of
+.Pa /proc/cmdline .
+.It Ev KLDLOAD_TTY1_LIVE
+Directories to look for instead of the live mounts.
+.It Ev KLDLOAD_TTY1_DRYRUN
+1 prints the
+.Xr agetty 8
+command instead of running it.
+.El
+.Sh EXIT STATUS
+It becomes
+.Xr agetty 8 ;
+with
+.Ev KLDLOAD_TTY1_DRYRUN ,
+0.
+.Sh EXAMPLES
+What it would run, with its test settings, on 2026-09-30: a live medium
+with
+.Ql kldload.tui=1 ,
+a live medium without it, and an installed system:
+.Bd -literal -offset indent
+/sbin/agetty --autologin root --noclear tty1 linux
+/sbin/agetty --noclear tty1 linux
+/sbin/agetty --noclear tty1 linux
+.Ed
+.Sh SEE ALSO
+.Xr agetty 8 ,
+.Xr kld 8
+.Sh HISTORY
+On 2026-09-13 a separate unit that fought the login for tty1 cost the
+kiosk two days; this replaced that approach.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com

@@ -1,32 +1,40 @@
 #!/usr/bin/env bash
 # kldload-ca — per-install PKI root for kldload.
 #
-# ONE root per install. Signs every TLS cert (webui, proxy, grafana, ttyd,
-# prometheus, …), enrolls as the Secure Boot MOK, bootstraps the K8s
-# cluster CA, and gets distributed to cloned VMs via Ansible. Replaces
-# the old per-service self-signed cert soup that caused cert-drift
-# races all through 1.0.5.
+# ONE root per install. It signs the web console's certificate (through
+# kldload-tls-cert), is served to browsers at https://<host>:8443/kldload-ca.crt,
+# is put in the system and users' browser trust stores by trust-install, and
+# its key is the Secure Boot MOK that kldload-secure-boot enrolls and signs
+# modules with. It replaced the per-service self-signed certificates that
+# raced each other all through 1.0.5.
 #
-# Regenerated fresh on every install / cluster-rebuild — a wiped system
-# should not share a trust root with its replacement. Within a single
-# install's lifetime, leaves are re-issued from this root at will.
+# Made fresh on every install -- a wiped system should not share a trust root
+# with its replacement. Within one install, leaves are re-issued at will.
 #
-# Layout:
-#   /var/lib/kldload/ca/
-#     root/
-#       ca.key           RSA 4096, 0600 root:root. Never leaves this box.
-#       ca.crt           PEM. Distributed freely (this is the whole point).
-#       ca.der           DER form. mokutil + Windows trust stores want DER.
-#       serial           openssl-compatible serial counter.
-#       fingerprint      sha256 of ca.crt (shown on firstboot banner).
-#     leaves/
-#       <name>.key       RSA 2048, 0640 root:<name-group-if-exists>.
-#       <name>.crt       Signed by root, 90-day lifetime.
-#       <name>.sans      Record of SANs — replay on renew.
-#     leaf.conf          Templated at issue time.
+# Layout (under /etc/kldload/ca, or $KLDLOAD_CA_DIR):
+#   root/
+#     ca.key           RSA 4096, 0600. Never leaves this box.
+#     ca.crt           PEM, ten years. Distributed freely (the whole point).
+#     ca.der           DER form, for mokutil and Windows trust stores.
+#     serial           openssl's serial counter.
+#     fingerprint      sha256 of ca.crt.
+#     ca.conf          the request config init used.
+#     openssl.log      openssl's stderr from init and issue.
+#   leaves/
+#     <name>.key       RSA 2048, 0640 root:root.
+#     <name>.crt       signed by the root; 90 days unless --days
+#                      (kldload-tls-cert asks for 365).
+#     <name>.cnf       the request config issue wrote.
+#     <name>.sans      the issue arguments, replayed by renew.
 #
-# Exit codes: 0 ok, 1 generic error, 2 wrong args.
-set -euo pipefail
+# Exit codes: 0 ok, 1 error, 2 usage. See kldload-ca(8).
+#
+# The layout above was wrong for a year: it named /var/lib/kldload/ca and a
+# per-service group on leaf keys, neither of which this code has done since
+# the move below, and claimed a Kubernetes CA and Ansible distribution that
+# nothing in the tree does (read against the code, 2026-09-30).
+set -Eeuo pipefail
+trap 'echo "kldload-ca: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # CA default path is /etc/kldload/ca — on the ROOT ZFS dataset, never
 # shadowed by child dataset mounts. The 1.0.5-b303 installs put CA under
@@ -53,7 +61,13 @@ die() {
 # Hostname + install fingerprint for CN — uniqueness matters so MokManager
 # doesn't silently skip because "a CA with this subject is already trusted"
 # from a prior install.
-_hostname() { hostname -s 2>/dev/null || echo kldload; }
+# uname -n when there is no hostname program (Arch's base has none), as in
+# kldload-tls-cert.
+_hostname() {
+    local n
+    n="$(hostname -s 2>/dev/null || uname -n)"
+    printf '%s\n' "${n%%.*}"
+}
 _stamp() { date +%Y%m%d%H%M%S; }
 _rand() { head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
@@ -97,10 +111,15 @@ cmd_init() {
         local stamp
         stamp="$(date +%Y%m%d-%H%M%S)"
         mv "${ROOT_DIR}" "${CA_DIR}/root.archived.${stamp}"
-        install -d -m 0700 -o root -g root "${ROOT_DIR}"
+        # 0755 like ensure_dirs: nginx serves ca.crt from here as its own
+        # user. This was 0700, so the first rotation made /kldload-ca.crt a
+        # 403 (found exercising --force in a container, 2026-09-30). The key
+        # is 0600 on its own.
+        install -d -m 0755 -o root -g root "${ROOT_DIR}"
     fi
 
-    local cn="kldload-ca $(_hostname)-$(_stamp)-$(_rand)"
+    local cn
+    cn="kldload-ca $(_hostname)-$(_stamp)-$(_rand)"
 
     log "generating root CA: CN='${cn}'"
 
@@ -157,6 +176,9 @@ cmd_issue() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+        --dns | --ip | --days | --eku)
+            [[ $# -ge 2 ]] || die "$1 needs a value"
+            ;;&
         --dns)
             dns_sans+=("$2")
             shift 2
@@ -309,21 +331,40 @@ cmd_enroll_mok() {
         return 0
     fi
 
-    # Idempotent: already enrolled?
-    if mokutil --test-key "${ROOT_DER}" 2>/dev/null | grep -qi 'is already enrolled'; then
+    # Idempotent: already enrolled? Captured, not piped into grep -q: under
+    # pipefail an early grep exit can SIGPIPE mokutil, and a 141 here would
+    # queue the key a second time.
+    local mok_out
+    # WHY 2>/dev/null and || true: --test-key exits non-zero for a key that is
+    # NOT enrolled, which is the answer being asked for, not a failure.
+    mok_out="$(mokutil --test-key "${ROOT_DER}" 2>/dev/null || true)"
+    if [[ "${mok_out,,}" == *"is already enrolled"* ]]; then
         log "kldload CA already enrolled as MOK"
         return 0
     fi
 
     # Already pending from prior install? Let the user drive.
-    if mokutil --list-new 2>/dev/null | grep -q "$(openssl x509 -in "${ROOT_CRT}" -noout -subject | sed 's/^subject=//;s/ *//g')"; then
+    local pending fp
+    # WHY || true: --list-new exits non-zero when nothing is queued.
+    pending="$(mokutil --list-new 2>/dev/null || true)"
+    # By SHA1 fingerprint, which mokutil prints lower-case with colons. This
+    # compared the subject with its spaces removed against mokutil's spaced
+    # "Subject:" line, which never matched (2026-09-30).
+    fp="$(openssl x509 -in "${ROOT_CRT}" -noout -fingerprint -sha1 | sed 's/^.*=//' | tr 'A-F' 'a-f')"
+    if [[ -n "$fp" && "$pending" == *"$fp"* ]]; then
         log "kldload CA already queued for enrollment — reboot into MokManager to finish"
         return 0
     fi
 
     local pass="${KLDLOAD_MOK_PASSWORD:-kldload}"
     if printf '%s\n%s\n' "${pass}" "${pass}" | mokutil --ignore-keyring --import "${ROOT_DER}" >/dev/null 2>&1; then
-        log "MOK enrollment queued — password: ${pass}"
+        # The default is published (README); one the operator chose is a
+        # secret and stays out of the journal.
+        if [[ -n "${KLDLOAD_MOK_PASSWORD:-}" ]]; then
+            log "MOK enrollment queued — password: the one in KLDLOAD_MOK_PASSWORD"
+        else
+            log "MOK enrollment queued — password: ${pass}"
+        fi
         log "Reboot: firmware will drop into MokManager. Choose 'Enroll MOK' → Continue → enter password."
     else
         log "WARNING: mokutil --import failed"
@@ -545,6 +586,11 @@ cmd_sign_module() {
         exit 0
     }
 
+    # SAFETY: sign-file appends to the file as given, so a compressed module
+    # comes out corrupt with exit 0 (tried on a copy of zfs.ko.xz,
+    # 2026-09-30). DKMS hands its sign tool the .ko before compressing;
+    # anything else is refused.
+    [[ "${mod}" == *.ko ]] || die "not an uncompressed .ko: ${mod} (signing it in place would corrupt it)"
     exec "${sign_file}" sha256 "${ROOT_KEY}" "${ROOT_CRT}" "${mod}"
 }
 
@@ -601,9 +647,14 @@ main() {
     info) cmd_info ;;
     dump-root) cmd_dump_root ;;
     dump-der) cmd_dump_der ;;
-    -h | --help | help | "") usage ;;
+    -h | --help | help) usage ;;
+    "")
+        usage >&2
+        exit 2
+        ;;
     *)
-        usage
+        echo "kldload-ca: unknown command: $cmd" >&2
+        usage >&2
         exit 2
         ;;
     esac

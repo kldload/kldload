@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # kube-load-images — import pre-pulled container images from darksite into containerd
 # Run before kube-init on offline/air-gapped systems
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kube-load-images: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # --help answers before the root re-exec below: asking a tool what it does
 # must never need a password, and on a machine where the operator has no
@@ -36,6 +37,7 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 IMAGES_DIR="${1:-/root/darksite/k8s-images}"
 
 log() { echo -e "\033[1;32m[kube-load-images]\033[0m $*"; }
+err() { echo -e "\033[1;31m[kube-load-images]\033[0m $*" >&2; }
 
 if [[ ! -d "$IMAGES_DIR" ]] || [[ -z "$(ls -A "$IMAGES_DIR" 2>/dev/null)" ]]; then
     log "No pre-pulled images found at $IMAGES_DIR — will pull from internet"
@@ -43,7 +45,7 @@ if [[ ! -d "$IMAGES_DIR" ]] || [[ -z "$(ls -A "$IMAGES_DIR" 2>/dev/null)" ]]; th
 fi
 
 command -v ctr >/dev/null 2>&1 || {
-    log "ctr not found — containerd not installed?"
+    err "ctr not found — containerd not installed?"
     exit 1
 }
 
@@ -64,6 +66,6 @@ for tarball in "$IMAGES_DIR"/*.tar; do
 done
 log "Loaded ${count} of ${given} container image archives into containerd"
 if ((${#failed[@]})); then
-    log "FAILED to import: ${failed[*]}"
+    err "FAILED to import: ${failed[*]}"
     exit 1
 fi

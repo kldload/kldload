@@ -1,0 +1,138 @@
+.Dd September 30, 2026
+.Dt KUBE-SETUP 8
+.Os
+.Sh NAME
+.Nm kube-setup
+.Nd install and configure what a machine needs to be a Kubernetes node, online or from the darksite
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+makes this machine ready for
+.Xr kube-init 8
+or
+.Xr kube-join 8 ,
+on dnf systems (CentOS, RHEL, Rocky, Fedora) and apt systems (Debian,
+Ubuntu).
+In order it:
+.Bl -enum -compact
+.It
+when
+.Ev KLDLOAD_DARKSITE_URL
+is set, copies the version lock, charts, manifests, command-line tools and
+container images from the host's darksite, and installs every package
+from its mirror only;
+.It
+sets the node's time source and its routes to the cluster;
+.It
+installs the QEMU guest agent;
+.It
+loads the kernel modules and sysctls Kubernetes needs, and turns swap
+off;
+.It
+installs containerd, with the systemd cgroup driver, and kubeadm,
+kubelet, kubectl and cri-tools from
+.Ql pkgs.k8s.io
+or the darksite;
+.It
+installs Helm, the Cilium CLI, Hubble and k9s: the darksite's copy when
+there is one, otherwise downloaded and checked against the SHA-256 each
+release publishes;
+.It
+installs node_exporter;
+.It
+loads the darksite's container images, pulls any image the lock or
+kubeadm names that is still missing, and counts what came from where;
+.It
+sets up networking for clones: DHCP with a client id from the MAC,
+unless NetworkManager owns the interface.
+.El
+.Pp
+It runs itself under
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the description and environment and exit 0, without root.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev K8S_VERSION
+The package stream, as a minor version:
+.Ql v1.37 .
+From the caller, else
+.Pa /root/darksite/k8s-stack.lock ,
+else
+.Ql dl.k8s.io Ns 's
+current release; if none answers, it stops.
+.It Ev HELM_VERSION , Ev CILIUM_CLI_VERSION , Ev HUBBLE_CLI_VERSION
+Each tool's release: from the caller, else the lock; a lock without one
+is refused.
+With no lock at all each is GitHub's latest release.
+.It Ev KLDLOAD_DARKSITE_URL
+The host's darksite as
+.Xr kube-cluster 8
+tunnels it into a golden, e.g.
+.Ql http://127.0.0.1:18080 .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/darksite/k8s-stack.lock
+The versions the image was built with.
+.It Pa /root/darksite/bin/
+Command-line tool archives baked into the image; Helm's, the Cilium
+CLI's, Hubble's and k9s's are checked against their sums when baked.
+.It Pa /root/darksite/k8s-images/
+Container images, loaded by
+.Xr kube-load-images 8 .
+.El
+.Sh EXIT STATUS
+0 when done; 1 on a failure, named.
+A required tool that does not download and verify is a failure; Hubble
+and k9s are warned about.
+.Sh EXAMPLES
+The download steps alone, run in a Fedora 44 container with no darksite,
+at the lock's versions:
+.Bd -literal -offset indent
+[kube-setup] Installing Helm v4.3.0...
+[kube-setup] Helm installed: v4.3.0+gbec5b06
+[kube-setup] Installing Cilium CLI v0.20.1...
+[kube-setup] Cilium CLI installed
+[kube-setup] Installing Hubble CLI v1.19.4...
+[kube-setup] Hubble CLI installed
+[kube-setup] Installing k9s...
+[kube-setup] k9s installed
+.Ed
+.Pp
+The check itself, given Helm's archive and Cilium's list of sums, which
+has no line for it:
+.Bd -literal -offset indent
+[kube-setup] helm-v4.3.0-linux-amd64.tar.gz: the release publishes sha256 'none', the download is 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
+.Ed
+.Pp
+The archive was removed and nothing installed.
+.Sh SEE ALSO
+.Xr kube-cluster 8 ,
+.Xr kube-init 8 ,
+.Xr kube-join 8 ,
+.Xr kube-load-images 8 ,
+.Xr kube-smoke-test 8
+.Sh HISTORY
+On 2026-09-27 a golden built "offline" was found fetching containerd,
+kubeadm, Helm and every image from the internet; since then everything
+comes from the host's darksite when it is given.
+On 2026-09-30, writing this page: downloaded tools were piped into
+.Xr tar 1
+as root without a check.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It disables swap, including zram, for good: the kubelet refuses to run
+with it.
+.Pp
+Without
+.Ev KLDLOAD_DARKSITE_URL
+it adds the Kubernetes, and on some systems Docker and ZFS, package
+repositories to the machine.

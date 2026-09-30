@@ -78,6 +78,16 @@ if zfs list "${ZPATH}@golden" >/dev/null 2>&1; then
     exit 0
 fi
 
+# A volume of this name WITHOUT @golden is a run that died part-way. The
+# `zfs create` below would fail on it -- after the 15-25 minute compose,
+# and again on every retry. Say so now; destroying it is the operator's
+# call, not this script's (2026-09-30).
+if zfs list -H "$ZPATH" >/dev/null 2>&1; then
+    log "ERROR: ${ZPATH} exists without @golden (an earlier run stopped part-way)"
+    log "       remove it, then retry: zfs destroy ${ZPATH}; systemctl start kldload-rhel-composer"
+    exit 1
+fi
+
 # Must be on a registered RHEL host. Composer's RHEL repo definitions
 # need active entitlement certs to talk to cdn.redhat.com.
 if ! subscription-manager identity >/dev/null 2>&1; then

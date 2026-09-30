@@ -1,0 +1,93 @@
+.Dd September 30, 2026
+.Dt KFIRE-EXPORTER 8
+.Os
+.Sh NAME
+.Nm kfire-exporter
+.Nd count Firecracker microVMs where node_exporter will serve them
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The estate dashboards count virtual machines from libvirt, and a
+Firecracker microVM made by
+.Xr kfire 8
+is not a libvirt domain.
+.Nm
+counts them from kfire's records, so that the dashboards can add them in.
+It writes:
+.Bl -tag -width Ds
+.It Ql kldload_firecracker_instances
+Every microVM kfire has a record for.
+.It Ql kldload_firecracker_running
+Those whose
+.Pa kfire- Ns Ar name Ns Pa .service
+is active.
+.It Ql kldload_firecracker_by_golden{golden}
+How many were made from each golden.
+.It Ql kldload_firecracker_instance{name,golden,ip,vcpus,ram_mb}
+One per microVM: 1 while it runs, else 0.
+.El
+.Pp
+The file is written under a temporary name and renamed over the real one.
+When node_exporter's textfile directory does not exist it writes nothing.
+.Pa kfire-exporter.timer
+runs it 10 seconds after boot and every 15 seconds after that, as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0, writing nothing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kfire/instances/ Ns Ar name Ns Pa /instance.json
+What it reads; the golden, address, processors and memory come from
+here, through
+.Xr jq 1
+when it is installed.
+.It Pa /var/lib/node_exporter/textfile_collector/kfire.prom
+What it writes.
+.El
+.Sh EXIT STATUS
+0, always: an empty or missing file already means
+.Dq no data
+to Prometheus, and a failing timer would only be noise.
+.Sh EXAMPLES
+On a kldload desktop with no microVMs on 2026-09-30:
+.Bd -literal -offset indent
+$ cat /var/lib/node_exporter/textfile_collector/kfire.prom
+# HELP kldload_firecracker_instances Firecracker microVMs kfire has a record for.
+# TYPE kldload_firecracker_instances gauge
+kldload_firecracker_instances 0
+# HELP kldload_firecracker_running Firecracker microVMs whose unit is active.
+# TYPE kldload_firecracker_running gauge
+kldload_firecracker_running 0
+# HELP kldload_firecracker_by_golden Firecracker microVMs per golden template.
+# TYPE kldload_firecracker_by_golden gauge
+# HELP kldload_firecracker_instance One line per microVM; 1 when its unit is active.
+# TYPE kldload_firecracker_instance gauge
+# (exited 0)
+.Ed
+.Pp
+Whether node_exporter read the directory cleanly:
+.Bd -literal -offset indent
+$ curl -s http://127.0.0.1:9100/metrics | grep -E '^(kldload_firecracker_running|node_textfile_scrape_error)'
+kldload_firecracker_running 0
+node_textfile_scrape_error 0
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr arcstats-exporter 8 ,
+.Xr kfire 8 ,
+.Xr zpool-scrub-exporter 8
+.Sh HISTORY
+Written after 2026-09-06, when microVMs were cloned on a lab host during
+a demonstration of the fleet and the dashboard's machine count read 39
+before and 39 after.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Without
+.Xr jq 1
+every microVM is still counted, but with no address, processors or
+memory.

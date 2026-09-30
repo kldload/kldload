@@ -32,9 +32,21 @@ esac
 }
 
 . /etc/os-release 2>/dev/null || true
-EL="${VERSION_ID%%.*}"
-[[ -n "$EL" ]] || {
-    echo "Cannot determine EL version from /etc/os-release" >&2
+# RPM Fusion keeps Fedora and the RHEL family apart: fedora/<release> and
+# el/<major>. It asked for el/ everywhere, and on Fedora 44 -- kldload's main
+# substrate -- el/...-release-44 is a 404, so the first dnf failed
+# (2026-09-30).
+_rel="${VERSION_ID%%.*}"
+case "${ID:-}" in
+fedora) _fusion=fedora ;;
+rhel | centos | rocky | almalinux) _fusion=el ;;
+*)
+    echo "kldload-codecs: RPM Fusion is for Fedora and the RHEL family; this is ${ID:-unknown}" >&2
+    exit 1
+    ;;
+esac
+[[ -n "$_rel" ]] || {
+    echo "Cannot determine the release from /etc/os-release" >&2
     exit 1
 }
 
@@ -49,10 +61,10 @@ read -rp "[y/N] " ans
     exit 0
 }
 
-echo "==> Enabling RPM Fusion for EL${EL}..."
+echo "==> Enabling RPM Fusion for ${_fusion} ${_rel}..."
 dnf install -y \
-    "https://download1.rpmfusion.org/free/el/rpmfusion-free-release-${EL}.noarch.rpm" \
-    "https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-${EL}.noarch.rpm"
+    "https://download1.rpmfusion.org/free/${_fusion}/rpmfusion-free-release-${_rel}.noarch.rpm" \
+    "https://download1.rpmfusion.org/nonfree/${_fusion}/rpmfusion-nonfree-release-${_rel}.noarch.rpm"
 
 echo "==> Installing codecs (full ffmpeg + GStreamer + VLC)..."
 dnf install -y --allowerasing \
@@ -61,8 +73,20 @@ dnf install -y --allowerasing \
     lame vlc
 
 echo "==> Verifying H.264/HEVC/AAC decoders..."
+# Read once, then searched: `ffmpeg | grep -q` under pipefail can read as
+# MISSING when grep leaves first. And a missing decoder is a failure.
+_dec="$(ffmpeg -hide_banner -decoders 2>/dev/null)" || _dec=""
+_missing=0
 for c in h264 hevc aac; do
-    ffmpeg -hide_banner -decoders 2>/dev/null | grep -q " $c " &&
-        echo "   $c: ok" || echo "   $c: MISSING"
+    if grep -q " $c " <<<"$_dec"; then
+        echo "   $c: ok"
+    else
+        echo "   $c: MISSING"
+        _missing=1
+    fi
 done
+((_missing == 0)) || {
+    echo "kldload-codecs: a decoder is missing -- see above" >&2
+    exit 1
+}
 echo "Done. Every app (browsers, players, VLC) can now decode common media."

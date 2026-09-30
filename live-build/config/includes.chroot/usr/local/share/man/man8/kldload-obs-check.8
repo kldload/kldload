@@ -1,0 +1,151 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-OBS-CHECK 8
+.Os
+.Sh NAME
+.Nm kldload-obs-check
+.Nd check the metrics and logs stack end to end, and say where it breaks
+.Sh SYNOPSIS
+.Nm
+.Op Fl -fix
+.Op Fl -vm Ar name
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+kldload's observability is a chain: exporters for ZFS, disks and eBPF;
+Prometheus scraping them; promtail shipping the journal to Loki; Grafana
+drawing both.
+A broken link shows up only as an empty dashboard.
+.Nm
+walks the chain in order, so the first failure is where it breaks:
+.Bl -enum -compact
+.It
+the services are active;
+.It
+each listens on its port;
+.It
+Prometheus finds every target up;
+.It
+the ZFS exporter reports pool health, not only its own version;
+.It
+the SMART exporter sees at least one device;
+.It
+Loki is ready and has labels;
+.It
+promtail has shipped something;
+.It
+the system journal records to disk, asked of
+.Xr kldload-journal-assert 8 ;
+.It
+Grafana answers and has its Loki data source;
+.It
+each of kldload's dashboards is loaded;
+.It
+with
+.Fl -vm ,
+that virtual machine's logs reach the host's Loki.
+.El
+.Pp
+Each failure is followed by the command that shows it.
+It changes nothing unless
+.Fl -fix
+is given.
+It must run as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -fix
+Restart a service that is not active, and run
+.Xr kldload-journal-assert 8 ,
+which repairs a journal that is not on disk, instead of only asking it.
+.It Fl -vm Ar name
+Also look for an hour of log lines from
+.Ar name
+in Loki.
+.It Fl h , Fl -help
+Print the description at the top of the script and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_GRAFANA_URL
+Where Grafana listens; default
+.Lk http://127.0.0.1:3000 ,
+since it answers only on loopback, behind the proxy.
+.It Ev KLDLOAD_JOURNAL_ASSERT
+Another copy of
+.Xr kldload-journal-assert 8 ;
+for testing.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Every check passed.
+.It 1
+At least one failed.
+.It 2
+An unknown argument.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30:
+.Bd -literal -offset indent
+# kldload-obs-check
+[1] systemd services
+  [OK]   zfs_exporter active
+  [OK]   smartctl_exporter active
+  [OK]   loki active
+  [OK]   promtail active
+  [OK]   grafana-server active
+  [OK]   prometheus active
+  [OK]   ebpf_exporter active
+\&...
+[8] persistent journal
+  [OK]   journal: recording persistently in /var/log/journal (root:systemd-journal)
+
+[9] Grafana
+  [OK]   Grafana database=ok
+  [OK]   Loki datasource provisioned
+
+[10] Grafana dashboards
+  [OK]   dashboard zfs-pool-health → 200
+\&...
+  [OK]   dashboard klab-test-matrix → 200
+
+✓ ALL CHECKS PASSED — observability stack healthy
+
+Dashboards:
+  https://10.100.10.121:8443/grafana/d/zfs-pool-health/
+\&...
+# (exited 0)
+.Ed
+.Pp
+Before this page was written, the same machine failed [9] and [10], and
+[8] could not have failed:
+.Bd -literal -offset indent
+[9] Grafana
+  [FAIL] Grafana /api/health returned ''
+  [OK]   Loki datasource provisioned
+
+[10] Grafana dashboards
+  [FAIL] dashboard zfs-pool-health → http=000
+           ls /var/lib/grafana/dashboards/zfs-pool-health.json
+\&...
+.Ed
+.Sh SEE ALSO
+.Xr kldload-doctor 8 ,
+.Xr kldload-journal-assert 8
+.Sh HISTORY
+On 2026-09-30, writing this page: the Grafana checks asked for HTTPS on
+port 3000, where Grafana speaks plain HTTP on loopback only, so they
+failed on every install, and the dashboard links it printed led nowhere;
+and its journal check passed whenever an old journal file existed, which
+it did on a desktop that had kept its journal only in
+.Pa /run
+for three weeks.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+.Fl -vm
+looks for a Loki label
+.Ql vm ;
+the desktop above has no such label, and the check has not been seen to
+pass.
+.Pp
+The list of dashboards is fixed in the script.

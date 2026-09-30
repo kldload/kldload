@@ -1,0 +1,120 @@
+.Dd September 30, 2026
+.Dt KUBE-INIT 8
+.Os
+.Sh NAME
+.Nm kube-init
+.Nd make this machine the first control plane of a Kubernetes cluster, with Cilium, MetalLB and ZFS storage
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+Run after
+.Xr kube-setup 8
+on the machine that will be the first control plane.
+In order it:
+.Bl -enum -compact
+.It
+checks that kubeadm, kubectl, Helm and the Cilium CLI are installed,
+containerd is running, and no cluster is already up here;
+.It
+snapshots every dataset of the root's pool, as
+.Ar pool Ns Pa @pre-kube-init- Ns Ar timestamp ,
+and warns if it cannot;
+.It
+when
+.Ev KUBE_VIP_ADDRESS
+is set, puts that address on the node and runs kube-vip to hold it, so
+that other control planes can join behind one address;
+.It
+runs
+.Ql kubeadm init
+without kube-proxy, and lets workloads run on the control plane;
+.It
+installs Cilium, in place of kube-proxy;
+.It
+installs the Gateway API, MetalLB with an address pool, ZFS LocalPV
+storage \(em or local-path storage when the node has no ZFS \(em and
+metrics-server, each warned about rather than fatal if it fails;
+.It
+saves a join command for
+.Xr kube-join 8 ,
+starts a sample nginx deployment, and prints the cluster's state.
+.El
+.Pp
+Charts, manifests and versions come from
+.Pa /root/darksite
+when it holds them, so a node with no internet can do all of it.
+It runs itself under
+.Xr sudo 8 .
+.Xr kube-cluster 8
+runs it on the first control plane it makes.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the description and environment and exit 0, without root.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev POD_CIDR , Ev SVC_CIDR
+Default
+.Ql 10.244.0.0/16
+and
+.Ql 10.96.0.0/16 .
+The service range is a /16, not kubeadm's /12, which covers 10.96 to
+10.111 and so many LANs.
+.It Ev CILIUM_VERSION , Ev METALLB_VERSION , Ev KUBE_VIP_VERSION
+Default the lock's.
+.It Ev METALLB_POOL
+The LoadBalancer address range; empty takes .200 to .220 of the node's
+/24.
+.It Ev METALLB_POOL_NAME
+Default
+.Ql kldload-pool ;
+anything that asks for a pool by name must use this one.
+.It Ev KUBE_VIP_ADDRESS , Ev KUBE_VIP_INTERFACE
+A free address for the API server to share among control planes, and the
+interface to hold it; set it now, since the certificates name it.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kubernetes/join-command.sh
+The join command, mode 0600.
+.It Pa /root/darksite/k8s-stack.lock
+The versions the image was built with.
+.El
+.Sh EXIT STATUS
+0 when the control plane is up; 1 when a step it cannot do without
+failed, named.
+.Sh EXAMPLES
+Not run for this page, since it makes a cluster:
+.Bd -literal -offset indent
+# kube-init
+# METALLB_POOL=192.168.122.230-192.168.122.239 KUBE_VIP_ADDRESS=192.168.122.240 kube-init
+.Ed
+.Sh SEE ALSO
+.Xr kube-cluster 8 ,
+.Xr kube-join 8 ,
+.Xr kube-reset 8 ,
+.Xr kube-setup 8 ,
+.Xr kube-status 8
+.Sh HISTORY
+On 2026-08-19 the MetalLB pool's name did not match what four other files
+asked for, and a first boot waited fifteen minutes on a LoadBalancer
+that never came.
+On 2026-09-20 it read a version lock that only the host has, and died
+before printing anything on every control plane.
+On 2026-09-28 the service range moved from /12 to /16 when a route over it
+cut nodes off the LAN.
+On 2026-09-30, writing this page: its help said an empty
+.Ev METALLB_POOL
+left MetalLB unconfigured, and a snapshot that failed was logged as the
+rollback point.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+On a node with ZFS but no pool named
+.Ql rpool ,
+it makes one on a 20 GB file,
+.Pa /var/lib/zfs-csi-pool.img ,
+for the storage driver.

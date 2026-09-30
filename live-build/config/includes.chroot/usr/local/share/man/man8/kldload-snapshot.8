@@ -1,0 +1,76 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-SNAPSHOT 8
+.Os
+.Sh NAME
+.Nm kldload-snapshot
+.Nd take the hourly snapshot of the running boot environment, and keep the newest two days of them
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+snapshots the boot environment the pool boots \(em its
+.Ql bootfs
+\(em as
+.Ar dataset Ns Pa @auto- Ns Ar YYYYMMDD-HHMMSS ,
+then removes the oldest of those so that the newest
+.Ev KLDLOAD_ROOT_SNAP_KEEP
+remain.
+A snapshot a boot environment was cloned from is kept by ZFS and
+reported, not treated as a failure.
+.Pa kldload-snapshot.timer
+runs it every hour.
+.Xr kldload-rollback 8
+lists these snapshots as
+.Dq scheduled .
+.Pp
+On a machine without ZFS, or a pool with no
+.Ql bootfs ,
+it does nothing.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0, taking no snapshot.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_ROOT_SNAP_KEEP
+How many
+.Ql @auto-
+snapshots to keep; default 48, two days of hourly ones.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/kldload/bootstrap.log
+Each snapshot, the pruning, and any failure.
+.El
+.Sh EXIT STATUS
+0 when the snapshot was taken, or there was nothing to snapshot; 1 when
+it failed; 2 when given an argument.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30:
+.Bd -literal -offset indent
+# grep auto- /var/log/kldload/bootstrap.log | tail -2
+[2026-09-30 02:00:00] creating snapshot rpool/ROOT/onyx@auto-20260930-020000
+[2026-09-30 03:00:01] creating snapshot rpool/ROOT/onyx@auto-20260930-030001
+# (exited 0)
+$ zfs list -H -t snapshot -o name rpool/ROOT/onyx | grep -c @auto-
+35
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr kldload-snapshots 7 ,
+.Xr kldload-rollback 8 ,
+.Xr zfs-snapshot 8
+.Sh HISTORY
+Until 2026-09-26 the hourly snapshots were never pruned and grew by 24 a
+day for the life of the machine.
+On 2026-09-30, writing this page: a snapshot that failed left the timer
+reporting success.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It looks at the pool named
+.Ql rpool
+only.

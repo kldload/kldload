@@ -1,0 +1,184 @@
+.Dd September 30, 2026
+.Dt KUBE-NETWORK 8
+.Os
+.Sh NAME
+.Nm kube-network
+.Nd make this machine a node of the kldload WireGuard mesh, on its management and Kubernetes planes
+.Sh SYNOPSIS
+.Nm
+.Cm init
+.Ar node-id
+.Op Fl -force
+.Nm
+.Cm add-peer
+.Ar endpoint pubkey peer-id
+.Nm
+.Cm remove-peer
+.Ar peer-id
+.Nm
+.Cm show-keys | status | pin-kubelet | nft
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The kldload mesh has two WireGuard planes:
+.Ql wg-mgmt ,
+.Ql 10.250.0. Ns Ar id ,
+port 51820, for ssh, management and monitoring; and
+.Ql wg-k8s ,
+.Ql 10.251.0. Ns Ar id ,
+port 51821, for the kubelet, the API server and pod traffic.
+Every node has one id, 1 to 254, and the same address on both planes.
+.Xr kube-cluster 8
+gives the control plane 1 and workers 2 up, the hypervisor is 100, and
+.Xr kldload-enroll 8
+gives other machines 150 up.
+.Pp
+.Nm
+is the node's half: it makes the keys and configurations, adds and
+removes peers, and brings the interfaces up under
+.Ql wg-quick@ ,
+checking afterwards that they are.
+It runs itself under
+.Xr sudo 8 .
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm init Ar node-id Op Fl -force
+Make the keys and both configurations and bring them up.
+A node that already has a configuration is left alone \(em a second
+.Cm init
+would drop every peer it has \(em unless
+.Fl -force
+is given to re-key it or move it to another id.
+.It Cm add-peer Ar endpoint pubkey peer-id
+Add a peer to both planes, at
+.Ar endpoint
+on each plane's port, and reload them.
+.Ar endpoint
+must be an address or host name,
+.Ar pubkey
+a WireGuard public key, and
+.Ar peer-id
+1 to 254.
+.It Cm remove-peer Ar peer-id
+Remove it from both planes; a peer that is not there is not an error.
+.It Cm show-keys
+This node's id and public keys.
+.It Cm status
+.Ql wg show
+for both planes.
+.It Cm pin-kubelet
+Make the kubelet use this node's
+.Ql wg-k8s
+address, and restart it if a cluster is running.
+.It Cm nft
+Replace the whole
+.Xr nft 8
+ruleset with one for a Kubernetes node: established traffic, ssh, the
+WireGuard ports, everything on the two planes, the node's own subnet and
+the pod network, the API server and the NodePort range; everything else
+dropped.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev K8S_POD_CIDR
+The pod network
+.Cm nft
+trusts; default
+.Ql 10.244.0.0/16 .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/wireguard/wg-mgmt.conf , Pa /etc/wireguard/wg-k8s.conf
+The planes, mode 0600; they hold the private key.
+.It Pa /etc/wireguard/wg-mgmt.key , Pa .pub , Pa wg-k8s.key , Pa .pub
+The keys.
+.It Pa /etc/wireguard/.node-id
+This node's id.
+.It Pa /etc/default/kubelet
+Written by
+.Cm pin-kubelet .
+.It Pa /etc/nftables.conf
+Written by
+.Cm nft .
+.El
+.Sh EXIT STATUS
+0 when done; 1 when a step failed or a value was refused, named; 2 on a
+usage error.
+.Sh EXAMPLES
+In a Fedora 44 container, whose complaints that it has no systemd are
+left out:
+.Bd -literal -offset indent
+# kube-network init 1
+[kube-network] Generated WireGuard keys
+[kube-network] WireGuard initialized for node 1:
+[kube-network]   Management: 10.250.0.1/24 (port 51820)
+[kube-network]   Kubernetes: 10.251.0.1/24 (port 51821)
+
+[kube-network] Public keys:
+[kube-network]   wg-mgmt: kmBpGsdAlkbJ1EL17t3KwCANgPkcjX8DcZc1FvmTpC0=
+[kube-network]   wg-k8s:  kmBpGsdAlkbJ1EL17t3KwCANgPkcjX8DcZc1FvmTpC0=
+
+[kube-network] Next: share public keys with peers and run:
+[kube-network]   kube-network add-peer <endpoint> <pubkey> <peer-id>
+# (exited 0)
+# kube-network show-keys
+Node ID:  1
+wg-mgmt:  kmBpGsdAlkbJ1EL17t3KwCANgPkcjX8DcZc1FvmTpC0=
+wg-k8s:   kmBpGsdAlkbJ1EL17t3KwCANgPkcjX8DcZc1FvmTpC0=
+# (exited 0)
+# kube-network add-peer 10.0.0.2 NTmpi7gMSm8KbSLhbDlmxrIpxfcwDSravnBfY6lvznk= 2
+\&...
+[kube-network] Peer 2 added: 10.0.0.2
+[kube-network]   Management: 10.250.0.2
+[kube-network]   Kubernetes: 10.251.0.2
+# (exited 0)
+# kube-network add-peer 10.0.0.4 not-a-key 4
+[kube-network] not a WireGuard public key: not-a-key
+# (exited 1)
+# kube-network remove-peer 2
+\&...
+[kube-network] Peer 2 removed
+# (exited 0)
+# kube-network remove-peer 2
+[kube-network] Peer 2 not present — nothing to do
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr kldload-enroll 8 ,
+.Xr kube-cluster 8 ,
+.Xr wg 8 ,
+.Xr wg-quick 8
+.Sh HISTORY
+On 2026-08-16 a control plane carried 17 peers where 8 were right: there
+was no way to remove one.
+On 2026-08-24 an enrolment sweep ran
+.Cm init
+on every node every ten minutes and flattened a six-node mesh to one
+peer each, while every node stayed Ready.
+On 2026-08-31 a node whose configurations had been deleted kept its id
+file, and
+.Cm init
+did nothing and succeeded.
+On 2026-09-27 a peer added to an interface deleted by hand reported
+success with no interface.
+.Pp
+On 2026-09-30, writing this page, in a container:
+.Cm add-peer
+wrote its arguments into the configurations unchecked, so a newline in
+one, or a peer id of
+.Ql 08 ,
+left configurations that would not load and both planes down;
+.Cm remove-peer
+copied the configuration, private key included, through
+.Pa /tmp .
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+One key serves both planes: the two public keys are the same, and
+.Cm add-peer
+takes one.
+.Pp
+.Cm nft
+flushes every rule on the machine, the hypervisor's and container
+runtime's among them; it is for a Kubernetes node, not the host its
+virtual machines run on.

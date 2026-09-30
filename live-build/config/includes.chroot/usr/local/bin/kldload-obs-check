@@ -180,18 +180,32 @@ fi
 # ─── [8] persistent journal ───────────────────────────────────────────
 echo
 echo "[8] persistent journal"
-_jstorage=$(journalctl --disk-usage 2>&1 | head -1)
-if [[ -d /var/log/journal ]] && ls /var/log/journal/*/*.journal 2>/dev/null | head -1 | grep -q journal; then
-    _pass "persistent journal active — $_jstorage"
+# Asked of kldload-journal-assert, which puts a probe through the journal and
+# looks for it in /var/log/journal alone. This checked that a .journal file
+# existed there, which old archives satisfy: onyx passed it for three weeks with
+# journald writing only to /run (2026-09-30). --fix runs the real repair.
+_ja="${KLDLOAD_JOURNAL_ASSERT:-/usr/local/sbin/kldload-journal-assert}" # the variable is for tests
+if [[ ! -x "$_ja" ]]; then
+    _fail "cannot ask: $_ja is not installed"
 else
-    _fail "journal is volatile — promtail loses events on reboot"
-    _hint "  mkdir -p /var/log/journal && systemd-tmpfiles --create --prefix /var/log/journal && systemctl restart systemd-journald"
+    ((FIX)) && _jarg=() || _jarg=(--check)
+    if _jout="$("$_ja" "${_jarg[@]}" 2>&1)"; then
+        _pass "${_jout##*$'\n'}"
+    else
+        _fail "${_jout##*$'\n'} — promtail loses events on reboot"
+        _hint "  kldload-obs-check --fix  (runs kldload-journal-assert, which rotates, flushes and restarts journald)"
+    fi
 fi
 
 # ─── [9] Grafana healthy + Loki datasource ───────────────────────────
 echo
 echo "[9] Grafana"
-_gh=$(curl -sk --max-time 5 https://localhost:3000/api/health 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['database'])" 2>/dev/null)
+# Grafana listens on loopback in PLAIN HTTP; kldload-proxy on :8443 is the TLS
+# end (kldload-firstboot writes protocol = http). Both Grafana checks asked
+# https://localhost:3000 and failed on every install -- onyx 2026-09-30: health
+# '' and every dashboard http=000, while http:// answered 200.
+GRAFANA="${KLDLOAD_GRAFANA_URL:-http://127.0.0.1:3000}"
+_gh=$(curl -s --max-time 5 "$GRAFANA/api/health" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['database'])" 2>/dev/null)
 if [[ "$_gh" == "ok" ]]; then
     _pass "Grafana database=ok"
 else
@@ -207,7 +221,9 @@ fi
 echo
 echo "[10] Grafana dashboards"
 for uid in zfs-pool-health disk-health-smart kernel-messages klab-test-debug scrub-history compression-trend block-io-latency klab-test-matrix; do
-    _code=$(curl -sk -u admin:admin --max-time 5 -o /dev/null -w "%{http_code}" "https://localhost:3000/api/dashboards/uid/$uid" 2>/dev/null)
+    # Anonymous viewer, as firstboot configures it: no password on the
+    # command line, where ps shows it (it passed admin:admin here).
+    _code=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "$GRAFANA/api/dashboards/uid/$uid" 2>/dev/null)
     if [[ "$_code" == "200" ]]; then
         _pass "dashboard $uid → 200"
     else
@@ -248,7 +264,10 @@ if [[ $FAIL -eq 0 ]]; then
     [[ -z "$_ip" ]] && _ip="localhost"
     printf '\nDashboards:\n'
     for _uid in zfs-pool-health disk-health-smart kernel-messages klab-test-debug scrub-history compression-trend block-io-latency klab-test-matrix; do
-        printf '  https://%s:3000/d/%s/\n' "$_ip" "$_uid"
+        # Through the proxy: Grafana itself answers only on loopback, so the
+        # :3000 links printed here led nowhere (onyx 2026-09-30: 000 on the LAN
+        # address, 200 at :8443/grafana/).
+        printf '  https://%s:8443/grafana/d/%s/\n' "$_ip" "$_uid"
     done
     exit 0
 else

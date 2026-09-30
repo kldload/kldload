@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # kube-status — comprehensive Kubernetes cluster health check
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kube-status: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate to root
 # --help answers before the root re-exec below: asking a tool what it does
@@ -37,7 +38,7 @@ D="\033[0;37m"
 N="\033[0m"
 
 if ! command -v kubectl >/dev/null 2>&1 || ! kubectl cluster-info >/dev/null 2>&1; then
-    echo -e "${R}[kube-status]${N} No cluster available. Is this a control plane node?"
+    echo -e "${R}[kube-status]${N} No cluster available. Is this a control plane node?" >&2
     exit 1
 fi
 
@@ -48,12 +49,15 @@ echo ""
 
 # Cluster info
 echo -e "${Y}Cluster Info${N}"
-kubectl cluster-info 2>/dev/null | head -3
+# awk, not head: an early-exiting reader is SIGPIPE 141 under pipefail
+kubectl cluster-info 2>/dev/null | awk 'NR <= 3' || echo "  kubectl cluster-info failed"
 echo ""
 
 # Nodes
 echo -e "${Y}Nodes${N}"
-kubectl get nodes -o wide 2>/dev/null
+# WHY every kubectl here has an ||: under set -e one failed call ended the
+# report part-way, with nothing to say which section it stopped at.
+kubectl get nodes -o wide 2>/dev/null || echo "  kubectl get nodes failed"
 echo ""
 
 # Component status
@@ -67,12 +71,12 @@ echo ""
 
 # System pods
 echo -e "${Y}System Pods (kube-system)${N}"
-kubectl get pods -n kube-system -o wide 2>/dev/null
+kubectl get pods -n kube-system -o wide 2>/dev/null || echo "  kubectl get pods failed"
 echo ""
 
 # All namespaces summary
 echo -e "${Y}All Namespaces${N}"
-kubectl get ns 2>/dev/null
+kubectl get ns 2>/dev/null || echo "  kubectl get ns failed"
 echo ""
 
 # Resource usage
@@ -86,7 +90,15 @@ if command -v zfs >/dev/null 2>&1; then
     zfs list -o name,used,avail,mountpoint 2>/dev/null | grep -E 'etcd|containerd|kubelet|NAME' || true
     echo ""
     echo -e "${Y}ZFS Snapshots (K8s related)${N}"
-    zfs list -t snapshot 2>/dev/null | grep -E 'kube|etcd|NAME' | head -10 || echo "  None"
+    # Captured first and cut with awk. `zfs list -t snapshot | grep | head -10
+    # || echo None` took SIGPIPE from head on any host with more than ten, and
+    # the || then printed "None" under ten snapshots (onyx, 2026-09-30).
+    _snaps="$(zfs list -H -t snapshot -o name 2>/dev/null | grep -E 'kube|etcd' || true)" # grep 1: none match
+    if [[ -n "$_snaps" ]]; then
+        printf '%s\n' "$_snaps" | awk 'NR <= 10 { print "  " $0 } END { if (NR > 10) printf "  ... %d in all\n", NR }'
+    else
+        echo "  None"
+    fi
     echo ""
 fi
 

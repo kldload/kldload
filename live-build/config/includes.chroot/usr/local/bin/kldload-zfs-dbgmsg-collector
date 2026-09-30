@@ -27,6 +27,14 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 
+# --help answers without collecting (as root it ran the collector)
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
+
 SRC=/proc/spl/kstat/zfs/dbgmsg
 OUT=/var/log/kldload/zfs-dbgmsg.log
 LAST=/var/lib/kldload/.zfs-dbgmsg.lastts
@@ -34,6 +42,12 @@ LAST=/var/lib/kldload/.zfs-dbgmsg.lastts
 [ -r "$SRC" ] || exit 0
 
 mkdir -p "$(dirname "$OUT")" "$(dirname "$LAST")"
+# Nothing rotated this file: 81 MB on onyx by 2026-09-30, on every install,
+# for good. Past 50 MB it is moved to .1 (the previous .1 is dropped) and a
+# new one started; promtail follows a rename by inode, so nothing is lost.
+if [[ -f "$OUT" ]] && (($(stat -c %s "$OUT" 2>/dev/null || echo 0) > 50 * 1024 * 1024)); then
+    mv -f "$OUT" "${OUT}.1"
+fi
 touch "$OUT"
 chmod 0644 "$OUT"
 

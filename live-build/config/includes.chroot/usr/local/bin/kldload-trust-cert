@@ -48,10 +48,23 @@ OLD_NICKNAME=kldload-webui # stale leaf entry seeded by pre-fix installs
 # slot beyond "valid CA," and that's fine for our purpose.
 TRUST_FLAGS="CT,C,T"
 
+# _import_into DB -- make sure DB trusts the root. Returns 1 and says why when
+# it could not.
+#
+# WARN: every step checks its own status. Callers once ran this as
+# `_import_into ... || true`, and bash ignores set -e for the whole of a
+# function called from a || list, so a certutil -A that failed (read-only
+# database) was followed by "imported" and exit 0, and the user kept trusting
+# the old root after a rotation (found in a container, 2026-09-30).
 _import_into() {
     local db="$1"
-    mkdir -p "$db"
-    [[ -f "$db/cert9.db" ]] || certutil -d "sql:$db" -N --empty-password >/dev/null 2>&1
+    mkdir -p "$db" || return 1
+    if [[ ! -f "$db/cert9.db" ]]; then
+        certutil -d "sql:$db" -N --empty-password >/dev/null || {
+            echo "kldload-trust-cert: could not create the NSS database $db" >&2
+            return 1
+        }
+    fi
     local cur ins existing_flags
     cur="$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 2>/dev/null |
         cut -d= -f2 | tr -d ':' | tr 'a-f' 'A-F' || true)"
@@ -73,12 +86,20 @@ _import_into() {
     # Purge the stale leaf entry pre-fix installs seeded (harmless if absent).
     certutil -D -d "sql:$db" -n "${OLD_NICKNAME:-kldload-webui}" >/dev/null 2>&1 || true
     certutil -D -d "sql:$db" -n "$NICKNAME" >/dev/null 2>&1 || true
-    certutil -A -d "sql:$db" -n "$NICKNAME" -t "$TRUST_FLAGS" -i "$CERT"
+    if ! certutil -A -d "sql:$db" -n "$NICKNAME" -t "$TRUST_FLAGS" -i "$CERT"; then
+        echo "kldload-trust-cert: FAILED to import $NICKNAME into $db" >&2
+        return 1
+    fi
     echo "kldload-trust-cert: imported $NICKNAME (${cur:0:16}...) into $db"
 }
 
 # ── prerequisites ─────────────────────────────────────────────────
-[[ -r "$CERT" ]] || { exit 0; }
+if [[ ! -r "$CERT" ]]; then
+    # Not an error: a machine with no authority yet has nothing to trust. But
+    # say so -- this exited 0 in silence.
+    echo "kldload-trust-cert: no kldload CA root at /etc/kldload/ca/root/ca.crt; nothing to trust" >&2
+    exit 0
+fi
 command -v certutil >/dev/null 2>&1 || {
     echo "kldload-trust-cert: certutil missing (need nss-tools)" >&2
     exit 0
@@ -91,9 +112,10 @@ if [[ "${1:-}" == "--system" ]]; then
         exit 1
     fi
 
+    _failed=0
     # /etc/skel — every future-created user starts with the cert trusted
-    _import_into /etc/skel/.pki/nssdb || true
-    chmod -R go-rwx /etc/skel/.pki 2>/dev/null || true
+    _import_into /etc/skel/.pki/nssdb || _failed=$((_failed + 1))
+    chmod -R go-rwx /etc/skel/.pki || _failed=$((_failed + 1))
 
     # Existing users: /root + every /home/*
     for user_home in /root /home/*; do
@@ -101,7 +123,7 @@ if [[ "${1:-}" == "--system" ]]; then
         local_owner="$(stat -c '%U' "$user_home" 2>/dev/null || echo root)"
         nssdb="$user_home/.pki/nssdb"
         if [[ "$local_owner" == "root" ]]; then
-            _import_into "$nssdb" || true
+            _import_into "$nssdb" || _failed=$((_failed + 1))
         else
             # Run as the owning user so file ownership lands correctly.
             # MUST pass TRUST_FLAGS through the env prefix — _import_into reads
@@ -110,13 +132,25 @@ if [[ "${1:-}" == "--system" ]]; then
             # 2026-06-09 incident) caused certutil -t '' → empty trust flags
             # (',,'), Chrome rejected the cert, every kldload --app launcher
             # showed the cert-warning interstitial on every open.
-            mkdir -p "$nssdb"
-            chown -R "$local_owner:$local_owner" "$user_home/.pki" 2>/dev/null || true
-            su -s /bin/bash "$local_owner" -c "$(declare -f _import_into); CERT='$CERT' NICKNAME='$NICKNAME' TRUST_FLAGS='$TRUST_FLAGS' _import_into '$nssdb'" || true
+            # SAFETY: the paths go in as arguments, not pasted into the -c
+            # string, where a quote in a directory name would end the string.
+            if ! mkdir -p "$nssdb" || ! chown -R "$local_owner:$local_owner" "$user_home/.pki"; then
+                echo "kldload-trust-cert: could not prepare $nssdb for $local_owner" >&2
+                _failed=$((_failed + 1))
+                continue
+            fi
+            # shellcheck disable=SC2016 # expanded by the user's shell, not here
+            su -s /bin/bash -c "$(declare -f _import_into)"'; CERT=$2 NICKNAME=$3 TRUST_FLAGS=$4 _import_into "$1"' \
+                "$local_owner" -- _ "$nssdb" "$CERT" "$NICKNAME" "$TRUST_FLAGS" ||
+                _failed=$((_failed + 1))
         fi
     done
+    if ((_failed)); then
+        echo "kldload-trust-cert: $_failed database(s) NOT updated; see above" >&2
+        exit 1
+    fi
     exit 0
 fi
 
 # ── per-user mode (default) ───────────────────────────────────────
-_import_into "$HOME/.pki/nssdb" || true
+_import_into "$HOME/.pki/nssdb"

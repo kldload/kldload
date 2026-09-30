@@ -1,0 +1,61 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-NODE-EXPORTER 8
+.Os
+.Sh NAME
+.Nm kldload-node-exporter
+.Nd run whichever node_exporter this distribution ships, with kldload's collectors
+.Sh SYNOPSIS
+.Nm
+.Op Ar node_exporter-flags ...
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+kldload's drop-in for
+.Pa node_exporter.service
+starts the exporter with the collectors its dashboards need: the textfile
+directory, per-process metrics, interrupts, and the memory-reclaim
+counters.
+.Nm
+is what that drop-in starts: it runs the first node_exporter it finds, in
+.Pa /usr/local/bin ,
+then the Debian and Fedora package paths, with the flags it was given,
+replacing itself with it.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0.
+.El
+.Pp
+Anything else is node_exporter's.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/systemd/system/node_exporter.service.d/textfile.conf
+The drop-in, with the flags.
+.It Pa /var/lib/node_exporter/textfile_collector/
+What the textfile collector reads; see
+.Xr arcstats-exporter 8 .
+.El
+.Sh EXIT STATUS
+The exporter's own; 1, on standard error, when no node_exporter is
+installed, so that the unit fails rather than sitting active with nothing
+running.
+.Sh EXAMPLES
+Not run for this page; the service starts it:
+.Bd -literal -offset indent
+# systemctl restart node_exporter
+.Ed
+.Sh SEE ALSO
+.Xr arcstats-exporter 8 ,
+.Xr kfire-exporter 8 ,
+.Xr zpool-scrub-exporter 8
+.Sh HISTORY
+Until 2026-09-20 the drop-in named
+.Pa /usr/local/bin/node_exporter ,
+which nothing installed.
+On Fedora, where the package's
+.Pa node_exporter.service
+is another name for its own service, that broke the working exporter:
+every start failed, and the machine had no host metrics while its Metrics
+view looked fine.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com

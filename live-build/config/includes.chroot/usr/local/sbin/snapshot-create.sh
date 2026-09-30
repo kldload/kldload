@@ -18,7 +18,7 @@ case "${1:-}" in
 esac
 
 CONTEXT="${1:-manual}"
-LOG_DIR=/var/log/kldload
+LOG_DIR="${KLDLOAD_LOG_DIR:-/var/log/kldload}" # the variable is for tests
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/snapshots.log"
 
@@ -33,12 +33,6 @@ die() {
     exit 1
 }
 
-# Detect the active root boot environment dataset
-_active_root() {
-    zfs list -H -o name rpool/ROOT 2>/dev/null | head -1 || true
-    zfs list -H -o name -r rpool/ROOT 2>/dev/null |
-        awk 'NR==2{print; exit}' || true
-}
 ROOT_DS="$(zfs list -H -o name "$(zpool get -H -o value bootfs rpool 2>/dev/null)" 2>/dev/null ||
     zfs list -H -o name -r rpool/ROOT 2>/dev/null | grep -v '^rpool/ROOT$' | head -1 ||
     echo 'rpool/ROOT/kldload')"
@@ -112,18 +106,17 @@ log "Creating snapshot: $SNAP"
 # one this call wanted; taking it again would be a no-op even if ZFS allowed
 # it. Any OTHER failure still propagates and still stops the transaction,
 # which is the behaviour worth keeping.
-if ! zfs snapshot "$SNAP" 2>/tmp/.snapshot-create.err; then
+# The error is captured in a variable. It went to /tmp/.snapshot-create.err, a
+# fixed name written as root in a world-writable directory (2026-09-30).
+if ! _err="$(zfs snapshot "$SNAP" 2>&1)"; then
     if zfs list -H -t snapshot "$SNAP" >/dev/null 2>&1; then
         log "Snapshot $SNAP already exists (two apt hooks in one second) — reusing it"
-        rm -f /tmp/.snapshot-create.err
     else
-        log "FATAL: zfs snapshot $SNAP failed: $(cat /tmp/.snapshot-create.err 2>/dev/null)"
-        cat /tmp/.snapshot-create.err >&2 2>/dev/null
-        rm -f /tmp/.snapshot-create.err
+        log "FATAL: zfs snapshot $SNAP failed: ${_err}"
+        printf '%s\n' "$_err" >&2
         exit 1
     fi
 else
-    rm -f /tmp/.snapshot-create.err
     log "Snapshot created: $SNAP"
 fi
 

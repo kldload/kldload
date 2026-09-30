@@ -1,0 +1,153 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-RESTAMP-IDENTITY 8
+.Os
+.Sh NAME
+.Nm kldload-restamp-identity
+.Nd take another machine's identity out of a boot environment before it is booted here
+.Sh SYNOPSIS
+.Nm
+.Fl -dataset Ar dataset | Fl -root Ar dir
+.Op Fl -hostname Ar name
+.Op Fl -new-hostid
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+A boot environment carries all of
+.Pa /etc .
+Replicate one to twenty machines and all twenty wake with one machine id,
+one set of SSH host keys, and network connections pinned to the first
+machine's network card.
+Nothing fails at once: they boot, then the journal and D-Bus confuse them,
+every SSH client that trusted one trusts them all, and the pinned
+connections never come up.
+.Pp
+.Nm
+clears, in the boot environment given:
+.Bl -tag -width Ds
+.It Pa /etc/machine-id
+emptied; systemd makes a new one at first boot;
+.It Pa /var/lib/dbus/machine-id
+removed;
+.It Pa /etc/ssh/ssh_host_*key*
+removed; made again at first boot;
+.It the journal, Pa wtmp No and Pa btmp
+the old machine's history;
+.It Ql mac-address= No in NetworkManager connections
+removed.
+A connection pinned to an interface name is reported, not changed: on a
+machine with several cards, renaming it blind could put it on the wrong
+one.
+.El
+.Pp
+It keeps
+.Pa /etc/hostid
+unless told otherwise: the boot environment is going to a machine that
+already owns its pool, and ZFS checks the host id at every import.
+.Pp
+Then it checks that each of those is so, and records when and where it
+ran in
+.Pa /etc/kldload/restamp.info .
+.Pp
+It refuses the running boot environment, and
+.Pa / :
+clearing the identity of the system in use is noticed only at its next
+boot, remotely.
+It needs root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -dataset Ar dataset
+A boot environment, mounted for the purpose under
+.Pa /tmp
+and unmounted after.
+.It Fl -root Ar dir
+A boot environment already mounted at
+.Ar dir .
+.It Fl -hostname Ar name
+Write
+.Ar name
+to its
+.Pa /etc/hostname .
+.It Fl -new-hostid
+Remove
+.Pa /etc/hostid
+as well, for a boot environment going to different hardware.
+On the same machine this makes every pool import warn that the pool was
+last used by another system.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Restamped and checked.
+.It 1
+A step or a check failed.
+.It 2
+A usage error, or refused.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, against a throwaway dataset
+.Ql rpool/rstest-3937594
+filled like a boot environment \(em a machine id, a D-Bus id, an SSH host
+key, a host id, a journal, and a connection pinned to both a MAC address
+and an interface \(em and destroyed afterwards.
+.Ss Restamping
+.Bd -literal -offset indent
+# kldload-restamp-identity --dataset rpool/rstest-3937594 --hostname node7
+mounted rpool/rstest-3937594 at /tmp/restamp.L3OiM4
+restamping identity in /tmp/restamp.L3OiM4
+  cleared /etc/machine-id (systemd-machine-id-setup regenerates it)
+  removed /var/lib/dbus/machine-id
+  removed SSH host keys (sshd-keygen regenerates them)
+  KEPT /etc/hostid: this machine owns its pool, and ZFS checks it
+  cleared journal and login records
+  WARNING: br0-port.nmconnection pins interface-name=enp5s0 — check it matches a NIC here
+  removed 1 MAC pin(s) from NetworkManager connections
+  hostname set to node7
+verifying:
+  ok    machine-id is empty
+  ok    no SSH host keys remain
+  ok    no dbus machine-id
+  ok    hostid preserved
+  ok    hostname is node7
+OK: identity restamped. First boot regenerates machine-id and SSH host keys.
+# (exited 0)
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+# kldload-restamp-identity --dataset rpool/ROOT/onyx
+FATAL: rpool/ROOT/onyx is the RUNNING boot environment — refusing
+# (exited 2)
+# kldload-restamp-identity --root /
+FATAL: --root / is the running system — refusing
+# (exited 2)
+# kldload-restamp-identity --dataset rpool/rstest-3937594 --hostname "bad'name"
+FATAL: not a valid hostname: bad'name
+# (exited 2)
+.Ed
+.Sh SEE ALSO
+.Xr ssh-keygen 1 ,
+.Xr machine-id 5 ,
+.Xr kldload-restore-machine 8 ,
+.Xr kldload-seal 8 ,
+.Xr zfs-send 8
+.Sh HISTORY
+It is the boot-environment form of what kldload already did for cloned
+virtual machines, which each get their own machine id.
+Unlike
+.Xr kldload-seal 8 ,
+which prepares an image for hardware not yet known and so removes the host
+id, it keeps it by default.
+.Pp
+On 2026-09-30, writing this page: a host name was written unchecked and
+pasted into its own check, and every run left its mount point in
+.Pa /tmp .
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The running boot environment is recognised by its name; a copy of it under
+another name is not the running one, and is restamped.
+.Pp
+Keys other than the SSH host keys \(em WireGuard's, a TLS key, the
+machine's certificate authority \(em are not touched, and two machines
+booted from one environment share them.

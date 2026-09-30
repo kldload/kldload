@@ -1,0 +1,92 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-RECOVERY 8
+.Os
+.Sh NAME
+.Nm kldload-recovery
+.Nd find and import a broken machine's pools from the live image, leaving virtual machines' pools alone
+.Sh SYNOPSIS
+.Nm
+.Cm import | scan | list-pools | list-datasets
+.Nm
+.Op Cm help | Fl h | Fl -help
+.Sh DESCRIPTION
+The first step in repairing a machine that will not boot, from the
+kldload live image.
+.Cm import
+imports every pool it finds, forced, since a machine that stopped
+suddenly never exported them, and without mounting anything over the live
+system.
+A pool whose devices are zvols is a virtual machine's own disk and is
+never imported: two kernels writing one pool destroy it.
+Then
+.Xr krecovery 8
+mounts the installed system, rolls back or repairs the boot loader.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm import
+Import each pool found on a disk by id, with
+.Fl f
+and
+.Fl N ;
+name each pool skipped for being on a zvol, and each that failed; count
+all three.
+.It Cm scan
+List the importable pools without importing any.
+.It Cm list-pools
+The imported pools.
+.It Cm list-datasets
+Their datasets.
+.It Cm help , Fl h , Fl -help
+Usage; also with no command.
+.El
+.Sh EXIT STATUS
+0 when done; 1 when a pool did not import or a command failed; 2 for an
+unknown command.
+.Sh EXAMPLES
+On a kldload desktop that runs virtual machines, on 2026-09-30, with this
+release's
+.Nm
+first on the path.
+.Cm scan
+there lists twenty pools named
+.Ql tank ,
+each on a zvol \(em the guests' own \(em which
+.Cm import
+skips.
+.Bd -literal -offset indent
+# kldload-recovery list-pools
+NAME    SIZE  ALLOC   FREE  CKPOINT  EXPANDSZ   FRAG    CAP  DEDUP    HEALTH  ALTROOT
+rpool  1.81T  1.61T   207G        -         -    39%    88%  1.00x    ONLINE  -
+tank   3.62T  3.31T   327G        -         -     2%    91%  1.00x    ONLINE  -
+# (exited 0)
+# kldload-recovery frob
+Usage:
+  kldload-recovery import          import every pool found on a disk, forced, not
+                                   mounted (-f -N); pools on zvols are VMs' and
+                                   are skipped
+  kldload-recovery scan            list importable pools without importing
+  kldload-recovery list-pools      list imported pools
+  kldload-recovery list-datasets   list datasets of imported pools
+
+For chroot/rollback/bootloader repair, see: krecovery help
+# (exited 2)
+.Ed
+.Sh SEE ALSO
+.Xr kldload-rollback 8 ,
+.Xr krecovery 8 ,
+.Xr zpool-import 8
+.Sh HISTORY
+Until 2026-07-22
+.Cm import
+only listed the pools and reported success.
+On 2026-09-30, writing this page: it imported with
+.Ql zpool import -a -f ,
+which would also force every virtual machine's pool into the host \(em
+on the live image, as soon as it was run a second time.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Forcing an import takes a pool another machine still has open.
+Only use
+.Cm import
+where no other machine can reach these disks.

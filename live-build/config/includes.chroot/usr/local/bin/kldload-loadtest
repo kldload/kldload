@@ -15,7 +15,7 @@
 #                                     bpftool prog show CPU bumps
 #
 # Usage:
-#   kldload-loadtest [SECONDS] [--http-only|--io-only|--fork-only]
+#   kldload-loadtest [SECONDS] [--http-only|--io-only|--fork-only]  (either order)
 #   defaults: 60 seconds, all three layers
 #
 # Safe to Ctrl-C — runs everything in tagged background jobs and
@@ -42,11 +42,24 @@ case "${1:-}" in
     ;;
 esac
 
-DURATION="${1:-60}"
-MODE="${2:-all}"
-
-# Strip --prefix so positional args don't get confused.
-case "$MODE" in --*) ;; *) MODE="all" ;; esac
+# Either argument may come first. `kldload-loadtest --io-only` read the mode
+# as the duration: DURATION="--io-only", MODE back to "all", then
+# $((DURATION / 2)) and `fio --runtime=--io-only` (2026-09-30).
+DURATION=60
+MODE=all
+for _a in "$@"; do
+    case "$_a" in
+    --http-only | --io-only | --fork-only) MODE="$_a" ;;
+    *)
+        if [[ "$_a" =~ ^[0-9]+$ ]] && ((10#$_a >= 1)); then
+            DURATION=$((10#$_a))
+        else
+            echo "kldload-loadtest: not a number of seconds or a mode: $_a (see --help)" >&2
+            exit 2
+        fi
+        ;;
+    esac
+done
 
 # Colours for readable output.
 G=$'\e[32m'

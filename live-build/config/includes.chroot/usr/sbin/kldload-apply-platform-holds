@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+trap 'echo "kldload-apply-platform-holds: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 # ---------------------------------------------------------------------------
 # kldload-apply-platform-holds — pin the kernel-coupled substrate
 #
@@ -24,8 +25,14 @@ set -Eeuo pipefail
 # found no apt, reported nothing, and the absence looked like a UI gap rather
 # than an unpinned kernel. Found 2026-08-17, before the 1.4.0 build.
 #
-# Run by: kldload-package-holds.service, once, at first boot. Not a daemon —
-# Type=oneshot, runs and exits. Re-running it is harmless and idempotent.
+# Run by: kldload-package-holds.service, on every boot (onyx's log holds 17
+# runs by 2026-09-30), so a platform package installed since the last boot is
+# pinned at the next one. Not a daemon — Type=oneshot, runs and exits.
+# Re-running it is harmless and idempotent.
+#
+# Exit: 0 when everything asked for is pinned, or there is nothing to pin, or
+# no supported manager exists (warned on stderr); 1 when any platform package
+# is left unpinned or the state dataset cannot be mounted.
 #
 # Outputs: pins in the package manager's state; a log at
 #          /var/log/kldload/platform-holds.log; a machine-readable list at

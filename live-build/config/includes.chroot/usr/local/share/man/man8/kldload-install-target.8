@@ -1,0 +1,87 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-INSTALL-TARGET 8
+.Os
+.Sh NAME
+.Nm kldload-install-target
+.Nd install kldload from the live image onto a disk, from an answers file or by asking
+.Sh SYNOPSIS
+.Nm
+.Fl -config Ar answers.env
+.Nm
+.Fl -guided
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The installer the live image, the web console's install page and network
+installs all end in.
+It partitions the disk, makes the ZFS pool and its datasets \(em
+encrypted when asked \(em installs the chosen distribution and profile
+into the boot environment
+.Pa rpool/ROOT/ Ns Ar hostname
+from the image's offline mirrors, sets up ZFSBootMenu or the signed boot
+path with Secure Boot, and writes the install manifest that
+.Xr kldload-firstboot 8
+reads.
+It checks the result \(em a kernel on the target among other things
+\(em rather than trusting each step's exit status.
+.Pp
+The host name is made lower case and checked: 1 to 63 letters, digits
+and hyphens, starting with a letter.
+If the install stops part-way the target is unmounted on the way out.
+It runs itself with root's privileges.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -config Ar answers.env
+Install unattended from an answers file.
+.It Fl -guided
+Ask each question on the terminal.
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_LOG_DIR
+Where the logs go; default
+.Pa /var/log/installer .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/answers/TEMPLATE.env
+Every answer, with its default, to copy; beside it, examples for a Fedora
+desktop, a Debian server and a single-disk ZFS install.
+.It Pa /var/log/installer/
+On the live image:
+.Pa kldload-installer.log
+and one log per stage \(em
+.Pa storage , zfs , security , network , bootstrap , bootloader
+\(em with the answers as they were used in
+.Pa effective-config.env .
+.It Pa /etc/kldload/install-manifest.env
+On the target: what was installed and asked for.
+.El
+.Sh EXIT STATUS
+0 when installed; 1 on a failure, named; 129, 130 or 143 when stopped by a
+hang-up, an interrupt or a termination signal.
+.Sh EXAMPLES
+Not run for this page, since it overwrites a disk:
+.Bd -literal -offset indent
+# cp /etc/kldload/answers/TEMPLATE.env /root/my.env
+# kldload-install-target --config /root/my.env
+.Ed
+.Sh SEE ALSO
+.Xr kld 8 ,
+.Xr kldload-autoinstall 8 ,
+.Xr kldload-firstboot 8 ,
+.Xr kldload-netboot-server 8
+.Sh HISTORY
+On 2026-08-15 two machines installed
+.Dq cleanly
+and had no kernel: one optional package missing from the offline mirror
+took the whole transaction with it.
+On 2026-05-15 a false
+.Dq Installation failed
+line in the middle of a good install made operators abort it.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The disk named in the answers is overwritten without a further question.

@@ -45,8 +45,10 @@ SYS_PCI="${SYS_PCI:-/sys/bus/pci/devices}"
 SYS_HOST="${SYS_HOST:-/sys/class/scsi_host}"
 SYS_ENCL="${SYS_ENCL:-/sys/class/enclosure}"
 
+# die MESSAGE [STATUS] -- the message is $1 alone: with "$*" the status
+# was printed as part of it ("unknown subcommand: frob 2", 2026-09-30).
 die() {
-    printf 'kldload-hba: %s\n' "$*" >&2
+    printf 'kldload-hba: %s\n' "$1" >&2
     exit "${2:-1}"
 }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -205,6 +207,11 @@ cmd_status() {
 # got nothing" from "never asked".
 _collect_drives() {
     local d n id model serial fwrev health l
+    # smartctl cannot open a disk as a user; say so, or "-" in the firmware
+    # and health columns reads as "the drive does not report it" (2026-09-30).
+    if have smartctl && ((EUID != 0)); then
+        printf 'kldload-hba: not root: serial, firmware and health need smartctl as root\n' >&2
+    fi
     for d in /sys/block/*; do
         [[ -e "$d" ]] || continue
         n="$(basename "$d")"
@@ -232,6 +239,9 @@ _collect_drives() {
         done
         model="-" serial="-" fwrev="-" health="-"
         [[ -r "$d/device/model" ]] && model="$(<"$d/device/model")"
+        # sysfs pads the model to a fixed width; the JSON carried the padding
+        # ("Samsung SSD 980 PRO 2TB                 ", onyx 2026-09-30).
+        model="${model%"${model##*[![:space:]]}"}"
         if have smartctl; then
             # -i is identity only: no self-test, no writes, safe on a live pool.
             local si
@@ -326,7 +336,7 @@ cmd_enclosures() {
 # Same reason as _collect_drives: the JSON needs these too, and the label
 # generator's whole point is slot-to-serial.
 _collect_enclosures() {
-    local e s dev
+    local e s dev st
     [[ -d "$SYS_ENCL" ]] || return 0
     compgen -G "$SYS_ENCL/*" >/dev/null || return 0
     for e in "$SYS_ENCL"/*; do
@@ -334,8 +344,13 @@ _collect_enclosures() {
             [[ -r "$s/slot" ]] || continue
             dev="-"
             [[ -d "$s/device/block" ]] && dev="$(ls "$s/device/block" 2>/dev/null | head -1)"
-            printf '%s\t%s\t%s\t%s\n' "$(basename "$e")" "$(<"$s/slot")" "$dev" \
-                "$([[ -r "$s/status" ]] && <"$s/status" || echo -)"
+            # WHY a variable: this was $([[ -r f ]] && <f || echo -), and a
+            # bare <f only reads the file when it is the WHOLE substitution,
+            # so every readable slot printed an empty status (shown with a
+            # fake SYS_ENCL, 2026-09-30).
+            st="-"
+            [[ -r "$s/status" ]] && st="$(<"$s/status")"
+            printf '%s\t%s\t%s\t%s\n' "$(basename "$e")" "$(<"$s/slot")" "$dev" "$st"
         done
     done
     return 0
@@ -353,7 +368,7 @@ _collect_enclosures() {
 # instead of an error.
 cmd_json() {
     local pci cls cname drv hosts h fw bios board first=1
-    printf '{"host":"%s","controllers":[' "$(hostname)"
+    printf '{"host":"%s","controllers":[' "$(_json_str "$(uname -n)")"
     for pci in "$SYS_PCI"/*; do
         [[ -r "$pci/class" ]] || continue
         cls="$(<"$pci/class")"
@@ -371,8 +386,11 @@ cmd_json() {
         done
         ((first)) || printf ','
         first=0
+        # Firmware, BIOS and board are vendor text exactly as model and serial
+        # are; they went out unescaped while those two did not (2026-09-30).
         printf '{"pci":"%s","class":"%s","driver":"%s","fw":"%s","bios":"%s","board":"%s","hba":%s}' \
-            "$pci" "$cname" "$drv" "$fw" "$bios" "$board" "$(_is_hba "$cls" && echo true || echo false)"
+            "$(_json_str "$pci")" "$cname" "$(_json_str "$drv")" "$(_json_str "$fw")" \
+            "$(_json_str "$bios")" "$(_json_str "$board")" "$(_is_hba "$cls" && echo true || echo false)"
     done
     printf '],"drives":['
     local n id model serial fwrev health line
@@ -408,7 +426,7 @@ usage: kldload-hba [status | drives | enclosures | json]
                enclosures, and an honest list of what needs a vendor tool
   drives       per-drive by-id, model, serial, firmware revision and SMART health
   enclosures   SES slot -> device mapping (which bay holds which disk)
-  json         the controller inventory as one JSON object on stdout
+  json         controllers, drives and enclosures as one JSON object on stdout
 
 Reads only redistributable sources: sysfs, lspci, lsscsi, smartctl, sg_ses.
 It NEVER writes to a controller. Flashing an HBA is deliberately not here.

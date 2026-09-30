@@ -1,0 +1,96 @@
+.Dd September 30, 2026
+.Dt KIMAGE 8
+.Os
+.Sh NAME
+.Nm kimage
+.Nd turn this machine into a cloud-init golden image, export its disk, and start virtual machines from it
+.Sh SYNOPSIS
+.Nm
+.Cm build
+.Nm
+.Cm export
+.Op Ar format Op Ar directory
+.Nm
+.Cm deploy
+.Ar image count
+.Nm
+.Cm full
+.Op Ar count
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+An older demonstration, from before golden images were built in virtual
+machines: install kldload on a machine, make that machine the golden,
+and start copies of it.
+.Bl -tag -width Ds
+.It Cm build
+Prepares
+.Em this machine
+to be copied: installs and enables cloud-init, deletes its SSH host keys,
+empties its machine id and host name, clears the login records and
+everything in
+.Pa /tmp
+and
+.Pa /var/tmp ,
+and snapshots the root dataset as
+.Ql @golden .
+.It Cm export Op Ar format Op Ar directory
+Writes the root disk as qcow2, raw, VHD, VMDK or all four, to
+.Pa /srv/images
+by default.
+.It Cm deploy Ar image count
+Starts
+.Ar count
+machines named
+.Ql kldload-node- Ns Ar n
+from the image, each a copy of it in
+.Pa /var/lib/libvirt/images
+with its own host name through cloud-init.
+A machine of that name whose disk is not that copy is left alone and the
+command stops.
+.It Cm full Op Ar count
+All three.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KIMAGE_DISK
+The root disk; found by itself otherwise.
+.It Ev KIMAGE_OUTDIR , Ev KIMAGE_NAME
+Where and under what name to export; default
+.Pa /srv/images
+and
+.Ql kldload-golden- Ns Ar YYYYMMDD .
+.It Ev KIMAGE_RAM , Ev KIMAGE_CORES
+Each machine's memory and processors; default 4096 MB and 4.
+.El
+.Sh EXIT STATUS
+0 when done; 1 on a failure, named.
+.Sh EXAMPLES
+Not run for this page: see CAVEATS.
+.Bd -literal -offset indent
+# kimage full 3
+.Ed
+.Sh SEE ALSO
+.Xr klab 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-create 8
+.Sh HISTORY
+On 2026-09-30, writing this page:
+.Cm deploy
+removed any machine named
+.Ql kldload-node- Ns Ar n ,
+with every disk it had.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+.Cm build
+and
+.Cm full
+change the machine they run on: after them it has no SSH host keys, no
+machine id and no host name until they are made again, and everyone's
+temporary files are gone.
+Run them only on a machine meant to become an image.
+.Xr klab 8
+and
+.Xr kvm-clone 8
+build goldens inside virtual machines and are the way to do this now.

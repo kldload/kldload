@@ -1,0 +1,179 @@
+.Dd September 30, 2026
+.Dt KVM-WIN 8
+.Os
+.Sh NAME
+.Nm kvm-win
+.Nd build Windows golden images unattended, and make Windows virtual machines as instant ZFS clones of them
+.Sh SYNOPSIS
+.Nm
+.Cm golden
+.Cm win11 | server
+.Op Fl -iso Ar url | path
+.Op Fl -ram Ar mb
+.Op Fl -disk Ar gb
+.Nm
+.Cm create
+.Ar name
+.Fl -os Cm win11 | server
+.Op Fl -ram Ar mb
+.Op Fl -cpus Ar n
+.Nm
+.Cm list
+.Nm
+.Cm destroy
+.Ar name
+.Op Fl -purge
+.Nm
+.Cm demo sccm
+.Nm
+.Fl -self-test
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+Nothing of Windows ships in the kldload image.
+.Nm
+fetches the media only when a golden is built: Microsoft's evaluation
+ISO, found with Mido, or your own with
+.Fl -iso ,
+and the virtio drivers.
+It installs Windows with no one at the console, with the virtio storage
+driver loaded before setup, the QEMU guest agent and Cloudbase-Init
+added, generalises it with sysprep, and keeps the result as a ZFS volume,
+.Ar pool Ns Pa /win- Ns Ar os Ns Pa -golden@golden .
+.Pp
+Every machine made from it is an instant clone of that snapshot, on q35
+with UEFI Secure Boot, a TPM 2.0 and virtio devices \(em what Windows 11
+requires.
+Cloudbase-Init reads the same NoCloud seed that klab's Linux machines
+use, so host name, administrator password, network and first-run commands
+are set the cloud-init way.
+The administrator is
+.Ql Administrator ,
+password
+.Ql kldload .
+.Pp
+.Nm
+touches only what it made: every clone carries the ZFS property
+.Ql com.kldload:kvm-win ,
+and
+.Cm create
+and
+.Cm destroy Fl -purge
+refuse a volume without it.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm golden Cm win11 | server
+Build the golden, unless it exists.
+.Fl -iso
+takes your own installation media, a path or a URL; the evaluation
+download depends on Microsoft's site and is the less reliable way.
+.It Cm create Ar name Fl -os Ar os
+Clone the golden and start the machine.
+.Ar name
+must do as a host name; a volume of that name that
+.Nm
+did not make is refused.
+.It Cm list
+The goldens, and every machine
+.Nm
+made, with its state.
+.It Cm destroy Ar name Op Fl -purge
+Stop and remove the machine; with
+.Fl -purge ,
+its volume too.
+.It Cm demo sccm
+Build both goldens and make a Windows Server and a Windows 11 machine on
+the same network, for a configuration-manager demonstration.
+.It Fl -self-test
+Check the prerequisites \(em virt-install, swtpm, Secure Boot firmware,
+ZFS, the libvirt network \(em that the driver download answers, and that
+the unattended-setup files are well formed.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KVMWIN_POOL
+The dataset holding goldens and clones; default
+.Ql rpool/vms .
+.It Ev KVMWIN_ISO_DIR , Ev KVMWIN_WORK , Ev KVMWIN_NET
+Where media is kept
+.Pq Pa /var/lib/libvirt/isos ,
+its scratch directory
+.Pq Pa /var/lib/kldload/kvm-win ,
+and the libvirt network
+.Pq Ql default .
+.It Ev LIBVIRT_DEFAULT_URI
+Default
+.Ql qemu:///system ,
+whoever runs it.
+.El
+.Sh EXIT STATUS
+0 when done; 1 on any failure, named.
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30.
+.Bd -literal -offset indent
+$ kvm-win --self-test
+  ✔ prereqs ok (virt-install/swtpm/OVMF-secboot/zfs/default)
+  ✔ OVMF: /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd / VARS /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd
+  ✔ virtio-win URL reachable
+  ✔ autounattend(win11) well-formed
+  ✔ autounattend(server) well-formed
+
+  ✔ self-test PASS
+# (exited 0)
+.Ed
+.Pp
+With a throwaway volume marked as a stopped server clone:
+.Bd -literal -offset indent
+$ kvm-win list
+NAME                     OS       STATE      ZVOL
+kwlist-39623             server   undefined  rpool/vms/kwlist-39623
+# (exited 0)
+.Ed
+.Pp
+What it will not destroy \(em a throwaway volume without the mark, then the
+same volume marked, then a name that is not one:
+.Bd -literal -offset indent
+# kvm-win destroy kwtest-32679 --purge
+[kvm-win] error: rpool/vms/kwtest-32679 was not made by kvm-win (no com.kldload:kvm-win); nothing destroyed
+# (exited 1)
+# kvm-win destroy kwtest-32679 --purge
+  ✔ destroyed kwtest-32679 (zvol purged)
+# (exited 0)
+# kvm-win destroy ../x --purge
+[kvm-win] error: not a usable VM name: '../x'
+# (exited 1)
+.Ed
+.Pp
+Building and using a golden; not run for this page, since it downloads
+several gigabytes:
+.Bd -literal -offset indent
+# kvm-win golden win11 --iso /var/lib/libvirt/isos/Win11_24H2.iso
+# kvm-win create dc01 --os server --ram 8192
+# the second prints "dc01 running" once virt-install has started it
+.Ed
+.Sh SEE ALSO
+.Xr virt-install 1 ,
+.Xr klab 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-create 8 ,
+.Xr zfs-clone 8
+.Sh HISTORY
+On 2026-09-30, writing this page:
+.Cm create
+destroyed any existing volume of the name it was given, and
+.Cm destroy Fl -purge
+destroyed any volume of any name \(em shown on a throwaway volume;
+.Cm list
+missed every machine whose name did not start
+.Ql win- ;
+and run as a user it looked at that user's own libvirt, which has no
+network.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A machine made before the mark existed has none;
+.Cm destroy Fl -purge
+leaves its volume, to be destroyed by hand.
+.Pp
+The evaluation editions expire; Microsoft's terms apply to what it
+downloads.

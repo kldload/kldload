@@ -1,0 +1,64 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-HEADLAMP-INSTALL 8
+.Os
+.Sh NAME
+.Nm kldload-headlamp-install
+.Nd fetch the Headlamp Kubernetes interface for the web console \(em which upstream no longer publishes
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Pa kldload-headlamp.service
+runs
+.Nm
+before starting Headlamp behind the web console's
+.Pa /k8s/
+path.
+It does nothing when the pinned version is already installed, installs
+from
+.Pa /var/lib/kldload/headlamp-cache/
+when a copy is there, and otherwise downloads the server from Headlamp's
+GitHub releases.
+.Pp
+Headlamp stopped publishing a standalone server; the download fails, and
+the build leaves
+.Pa kldload-headlamp.service
+disabled so that no install carries a failing unit.
+The web console's Kubernetes terminal,
+.Pa /k9s/ ,
+is unaffected.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev HEADLAMP_VER
+The version; default 0.26.0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/headlamp/headlamp-server
+The installed server.
+.It Pa /var/lib/kldload/headlamp-cache/headlamp-server- Ns Ar version
+A copy to install from instead of the network.
+.El
+.Sh EXIT STATUS
+0 when installed; 1 when it could not be.
+.Sh SEE ALSO
+.Xr kldload-webui 8 ,
+.Xr kube-cluster 8
+.Sh HISTORY
+On 2026-05-17 the download was found to return 404; the service has been
+disabled at build since.
+On 2026-09-30, writing this page: its message still said to retry once
+the network was up.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It needs rewriting \(em the server is inside the desktop application's
+archive, or Headlamp can be deployed into the cluster with its Helm
+chart \(em before the service is worth enabling.
+Nothing it downloads is checked against a published sum.
