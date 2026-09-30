@@ -1,0 +1,253 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-NETBOOT-SERVER 8
+.Os
+.Sh NAME
+.Nm kldload-netboot-server
+.Nd install or clone the machines of a rack over the network, offline, from an installed kldload machine or its USB stick
+.Sh SYNOPSIS
+.Nm
+.Cm serve
+.Nm
+.Cm arm-install
+.Ar mac | Cm any
+.Ar answers
+.Op Fl -netdev Ar mac2
+.Nm
+.Cm arm-all
+.Ar dir
+.Op Fl -dry-run
+.Nm
+.Cm arm-deploy
+.Ar mac
+.Fl -golden Ar name
+.Fl -disk Ar disk
+.Op Fl -hostname Ar name
+.Op Fl -netdev Ar mac2
+.Nm
+.Cm golden
+.Ar dataset
+.Op Cm as Ar name
+.Nm
+.Cm disarm Ar mac | Cm disarm-all
+.Nm
+.Cm never
+.Op Cm list | Cm add Ar mac Op Ar note ... | Cm remove Ar mac
+.Nm
+.Cm status
+.Op Fl -json
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+serves the kernel, initramfs and root image this machine was installed
+from \(em kept at install time with
+.Ev KLDLOAD_KEEP_NETBOOT Ns =1 ,
+or read from the live USB stick it booted from \(em to other machines on
+the LAN, with the offline package mirrors inside, so a rack installs with
+no internet.
+.Cm serve ,
+run by
+.Pa kldload-netboot.service ,
+writes an HTTP tree, an
+.Xr nginx 8
+configuration with directory listing off, and a
+.Xr dnsmasq 8
+configuration for proxy DHCP and TFTP on one interface, and runs both.
+Proxy DHCP answers network boot requests beside the network's own DHCP
+server and gives out no addresses.
+.Pp
+Nothing is installed unless it is armed.
+Every machine that network-boots from here gets
+.Pa boot.ipxe ,
+which looks for
+.Pa armed/ Ns Ar mac Ns Pa .ipxe
+for each of its network interfaces in turn and runs the first it finds.
+A machine with none falls through to its own boot order.
+Arming writes that file:
+.Cm arm-install
+to install from the answers file, and
+.Cm arm-deploy
+to receive a golden as a ZFS stream over the same HTTP server, so a clone
+needs no ssh key.
+An armed install first shows a summary of what will be installed and
+counts down; a key opens a menu to change the profile, distribution and
+options, and a password the answers lack is asked for on the machine's
+own screen, never sent on the command line.
+.Pp
+Machines listed in
+.Pa /etc/kldload/netboot-never
+are never installed from here:
+.Cm arm-install
+and
+.Cm arm-deploy
+refuse them, and
+.Pa boot.ipxe
+sends a machine with any listed interface back to its own boot order,
+open mode included.
+A line in that file that does not parse stops the server rather than
+dropping the protection.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm serve
+Run the server.
+.It Cm arm-install Ar mac answers
+The next network boot of
+.Ar mac
+installs, from the answers file.
+With
+.Cm any
+in place of a MAC, every machine that network-boots gets the menu: a key
+installs, the countdown boots its own disk.
+.It Cm arm-all Ar dir
+Arm every
+.Ar mac Ns Pa .env
+in
+.Ar dir ,
+refusing duplicate MACs or host names; exit 1 unless all were armed.
+.Fl -dry-run
+checks without arming.
+.It Cm arm-deploy Ar mac Fl -golden Ar name Fl -disk Ar disk
+The next network boot of
+.Ar mac
+writes the golden
+.Ar name
+to
+.Ar disk .
+.It Fl -netdev Ar mac2
+.Ar mac
+starts the boot and
+.Ar mac2
+carries the download: for a fast card that cannot network-boot under
+UEFI.
+.Cm arm-install
+also reads
+.Ev KLDLOAD_NETBOOT_NETDEV
+from the answers file; the option wins.
+.It Cm golden Ar dataset Op Cm as Ar name
+Stage a dataset as a golden stream.
+.It Cm disarm Ar mac , Cm disarm-all
+Remove the token; the machine boots locally.
+.It Cm never Cm list
+The never list.
+.It Cm never Cm add Ar mac Op Ar note ...
+Add a machine, disarm it if armed, and rewrite
+.Pa boot.ipxe
+now.
+.It Cm never Cm remove Ar mac
+Take it off.
+.It Cm status Op Fl -json
+The payload \(em followed by its
+.Pa VERSION
+file as written by the build, which
+.Pa tests/estate-sweep.sh
+reads the build commit from \(em whether the service is running, the
+goldens and the armed machines.
+.El
+.Sh ENVIRONMENT
+Read from
+.Pa /etc/kldload/netboot.env
+by the service and by every command run by hand; a variable already set
+wins.
+.Bl -tag -width Ds
+.It Ev NETBOOT_PORT
+The HTTP port; default 8080.
+.It Ev NETBOOT_IFACE
+The interface to serve on; default the one with the default route.
+.It Ev NETBOOT_MENU_TIMEOUT
+Seconds the summary counts down; default 10, and 0 for no menu.
+.It Ev NETBOOT_DISTROS
+The distributions the menu offers; default
+.Ql fedora .
+.It Ev NETBOOT_PAYLOAD_NET , Ev NETBOOT_NET_DISTROS
+A second, smaller payload without the offline mirrors, used for the
+distributions named (default
+.Ql rhel arch )
+only when it is the same build as the main one.
+.It Ev NETBOOT_PAYLOAD , Ev NETBOOT_NEVER
+The payload directory and the never list.
+.El
+.Pp
+.Ev NETBOOT_MENU_TIMEOUT
+and
+.Ev NETBOOT_DISTROS
+are read when arming: re-arm to change them for an armed machine.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload-netboot/
+The retained payload.
+.It Pa /var/lib/kldload/netboot-serve/
+What is served:
+.Pa boot.ipxe ,
+.Pa armed/ ,
+.Pa answers/ ,
+.Pa golden/
+and
+.Pa ipxe/ .
+.It Pa /etc/kldload/netboot-never
+One MAC a line, with a note.
+.El
+.Sh EXIT STATUS
+0 when done; 1 when a step failed, named; 2 on a usage error.
+.Sh EXAMPLES
+On a kldload desktop serving build 165 to the lab on 2026-09-30, with
+this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+# kldload-netboot-server status
+payload : retained (/var/lib/kldload-netboot-new): kldload_version = 1.5.1-console
+iso_name        = kldload-1.5.1-console-x86_64.iso
+built_at        = 2026-09-30T08:09:42Z
+edition         = free
+profile         = desktop
+arch            = x86_64
+release         = 10
+commit          = 6dd3ebe544fd
+k8s_stack_lock  = ac7699c54b7144be
+net     : NOT USED -- they are different builds (full: 6dd3ebe544fd, net: 898ec9f99632)
+service : active
+goldens : 0
+armed   : 0 machine(s)
+# (exited 0)
+# kldload-netboot-server never list
+3c:ec:ef:45:86:c0  abyss onboard LAN1 - main pool, FreeBSD+GELI, never install
+3c:ec:ef:45:86:c1  abyss onboard LAN2
+0c:c4:7a:1e:55:34  abyss AOC-STG-i2T port 1
+0c:c4:7a:1e:55:35  abyss AOC-STG-i2T port 2
+# (exited 0)
+.Ed
+.Pp
+Arming; not run for this page:
+.Bd -literal -offset indent
+# kldload-netboot-server arm-install <mac> <answers.env>
+# kldload-netboot-server arm-deploy <mac> --golden <name> --disk <disk>
+# kldload-netboot-server disarm <mac>
+.Ed
+.Sh SEE ALSO
+.Xr dnsmasq 8 ,
+.Xr kldload-restore-machine 8 ,
+.Xr nginx 8
+.Sh HISTORY
+On 2026-09-11 a lab machine network-booted from its second card, which
+is why
+.Pa boot.ipxe
+tries every interface; the same day the payload written at install went
+under a dataset's mount point and vanished at the next boot.
+On 2026-09-13 a command run by hand ignored
+.Pa netboot.env
+and reported a different payload from the one being served.
+The never list came on 2026-09-29, for a machine that must not be
+installed over.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+.Pa answers/
+holds each answers file as written, passwords included, and is served
+without authentication to anyone on the LAN who knows the MAC; listing is
+off, and
+.Cm arm-install
+warns.
+.Pp
+The iPXE image is not signed: a machine with Secure Boot on refuses it.
+x86 only.
+The site's DHCP server must not also hand out a boot server and file.
