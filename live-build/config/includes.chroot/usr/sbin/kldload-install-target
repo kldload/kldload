@@ -774,10 +774,17 @@ EOS
                 >>"$log" 2>&1 ||
                 k_die "apt-get install pass B1 (bootloader) failed — check ${log}"
 
+            # The ZFS package names: the distro's, or OpenZFS's own native
+            # packaging (openzfs-*) when the ZFS Lab supplies the build. The
+            # openzfs packages Conflict with the distro names rather than
+            # Provide them, so the two sets cannot be mixed (2026-09-30).
+            local _zfs_debs=(zfs-dkms zfsutils-linux zfs-initramfs zfs-zed)
+            [[ -z "${KLDLOAD_ZFS_SOURCE:-}" ]] ||
+                _zfs_debs=(openzfs-zfs-dkms openzfs-zfsutils openzfs-zfs-initramfs openzfs-zfs-zed)
             DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
                 --no-install-recommends "${_apt_t[@]}" \
                 linux-headers-amd64 linux-image-amd64 \
-                zfs-dkms zfsutils-linux zfs-initramfs zfs-zed \
+                "${_zfs_debs[@]}" \
                 >>"$log" 2>&1 ||
                 k_die "apt-get install pass B2 (kernel + zfs) failed — check ${log}"
 
@@ -790,7 +797,7 @@ EOS
             # ZBM-can't-find-a-kernel screen. .137 2026-05-25 spent an hour on
             # exactly this failure mode before we added the guard.
             local _required=(linux-image-amd64 linux-headers-amd64 grub-efi-amd64
-                shim-signed initramfs-tools zfs-dkms zfs-initramfs)
+                shim-signed initramfs-tools "${_zfs_debs[0]}" "${_zfs_debs[2]}")
             local _missing=()
             for _p in "${_required[@]}"; do
                 chroot "${target}" /usr/bin/dpkg-query -W -f='${db:Status-Abbrev}' "$_p" 2>/dev/null |
@@ -2186,6 +2193,7 @@ guided_defaults() {
     export KLDLOAD_EXTRA_PACKAGES="${KLDLOAD_EXTRA_PACKAGES:-}"
     export KLDLOAD_KEEP_DARKSITE="${KLDLOAD_KEEP_DARKSITE:-0}"
     export KLDLOAD_CUSTOM_MIRROR_URL="${KLDLOAD_CUSTOM_MIRROR_URL:-}"
+    export KLDLOAD_ZFS_SOURCE="${KLDLOAD_ZFS_SOURCE:-}"
     export KLDLOAD_INFRA_MODE="${KLDLOAD_INFRA_MODE:-standalone}"
     export KLDLOAD_CLUSTER_CIDR="${KLDLOAD_CLUSTER_CIDR:-}"
     export KLDLOAD_CLUSTER_DOMAIN="${KLDLOAD_CLUSTER_DOMAIN:-infra.local}"
