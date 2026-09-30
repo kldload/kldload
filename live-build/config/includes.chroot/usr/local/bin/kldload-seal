@@ -53,7 +53,8 @@
 # Refuses to run against the live host's own root (any pool already
 # imported on the host, or any disk that shadows the running rootfs).
 
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kldload-seal: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 DISK="${1:-}"
 
@@ -113,34 +114,42 @@ esac
 [[ $EUID -eq 0 ]] || die "must run as root"
 
 # ── Safety checks ─────────────────────────────────────────────────────
-# Refuse if the disk is currently mounted anywhere on the host.
-if grep -q "^${DISK}\b\|^${DISK}p[0-9]" /proc/mounts 2>/dev/null; then
-    die "$DISK (or a partition of it) is currently mounted on the host — refusing"
-fi
-
-# Refuse if any zpool imported on the host has any vdev that overlaps
-# this disk's partitions. (Cheap heuristic — checks names.)
-if [[ "$DISK" == /dev/zvol/* ]]; then
-    HOST_POOLS=$(zpool list -H -o name 2>/dev/null || true)
-    for p in $HOST_POOLS; do
-        if zpool status "$p" 2>/dev/null | grep -q "$(basename "$DISK")"; then
-            die "$DISK is part of host-imported pool '$p' — refusing (would brick live root)"
-        fi
-    done
-fi
-
-# Refuse if a running libvirt domain has this disk attached.
-if command -v virsh >/dev/null 2>&1; then
-    if virsh list --name 2>/dev/null | while read -r vm; do
-        [[ -n "$vm" ]] || continue
-        virsh domblklist "$vm" 2>/dev/null | awk 'NR>2 {print $2}' | grep -qFx "$DISK" &&
-            {
-                echo "RUNNING: $vm"
-                break
-            }
-    done | grep -q RUNNING; then
-        die "$DISK is currently attached to a running libvirt domain — shut it down first"
+# Every check compares the RESOLVED device, and every partition of it, with
+# what the host resolves too. HISTORY (2026-09-29): the old checks compared
+# the argument as a string -- /proc/mounts for the path given, zpool status
+# for its basename, each running VM's disk for an exact path -- and the pool
+# check ran only for /dev/zvol/ paths. So /dev/zd496 for /dev/zvol/..., a
+# /dev/disk/by-id alias, or the host's own pool partition (/dev/nvme0n1p2:
+# ZFS mounts datasets, never the partition, and the pool check was skipped)
+# passed every guard; the last would have gone on to import the live root
+# pool a second time.
+REAL="$(readlink -f "$DISK")"
+if [[ -b "$REAL" ]]; then
+    mapfile -t NODES < <(lsblk -nrpo NAME "$REAL")
+    # mounted, or swap: lsblk lists both, for the disk and its partitions
+    if lsblk -nro MOUNTPOINTS "$REAL" | grep -q .; then
+        die "$DISK ($REAL) or a partition of it is mounted or in use as swap on this host — refusing"
     fi
+    # a vdev of any imported pool (-P full paths, -L symlinks resolved)
+    while read -r v; do
+        for n in "${NODES[@]}"; do
+            [[ "$v" == "$n" ]] && die "$DISK ($n) is a device of a pool imported on this host — refusing"
+        done
+    done < <(zpool status -PL 2>/dev/null | awk '$1 ~ /^\/dev\// {print $1}')
+elif [[ -f "$REAL" ]] && [[ -n "$(losetup -nO NAME -j "$REAL")" ]]; then
+    die "$DISK is attached to a loop device ($(losetup -nO NAME -j "$REAL" | tr '\n' ' ')) — in use, refusing"
+fi
+
+# Refuse if a running (or paused) libvirt domain has this disk attached,
+# compared resolved: libvirt may hold /dev/zvol/... while DISK is /dev/zdN.
+if command -v virsh >/dev/null 2>&1; then
+    while read -r vm; do
+        [[ -n "$vm" ]] || continue
+        while read -r src; do
+            [[ -n "$src" && "$(readlink -f "$src")" == "$REAL" ]] &&
+                die "$DISK is attached to the running libvirt domain $vm — shut it down first"
+        done < <(virsh domblklist "$vm" 2>/dev/null | awk 'NR > 2 && NF >= 2 {print $2}')
+    done < <(virsh list --name 2>/dev/null)
 fi
 
 # ── Stage the mount ───────────────────────────────────────────────────
@@ -231,10 +240,14 @@ zfs)
     [[ -n "$BOOTFS" && "$BOOTFS" != "-" ]] || die "pool '$SEAL_POOL' has no bootfs property — cannot find root dataset"
     log "mounting bootfs $BOOTFS"
     zfs mount "$BOOTFS"
-    # bootfs may have canmount=noauto; force
+    # bootfs may have canmount=noauto; force -- and put it back, because
+    # kldload boot environments are noauto on purpose and this is the
+    # image every clone boots (the old code left it at on).
     if ! mountpoint -q "$MNT"; then
+        _cm="$(zfs get -H -o value canmount "$BOOTFS")"
         zfs set canmount=on "$BOOTFS"
         zfs mount "$BOOTFS"
+        zfs set canmount="$_cm" "$BOOTFS" || die "could not restore canmount=$_cm on $BOOTFS"
     fi
     [[ -d "$MNT/etc" ]] || die "$BOOTFS mounted but no /etc found at $MNT — wrong dataset?"
     ;;
