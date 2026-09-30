@@ -1,0 +1,96 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-FOLLOW 8
+.Os
+.Sh NAME
+.Nm kldload-follow
+.Nd follow every kldload log at once, each line tagged with where it came from
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+follows, in one stream, every log that kldload writes while a machine is
+being installed, first-booted and built on: the automatic deployment,
+the installer, first boot, the Kubernetes bootstrap and its joins, the
+klab driver and each of its machines' serial consoles, and every job the
+web console starts \(em golden builds, clones, Ansible runs, Helm
+installs.
+.Pp
+Each line is prefixed with a tag \(em
+.Ql deploy ,
+.Ql install ,
+.Ql firstbt ,
+.Ql k8s-bs ,
+.Ql klab ,
+.Ql console ,
+.Ql ansible ,
+and so on \(em so interleaved streams can be told apart, coloured on a
+terminal.
+It starts with the last 30 lines of each log.
+.Pp
+A log that appears while it runs is picked up within two seconds;
+a log that does not exist yet is waited for.
+Ctrl-C ends it.
+.Pp
+Run it as root to see the logs under
+.Pa /root/klab .
+In the embedded terminal of the web console, F3 opens it.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/kldload/*.log
+The installer's, first boot's, the deployment's, and every web console
+job's logs.
+.It Pa /var/log/klab/*.log
+klab machines' serial consoles.
+.It Pa /root/klab/*.log
+The klab driver.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Ended with Ctrl-C, or
+.Fl -help .
+.It 2
+An argument was given.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, stopped after six seconds:
+.Bd -literal -offset indent
+# timeout 6 kldload-follow
+══════════════════════════════════════════════════════════════
+ kldload-follow — unified live tail (Ctrl-C to exit)
+ Streams: autodeploy / klab driver / firstboot / kube-bootstrap
+          + every VM console under /var/log/klab/
+══════════════════════════════════════════════════════════════
+
+── /var/log/kldload/autodeploy.log ──
+deploy  | [klab]     ZFS binary:     MISSING
+deploy  | [klab]     ZFS module:     loaded
+\&...
+.Ed
+.Pp
+The lines themselves carry the logs' own colour codes, left out here.
+.Sh SEE ALSO
+.Xr journalctl 1 ,
+.Xr tail 1 ,
+.Xr klab 8 ,
+.Xr kldload-component 8 ,
+.Xr kube-cluster 8
+.Sh HISTORY
+It replaced a follower of the ZFS test lab's logs alone.
+.Pp
+On 2026-09-30, writing this page:
+.Fl -help
+started following, and never returned.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The systemd journal is not followed; a unit that logs only there is seen
+with
+.Xr journalctl 1 .
