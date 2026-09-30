@@ -71,6 +71,21 @@ die() {
     exit 1
 }
 
+# _valid_cluster NAME -- dies unless NAME is safe to put in a path, a zvol
+# and a domain name.
+#
+# SAFETY: destroy ends in `rm -rf /var/lib/kspawn/clusters/NAME`, and NAME
+# was never checked. In a container, 2026-09-30: `kspawn destroy
+# ../../libvirt` found no manifest, removed /var/lib/libvirt -- every VM
+# definition -- printed "Cluster '../../libvirt' destroyed." and exited 0.
+_valid_cluster() {
+    [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] ||
+        die "cluster name must be lowercase letters, digits and dashes, 1-31 long: '$1'"
+}
+_valid_int() {
+    [[ "$2" =~ ^[0-9]+$ ]] || die "$1 needs a whole number, got '$2'"
+}
+
 # ── SSH key setup ─────────────────────────────────────────────────────────
 ensure_ssh_key() {
     if [[ ! -f "$SSH_KEY" ]]; then
@@ -166,10 +181,23 @@ runcmd:
   - [ systemctl, enable, --now, sshd.service ]
 USER
 
-    genisoimage -output "$seed_iso" -volid cidata -joliet -rock \
-        "${tmp}/user-data" "${tmp}/meta-data" >/dev/null 2>&1 ||
-        die "genisoimage failed for $hostname"
+    # Fedora ships no genisoimage; fall back as klab and kube-cluster do.
+    # onyx had only mkisofs/xorrisofs, so every seed died here (2026-09-30).
+    local rc=0
+    if command -v genisoimage >/dev/null 2>&1; then
+        genisoimage -output "$seed_iso" -volid cidata -joliet -rock \
+            "${tmp}/user-data" "${tmp}/meta-data" >/dev/null 2>&1 || rc=$?
+    elif command -v mkisofs >/dev/null 2>&1; then
+        mkisofs -output "$seed_iso" -volid cidata -joliet -rock \
+            "${tmp}/user-data" "${tmp}/meta-data" >/dev/null 2>&1 || rc=$?
+    elif command -v xorriso >/dev/null 2>&1; then
+        xorriso -as mkisofs -o "$seed_iso" -volid cidata -joliet -rock \
+            "${tmp}/user-data" "${tmp}/meta-data" >/dev/null 2>&1 || rc=$?
+    else
+        rc=127
+    fi
     rm -rf "$tmp"
+    ((rc == 0)) || die "could not make the seed for $hostname (genisoimage, mkisofs or xorriso; rc $rc)"
 }
 
 # ── OS variant resolver (ported from klab) ───────────────────────────────
@@ -213,14 +241,18 @@ _resolve_os_variants
 spawn_kvm_node() {
     local cluster="$1" idx="$2" distro="$3" cpu="$4" ram="$5" disk_gb="$6"
 
-    local node_name="${PREFIX}-${cluster}-$(printf '%02d' "$idx")"
+    local node_name
+    printf -v node_name '%s-%s-%02d' "$PREFIX" "$cluster" "$idx"
     local zvol="${POOL}/vms/${node_name}"
     local golden_snap
     golden_snap="$(golden_snapshot "$distro")"
 
     log "  [${node_name}] cloning from ${golden_snap}..."
-    zfs clone "$golden_snap" "$zvol" 2>&1 | grep -v "^$" ||
-        die "zfs clone failed for $node_name"
+    # WHY no pipe: this was `zfs clone ... 2>&1 | grep -v "^$" || die`. A
+    # clone that works prints nothing, grep then exits 1, and under pipefail
+    # every node died right after its clone was made -- proven with the same
+    # pipeline on onyx, 2026-09-30. No spawn could ever have succeeded.
+    zfs clone "$golden_snap" "$zvol" || die "zfs clone failed for $node_name"
 
     # Optional: resize the zvol for this node (ZFS grows the backing,
     # guest filesystem still needs `growpart` on first boot which cloud-init
@@ -230,17 +262,29 @@ spawn_kvm_node() {
         current_bytes="$(zfs get -H -p -o value volsize "$zvol")"
         local wanted_bytes=$((disk_gb * 1024 * 1024 * 1024))
         if ((wanted_bytes > current_bytes)); then
-            zfs set volsize="${disk_gb}G" "$zvol" 2>/dev/null &&
+            if zfs set volsize="${disk_gb}G" "$zvol"; then
                 log "  [${node_name}] volsize grown to ${disk_gb}G"
+            else
+                warn "  [${node_name}] could not grow to ${disk_gb}G; keeping the golden's size"
+            fi
         fi
     fi
 
     local seed_iso="${ISO_DIR}/${node_name}-seed.iso"
-    make_cloudinit_seed "$node_name" "$seed_iso"
+    # A node that fails from here on takes its clone and seed with it; they
+    # used to be left behind with no manifest entry to find them by.
+    if ! (make_cloudinit_seed "$node_name" "$seed_iso"); then
+        zfs destroy "$zvol" || warn "  [${node_name}] could not remove ${zvol}"
+        return 1
+    fi
 
     local os_variant="${OS_VARIANTS[$distro]:-linux}"
 
     log "  [${node_name}] virt-install (${cpu} CPU, ${ram}MB, ${os_variant})..."
+    # WHY no bus on the seed: it was bus=ide, and q35 has no IDE controller --
+    # "IDE controllers are unsupported for this QEMU binary or machine type"
+    # on onyx, 2026-09-30. Left out, libvirt picks one the machine has, as klab
+    # does.
     virt-install \
         --connect qemu:///system \
         --name "$node_name" \
@@ -248,14 +292,16 @@ spawn_kvm_node() {
         --vcpus "$cpu" \
         --os-variant "$os_variant" \
         --disk "path=/dev/zvol/${zvol},format=raw,bus=virtio,cache=none" \
-        --disk "path=${seed_iso},device=cdrom,bus=ide" \
+        --disk "path=${seed_iso},device=cdrom" \
         --network "network=${NETWORK},model=virtio" \
         --graphics none \
         --console pty,target_type=serial \
         --noautoconsole \
-        --import >/dev/null 2>&1 ||
+        --import >/dev/null ||
         {
-            warn "  [${node_name}] virt-install failed"
+            warn "  [${node_name}] virt-install failed (its message is above); removing its clone and seed"
+            zfs destroy "$zvol" || warn "  [${node_name}] could not remove ${zvol}"
+            rm -f "$seed_iso"
             return 1
         }
 
@@ -462,6 +508,12 @@ cmd_spawn() {
     done
 
     [[ -n "$cluster" ]] || die "--name required"
+    _valid_cluster "$cluster"
+    _valid_int --count "$count"
+    _valid_int --cpu "$cpu"
+    _valid_int --ram "$ram"
+    _valid_int --disk "$disk"
+    ((count >= 1)) || die "--count must be at least 1"
     [[ -n "$distro" ]] || die "--distro required (one of: $(list_goldens | tr '\n' ' '))"
     [[ "$runtime" == "kvm" ]] || die "v1 supports --runtime kvm only (firecracker coming)"
 
@@ -502,7 +554,10 @@ cmd_spawn() {
         if [[ -s "${tmpf}/node-${i}.out" ]]; then
             nodes+=("$(cat "${tmpf}/node-${i}.out")")
         else
-            warn "  node-${i}: no output — check ${tmpf}/node-${i}.err"
+            # The error itself, not a path to it: the directory is removed
+            # below, so the old "check <file>" pointed at nothing.
+            warn "  node-${i} failed:"
+            sed 's/^/      /' "${tmpf}/node-${i}.err" >&2
         fi
     done
 
@@ -527,17 +582,29 @@ cmd_spawn() {
     # that have not got an address yet are skipped and can be enrolled later by
     # re-running `kldload-enroll <name>`.
     if command -v kldload-enroll >/dev/null 2>&1; then
+        local _enrolled=0
         for entry in "${nodes[@]}"; do
             IFS='|' read -r _n _zvol _seed _ip <<<"$entry"
             [[ -n "$_ip" ]] || continue
-            kldload-enroll "$_n" --ip "$_ip" --role "$role" --cluster "$cluster" \
-                >/dev/null 2>&1 ||
+            if kldload-enroll "$_n" --ip "$_ip" --role "$role" --cluster "$cluster" \
+                >/dev/null 2>&1; then
+                _enrolled=$((_enrolled + 1))
+            else
                 warn "  ${_n}: mesh enrollment incomplete — run 'kldload-enroll ${_n}'"
+            fi
         done
-        log "  WireGuard: enrolled ${#nodes[@]} node(s) on the mesh"
+        # The count is what enrolled, not what was asked: this printed
+        # ${#nodes[@]} whatever happened.
+        log "  WireGuard: enrolled ${_enrolled}/${#nodes[@]} node(s) on the mesh"
     fi
 
-    log "${C_CYN}══ Cluster '${cluster}' ready ══${C_RST}"
+    if ((${#nodes[@]} < count)); then
+        warn "only ${#nodes[@]} of ${count} node(s) came up"
+        exit_code=1
+        log "${C_CYN}══ Cluster '${cluster}' incomplete ══${C_RST}"
+    else
+        log "${C_CYN}══ Cluster '${cluster}' ready ══${C_RST}"
+    fi
     printf '%b\n' "$C_DIM"
     for entry in "${nodes[@]}"; do
         IFS='|' read -r n _zvol _seed ip <<<"$entry"
@@ -566,13 +633,19 @@ cmd_list() {
         printf '  %-20s %-10s %-10s %3s nodes   %s\n' \
             "$cluster" "$distro" "$runtime" "$nodes" "$created"
     done
-    [[ $found -eq 0 ]] && log "No clusters. Try: kspawn spawn --name demo --distro centos --count 3"
+    # An if, not `[[ ]] && log`: as the last line of the function that
+    # returned 1 whenever there WERE clusters (onyx, 2026-09-30).
+    if ((found == 0)); then
+        log "No clusters. Try: kspawn spawn --name demo --distro centos --count 3"
+    fi
+    return 0
 }
 
 # ── status: one cluster ─────────────────────────────────────────────────
 cmd_status() {
     local cluster="${1:-}"
     [[ -n "$cluster" ]] || die "usage: kspawn status <cluster>"
+    _valid_cluster "$cluster"
     local m="${CLUSTERS_DIR}/${cluster}/manifest.json"
     [[ -f "$m" ]] || die "no such cluster: $cluster"
 
@@ -597,15 +670,22 @@ cmd_status() {
 cmd_ssh() {
     local cluster="${1:-}" idx="${2:-1}"
     [[ -n "$cluster" ]] || die "usage: kspawn ssh <cluster> [index]"
+    _valid_cluster "$cluster"
+    _valid_int index "$idx"
     local m="${CLUSTERS_DIR}/${cluster}/manifest.json"
     [[ -f "$m" ]] || die "no such cluster: $cluster"
 
-    local node_name="${PREFIX}-${cluster}-$(printf '%02d' "$idx")"
-    local ip
-    ip="$(awk -F'"' -v n="$node_name" '
-    /"name":/ { in_node = ($4 == n) }
-    in_node && /"ip":/ { print $4; exit }
-  ' "$m")"
+    local node_name
+    printf -v node_name '%s-%s-%02d' "$PREFIX" "$cluster" "$idx"
+    # write_manifest puts each node on ONE line, so the awk that was here
+    # printed field 4 of that line -- the node's name -- as its address, and
+    # ssh went to the hostname "kspawn-kst-01" (onyx, 2026-09-30).
+    local ip="" line
+    while IFS= read -r line; do
+        [[ "$line" == *"\"name\":\"${node_name}\""* ]] || continue
+        [[ "$line" =~ \"ip\":\"([0-9.]*)\" ]] && ip="${BASH_REMATCH[1]}"
+        break
+    done <"$m"
     [[ -n "$ip" ]] || ip="$(get_vm_ip "$node_name")"
     [[ -n "$ip" ]] || die "no IP known for $node_name — try: kspawn status $cluster"
     exec ssh -i "$SSH_KEY" \
@@ -617,8 +697,11 @@ cmd_ssh() {
 cmd_destroy() {
     local cluster="${1:-}"
     [[ -n "$cluster" ]] || die "usage: kspawn destroy <cluster>"
+    _valid_cluster "$cluster"
     local dir="${CLUSTERS_DIR}/${cluster}"
     [[ -d "$dir" ]] || die "no such cluster: $cluster"
+    [[ -f "${dir}/manifest.json" ]] ||
+        die "no manifest in ${dir}; nothing is destroyed without one (remove the directory by hand)"
 
     log "Destroying cluster '${cluster}'..."
     local m="${dir}/manifest.json"
@@ -629,22 +712,54 @@ cmd_destroy() {
         [[ "$line" =~ \"seed\":\"([^\"]+)\" ]] && seeds+=("${BASH_REMATCH[1]}")
     done <<<"$(tr ',' '\n' <"$m")"
 
-    local n z s
+    # SAFETY: the manifest is data. Only names this cluster could have made,
+    # the zvol spawn made for that name, and its seed are acted on; anything
+    # else in the file is reported and left alone.
+    local n z s failed=0
+    local name_re="^${PREFIX}-${cluster}-[0-9]+$"
     for n in "${names[@]}"; do
+        if [[ ! "$n" =~ $name_re ]]; then
+            warn "  manifest names '$n', which is not a node of ${cluster}; left alone"
+            failed=$((failed + 1))
+            continue
+        fi
         log "  destroying VM $n..."
-        virsh destroy "$n" 2>/dev/null | head -1 || true
-        virsh undefine "$n" --nvram 2>/dev/null | head -1 || true
+        # WHY || true: destroy fails on a VM that is already off, which is fine;
+        # undefine below is the step that has to succeed.
+        virsh destroy "$n" >/dev/null 2>&1 || true
+        if virsh dominfo "$n" >/dev/null 2>&1; then
+            virsh undefine "$n" --nvram >/dev/null ||
+                {
+                    warn "  could not undefine $n"
+                    failed=$((failed + 1))
+                }
+        fi
     done
     # give libvirt a beat to release zvol handles
     sleep 2
     for z in "${zvols[@]}"; do
+        if [[ ! "$z" =~ ^[A-Za-z0-9_.-]+/vms/${PREFIX}-${cluster}-[0-9]+$ ]]; then
+            warn "  manifest names zvol '$z', which is not one spawn makes; left alone"
+            failed=$((failed + 1))
+            continue
+        fi
+        zfs list -H -o name "$z" >/dev/null 2>&1 || continue
         log "  destroying zvol $z..."
         # -r to handle any autosnapshots sanoid may have made
-        zfs destroy -rf "$z" 2>&1 | head -3 || warn "  zfs destroy $z failed"
+        zfs destroy -r "$z" ||
+            {
+                warn "  zfs destroy $z failed"
+                failed=$((failed + 1))
+            }
     done
     for s in "${seeds[@]}"; do
-        [[ -f "$s" ]] && rm -f "$s"
+        [[ "$s" == "${ISO_DIR}/${PREFIX}-${cluster}-"*-seed.iso ]] || continue
+        rm -f "$s"
     done
+    if ((failed)); then
+        err "${failed} step(s) failed; the manifest is kept at ${dir} so destroy can be run again"
+        exit 1
+    fi
     # Drop the inventory rows too, or Ansible keeps targeting nodes whose zvols
     # were destroyed seconds ago and every play opens with unreachable hosts.
     deregister_cluster_db "$cluster" "${names[@]}"
@@ -715,5 +830,10 @@ destroy)
     shift
     cmd_destroy "$@"
     ;;
--h | --help | help | *) show_help ;;
+-h | --help | help) show_help ;;
+*)
+    err "unknown command: $1"
+    show_help >&2
+    exit 2
+    ;;
 esac
