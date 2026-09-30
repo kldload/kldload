@@ -1,0 +1,407 @@
+.Dd September 29, 2026
+.Dt KVM-CREATE 8
+.Os
+.Sh NAME
+.Nm kvm-create
+.Nd create a KVM virtual machine whose disk is a ZFS volume
+.Sh SYNOPSIS
+.Nm
+.Ar name
+.Op Fl -ram Ar MB
+.Op Fl -cpus Ar N
+.Op Fl -disk Ar GB
+.Op Fl -iso Ar path
+.Op Fl -bridge Ar interface
+.Op Fl -os Ar variant
+.Op Fl -volblocksize Ar size
+.Op Fl -vnc-listen Ar address
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+creates a virtual machine called
+.Ar name
+whose disk is a ZFS volume,
+.Pa rpool/vms/ Ns Ar name ,
+rather than an image file.
+The disk is then a dataset like any other: it can be snapshotted with
+.Xr kvm-snap 8 ,
+cloned with
+.Xr kvm-clone 8 ,
+and sent to another pool or machine with
+.Xr zfs-send 8 .
+.Pp
+In order,
+.Nm :
+.Bl -enum -compact
+.It
+checks the name and every value, and changes nothing if any is wrong;
+.It
+creates the volume, sparse and compressed (compression is inherited from
+.Pa rpool/vms ) ,
+and waits up to three seconds for its device node;
+.It
+defines and starts the machine with
+.Xr virt-install 1 :
+UEFI firmware, the q35 machine type, the host's CPU model, a virtio disk
+that passes the guest's discards through to the volume, a virtio network
+interface on
+.Ar interface ,
+and a VNC console;
+.It
+if
+.Xr virt-install 1
+fails, destroys the volume it created;
+.It
+registers the machine in the kldload state database, so it appears in the
+estate and in the Ansible inventory.
+.El
+.Pp
+Without
+.Fl -iso
+the machine boots its disk, which is empty: it is ready to receive an image
+(for example with
+.Xr dd 1
+or
+.Xr zfs-receive 8
+into the volume), or to boot from the network.
+With
+.Fl -iso
+it boots the CD first and the disk after, which is an installation.
+.Pp
+The discard pass-through matters on a sparse volume: when the guest deletes
+files and trims its filesystem, the volume gives the space back to the
+pool, instead of keeping every block the guest ever wrote.
+.Pp
+A
+.Ar name
+is letters, digits,
+.Ql \&. ,
+.Ql _
+and
+.Ql - ,
+up to 63 characters, starting with a letter or a digit.
+It becomes both a dataset path and a libvirt domain name, so nothing else
+is accepted: a
+.Ql /
+would create a nested dataset.
+.Pp
+.Nm
+must run as root; run as a user it re-executes itself with
+.Xr sudo 8 .
+.Fl -help
+needs neither.
+.Sh OPTIONS
+.Bl -tag -width "--volblocksize size"
+.It Fl -ram Ar MB
+Memory in megabytes, 64 or more.
+The default is 2048.
+.It Fl -cpus Ar N
+Virtual CPUs.
+The default is 2.
+.It Fl -disk Ar GB
+The volume's size in gigabytes.
+The volume is sparse, so this is the size the guest sees, not space taken
+from the pool.
+The default is 20.
+.It Fl -iso Ar path
+Attach
+.Ar path
+as a CD and boot it first.
+The file must be readable by the hypervisor's
+.Ql qemu
+user, not only by root; see
+.Sx DIAGNOSTICS .
+.It Fl -bridge Ar interface
+The bridge the machine's network interface joins.
+The default is
+.Ql br0 ,
+the host's LAN bridge on a kldload install.
+.Ql virbr0
+is libvirt's NAT network.
+.It Fl -os Ar variant
+The operating system, as libvirt's osinfo database names it
+.Po
+.Ql osinfo-query os
+lists them
+.Pc ,
+which lets
+.Xr virt-install 1
+choose devices and defaults for that system.
+The default is
+.Ql generic ,
+which works for anything and makes
+.Xr virt-install 1
+print a warning.
+.It Fl -volblocksize Ar size
+The volume's block size, written like
+.Ql 8K ,
+.Ql 16K
+or
+.Ql 64K .
+The default, 64K, suits sequential I/O, compression and clones; 8K or 16K
+suits a guest running a database with small random writes.
+It cannot be changed after the volume exists.
+.It Fl -vnc-listen Ar address
+The address the machine's VNC console listens on.
+The default is
+.Ql 0.0.0.0 ,
+every interface, with no password; see
+.Sx CAVEATS .
+.Ql 127.0.0.1
+keeps the console on this host, to be reached through an
+.Xr ssh 1
+tunnel.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+Needs no root and changes nothing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /dev/zvol/rpool/vms/ Ns Ar name
+The machine's disk.
+.It Pa rpool/vms@pre-create- Ns Ar name
+A snapshot of the parent dataset, taken before each create; the ten most
+recent are kept.
+It is not recursive and holds none of any machine's disk.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+The machine was created.
+.It 1
+The volume already exists, or creating the volume or the machine failed.
+.It 2
+A usage error: no name, a name that is not a plain name, a missing or bad
+value, or an unknown flag.
+Nothing was created.
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on a kldload host on 2026-09-29.
+The machines were throwaway ones named
+.Ql mp-3173365-* ,
+put on libvirt's NAT network with
+.Fl -bridge Ar virbr0
+so an empty disk never network-boots on the LAN, and deleted afterwards
+with
+.Xr kvm-delete 8 .
+.Ss The defaults (--bridge)
+2048 MB, 2 CPUs, a 20 GB volume:
+.Bd -literal -offset indent
+# kvm-create mp-3173365-a --bridge virbr0
+Creating ZFS zvol: rpool/vms/mp-3173365-a (20G, thin provisioned,
+volblocksize=64K)...
+Creating VM: mp-3173365-a (2048MB RAM, 2 vCPUs, 20GB disk)...
+WARNING  Using --osinfo generic, VM performance may suffer. Specify an
+accurate OS for optimal results.
+
+Starting install...
+Creating domain...                                          |         00:00
+Domain creation completed.
+
+VM 'mp-3173365-a' created
+  Disk:    /dev/zvol/rpool/vms/mp-3173365-a
+  Console: virsh console mp-3173365-a
+  VNC:     virsh vncdisplay mp-3173365-a
+  Snap:    kvm-snap mp-3173365-a
+  Clone:   kvm-clone mp-3173365-a <new-name>
+.Ed
+.Pp
+The volume is sparse and compressed (the second machine, below, was
+asked about in the same command):
+.Bd -literal -offset indent
+# zfs get -H -o name,property,value \e
+      volsize,volblocksize,compression,refreservation \e
+      rpool/vms/mp-3173365-a rpool/vms/mp-3173365-b
+rpool/vms/mp-3173365-a	volsize	20G
+rpool/vms/mp-3173365-a	volblocksize	64K
+rpool/vms/mp-3173365-a	compression	lz4
+rpool/vms/mp-3173365-a	refreservation	none
+\&...
+.Ed
+.Pp
+Without
+.Fl -bridge
+the machine joins
+.Ql br0 :
+.Bd -literal -offset indent
+# kvm-create web01
+# on the LAN bridge; the host's DHCP server gives it an address
+.Ed
+.Ss Memory, CPUs and disk (--ram, --cpus, --disk)
+.Bd -literal -offset indent
+# kvm-create mp-3173365-b --ram 4096 --cpus 4 --disk 40 --bridge virbr0
+Creating ZFS zvol: rpool/vms/mp-3173365-b (40G, thin provisioned,
+volblocksize=64K)...
+Creating VM: mp-3173365-b (4096MB RAM, 4 vCPUs, 40GB disk)...
+\&...
+VM 'mp-3173365-b' created
+# virsh dominfo mp-3173365-b | grep -E 'State|Max memory|CPU\e(s\e)'
+State:          running
+CPU(s):         4
+Max memory:     4194304 KiB
+.Ed
+.Ss A database guest (--volblocksize)
+.Bd -literal -offset indent
+# kvm-create mp-3173365-c --disk 60 --volblocksize 16K --bridge virbr0
+Creating ZFS zvol: rpool/vms/mp-3173365-c (60G, thin provisioned,
+volblocksize=16K)...
+\&...
+# zfs get -H -o name,value volblocksize rpool/vms/mp-3173365-c
+rpool/vms/mp-3173365-c	16K
+.Ed
+.Ss Naming the operating system (--os)
+No
+.Ql generic
+warning, and libvirt records the system:
+.Bd -literal -offset indent
+# kvm-create mp-3173365-d --os debian13 --bridge virbr0
+Creating ZFS zvol: rpool/vms/mp-3173365-d (20G, thin provisioned,
+volblocksize=64K)...
+Creating VM: mp-3173365-d (2048MB RAM, 2 vCPUs, 20GB disk)...
+\&...
+# virsh dumpxml mp-3173365-d | grep -oE 'libosinfo:os id="[^"]*"'
+libosinfo:os id="http://debian.org/debian/13"
+.Ed
+.Ss A console only this host can reach (--vnc-listen)
+.Bd -literal -offset indent
+# kvm-create mp-3173365-e --vnc-listen 127.0.0.1 --bridge virbr0
+\&...
+# virsh dumpxml mp-3173365-e | grep -oE "graphics type='vnc'[^>]*listen='[^']*'"
+graphics type='vnc' port='5904' autoport='yes' listen='127.0.0.1'
+$ ssh -L 5904:127.0.0.1:5904 root@hypervisor
+# then point a VNC viewer at localhost:5904
+.Ed
+.Ss Installing from a CD (--iso)
+The image has to be where the hypervisor can read it;
+.Pa /var/lib/libvirt/images
+is:
+.Bd -literal -offset indent
+# kvm-create mp-3173365-f \e
+      --iso /var/lib/libvirt/images/kvm-create-example.iso --bridge virbr0
+Creating ZFS zvol: rpool/vms/mp-3173365-f (20G, thin provisioned,
+volblocksize=64K)...
+Creating VM: mp-3173365-f (2048MB RAM, 2 vCPUs, 20GB disk)...
+\&...
+Domain is still running. Installation may be in progress.
+You can reconnect to the console to complete the installation process.
+VM 'mp-3173365-f' created
+\&...
+# virsh dumpxml mp-3173365-f | grep -oE "<source file='[^']*'|<boot dev='[^']*'" | head -4
+<boot dev='cdrom'
+<boot dev='hd'
+<source file='/var/lib/libvirt/images/kvm-create-example.iso'
+.Ed
+.Ss Mistakes it refuses (nothing is created)
+.Bd -literal -offset indent
+# kvm-create web/01
+kvm-create: 'web/01' is not a plain name (letters, digits, . _ -)
+# kvm-create probe-x --disk 0
+kvm-create: --disk must be a positive number of GB (got: 0)
+# kvm-create probe-x --ram 10
+kvm-create: --ram must be a number of MB, 64 or more (got: 10)
+# kvm-create probe-x --cpus two
+kvm-create: --cpus must be a positive number (got: two)
+# kvm-create probe-x --volblocksize 7Q
+kvm-create: --volblocksize must look like 8K, 16K or 64K (got: 7Q)
+# kvm-create probe-x --iso /nonexistent.iso
+kvm-create: --iso /nonexistent.iso: no such readable file
+# kvm-create probe-x --vnc-listen 'x;y'
+kvm-create: --vnc-listen must be an address (got: x;y)
+# kvm-create probe-x --ram
+kvm-create: --ram needs a value
+# kvm-create probe-x --foo
+kvm-create: unknown option: --foo
+# echo $?
+2
+# kvm-create mp-3173365-a --bridge virbr0
+kvm-create: rpool/vms/mp-3173365-a already exists; pick another name or
+kvm-delete it first
+# echo $?
+1
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kvm-create: NAME is not a plain name (letters, digits, . _ -)"
+The name would not be a safe dataset path or domain name.
+Exit 2.
+.It "kvm-create: --FLAG must be ... (got: VALUE)"
+A value is out of range or not a number; the message names the flag.
+Exit 2.
+.It "kvm-create: rpool/vms/NAME already exists; pick another name or kvm-delete it first"
+A volume of that name exists, whether or not a machine uses it.
+Exit 1.
+.It "kvm-create: virt-install failed; destroying rpool/vms/NAME"
+The machine could not be defined or started;
+.Xr virt-install 1 Ns 's
+own error is printed above this line, and the volume created for it is
+destroyed.
+Exit 1.
+The commonest cause is an ISO the hypervisor cannot read.
+On 2026-09-29 an image in a home directory gave:
+.Bd -literal
+WARNING  /home/anthony/.cache/kvm-create-example.iso may not be
+accessible by the hypervisor. You will need to grant the 'qemu' user
+search permissions for the following directories: ['/home/anthony/.cache']
+ERROR    internal error: QEMU unexpectedly closed the monitor
+(vm='mp-3173365-f'): ... Could not open
+\&'/home/anthony/.cache/kvm-create-example.iso': Permission denied
+kvm-create: virt-install failed; destroying rpool/vms/mp-3173365-f
+.Ed
+Move the image to
+.Pa /var/lib/libvirt/images .
+.It "kvm-create: could not destroy rpool/vms/NAME -- remove it by hand: zfs destroy rpool/vms/NAME"
+The clean-up after a failed
+.Xr virt-install 1
+did not succeed; the volume is left behind and nothing uses it.
+.It "kvm-create: WARNING: NAME is not in the kldload state DB (kldload-db vm-register failed)"
+The machine exists and runs, but the estate and the Ansible inventory will
+not show it until it is registered.
+.It "kvm-create: /dev/zvol/rpool/vms/NAME did not appear after 3 seconds"
+The volume was created but its device node never appeared; udev is slow or
+stuck.
+Exit 1, and the volume is left for inspection.
+.El
+.Sh SEE ALSO
+.Xr ssh 1 ,
+.Xr virsh 1 ,
+.Xr virt-install 1 ,
+.Xr kldload-db 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-delete 8 ,
+.Xr kvm-golden 8 ,
+.Xr kvm-snap 8 ,
+.Xr zfs-send 8
+.Sh HISTORY
+.Nm
+has created kldload's virtual machines since the first KVM profile.
+On 2026-09-29, writing this page, its checks were tightened: a name had
+been used as a dataset path unchecked, bad values were reported on
+standard output with the exit status of a failed create, and a failed
+clean-up or database registration was silent.
+.Fl -vnc-listen
+was added the same day.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Every machine's VNC console listens on every interface of the host with no
+password, unless
+.Fl -vnc-listen
+says otherwise: anyone who can reach the host can see and type into the
+console.
+On a host on an untrusted network, use
+.Fl -vnc-listen Ar 127.0.0.1 .
+.Pp
+The
+.Pa rpool/vms@pre-create-
+snapshots are not a way back: they hold the parent dataset only.
+To be able to return a machine to an earlier state, snapshot it with
+.Xr kvm-snap 8 .
+.Pp
+.Nm
+assumes the pool is called
+.Ql rpool
+and machines live in
+.Pa rpool/vms .

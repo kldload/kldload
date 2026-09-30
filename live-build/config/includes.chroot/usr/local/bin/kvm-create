@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
-# kvm-create — create a VM on ZFS zvol with sensible defaults
-set -euo pipefail
+# ─────────────────────────────────────────────────────────────────────────────
+# kvm-create — create a KVM virtual machine whose disk is a ZFS zvol.
+#
+#   1. checks the name and every value before touching anything;
+#   2. creates rpool/vms/<name>, thin and compressed, and waits for its device;
+#   3. defines and starts the VM with virt-install (UEFI, q35, virtio disk with
+#      discard, virtio NIC on a bridge, VNC console);
+#   4. destroys the zvol again if virt-install fails;
+#   5. registers the VM in the kldload state DB, so the estate and the
+#      Ansible inventory see it.
+#
+# WHY a zvol and not a qcow2 file: the disk is then a ZFS dataset -- snapshot
+# (kvm-snap), clone (kvm-clone), send and replicate it like any other.
+# Man page: kvm-create(8).
+#
+# Exit: 0 created, 1 zvol or virt-install failed, 2 usage error (a missing or
+# bad value, an unknown flag, no name, a name that is not a plain name).
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kvm-create: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate to root (ZFS + libvirt require it)
 # Rule 9: -h/--help answers BEFORE this re-exec. Asking a tool to explain
@@ -20,7 +38,12 @@ Options:
   --disk   <GB>       Disk size in GB (default: 20)
   --iso    <path>     Boot ISO (optional)
   --bridge <name>     Bridge interface (default: br0)
-  --os     <variant>  OS variant for virt-install (default: generic)
+  --os     <variant>  OS variant for virt-install (default: generic);
+                      (osinfo-query os lists them)
+  --vnc-listen <addr> address the VM's VNC console listens on (default:
+                      0.0.0.0, every interface, no password -- anyone who
+                      can reach this host can see the console; 127.0.0.1
+                      keeps it local, reached with an ssh tunnel)
   --volblocksize <sz> zvol block size (default: 64K). 64K favours
                       sequential I/O, compression and clone efficiency;
                       pick 8K-16K for guests running databases with
@@ -35,8 +58,10 @@ Examples:
 The VM disk is a ZFS zvol at rpool/vms/<name> — thin provisioned,
 compressed, snapshotable. Clone with kvm-clone, snapshot with kvm-snap.
 
-Exit: 0 created, 1 zvol or virt-install failed, 2 usage error (a flag with
-no value, an unknown flag, no name).
+A name is letters, digits, '.', '_' and '-', starting with a letter or digit.
+
+Exit: 0 created, 1 zvol or virt-install failed, 2 usage error (a missing or
+bad value, an unknown flag, no name, a name that is not a plain name).
 EOF
     # asked-for help is 0; a usage error is 2, distinct from a create that
     # ran and failed (1).
@@ -62,6 +87,12 @@ _need_value() {
 [[ "$1" == -* ]] && usage
 NAME="$1"
 shift
+# SAFETY: the name becomes a dataset path (rpool/vms/<name>) and a libvirt
+# domain. A "/" would create a nested dataset, ".." or a leading dash worse.
+if ! [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]]; then
+    echo "kvm-create: '${NAME}' is not a plain name (letters, digits, . _ -)" >&2
+    usage
+fi
 
 RAM=2048
 CPUS=2
@@ -70,6 +101,7 @@ ISO=""
 BRIDGE="br0"
 OS_VARIANT="generic"
 VOLBLOCK="64K"
+VNC_LISTEN="0.0.0.0"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -108,6 +140,11 @@ while [[ $# -gt 0 ]]; do
         VOLBLOCK="$2"
         shift 2
         ;;
+    --vnc-listen)
+        _need_value "$1" "${2:-}"
+        VNC_LISTEN="$2"
+        shift 2
+        ;;
     *)
         echo "kvm-create: unknown option: $1" >&2
         usage
@@ -117,27 +154,32 @@ done
 
 ZVOL="rpool/vms/${NAME}"
 
-# Validate disk size is a positive number
-if ! [[ "$DISK" =~ ^[0-9]+$ ]] || [[ "$DISK" -le 0 ]]; then
-    echo "ERROR: --disk must be a positive integer (got: ${DISK})"
-    exit 1
-fi
-
-# Validate volblocksize shape here so the error names the flag; zfs create
-# still enforces the real constraint (power of two, 512B-1M).
-if ! [[ "$VOLBLOCK" =~ ^[0-9]+[kKmM]?$ ]]; then
-    echo "ERROR: --volblocksize must look like 8K/16K/64K (got: ${VOLBLOCK})"
-    exit 1
-fi
+# Every value is checked before anything is created. These are usage errors
+# (exit 2, on stderr); they printed to stdout and exited 1, like a create
+# that had run and failed.
+_bad() {
+    echo "kvm-create: $*" >&2
+    exit 2
+}
+[[ "$DISK" =~ ^[0-9]+$ ]] && ((DISK > 0)) || _bad "--disk must be a positive number of GB (got: ${DISK})"
+[[ "$RAM" =~ ^[0-9]+$ ]] && ((RAM >= 64)) || _bad "--ram must be a number of MB, 64 or more (got: ${RAM})"
+[[ "$CPUS" =~ ^[0-9]+$ ]] && ((CPUS > 0)) || _bad "--cpus must be a positive number (got: ${CPUS})"
+# zfs create still enforces the real constraint (a power of two, 512B-1M)
+[[ "$VOLBLOCK" =~ ^[0-9]+[kKmM]?$ ]] || _bad "--volblocksize must look like 8K, 16K or 64K (got: ${VOLBLOCK})"
+[[ -z "$ISO" || -r "$ISO" ]] || _bad "--iso ${ISO}: no such readable file"
+[[ "$VNC_LISTEN" =~ ^[0-9.]+$|^[0-9a-fA-F:]+$ ]] || _bad "--vnc-listen must be an address (got: ${VNC_LISTEN})"
 
 # Check if zvol already exists
 if zfs list "${ZVOL}" >/dev/null 2>&1; then
-    echo "ERROR: ZFS zvol '${ZVOL}' already exists. Use a different name or delete first."
+    echo "kvm-create: ${ZVOL} already exists; pick another name or kvm-delete it first" >&2
     exit 1
 fi
 
-# Snapshot before creating (safety net)
-zfs snapshot "rpool/vms@pre-create-${NAME}" 2>/dev/null || true
+# A marker of when the VM was created, on the PARENT dataset. It is not
+# recursive and holds none of any VM's disk -- it was called a "safety net",
+# which it is not (man page review, 2026-09-29).
+zfs snapshot "rpool/vms@pre-create-${NAME}" 2>/dev/null ||
+    true # a leftover marker of the same name from an earlier VM: nothing lost
 # the last ten; one per VM ever created was kept (source audit 2026-09-26)
 if [[ -x /usr/local/sbin/snapshot-prune.sh ]]; then
     /usr/local/sbin/snapshot-prune.sh rpool/vms pre-create- 10 >/dev/null 2>&1 ||
@@ -172,12 +214,13 @@ CMD=(virt-install
     # guest data returns space to the pool instead of leaking forever
     --disk "source.dev=/dev/zvol/${ZVOL},type=block,bus=virtio,cache=none,discard=unmap"
     --network "bridge=${BRIDGE},model=virtio"
-    --graphics vnc,listen=0.0.0.0
+    --graphics "vnc,listen=${VNC_LISTEN}"
     --os-variant "${OS_VARIANT}"
     --noautoconsole
 )
 
 if [[ -n "$ISO" ]]; then
+    # shellcheck disable=SC2054 # uefi,cdrom,hd is ONE virt-install argument
     CMD+=(--cdrom "${ISO}" --boot uefi,cdrom,hd)
 else
     CMD+=(--boot uefi --import)
@@ -185,13 +228,14 @@ fi
 
 echo "Creating VM: ${NAME} (${RAM}MB RAM, ${CPUS} vCPUs, ${DISK}GB disk)..."
 if ! "${CMD[@]}"; then
-    echo "ERROR: virt-install failed. Cleaning up zvol..."
-    zfs destroy "${ZVOL}" 2>/dev/null
+    echo "kvm-create: virt-install failed; destroying ${ZVOL}" >&2
+    zfs destroy "${ZVOL}" ||
+        echo "kvm-create: could not destroy ${ZVOL} -- remove it by hand: zfs destroy ${ZVOL}" >&2
     exit 1
 fi
 
 echo ""
-echo "✔ VM '${NAME}' created"
+echo "VM '${NAME}' created"
 echo "  Disk:    /dev/zvol/${ZVOL}"
 echo "  Console: virsh console ${NAME}"
 echo "  VNC:     virsh vncdisplay ${NAME}"
@@ -199,10 +243,13 @@ echo "  Snap:    kvm-snap ${NAME}"
 echo "  Clone:   kvm-clone ${NAME} <new-name>"
 
 # Register with kldload state DB so the dynamic Ansible inventory sees it.
-# Soft-fail — a missing kldload-db must not block a working virt-install.
+# A failed registration must not undo a working VM, but it is said: a VM the
+# DB never heard of is missing from the estate and from Ansible.
 if command -v kldload-db >/dev/null 2>&1; then
     kldload-db vm-register --name "${NAME}" --cpu "${CPUS}" --ram-gb "$((RAM / 1024))" \
-        --disk-gb "${DISK}" --status "defined" 2>/dev/null || true
+        --disk-gb "${DISK}" --status "defined" >/dev/null ||
+        echo "kvm-create: WARNING: ${NAME} is not in the kldload state DB (kldload-db vm-register failed)" >&2
     kldload-db event --type "vm" --subject "${NAME}" \
-        --message "kvm-create: ${RAM}MB / ${CPUS}vCPU / ${DISK}GB disk" 2>/dev/null || true
+        --message "kvm-create: ${RAM}MB / ${CPUS}vCPU / ${DISK}GB disk" >/dev/null ||
+        echo "kvm-create: WARNING: could not record the create event" >&2
 fi
