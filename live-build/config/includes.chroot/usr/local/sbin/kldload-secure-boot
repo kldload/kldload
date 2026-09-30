@@ -132,20 +132,36 @@ _resign_loaded_zfs() {
 }
 
 _resign_zbm() {
-    # sbsign the ZFSBootMenu binary on the EFI partition so firmware
-    # running with SB on accepts it. kldload installs ZBM at
-    # \EFI\kldload\zbm.EFI with a fallback copy at \EFI\BOOT\BOOTX64.EFI.
-    # Re-sign both if found.
-    local target signed
+    # sbsign the ZFSBootMenu binary on the EFI partition so firmware running
+    # with Secure Boot accepts it through shim.
+    #
+    # SAFETY: never a file that carries a Microsoft signature. That is shim,
+    # and firmware trusts shim ONLY through that signature; the MOK is checked
+    # by shim, not by firmware. This list used to include EFI/BOOT/BOOTX64.EFI
+    # unconditionally, and the loop below strips every signature before
+    # signing -- on onyx that file IS shim (byte-identical to
+    # EFI/fedora/shimx64.efi, signed by the Microsoft UEFI CA), so `enable`
+    # would have left the removable-media fallback unbootable with Secure Boot
+    # on, the path firmware takes when its boot entries are lost. Meanwhile
+    # the real ZFSBootMenu image, EFI/zbm/BOOTX64.EFI where the installer
+    # puts it, was not in the list at all and was never re-signed.
+    # (read on onyx 2026-09-30; tested against copies in a scratch ESP)
+    local target signed esp="${KLDLOAD_ESP:-/boot/efi}"
     if ! command -v sbsign >/dev/null 2>&1; then
         log "sbsign not installed — cannot re-sign ZBM. Install 'sbsigntools' and retry."
         return 0
     fi
 
-    for target in /boot/efi/EFI/kldload/zbm.EFI \
-        /boot/efi/EFI/BOOT/BOOTX64.EFI \
-        /boot/efi/EFI/kldload/BOOTX64.EFI; do
+    for target in "${esp}/EFI/zbm/BOOTX64.EFI" \
+        "${esp}/EFI/kldload/zbm.EFI" \
+        "${esp}/EFI/kldload/BOOTX64.EFI" \
+        "${esp}/EFI/BOOT/BOOTX64.EFI"; do
         [[ -f "${target}" ]] || continue
+        if command -v sbverify >/dev/null 2>&1 &&
+            [[ "$(sbverify --list "${target}" 2>/dev/null)" == *"O=Microsoft Corporation"* ]]; then
+            log "left ${target} alone: it carries a Microsoft signature (shim)"
+            continue
+        fi
         # Strip ALL existing signatures first — sbsign appends rather than
         # replaces, so every repeated `kldload-secure-boot enable` run was
         # stacking another signature onto the same PE. Multi-signature
