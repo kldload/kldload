@@ -26,6 +26,15 @@ set +o pipefail
 # closes the window rather than leaving a bare shell behind. Without it, the
 # command-then-shell default (below) is right for docs/helpers like
 # `kldload-term kldload-help`, where the operator wants to keep working.
+# --help answers first, before anything is started or waited on (rule 9;
+# found by the sandboxed --help capture, 2026-09-30: this ran instead).
+case "${1:-}" in
+-h | --help)
+    awk 'NR > 1 && /^#/ { p = 1 } p && !/^#/ { exit } p { sub(/^# ?/, ""); print }' "$0"
+    exit 0
+    ;;
+esac
+
 APP_MODE=0
 if [ "${1:-}" = "--app" ]; then
     APP_MODE=1

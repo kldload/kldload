@@ -44,6 +44,15 @@ set -Eeuo pipefail
 # Removes the SYSTEM entry when writable, otherwise masks it with a per-user
 # override — an autostart entry is disabled by a same-named file carrying
 # Hidden=true in ~/.config/autostart.
+# --help answers first, before anything is started or waited on (rule 9;
+# found by the sandboxed --help capture, 2026-09-30: this ran instead).
+case "${1:-}" in
+-h | --help)
+    awk 'NR > 1 && /^#/ { p = 1 } p && !/^#/ { exit } p { sub(/^# ?/, ""); print }' "$0"
+    exit 0
+    ;;
+esac
+
 _retire_autostart() {
     local sys=/etc/xdg/autostart/kldload-webui.desktop
     local usr="${HOME}/.config/autostart/kldload-webui.desktop"
