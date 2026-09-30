@@ -254,33 +254,42 @@ detach() {
 
 # ─── Sub-commands ────────────────────────────────────────────────────────────
 
+# state_seen NAME -- the recorded state, reconciled with the component's own
+# status check; list and status both answer with it. Call after
+# load_component. status printed the recorded state alone until 2026-09-29,
+# so a script and the table disagreed (klab: "absent" vs "unmanaged", onyx).
+state_seen() {
+    local _state _live
+    _state="$(state_get "$1")"
+    # Show what is actually on the box when it contradicts the record:
+    # "installed" that no longer answers its own status check is the
+    # single most misleading thing this table could print.
+    if declare -F component_status >/dev/null; then
+        _live="$(component_status 2>/dev/null || true)" # a check that fails says nothing; the record stands
+        [[ "$_state" == "installed" && "$_live" == "absent" ]] && _state="missing"
+        # ...and the mirror image, which was missing until 2026-09-01.
+        # Only the installed->absent direction was reconciled, so a
+        # component deployed by its own tool (`kube-cluster bootstrap`,
+        # `klab golden all`) rather than through this CLI never got a
+        # state file and printed "absent" forever. On fiend .117 that
+        # table said absent for k8s, klab AND kvm while six Kubernetes
+        # nodes were Ready, twenty klab VMs were defined and libvirtd
+        # was serving all of them. An operator trusting it would have
+        # re-installed on top of a live cluster.
+        [[ "$_state" == "absent" && "$_live" == "installed" ]] && _state="unmanaged"
+    fi
+    printf '%s' "$_state"
+}
+
 cmd_list() {
-    local _n _state _live
+    local _n
     vm_prime # one libvirt query for the whole table, not one per component
     printf '%-12s %-12s %-8s %s\n' NAME STATE APPROX SUMMARY
     for _n in $(all_components); do
         (
             load_component "$_n"
-            _state="$(state_get "$_n")"
-            # Show what is actually on the box when it contradicts the record:
-            # "installed" that no longer answers its own status check is the
-            # single most misleading thing this table could print.
-            if declare -F component_status >/dev/null; then
-                _live="$(component_status 2>/dev/null || true)"
-                [[ "$_state" == "installed" && "$_live" == "absent" ]] && _state="missing"
-                # ...and the mirror image, which was missing until 2026-09-01.
-                # Only the installed->absent direction was reconciled, so a
-                # component deployed by its own tool (`kube-cluster bootstrap`,
-                # `klab golden all`) rather than through this CLI never got a
-                # state file and printed "absent" forever. On fiend .117 that
-                # table said absent for k8s, klab AND kvm while six Kubernetes
-                # nodes were Ready, twenty klab VMs were defined and libvirtd
-                # was serving all of them. An operator trusting it would have
-                # re-installed on top of a live cluster.
-                [[ "$_state" == "absent" && "$_live" == "installed" ]] && _state="unmanaged"
-            fi
             printf '%-12s %-12s %-8s %s\n' \
-                "$_n" "$_state" "~${COMPONENT_MINUTES}m" "${COMPONENT_SUMMARY}"
+                "$_n" "$(state_seen "$_n")" "~${COMPONENT_MINUTES}m" "${COMPONENT_SUMMARY}"
         )
     done
 }
@@ -291,7 +300,7 @@ cmd_status() {
         exit 1
     }
     load_component "$1"
-    state_get "$1"
+    state_seen "$1"
     echo
 }
 
