@@ -871,7 +871,8 @@ _node_time_source() {
 _node_cluster_routes() {
     # SAFETY: the service route is only as safe as the range is narrow. Refuse
     # a range wider than /16 rather than route over someone's LAN again.
-    local pod="${POD_CIDR:-10.244.0.0/16}" svc="${SVC_CIDR:-10.96.0.0/16}"
+    local pod="${POD_CIDR:-10.244.0.0/16}" svc="${SVC_CIDR:-10.96.0.0/16}" wgk8s="${WG_K8S_NET:-10.251.0.0/24}"
+    [[ "$wgk8s" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || die "WG_K8S_NET '${wgk8s}' is not a CIDR"
     [[ "${svc#*/}" =~ ^[0-9]+$ ]] && ((${svc#*/} >= 16)) ||
         die "SVC_CIDR ${svc} is wider than /16; a route over it can swallow a LAN -- use a /16 or narrower"
     install -d -m 0755 /etc/systemd/system
@@ -889,6 +890,11 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/ip route replace unreachable ${pod}
 ExecStart=/usr/sbin/ip route replace unreachable ${svc}
+# The wg-k8s mesh at metric 4000: before wg-k8s is up, Cilium's tunnel and
+# health traffic to the other nodes' mesh addresses (UDP 8472, TCP 4240) left
+# by the default route -- deb-4-k8s, build 162, 2026-09-29. Once wg-k8s is up
+# its own route (metric 0) wins and this one is never used.
+ExecStart=/usr/sbin/ip route replace unreachable ${wgk8s} metric 4000
 
 [Install]
 WantedBy=multi-user.target
@@ -898,7 +904,7 @@ UNIT
         die "kldload-cluster-routes.service did not enable -- joining nodes would leak cluster traffic"
     systemctl is-enabled kldload-cluster-routes.service >/dev/null 2>&1 ||
         die "kldload-cluster-routes.service is not enabled after enabling it"
-    log "pod range ${pod} and service range ${svc} unreachable until Cilium routes them (kldload-cluster-routes.service)"
+    log "pod range ${pod}, service range ${svc} and the wg-k8s mesh ${wgk8s} unreachable until their own routes exist (kldload-cluster-routes.service)"
 }
 
 main() {

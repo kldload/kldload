@@ -129,8 +129,9 @@ _plan() {
 }
 POD_CIDR="${POD_CIDR:-$(_plan K8S_POD_CIDR 10.244.0.0/16)}"
 SVC_CIDR="${SVC_CIDR:-$(_plan K8S_SVC_CIDR 10.96.0.0/16)}"
+WG_K8S_NET="${WG_K8S_NET:-$(_plan WG_K8S_NET 10.251.0.0/24)}"
 # SAFETY: these reach the control plane inside a quoted ssh command line.
-for _r in "$POD_CIDR" "$SVC_CIDR"; do
+for _r in "$POD_CIDR" "$SVC_CIDR" "$WG_K8S_NET"; do
     [[ "$_r" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || {
         echo "kube-cluster: '${_r}' is not a CIDR (POD_CIDR / SVC_CIDR)" >&2
         exit 2
@@ -1590,7 +1591,7 @@ NETCFG
     run_ansible_against_vm "$golden_ip" provision-golden.yml \
         -e "k8s_minor=${_k8s_minor}" -e "darksite_url=${GOLDEN_DARKSITE_URL}" \
         -e "ntp_server=${NODE_NTP_SERVER}" \
-        -e "pod_cidr=${POD_CIDR}" -e "svc_cidr=${SVC_CIDR}" ||
+        -e "pod_cidr=${POD_CIDR}" -e "svc_cidr=${SVC_CIDR}" -e "wg_k8s_net=${WG_K8S_NET}" ||
         die "ansible provision-golden failed"
     _golden_bundle_stop
     log "  provision-golden complete — kubeadm, helm, cilium-cli installed"
