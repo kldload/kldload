@@ -19,6 +19,11 @@
 #   sudo tests/lifecycle.sh debian desktop
 #
 # Env knobs:
+#   EXTRA_ANSWERS  a file of KEY=VALUE answers appended after the defaults
+#                  (the ZFS Lab's KLDLOAD_ZFS_SOURCE and hooks); default none
+#   LIVE_PATCH_DIR a tree rooted like /; its files replace the live env's
+#                  before the install (test an installer change without a
+#                  build); default none
 #   VM_NAME      default: kldload-smoke-<distro>-<profile>
 #   VM_MEMORY    default: 8192 (MB)
 #   VM_CORES     default: 4
@@ -111,7 +116,7 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 ISO="$(find "$ROOT/live-build/output" -maxdepth 1 -name 'kldload-*.iso' -printf '%T@ %p\n' 2>/dev/null |
     sort -rn | head -1 | awk '{print $2}')"
 [[ -n "$ISO" && -f "$ISO" ]] || fail "no ISO in $ROOT/live-build/output — run ./deploy.sh build first"
-log "ISO: $(basename "$ISO") ($(numfmt --to=iec --suffix=B "$(stat -c%s "$ISO")"))"
+log "ISO: $(basename "$ISO") ($(numfmt --to=iec --suffix=B "$(stat -L -c%s "$ISO")"))"
 
 # ── Tear down any prior VM with this name ────────────────────────────────────
 if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
@@ -242,12 +247,45 @@ KLDLOAD_ENABLE_EBPF=1
 KLDLOAD_ENABLE_SECURE_BOOT=$([[ "$SB_ENABLED" == "yes" ]] && echo 1 || echo 0)
 KLDLOAD_TIMEZONE=UTC
 EOF
+# Extra answers for a build that is not a plain smoke install: the ZFS Lab
+# (docs/ZFS-LAB-EDITION.md) passes KLDLOAD_ZFS_SOURCE and its hooks this way.
+# A file of KEY=VALUE lines, appended after the defaults so it wins. Empty by
+# default, so every smoke run is exactly what it was.
+if [[ -n "${EXTRA_ANSWERS:-}" ]]; then
+    [[ -r "$EXTRA_ANSWERS" ]] || fail "EXTRA_ANSWERS=${EXTRA_ANSWERS} is not readable"
+    cat "$EXTRA_ANSWERS" >>"$ANSWERS"
+    log "extra answers appended from ${EXTRA_ANSWERS}: $(grep -c '=' "$EXTRA_ANSWERS") line(s)"
+fi
 
 # scp without sshpass falls back to pubkey auth (no key installed in the
 # live ISO) and fails silently. Bug seen 2026-05-05 on fiend's CI run.
 sshpass -p live scp "${SSH_OPTS[@]}" "$ANSWERS" "live@${VM_IP}:/tmp/answers.env" >>"$LOG" 2>&1 ||
     fail "couldn't scp answers to live env"
 ok "answers staged → /tmp/answers.env"
+# Installer files changed in the tree but not yet in an ISO: every regular
+# file under LIVE_PATCH_DIR (a tree rooted like /) replaces its counterpart
+# on the live system before the install starts, so an installer change is
+# exercised in ten minutes instead of after a forty-minute build. File by
+# file with install(1), never a tar over /: a tar carrying usr/sbin/ as a
+# directory replaces the usrmerge symlink and breaks every sbin service
+# (reference_f44-usrmerge-tar-hazard). Empty by default.
+if [[ -n "${LIVE_PATCH_DIR:-}" ]]; then
+    [[ -d "$LIVE_PATCH_DIR" ]] || fail "LIVE_PATCH_DIR=${LIVE_PATCH_DIR} is not a directory"
+    _patched=0
+    while IFS= read -r -d '' _pf; do
+        _rel="${_pf#"$LIVE_PATCH_DIR"/}"
+        # </dev/null: scp and ssh read the loop's stdin otherwise and the list
+        # ends after the first file (1 of 2 landed on the first run, 2026-09-30).
+        sshpass -p live scp "${SSH_OPTS[@]}" "$_pf" "live@${VM_IP}:/tmp/live-patch.file" >>"$LOG" 2>&1 </dev/null ||
+            fail "couldn't scp ${_rel} to the live env"
+        ssh_live "sudo install -m \"\$(stat -c %a /${_rel} 2>/dev/null || echo 0755)\" /tmp/live-patch.file /${_rel}" >>"$LOG" 2>&1 </dev/null ||
+            fail "couldn't install /${_rel} on the live env"
+        _patched=$((_patched + 1))
+    done < <(find "$LIVE_PATCH_DIR" -type f -print0)
+    _wanted="$(find "$LIVE_PATCH_DIR" -type f | wc -l)"
+    ((_patched == _wanted)) || fail "live patch: ${_patched} of ${_wanted} files landed"
+    ok "live env patched: ${_patched} file(s) from ${LIVE_PATCH_DIR}"
+fi
 
 # ── Drive the installer headlessly ───────────────────────────────────────────
 log "starting headless install (15-25 min typical)"
