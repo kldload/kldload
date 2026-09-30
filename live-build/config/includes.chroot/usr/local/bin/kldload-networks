@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+trap 'echo "kldload-networks: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+# The system libvirt, whoever runs this: plain virsh as a user talks to that
+# user's session, where `list` showed no networks and `apply` would have
+# defined them in the session (found writing kldload-networks(8), 2026-09-29).
+export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 # ---------------------------------------------------------------------------
 # kldload-networks — define the per-class libvirt networks
 #
@@ -49,8 +53,9 @@ _ts() { date '+%Y-%m-%dT%H:%M:%S'; }
 log() { echo "$(_ts) $*" >>"$LOG"; }
 say() { printf '%s\n' "$*"; }
 die() {
-    log "ERROR: $*"
     printf 'kldload-networks: %s\n' "$*" >&2
+    # a user cannot write the log; the message is on stderr already
+    log "ERROR: $*" 2>/dev/null || true
     exit 1
 }
 
@@ -60,6 +65,11 @@ die() {
 case "${1:-apply}" in
 help | -h | --help) ;;
 *) command -v virsh >/dev/null 2>&1 || die "virsh not installed — libvirt is required" ;;
+esac
+# apply and sync write the log, the networks and the state DB: root. As a user
+# the first log line failed and the ERR trap ended the run mid-way.
+case "${1:-apply}" in
+apply | up | sync) ((EUID == 0)) || die "${1:-apply} must run as root (list does not)" ;;
 esac
 
 # _wait_libvirt — libvirtd may still be coming up when this runs at boot.
@@ -78,7 +88,7 @@ cmd_apply() {
     _wait_libvirt || die "libvirtd did not answer after 30s"
     [[ -d "$XML_DIR" ]] || die "no network definitions at $XML_DIR"
 
-    local xml name defined=0 started=0 skipped=0
+    local xml name defined=0 started=0 skipped=0 failed=0
     for xml in "$XML_DIR"/*.xml; do
         [[ -f "$xml" ]] || continue
         name="$(basename "$xml" .xml)"
@@ -90,6 +100,7 @@ cmd_apply() {
             else
                 # Not fatal: one malformed definition must not stop the rest.
                 say "  ! failed to define ${name} — see $LOG"
+                failed=$((failed + 1))
                 continue
             fi
         else
@@ -105,14 +116,17 @@ cmd_apply() {
                 started=$((started + 1))
             else
                 say "  ! failed to start ${name} — see $LOG"
+                failed=$((failed + 1))
             fi
         fi
     done
 
-    log "apply: ${defined} defined, ${started} started, ${skipped} already present"
-    say "Networks: ${defined} defined, ${started} started, ${skipped} already present."
+    # A failure used to print its "!" line and still exit 0.
+    log "apply: ${defined} defined, ${started} started, ${skipped} already present, ${failed} failed"
+    say "Networks: ${defined} defined, ${started} started, ${skipped} already present, ${failed} failed."
     say ""
     cmd_list
+    ((failed == 0)) || exit 1
 }
 
 cmd_list() {
@@ -529,7 +543,9 @@ EXAMPLES
        Ansible reads 'role:clone' as two patterns and matches nothing)
 
 EXIT STATUS
-  0 on success, 1 if libvirt is absent or unreachable, 2 on an unknown verb.
+  0 on success; 1 if libvirt is absent or unreachable, a network failed to
+  define or start, or apply/sync was run without root; 2 on an unknown verb.
+  See kldload-networks(8).
 
 FILES
   /usr/local/share/kldload-networks/*.xml   the definitions
