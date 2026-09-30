@@ -67,13 +67,22 @@ t2="$2"
 
 # ── Resolve to IPs ─────────────────────────────────────────────────────
 resolve_vm_ip() {
-    local name="$1" ip
-    ip="$(virsh domifaddr "$name" 2>/dev/null | awk '/ipv4/ {split($4,a,"/"); print a[1]; exit}')"
-    [[ -z "$ip" ]] && ip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v n="$name" '$NF==n || $6==n {print $5}' | head -1 | cut -d/ -f1)"
+    local name="$1" ip=""
+    # The one resolver every VM tool uses (guest agent, then lease, on the
+    # system libvirt); this carried its own copy of half of it.
+    if command -v kldload-vm-ip >/dev/null 2>&1; then
+        ip="$(kldload-vm-ip "$name" 2>/dev/null || true)"
+    else
+        ip="$(virsh domifaddr "$name" 2>/dev/null | awk '/ipv4/ {split($4,a,"/"); print a[1]; exit}')"
+    fi
     echo "$ip"
 }
 resolve_pod_ip() {
-    local nspod="$1" ns="${nspod%%/*}" pod="${nspod##*/}"
+    # Two statements: in one `local` every word is expanded before any is
+    # assigned, so ns and pod came out empty and --pod never resolved a pod
+    # (2026-09-30, SC2318).
+    local nspod="$1"
+    local ns="${nspod%%/*}" pod="${nspod##*/}"
     kubectl -n "$ns" get pod "$pod" -o jsonpath='{.status.podIP}' 2>/dev/null
 }
 
