@@ -279,12 +279,15 @@ _ipmi() {
     local host="${R[POWER_ADDRESS]%%:*}" port=() out rc=0
     [[ "${R[POWER_ADDRESS]}" == *:* ]] && port=(-p "${R[POWER_ADDRESS]##*:}")
     command -v ipmitool >/dev/null || die 1 "ipmitool is not installed"
-    out="$(IPMI_PASSWORD="${R[POWER_PASSWORD]:-}" ipmitool -I lanplus -H "$host" "${port[@]}" \
+    # -v: without it a wrong password and a BMC that is not there print the
+    # same line ("Unable to establish IPMI v2 / RMCP+ session"), and the tool
+    # reported a bad login as unreachable (virtualbmc, 2026-09-29).
+    out="$(IPMI_PASSWORD="${R[POWER_PASSWORD]:-}" ipmitool -v -I lanplus -H "$host" "${port[@]}" \
         -U "${R[POWER_USER]:-ADMIN}" -E -N 2 -R 2 "$@" 2>&1)" || rc=$?
     if ((rc)); then
         case "$out" in
         *"RAKP 2 HMAC is invalid"* | *"Unauthorized name"* | *"invalid user name"* | *"Invalid user name"*) return 5 ;;
-        *"Unable to establish IPMI"* | *"No response"* | *"Get Session Challenge"*) return 4 ;;
+        *"Get Auth Capabilities error"* | *"Unable to establish IPMI"* | *"No response"* | *"no response"* | *"Get Session Challenge"*) return 4 ;;
         esac
         say "ipmitool: ${out:0:200}"
         return 1
