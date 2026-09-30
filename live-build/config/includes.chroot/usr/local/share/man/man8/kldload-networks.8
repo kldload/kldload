@@ -1,0 +1,247 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-NETWORKS 8
+.Os
+.Sh NAME
+.Nm kldload-networks
+.Nd define kldload's libvirt networks, and copy machines' addresses into the state database
+.Sh SYNOPSIS
+.Nm
+.Op Cm apply
+.Nm
+.Cm sync
+.Nm
+.Cm list
+.Nm
+.Cm help
+.Sh DESCRIPTION
+.Nm
+does two jobs for the system libvirt,
+.Ql qemu:///system .
+.Pp
+.Cm apply
+defines the networks shipped in
+.Pa /usr/local/share/kldload-networks/ ,
+marks them to start at boot, and starts them:
+.Bl -column "kld-zfslab" "192.168.150.0/24" -offset indent
+.It Li kld-klab Ta 192.168.150.0/24 Ta klab goldens and sites
+.It Li kld-zfslab Ta 192.168.151.0/24 Ta the ZFS test lab
+.It Li kld-vms Ta 192.168.152.0/24 Ta other machines
+.El
+.Pp
+libvirt's own
+.Li default
+network, 192.168.122.0/24, where the Kubernetes cluster lives, is left
+alone.
+A network that exists is left as it is, and defining one moves no machine
+onto it.
+.Pp
+.Cm sync
+teaches the state database, which
+.Xr kldload-inventory 8
+turns into Ansible's inventory, what libvirt knows about addresses.
+Machines are registered without one, since they have not asked for a DHCP
+lease yet; an address copied here is what makes a machine an Ansible
+target.
+For each machine libvirt has:
+.Bl -bullet
+.It
+running, with a lease on any of libvirt's networks \(em matched to the
+machine by its MAC address, the newest lease winning \(em or an address
+its guest agent reports: that address is recorded;
+.It
+not running: its address is cleared, so a play cannot reach, through an
+address DHCP has since handed on, the wrong machine.
+.El
+Cluster nodes whose machine is not running are marked offline, and back
+ready when it is; a machine the database lists and libvirt no longer has
+loses its address.
+.Pp
+It also rewrites
+.Pa /root/.config/wgx/hosts ,
+the host list
+.Xr wgx 1
+checks WireGuard peers against, from the endpoints of the peers this host
+has now.
+.Pp
+The timer
+.Pa kldload-inventory-sync.timer
+runs
+.Cm sync
+every minute.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Cm apply , up
+The default.
+Define, autostart and start each shipped network, report the counts, and
+list the networks.
+Needs root.
+.It Cm sync
+As above.
+Needs root.
+.It Cm list , ls
+Every network of the system libvirt, its state, whether it starts at boot,
+its address and prefix, and its purpose.
+.It Cm help , Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_NETWORK_DIR
+Read the network definitions from this directory instead.
+.It Ev LIBVIRT_DEFAULT_URI
+The libvirt to use; default
+.Ql qemu:///system .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /usr/local/share/kldload-networks/*.xml
+The network definitions, in libvirt's format.
+.It Pa /var/log/kldload/networks.log
+What each run did, per machine.
+.It Pa /root/.config/wgx/hosts
+The derived
+.Xr wgx 1
+host list.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done.
+.It 1
+libvirt is absent or did not answer within 30 seconds, a network failed
+to define or start, or
+.Cm apply
+or
+.Cm sync
+was run without root.
+.It 2
+An unknown command.
+.El
+.Sh EXAMPLES
+Printed on 2026-09-29, on a kldload desktop whose per-class networks had
+never been defined (see
+.Sx CAVEATS )
+and on a freshly installed hypervisor.
+.Ss The networks (list)
+.Bd -literal -offset indent
+$ kldload-networks list
+  NETWORK        STATE    AUTOSTART    SUBNET             PURPOSE
+  ────────────── ──────── ──────────── ────────────────── ───────────────
+  default        yes      yes          192.168.122.1/24   kubernetes cluster
+# (exited 0)
+.Ed
+.Ss Defining them (apply)
+On the hypervisor, the first time, and again:
+.Bd -literal -offset indent
+# kldload-networks apply
+Networks: 3 defined, 3 started, 0 already present, 0 failed.
+
+  NETWORK        STATE    AUTOSTART    SUBNET             PURPOSE
+  ────────────── ──────── ──────────── ────────────────── ───────────────
+  default        yes      yes          192.168.122.1/24   kubernetes cluster
+  kld-klab       yes      yes          192.168.150.1/24   klab goldens + sites
+  kld-vms        yes      yes          192.168.152.1/24   operator VMs
+  kld-zfslab     yes      yes          192.168.151.1/24   ZFS test lab
+# (exited 0)
+# kldload-networks apply
+Networks: 0 defined, 0 started, 3 already present, 0 failed.
+\&...
+# (exited 0)
+.Ed
+.Pp
+A definition that is not valid XML
+.Pq Ev KLDLOAD_NETWORK_DIR :
+.Bd -literal -offset indent
+# KLDLOAD_NETWORK_DIR=/var/tmp/badnets kldload-networks apply
+  ! failed to define kld-broken — see /var/log/kldload/networks.log
+Networks: 0 defined, 0 started, 0 already present, 1 failed.
+\&...
+# (exited 1)
+.Ed
+.Ss Addresses into the database (sync)
+A throwaway clone of a golden was started, synced, powered off, and synced
+again:
+.Bd -literal -offset indent
+# kldload-networks sync
+Leases seen: 9 (0 stale).  VMs with an address: 0 → 1.
+\&...
+# kldload-networks sync
+Leases seen: 9 (1 stale).  VMs with an address: 1 → 0.
+\&...
+.Ed
+.Pp
+With nothing to change:
+.Bd -literal -offset indent
+# kldload-networks sync
+Leases seen: 8 (0 stale).  VMs with an address: 0 → 0.
+Only VMs libvirt reports as running are given an address.
+
+  NOTE: no VM address changed. Either every VM already had its address,
+  or the lease hostnames do not match any registered VM name.
+  Compare:  virsh net-dhcp-leases <net>   against   kldload-db dump
+# (exited 0)
+$ kldload-networks sync
+kldload-networks: sync must run as root (list does not)
+# (exited 1)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "  ! failed to define NAME \(em see /var/log/kldload/networks.log"
+.It "  ! failed to start NAME \(em see /var/log/kldload/networks.log"
+libvirt's reason is in the log.
+The other networks are still applied; the exit status is 1.
+.It "kldload-networks: libvirtd did not answer after 30s"
+.It "kldload-networks: VERB must run as root (list does not)"
+.It "NOTE: no VM address changed. ..."
+From
+.Cm sync ,
+when leases were seen and no address moved: either nothing needed to, or
+no lease belongs to a registered machine.
+.El
+.Sh SEE ALSO
+.Xr virsh 1 ,
+.Xr wgx 1 ,
+.Xr kldload-db 8 ,
+.Xr kldload-estate 8 ,
+.Xr kldload-inventory 8 ,
+.Xr kldload-netplan 8
+.Sh HISTORY
+.Cm sync
+was written after 2026-08-17, when ten registered machines had no address
+and the inventory had no machine in it: the call that records one had no
+caller.
+Its first version reported
+.Dq 11 VMs updated
+over an unchanged database, and it counts addresses before and after
+since.
+On 2026-08-30 two machines on one desktop claimed one address, a stopped
+machine's and the one DHCP had given it since; stopped machines lose
+theirs since.
+.Pp
+On 2026-09-29, writing this page: its
+.Dq is this network running
+test failed every time, a pipeline killed by its own early exit, so
+running
+.Cm apply
+again tried to start every network and reported success;
+run as a user it asked the user's own libvirt, and
+.Cm sync
+died writing its log;
+and every stopped machine was counted as a stale address on every run,
+every minute.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The three networks are defined only where
+.Cm apply
+runs.
+kldload's first boot runs it on a PRO hypervisor; a FREE install ships the
+definitions and does not define them, and no kldload tool yet puts a
+machine on them by name.
+Run
+.Cm apply
+by hand to have them.
+.Pp
+Their ranges are also in the network plan,
+.Xr kldload-netplan 8 ,
+which this tool does not read yet.
