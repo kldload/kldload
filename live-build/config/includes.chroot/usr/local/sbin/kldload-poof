@@ -27,6 +27,19 @@ if [[ -f "${MANIFEST}" ]] && grep -q 'KLDLOAD_INSTALLED=1' "${MANIFEST}" 2>/dev/
     echo "kldload-poof only runs in live mode. Installed systems use ZFS encryption and boot environments." >&2
     exit 1
 fi
+# SAFETY: and it must SEE a live boot, not merely miss the installed marker.
+# What follows shreds the CA root key (the TLS root and the Secure Boot signing
+# key), blanks WireGuard keys and stops sshd; with only the negative test, an
+# installed machine whose manifest was missing or damaged read as live
+# (2026-09-30, read against the code). Every kldload live boot, from the ISO
+# or the netboot server, has root=live: and rd.live.image on its command
+# line, and dracut mounts the medium at /run/initramfs/live.
+_cmdline="$(cat "${KLDLOAD_POOF_CMDLINE:-/proc/cmdline}" 2>/dev/null || true)" # the variable is for tests
+if [[ " ${_cmdline} " != *" rd.live.image "* && " ${_cmdline} " != *" root=live:"* &&
+    ! -d "${KLDLOAD_POOF_LIVEDIR:-/run/initramfs/live}" ]]; then
+    echo "kldload-poof: this is not a live boot (no rd.live.image or root=live: on the kernel command line); refusing" >&2
+    exit 1
+fi
 
 log "Starting live session scrub"
 SCRUBBED=()
