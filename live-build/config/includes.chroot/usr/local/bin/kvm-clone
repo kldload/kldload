@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
-# kvm-clone — instant CoW clone of a VM using ZFS
-set -euo pipefail
+# ─────────────────────────────────────────────────────────────────────────────
+# kvm-clone — make a new VM from an existing one, as a ZFS clone of its disk.
+#
+#   1. checks both names, and that the source has a volume and a domain;
+#   2. takes a snapshot of the source (pausing it for a moment if it is
+#      running), or uses the one --snap names;
+#   3. clones the snapshot to rpool/vms/<new>, which copies nothing: the
+#      clone shares every block with the snapshot until either is written;
+#   4. copies the source's UEFI variables and its libvirt definition, pointing
+#      the copy at the new volume, a new MAC and a new UUID;
+#   5. attaches a cloud-init seed so the clone boots with its own hostname,
+#      machine-id, root key, sshd and guest agent (best effort);
+#   6. registers the clone in the kldload state DB.
+#
+# WHY: a golden is prepared once and every machine after it is a clone --
+# klab, kube-cluster, the estate tests and the consoles all clone through this.
+# Man page: kvm-clone(8).
+#
+# Exit: 0 cloned, 1 failed (anything already created is removed again),
+# 2 usage error.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kvm-clone: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate to root (ZFS + libvirt require it)
 # Rule 9: -h/--help answers before this re-exec. These tools already had
@@ -11,19 +32,31 @@ usage() {
     cat <<EOF
 Usage: kvm-clone <source-vm> <new-name> [--snap <snapshot>]
 
-Creates an instant copy-on-write clone of a VM. Zero bytes copied —
+Creates an instant copy-on-write clone of a VM. Zero bytes copied --
 the clone shares all data with the source until either is modified.
+The clone gets its own MAC, UUID and UEFI variables, and a cloud-init
+seed that gives it its own hostname, machine-id and root ssh key.
+It is defined, not started: virsh start <new-name>.
 
 Options:
-  --snap <name>   Clone from a specific snapshot (default: creates one)
+  --snap <name>   Clone from an existing snapshot of the source:
+                  golden, @golden, or rpool/vms/<source>@golden.
+                  Without it, a new snapshot is taken (a running
+                  source is paused for the moment it takes).
 
 Examples:
   kvm-clone template webserver-01     # snapshot + clone
   kvm-clone template webserver-02     # another clone, instant
   kvm-clone myvm test --snap @stable  # clone from named snapshot
+
+Names are letters, digits, '.', '_' and '-', starting with a letter or digit.
+
+Exit: 0 cloned, 1 failed (anything it created is removed again),
+2 usage error.
 EOF
-    # asked-for help is 0; a usage error stays 1
-    exit "${1:-1}"
+    # asked-for help is 0; a usage error is 2, apart from a clone that ran
+    # and failed (1). It was 1 for both.
+    exit "${1:-2}"
 }
 
 [[ "${1:-}" == -h || "${1:-}" == --help ]] && usage 0
@@ -33,33 +66,55 @@ DEST="$2"
 shift 2
 
 SNAP_NAME=""
+_made_snap=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --snap)
+        # a bare trailing --snap died with "unbound variable" under set -u
+        [[ -n "${2:-}" && "${2:-}" != --* ]] || {
+            echo "kvm-clone: --snap needs a snapshot name" >&2
+            usage
+        }
         SNAP_NAME="$2"
         shift 2
         ;;
     *)
-        echo "Unknown option: $1"
+        echo "kvm-clone: unknown option: $1" >&2
         usage
         ;;
     esac
 done
 
+die() {
+    echo "kvm-clone: $*" >&2
+    exit 1
+}
+
+# SAFETY: both names become dataset paths AND sed patterns below (the domain
+# XML is rewritten by name). A "/" nests a dataset, a "." matches any
+# character in the pattern, a "|" breaks the sed expression outright.
+for _n in "$SOURCE" "$DEST"; do
+    [[ "$_n" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || {
+        echo "kvm-clone: '${_n}' is not a plain name (letters, digits, . _ -)" >&2
+        usage
+    }
+done
+[[ "$SOURCE" != "$DEST" ]] || {
+    echo "kvm-clone: the new name is the source's name" >&2
+    usage
+}
+# the names as literal sed patterns: a "." in a name must match only a "."
+_re() { printf '%s' "$1" | sed 's/[.]/\\./g'; }
+
 SRC_ZVOL="rpool/vms/${SOURCE}"
 DST_ZVOL="rpool/vms/${DEST}"
 
-# Verify source exists
-if ! zfs list "${SRC_ZVOL}" >/dev/null 2>&1; then
-    echo "Error: Source VM zvol '${SRC_ZVOL}' not found"
-    exit 1
-fi
-
-# Check dest doesn't exist
-if zfs list "${DST_ZVOL}" >/dev/null 2>&1; then
-    echo "Error: Destination '${DST_ZVOL}' already exists"
-    exit 1
-fi
+zfs list "${SRC_ZVOL}" >/dev/null 2>&1 || die "no volume ${SRC_ZVOL}"
+# the definition is copied from the source's domain; without one, the clone
+# was made and then removed with a misleading "Failed to define"
+virsh dominfo "${SOURCE}" >/dev/null 2>&1 || die "${SOURCE} has a volume but no libvirt domain to copy"
+zfs list "${DST_ZVOL}" >/dev/null 2>&1 && die "${DST_ZVOL} already exists"
+virsh dominfo "${DEST}" >/dev/null 2>&1 && die "a domain named ${DEST} already exists"
 
 # Create or use snapshot
 if [[ -n "$SNAP_NAME" ]]; then
@@ -81,27 +136,68 @@ if [[ -n "$SNAP_NAME" ]]; then
     */*@*) SNAP="$SNAP_NAME" ;;
     *) SNAP="${SRC_ZVOL}@${SNAP_NAME#@}" ;;
     esac
+    zfs list -H -t snapshot "${SNAP}" >/dev/null 2>&1 || die "no snapshot ${SNAP}"
 else
     SNAP="${SRC_ZVOL}@clone-$(date +%Y%m%d_%H%M%S%N)"
-    # Pause source if running for consistent snapshot
+    # A running source is paused for the snapshot, so its disk is consistent.
+    # SAFETY: whatever happens to the snapshot, a paused source is resumed --
+    # a failed `zfs snapshot` used to exit under set -e with the source (often
+    # the golden) left paused, silently (man page review, 2026-09-29).
     STATE=$(virsh domstate "${SOURCE}" 2>/dev/null || echo "unknown")
-    [[ "$STATE" == "running" ]] && virsh suspend "${SOURCE}" 2>/dev/null || true
-    zfs snapshot "${SNAP}"
-    [[ "$STATE" == "running" ]] && virsh resume "${SOURCE}" 2>/dev/null || true
+    _paused=0
+    if [[ "$STATE" == "running" ]]; then
+        if virsh suspend "${SOURCE}" >/dev/null; then
+            _paused=1
+        else
+            echo "kvm-clone: WARNING: could not pause ${SOURCE}; the snapshot is taken live (crash-consistent)" >&2
+        fi
+    fi
+    _snap_rc=0
+    zfs snapshot "${SNAP}" || _snap_rc=$?
+    if ((_paused)); then
+        virsh resume "${SOURCE}" >/dev/null ||
+            echo "kvm-clone: WARNING: ${SOURCE} is still PAUSED -- virsh resume ${SOURCE}" >&2
+    fi
+    ((_snap_rc == 0)) || die "could not snapshot ${SRC_ZVOL}"
+    _made_snap=1
 fi
 
-# Clone the zvol (instant, zero copy)
-echo "Cloning ${SNAP} → ${DST_ZVOL}..."
+# Clone the zvol (instant, zero copy). From here on, a failure removes what
+# this run created: an orphan clone blocks the name and holds the snapshot.
+echo "Cloning ${SNAP} -> ${DST_ZVOL}..."
 zfs clone "${SNAP}" "${DST_ZVOL}"
+_undo() {
+    virsh undefine --nvram "${DEST}" >/dev/null 2>&1 || true # not defined yet is the common case
+    [[ -z "${NVRAM_DST:-}" ]] || rm -f "$NVRAM_DST"
+    zfs destroy "${DST_ZVOL}" ||
+        echo "kvm-clone: could not remove ${DST_ZVOL} -- zfs destroy ${DST_ZVOL}" >&2
+    # only a snapshot this run took; one named with --snap is the operator's
+    if ((_made_snap)); then
+        zfs destroy "${SNAP}" ||
+            echo "kvm-clone: could not remove ${SNAP} -- zfs destroy ${SNAP}" >&2
+    fi
+}
+trap '_undo' EXIT
 
 # Tag the clone with its origin snapshot for cleanup tracking
 zfs set com.kldload:clone-origin="${SNAP}" "${DST_ZVOL}"
 
-# Copy UEFI NVRAM file if it exists (each VM needs its own)
-NVRAM_SRC="/var/lib/libvirt/qemu/nvram/${SOURCE}_VARS.fd"
-NVRAM_DST="/var/lib/libvirt/qemu/nvram/${DEST}_VARS.fd"
-if [[ -f "${NVRAM_SRC}" ]]; then
-    cp "${NVRAM_SRC}" "${NVRAM_DST}"
+# The UEFI variable store: each VM needs its own. The path is READ from the
+# source's definition, not assumed. It was assumed to be <name>_VARS.fd, and
+# current libvirt writes <name>_VARS.qcow2 -- so on EL10/F44 hosts every clone
+# of a UEFI VM (every kvm-create VM) kept the SOURCE's store in its definition:
+# two VMs, one set of boot variables (man page review, onyx, 2026-09-29).
+NVRAM_SRC="$(virsh dumpxml "${SOURCE}" | sed -n 's|.*<nvram[^>]*>\([^<]*\)</nvram>.*|\1|p' | head -n 1)"
+NVRAM_DST=""
+if [[ -n "$NVRAM_SRC" ]]; then
+    NVRAM_DST="$(dirname "$NVRAM_SRC")/${DEST}_VARS.${NVRAM_SRC##*.}"
+    if [[ -f "$NVRAM_SRC" ]]; then
+        cp -p "$NVRAM_SRC" "$NVRAM_DST"
+    else
+        # never started: libvirt creates the store from its template on first
+        # boot, so the clone only needs its own path in the definition
+        :
+    fi
 fi
 
 # Clone the libvirt domain definition via XML manipulation.
@@ -112,10 +208,10 @@ echo "Cloning VM definition..."
 SRC_DEV="$(readlink -f "/dev/zvol/${SRC_ZVOL}" 2>/dev/null || echo "/dev/zvol/${SRC_ZVOL}")"
 DST_DEV="$(readlink -f "/dev/zvol/${DST_ZVOL}" 2>/dev/null || echo "/dev/zvol/${DST_ZVOL}")"
 virsh dumpxml "${SOURCE}" |
-    sed "s|<name>${SOURCE}</name>|<name>${DEST}</name>|" |
-    sed "s|${SRC_ZVOL}|${DST_ZVOL}|g" |
-    sed "s|${SRC_DEV}|${DST_DEV}|g" |
-    sed "s|${SOURCE}_VARS.fd|${DEST}_VARS.fd|g" |
+    sed "s|<name>$(_re "${SOURCE}")</name>|<name>${DEST}</name>|" |
+    sed "s|$(_re "${SRC_ZVOL}")|${DST_ZVOL}|g" |
+    sed "s|$(_re "${SRC_DEV}")|${DST_DEV}|g" |
+    if [[ -n "$NVRAM_SRC" ]]; then sed "s|>$(_re "${NVRAM_SRC}")</nvram>|>${NVRAM_DST}</nvram>|"; else cat; fi |
     # Per-VM log paths. klab points <serial> and <console> at
     # /var/log/klab/<vm>-console.log, and a straight XML copy leaves every
     # clone pointing at the GOLDEN's file. libvirt opens it exclusively, so
@@ -125,14 +221,13 @@ virsh dumpxml "${SOURCE}" |
     # (2026-08-23): dtest-a started, dtest-b refused, same log path.
     # Rewrite the whole prefix rather than just -console.log, so any other
     # per-VM log klab adds later is carried along too.
-    sed "s|/var/log/klab/${SOURCE}-|/var/log/klab/${DEST}-|g" |
+    sed "s|/var/log/klab/$(_re "${SOURCE}")-|/var/log/klab/${DEST}-|g" |
     sed '/<uuid>/d' |
     sed '/<mac address/d' |
-    virsh define /dev/stdin || {
-    echo "ERROR: Failed to define VM ${DEST}"
-    zfs destroy "${DST_ZVOL}" 2>/dev/null
-    exit 1
-}
+    virsh define /dev/stdin >/dev/null || die "could not define ${DEST} from ${SOURCE}'s definition"
+# The clone exists and is defined: from here on nothing is undone, because
+# the seed below is best effort and a clone without it still boots.
+trap - EXIT
 
 # ── Give the clone an identity of its own ────────────────────────────────────
 #
@@ -299,7 +394,7 @@ else
 fi
 
 echo ""
-echo "✔ Cloned '${SOURCE}' → '${DEST}' (instant, zero bytes copied)"
+echo "Cloned '${SOURCE}' -> '${DEST}' (instant, zero bytes copied)"
 echo "  Source: /dev/zvol/${SRC_ZVOL}"
 echo "  Clone:  /dev/zvol/${DST_ZVOL}"
 echo "  Start:  virsh start ${DEST}"
@@ -336,8 +431,12 @@ if command -v kldload-db >/dev/null 2>&1; then
     *-worker*) _cluster="${DEST%%-worker*}" ;;
     *-w-[0-9] | *-w-[0-9][0-9]) _cluster="${DEST%-w-*}" ;;
     esac
+    # A failed registration does not undo a working clone, but it is said: a
+    # clone the DB never heard of is missing from the estate and from Ansible.
     kldload-db vm-register --name "$DEST" --role "$_role" \
-        --cluster "$_cluster" --golden-src "$SOURCE" --status "cloned" 2>/dev/null || true
+        --cluster "$_cluster" --golden-src "$SOURCE" --status "cloned" >/dev/null ||
+        echo "kvm-clone: WARNING: ${DEST} is not in the kldload state DB (kldload-db vm-register failed)" >&2
     kldload-db event --type "vm" --subject "$DEST" \
-        --message "cloned from ${SOURCE}" 2>/dev/null || true
+        --message "cloned from ${SOURCE}" >/dev/null ||
+        echo "kvm-clone: WARNING: could not record the clone event" >&2
 fi

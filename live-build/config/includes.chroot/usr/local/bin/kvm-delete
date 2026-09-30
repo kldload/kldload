@@ -137,8 +137,30 @@ else
     fi
 
     echo "Removing VM definition..."
-    virsh undefine "${NAME}" --nvram 2>/dev/null ||
-        virsh undefine "${NAME}" 2>/dev/null || true
+    # SAFETY: --nvram deletes the UEFI variable file the definition points at.
+    # A clone made by kvm-clone before 2026-09-29 points at its SOURCE's file
+    # (kvm-clone assumed <name>_VARS.fd; libvirt writes _VARS.qcow2), so
+    # deleting that clone deleted the golden's boot variables. Keep the file
+    # whenever another domain still uses it.
+    _nv="$(virsh dumpxml "${NAME}" 2>/dev/null | sed -n 's|.*<nvram[^>]*>\([^<]*\)</nvram>.*|\1|p' | head -n 1)"
+    _nv_keep=""
+    if [[ -n "$_nv" ]]; then
+        while read -r _d; do
+            [[ -n "$_d" && "$_d" != "$NAME" ]] || continue
+            if virsh dumpxml "$_d" 2>/dev/null | grep -qF ">${_nv}</nvram>"; then
+                _nv_keep="$_d"
+                break
+            fi
+        done < <(virsh list --all --name 2>/dev/null)
+    fi
+    if [[ -n "$_nv_keep" ]]; then
+        echo "  keeping ${_nv}: ${_nv_keep} uses it too"
+        virsh undefine "${NAME}" --keep-nvram 2>/dev/null ||
+            virsh undefine "${NAME}" 2>/dev/null || true # older libvirt: no --keep-nvram
+    else
+        virsh undefine "${NAME}" --nvram 2>/dev/null ||
+            virsh undefine "${NAME}" 2>/dev/null || true # a BIOS domain has no NVRAM to remove
+    fi
 fi
 
 if zfs list "${ZVOL}" >/dev/null 2>&1; then
