@@ -1,0 +1,198 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-SECURE-BOOT 8
+.Os
+.Sh NAME
+.Nm kldload-secure-boot
+.Nd sign what kldload builds with the machine's own key, and have the firmware's shim trust it
+.Sh SYNOPSIS
+.Nm
+.Cm status | enable | disable | reenroll
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+With Secure Boot on, the firmware boots Microsoft-signed shim, and shim
+boots only what is signed by a key it trusts: the distribution's, or a
+machine owner key enrolled by someone at the console in MokManager.
+kldload's ZFS module and ZFSBootMenu are built on the machine, so they
+are signed on the machine, with the root key of its certificate authority,
+.Xr kldload-ca 8 ,
+which is enrolled as a machine owner key.
+.Pp
+.Nm
+turns that on after an install that did not, reports on it, and turns
+module signing off.
+It never changes the firmware's own Secure Boot setting.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm status
+The firmware's Secure Boot state, the authority's root certificate, whether
+that certificate is enrolled or waiting to be, which key signed the ZFS
+module on disk, and whether DKMS is set to sign modules it builds.
+Needs no root.
+.It Cm enable
+Needs root.
+In order: makes the authority if there is none; copies its root key and
+certificate to
+.Pa /var/lib/dkms/mok.key ,
+.Pa mok.pub
+and
+.Pa mok.der ;
+sets DKMS to sign every module it builds with them; signs the ZFS module
+on disk now if it is an uncompressed
+.Pa .ko
+\(em a compressed one, as Fedora ships, is left for DKMS to sign when it
+next builds it, since signing it in place would corrupt it; signs
+ZFSBootMenu on the EFI partition, replacing any
+signature it had; and queues the certificate for enrolment, unless it is
+enrolled or queued already.
+The next boot stops in MokManager: choose
+.Dq Enroll MOK ,
+give the password, and reboot.
+Then Secure Boot can be turned on in the firmware.
+.Pp
+Any EFI binary that carries a Microsoft signature is shim and is left
+alone.
+.It Cm disable
+Needs root.
+Takes back a queued enrolment, if the password matches, and removes the
+DKMS signing configuration, so modules built after this are not signed.
+The authority, an enrolled key, and modules already signed stay.
+.It Cm reenroll
+Needs root.
+Queues the certificate for enrolment again \(em after a
+.Dq \&No
+in MokManager, or after the firmware's variables were cleared.
+Signs nothing.
+.It Fl h , Fl -help , Cm help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_MOK_PASSWORD
+The one-time password MokManager asks for; default
+.Ql kldload .
+One set here is not printed.
+.It Ev KLDLOAD_ESP
+The EFI partition's mount point, instead of
+.Pa /boot/efi ;
+for testing against a copy.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/ca/root/ca.key , Pa ca.crt , Pa ca.der
+The authority's root key and certificate.
+.It Pa /var/lib/dkms/mok.key , Pa mok.pub , Pa mok.der
+The copies DKMS signs with; the key mode 0600.
+.It Pa /etc/dkms/framework.conf.d/kldload-mok.conf , Pa /etc/dkms/sign_helper.sh
+DKMS's signing configuration and helper.
+.It Pa /boot/efi/EFI/zbm/BOOTX64.EFI
+ZFSBootMenu, signed; older installs also at
+.Pa EFI/kldload/ .
+.It Pa /boot/efi/EFI/BOOT/BOOTX64.EFI
+Shim, or ZFSBootMenu on a machine without shim; signed only in the second
+case.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done.
+.It 1
+Not root, or a step failed.
+.It 2
+No command, or an unknown one.
+.El
+.Pp
+A failure to queue the enrolment inside
+.Cm enable
+is reported and does not change its exit status.
+.Sh EXAMPLES
+.Ss A desktop
+Printed on 2026-09-30:
+.Bd -literal -offset indent
+$ kldload-secure-boot status
+─── Firmware Secure Boot ─────────────────────────────────────────
+  SecureBoot enabled
+
+─── kldload CA root ──────────────────────────────────────────────
+  cert:        /etc/kldload/ca/root/ca.crt
+  fingerprint: 8C:4B:71:8A:57:E0:4F:EE:1C:AE:32:D0:99:F5:D1:31:CB:48:DE:E0:A6:90:0C:8A:96:88:D1:1D:0F:1C:3C:50
+  validity:
+    notBefore=Aug 30 13:38:07 2026 GMT
+    notAfter=Aug 27 13:38:07 2036 GMT
+
+─── MOK enrollment ───────────────────────────────────────────────
+  kldload CA: not enrolled
+
+─── ZFS kernel module signing ────────────────────────────────────
+  module:  /lib/modules/7.2.2-300.fc44.x86_64/extra/zfs.ko.xz
+  signer:  kldload-mok-20260830133808-430b62b703c15c02
+
+─── DKMS sign config ─────────────────────────────────────────────
+  /etc/dkms/framework.conf.d/kldload-mok.conf  present ✓
+# (exited 0)
+.Ed
+.Pp
+This machine was installed when the machine owner key was a key of its
+own, not the authority's root: the ZFS module is signed by that key,
+which is enrolled, and the authority is not.
+See
+.Sx CAVEATS .
+.Ss Turning it on
+Not run for this page:
+.Bd -literal -offset indent
+# kldload-secure-boot enable
+# then reboot, choose "Enroll MOK" in MokManager, give the password,
+# reboot, and turn Secure Boot on in the firmware
+.Ed
+.Ss Mistakes
+.Bd -literal -offset indent
+$ kldload-secure-boot enable
+[kldload-secure-boot] error: must run as root
+# (exited 1)
+$ kldload-secure-boot frob
+kldload-secure-boot: unknown command: frob
+\&...
+# (exited 2)
+.Ed
+.Sh SEE ALSO
+.Xr mokutil 1 ,
+.Xr sbsign 1 ,
+.Xr dkms 8 ,
+.Xr kldload-ca 8 ,
+.Xr kldload-tpm-seal 8
+.Sh HISTORY
+It replaced a comment in 1.0.5 that pointed at a tool which did not exist.
+.Pp
+On 2026-09-30, writing this page:
+.Cm status
+died half way on every run;
+.Cm enable
+stripped the Microsoft signature from shim on the EFI fallback path and
+signed it with the kldload key, which the firmware does not trust, so that
+path would no longer boot with Secure Boot on \(em while ZFSBootMenu, where
+the installer puts it, was never re-signed; it signed a compressed ZFS
+module in place, which leaves it corrupt, with success reported; and a key
+already queued was not recognised, so it was queued again.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+On a machine installed while the machine owner key was separate from the
+authority, like the one above,
+.Cm enable
+replaces the DKMS key with the authority's and signs the ZFS module with
+it at once, although the firmware does not trust that key until the
+enrolment is confirmed at the next boot.
+Skip MokManager then, and modules signed from here on will not load with
+Secure Boot on.
+.Pp
+One key signs both the machine's TLS certificates and its kernel modules;
+see
+.Xr kldload-ca 8 .
+.Pp
+The initramfs keeps the ZFS module it was built with;
+.Cm enable
+does not rebuild it.
+On a machine whose modules are compressed, the ZFS module is signed with
+the new key only when DKMS next builds it:
+.Ql dkms autoinstall -k Ns Ar kernel ,
+or the next kernel.
