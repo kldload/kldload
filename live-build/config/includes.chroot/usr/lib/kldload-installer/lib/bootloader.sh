@@ -906,7 +906,7 @@ EOFSTAB
     # encrypted dataset. Not staging it when it cannot be used keeps those two
     # changes from colliding.
     if [[ -n "${_kver:-}" ]] && [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
-        k_log "Secure Boot off — not staging kernel/initramfs on the ESP (nothing boots them, and the ESP is unencrypted)"
+        k_log "Secure Boot off — ZBM is the boot target; the kernel is staged below only as a fallback, and only for an unencrypted root"
 
         # Make the FALLBACK path agree with the decision we just made.
         #
@@ -933,6 +933,24 @@ EOFSTAB
             else
                 k_log "WARNING: could not place ZBM at the fallback path — the firmware entry still boots shim"
             fi
+        fi
+        # A SECOND boot path, when it is safe to have one. With the root
+        # unencrypted the initramfs holds no secret, so the SECURITY note
+        # above does not apply, and staging the kernel makes GRUB's "direct"
+        # and "rescue" entries real: they boot without ZBM. HISTORY: build 166
+        # (2026-09-30) shipped a ZBM that was a 502 error page; fiend's GRUB
+        # fell back to "direct", found no kernel on the ESP, and every entry
+        # said "cannot load image". With this, that machine boots.
+        if [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" != "1" ]]; then
+            mkdir -p "${zbm_fallback_dir}"
+            if cp "$_kpath" "${zbm_fallback_dir}/vmlinuz" && cp "$_ipath" "${zbm_fallback_dir}/initrd.img"; then
+                k_log "Kernel + initramfs staged on the ESP as the fallback boot path (unencrypted root; kver=${_kver})"
+            else
+                rm -f "${zbm_fallback_dir}/vmlinuz" "${zbm_fallback_dir}/initrd.img"
+                k_log "WARNING: could not stage the fallback kernel — ZBM is the only boot path"
+            fi
+        else
+            k_log "Encrypted root — no fallback kernel on the unencrypted ESP; ZBM is the only boot path"
         fi
     elif [[ -n "${_kver:-}" ]]; then
         mkdir -p "${zbm_fallback_dir}"
@@ -1393,6 +1411,12 @@ EOFSTAB
     # It LOOKED correct only because arc_max happens to equal the default
     # (half of RAM), which is exactly the coincidence that hid this.
     _direct_bootargs+=" zfs.zfs_txg_timeout=10 zfs.l2arc_noprefetch=0"
+    # The direct and rescue entries boot /EFI/BOOT/vmlinuz; they are written
+    # only when it is there. Until 2026-09-30 they were written always, and on
+    # a Secure-Boot-off install (nothing staged) they were two entries that
+    # could never boot, and "fallback=direct" fell through to one of them.
+    local _staged=0
+    [[ -s "${zbm_fallback_dir}/vmlinuz" && -s "${zbm_fallback_dir}/initrd.img" ]] && _staged=1
     local _grub_cfg=""
     # swallow: read with -d '' always exits 1 at EOF; the heredoc is fully in _grub_cfg
     read -r -d '' _grub_cfg <<GRUBCFG || true
@@ -1417,11 +1441,19 @@ EOFSTAB
 set timeout=5
 set timeout_style=menu
 set default=${_grub_default}
-set fallback=direct
+GRUBCFG
+    ((_staged)) && _grub_cfg+=$'\nset fallback=direct'
+    local _grub_zbm _grub_direct
+    # swallow: read with -d '' always exits 1 at EOF
+    read -r -d '' _grub_zbm <<GRUBCFG || true
 
 menuentry "kldload — ZFS Boot Menu (boot environments + snapshot rollback)" --id=zbm {
     chainloader /EFI/zbm/BOOTX64.EFI
 }
+GRUBCFG
+    _grub_cfg+=$'\n'"${_grub_zbm}"
+    # swallow: read with -d '' always exits 1 at EOF
+    read -r -d '' _grub_direct <<GRUBCFG || true
 
 menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct {
     linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro ${_direct_bootargs}${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} psi=1 selinux=0
@@ -1438,6 +1470,11 @@ menuentry "kldload — rescue (single-user)" --id=rescue {
     initrd /EFI/BOOT/initrd.img
 }
 GRUBCFG
+    if ((_staged)); then
+        _grub_cfg+=$'\n'"${_grub_direct}"
+    else
+        k_log "grub.cfg: no direct/rescue entries (no kernel staged on the ESP)"
+    fi
 
     for _gcfg_dir in "${target}/boot/efi/EFI/centos" \
         "${target}/boot/efi/EFI/rocky" \
@@ -1484,6 +1521,11 @@ COMMAND="${1:-}"
 KVER="${2:-}"
 ESP=/boot/efi/EFI/BOOT
 [[ -d "$ESP" ]] || exit 0
+# Refresh only a kernel the installer chose to stage. It never creates one:
+# an encrypted root keeps its initramfs off the unencrypted ESP, and this
+# directory also exists on every Secure-Boot-off install (ZBM's fallback copy
+# lives here), so "the directory exists" was not that decision (2026-09-30).
+[[ -f "$ESP/vmlinuz" ]] || exit 0
 case "$COMMAND" in
     add)
         if [[ -f /boot/vmlinuz-"$KVER" ]]; then
