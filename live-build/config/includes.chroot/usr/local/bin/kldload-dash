@@ -7,6 +7,10 @@
 # Wired to F3 in kldload-console so it's one keystroke from any pane.
 
 set -Eeuo pipefail
+# The system libvirt when a user runs this: plain virsh as a user asks that
+# user's session libvirt and sees no VMs (2026-09-30, the class fixed across
+# the kvm tools).
+export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 # This file's own options line is `set -u`, and that is the author's
 # intent. The 2026-09-15 strict sweep put `set -Eeuo pipefail` above it, which
@@ -16,6 +20,14 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 set +o pipefail
+
+# --help answers instead of starting the dashboard, which it did (2026-09-30).
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
 
 REFRESH="${KLDLOAD_DASH_REFRESH:-3}"
 
