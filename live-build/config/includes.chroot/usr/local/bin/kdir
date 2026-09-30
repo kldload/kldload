@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kdir: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # kdir — create a ZFS dataset instead of a plain directory
 # Usage: kdir [-p] [-o property=value] ... <mountpoint> [<mountpoint> ...]
@@ -15,7 +16,11 @@ usage() {
 Usage: kdir [-p] [-o property=value] ... <mountpoint> [<mountpoint> ...]
 
 Creates a ZFS dataset mounted at each given path.
-The parent path must already be a ZFS mountpoint (or use -p).
+The parent path must already be where a ZFS dataset is mounted (or use -p).
+A path that already exists as a plain directory cannot be made a dataset
+here: its files would be hidden under the new mount.
+
+Exit: 0 created; 1 refused or failed; 2 usage. Needs root. See kdir(8).
 
 Options:
   -p              Create parent datasets as needed
@@ -28,8 +33,8 @@ Examples:
   kdir -p /srv/apps/backend/data
   kdir -o compression=zstd -o quota=50G /srv/bigdata
 EOF
-    # asked-for help is 0; a usage error is 1
-    exit "${1:-1}"
+    # asked-for help is 0; a usage error is 2, like the other tools (it was 1)
+    exit "${1:-2}"
 }
 
 die() {
@@ -43,6 +48,19 @@ info() { echo "kdir: $*"; }
 # relative suffix to form the new dataset name.
 #
 # e.g.  /srv/apps  →  rpool/srv/apps  (if /srv is rpool/srv)
+# _ds_at PATH -- the ZFS dataset mounted exactly AT path, or nothing.
+# WHY not `zfs list PATH`: that answers for ANY existing path with the
+# dataset containing it. A plain directory as the parent then gave the
+# containing dataset, the new one was named after IT, and so mounted
+# somewhere else -- `kdir /x/plain/data` said "-> /x/plain/data", exit 0, and
+# mounted at /x/data (onyx, 2026-09-29).
+_ds_at() {
+    local src="" fst="" tgt=""
+    read -r src fst tgt < <(findmnt -no SOURCE,FSTYPE,TARGET -T "$1" 2>/dev/null) || return 0
+    [[ "$fst" == zfs && "$tgt" == "$1" ]] && printf '%s\n' "$src"
+    return 0
+}
+
 dataset_for_path() {
     local path="$1"
     path="$(realpath -m "$path")" # normalise without requiring existence
@@ -50,15 +68,24 @@ dataset_for_path() {
     local parent="${path%/*}"
     [[ -n "$parent" ]] || parent="/"
 
-    # Find the ZFS dataset that owns the parent directory
     local parent_ds
-    parent_ds="$(zfs list -Ho name "$parent" 2>/dev/null)" ||
-        die "parent '$parent' is not a ZFS mountpoint. Use -p to create parents."
+    parent_ds="$(_ds_at "$parent")"
+    [[ -n "$parent_ds" ]] ||
+        die "parent '$parent' is not where a ZFS dataset is mounted (a plain directory, or not ZFS); use -p to create it"
 
     local basename="${path##*/}"
     [[ -n "$basename" ]] || die "cannot create dataset at filesystem root"
 
     echo "${parent_ds}/${basename}"
+}
+
+# _create DS PATH -- zfs create, then check it mounted at PATH
+_create() {
+    info "creating dataset: $1  →  $2"
+    zfs create "${ZFS_OPTS[@]+"${ZFS_OPTS[@]}"}" "$1"
+    local got
+    got="$(zfs get -H -o value mountpoint "$1")"
+    [[ "$got" == "$2" ]] || die "created $1, but it is mounted at $got, not $2 (a -o mountpoint= overrides the path)"
 }
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
@@ -79,6 +106,7 @@ done
 shift $((OPTIND - 1))
 
 [[ $# -gt 0 ]] || usage
+((EUID == 0)) || die "must run as root (zfs create)"
 
 # ── Create each requested dataset ───────────────────────────────────────────
 for mountpoint in "$@"; do
@@ -93,22 +121,24 @@ for mountpoint in "$@"; do
         declare -a to_create=()
         check="$abs"
         while [[ "$check" != "/" ]]; do
-            if zfs list -Ho name "$check" >/dev/null 2>&1; then
-                break # already a dataset — stop walking up
-            fi
+            [[ -n "$(_ds_at "$check")" ]] && break # a dataset is mounted here — stop walking up
+            [[ -e "$check" ]] &&
+                die "$check exists as a plain directory; kdir cannot make it a dataset (its files would be hidden)"
             to_create=("$check" "${to_create[@]+"${to_create[@]}"}")
             check="${check%/*}"
             [[ -n "$check" ]] || check="/"
         done
 
+        ((${#to_create[@]})) || die "$abs is already where a dataset is mounted"
         for path in "${to_create[@]+"${to_create[@]}"}"; do
-            ds="$(dataset_for_path "$path")"
-            info "creating dataset: $ds  →  $path"
-            zfs create "${ZFS_OPTS[@]+"${ZFS_OPTS[@]}"}" "$ds"
+            ds="$(dataset_for_path "$path")" || exit 1 # it said why; die in $( ) ends only the subshell
+            _create "$ds" "$path"
         done
     else
-        ds="$(dataset_for_path "$abs")"
-        info "creating dataset: $ds  →  $abs"
-        zfs create "${ZFS_OPTS[@]+"${ZFS_OPTS[@]}"}" "$ds"
+        [[ -e "$abs" && -z "$(_ds_at "$abs")" && -n "$(ls -A "$abs" 2>/dev/null)" ]] &&
+            die "$abs exists with files in it; a dataset mounted there would hide them"
+        [[ -n "$(_ds_at "$abs")" ]] && die "$abs is already where a dataset is mounted"
+        ds="$(dataset_for_path "$abs")" || exit 1 # it said why; die in $( ) ends only the subshell
+        _create "$ds" "$abs"
     fi
 done
