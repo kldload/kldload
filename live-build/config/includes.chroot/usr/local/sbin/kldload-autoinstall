@@ -27,6 +27,22 @@
 #   KLDLOAD_SECRETS_TIMEOUT      seconds to wait for secrets typed on screen (3600)
 set -Eeuo pipefail
 
+# --help answers before anything runs (rule 9). With no handler, --help WAS the
+# autoinstaller: as root on a live boot it scanned for seeds and could go on to
+# install (found by the sandboxed --help capture, 2026-09-30). The unit starts
+# it with no arguments; kldload.* on the kernel command line is its input.
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "kldload-autoinstall: takes no arguments (try --help)" >&2
+    exit 2
+    ;;
+esac
+
 LOG="${KLDLOAD_AUTOINSTALL_LOG:-/var/log/installer/autoinstall.log}"
 _CMDLINE_FILE="${KLDLOAD_AUTOINSTALL_CMDLINE:-/proc/cmdline}"
 mkdir -p "$(dirname "$LOG")"

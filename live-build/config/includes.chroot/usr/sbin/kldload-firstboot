@@ -13,6 +13,29 @@
 # nobody meant to swallow.
 set -Eeuo pipefail
 
+# --help answers before anything runs (rule 9). With no handler, --help WAS
+# a first boot: as root on an installed machine it re-ran every role's setup
+# (found by the sandboxed --help capture, 2026-09-30, where it died on mkdir).
+# The unit starts it with no arguments.
+case "${1:-}" in
+-h | --help)
+    cat <<'EOHELP'
+usage: kldload-firstboot
+
+Runs once, from kldload-firstboot.service, on the first boot of an installed
+kldload machine: reads the profile from /etc/kldload/install-manifest.env,
+does that profile's setup, and records the result. Log:
+/var/log/kldload/firstboot.log. Not meant to be run by hand.
+EOHELP
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "kldload-firstboot: takes no arguments (try --help)" >&2
+    exit 2
+    ;;
+esac
+
 export HOME=/root
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
