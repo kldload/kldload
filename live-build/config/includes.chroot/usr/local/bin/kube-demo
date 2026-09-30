@@ -20,26 +20,33 @@ case "${1:-}" in
 -h | --help)
     cat <<'USAGE'
 Usage: kube-demo [--no-pause]
+       kube-demo --list
+       kube-demo DEMO [ARG...]
 
-Walk the full Kubernetes stack running on ZFS instant clones, as a narrated
-demo. Read-only until the teardown step at the end, which asks first.
+With no DEMO, a menu of narrated demonstrations of the Kubernetes stack on
+ZFS instant clones. With DEMO -- a name --list prints -- that one runs once,
+without pauses, and exits; that is how the web console's Demos panel runs
+them. An unknown name is exit 2; with no control plane to reach, every
+run is exit 1 before the name is looked at.
+
+The demonstrations change the cluster: they clone and remove machines,
+snapshot and roll back nodes, scale and drain, and deploy and remove
+workloads. `cleanup` and `javaapi_destroy` remove what they made.
 
   --no-pause, --nopause, -n   do not wait for a keypress between sections.
                               Use this when the output is being piped or
                               captured, where a pause looks like a hang.
+  --list                      every DEMO name.
 
-Needs root. Any other argument is ignored rather than rejected, so a mistyped
-flag runs the demo with pauses ON.
+Needs root.
 
 Environment:
   KUBE_DEMO_COUNT     how many clones to spin in the clone section. Default 1.
   KUBECONFIG          Default /root/.kube/config.
-  KLDLOAD_DEMO_YES=1  skip the teardown confirmation. Set this for cron and
-                      scripts.
-
-The teardown prompt only appears on a TTY. Run non-interactively -- from the
-web UI button, `ssh host kube-demo`, or cron -- and it auto-confirms, because
-reading from a closed stdin used to abort the destroy silently.
+  KLDLOAD_DEMO_YES=1  javaapi_destroy does not ask first. With no terminal
+                      -- the web console, `ssh host kube-demo ...`, cron --
+                      it does not ask either: a closed stdin once read as
+                      "no" and the destroy button did nothing.
 
 See also: kube-cluster, kube-status, kube-demo-image, kube-demo-publish.
 USAGE
