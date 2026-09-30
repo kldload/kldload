@@ -1,0 +1,102 @@
+.Dd September 30, 2026
+.Dt KUBE-RESET 8
+.Os
+.Sh NAME
+.Nm kube-reset
+.Nd take Kubernetes off this machine, after a snapshot to come back to
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+asks for the word
+.Ql reset ;
+anything else, or no terminal, stops it with nothing touched.
+Then, in order, it:
+.Bl -enum -compact
+.It
+snapshots every dataset of the root's pool, as
+.Ar pool Ns Pa @pre-kube-reset- Ns Ar timestamp ,
+and stops with nothing removed if it cannot; on a root that is not ZFS it
+warns that there is nothing to come back to;
+.It
+runs
+.Ql kubeadm reset -f ;
+.It
+removes
+.Pa /etc/kubernetes Ns 's
+manifests, certificates and configurations,
+.Pa /var/lib/kubelet ,
+.Pa /var/lib/etcd
+and
+.Pa /root/.kube/config ;
+.It
+flushes the iptables rules and the CNI state kube-proxy or Cilium left;
+.It
+restarts containerd.
+.El
+.Pp
+The packages stay installed.
+It runs itself under
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print what it removes and exit 0, without root.
+.El
+.Sh EXIT STATUS
+0 when done, and when it was not confirmed; 1 when the snapshot could not
+be taken.
+.Sh EXAMPLES
+In a Fedora 44 container, with
+.Xr zfs 8
+replaced by a script that lists a root pool and refuses the snapshot, and
+a file in
+.Pa /var/lib/etcd :
+.Bd -literal -offset indent
+# echo reset | kube-reset
+
+WARNING: This will tear down Kubernetes on this node.
+  - kubeadm reset (drains and removes node from cluster)
+  - Removes /etc/kubernetes, /var/lib/etcd, /var/lib/kubelet state
+  - Cilium and all pods will be destroyed
+
+cannot create snapshot: out of space
+[kube-reset] could not take rpool@pre-kube-reset-20260930T101341Z; nothing has been removed
+# (exited 1)
+.Ed
+.Pp
+The file in
+.Pa /var/lib/etcd
+was still there.
+With no terminal:
+.Bd -literal -offset indent
+# kube-reset </dev/null
+Aborted.
+# (exited 0)
+.Ed
+.Pp
+Coming back, on a kldload machine; not run for this page:
+.Bd -literal -offset indent
+# rollback to pre-kube-reset-<timestamp>
+# zfs rollback <dataset>@pre-kube-reset-<timestamp>
+# the second for each dataset that holds etcd, kubelet or containerd state
+.Ed
+.Sh SEE ALSO
+.Xr kubeadm 1 ,
+.Xr kldload-rollback 8 ,
+.Xr kube-cluster 8 ,
+.Xr kube-status 8 ,
+.Xr zfs-rollback 8
+.Sh HISTORY
+On 2026-09-30, writing this page, in a container: a snapshot that failed
+was reported as taken, and etcd was removed anyway; and the way back it
+printed,
+.Ql zfs rollback -r Ar pool Ns @ Ns Ar snapshot ,
+rolls back only the pool's top dataset, which on kldload holds nothing.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+.Ql iptables -F
+flushes every rule in those tables, the host's own among them.
