@@ -644,6 +644,19 @@ and the form come after.
    pool belong to the root-on-ZFS suite (a disposable build, rebooted).
    Hardware mode is VM-free and ZFS-on-root throughout; the VM tier stays as
    an optional, labelled lower-fidelity path for developers without benches.
+   **Checked 2026-09-30 against openzfs/zfs master:** `zfs-tests.sh` keeps
+   every pool already imported out of its cleanup (`KEEP`, default `rpool`,
+   passed as `__ZFS_POOL_EXCLUDE`), but eight functional tests use the
+   pool-wide forms, and
+   `cli_root/zpool_export/zpool_export_parallel_pos.ksh` line 114 runs a
+   bare `log_must zpool export -a`: on a ZFS-root host it tries to export
+   the busy root pool (a false failure) and exports any other pool present.
+   Others: `zpool_import_all_001_pos`, `zpool_import_parallel_pos`,
+   `zpool_scrub_multiple_pools`, `zpool_iostat_interval_{all,some}`,
+   `mmp_reset_interval`, `cli_user/misc/zpool_import_001_neg` (each to be
+   read before classifying). Handling: run them only in the root-on-ZFS
+   suite on a disposable build, or list them as not applicable on ZFS-root
+   hosts. Upstream contribution for the summit: make them respect `KEEP`.
 
 1. **Summit date.** Decides whether root-on-ZFS builds make the first cut.
 2. **ZFS sources:** release tags only, or any commit or pull-request branch?
