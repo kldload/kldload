@@ -200,7 +200,14 @@ die() {
 
 # ── Dependency checks ────────────────────────────────────────────────
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found on PATH — install $2"; }
-need aws "AWS CLI v2 (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)"
+# A dry run calls nothing in AWS: it is for checking the flags and the disk
+# before an import is paid for, so it only warns when the CLI is missing
+# (it refused outright until 2026-09-30).
+if ((DRY_RUN)) && ! command -v aws >/dev/null 2>&1; then
+    printf "${Y}[aws-publish]${N} %s\n" "aws not found on PATH -- a real run needs AWS CLI v2" >&2
+else
+    need aws "AWS CLI v2 (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)"
+fi
 need qemu-img "qemu-img (package: qemu-img on RHEL/Fedora, qemu-utils on Debian/Ubuntu)"
 if ((SEAL)); then
     [[ -x /usr/local/bin/kldload-seal ]] || die "/usr/local/bin/kldload-seal not found — install kldload >= 1.1.0 or pass --no-seal"
