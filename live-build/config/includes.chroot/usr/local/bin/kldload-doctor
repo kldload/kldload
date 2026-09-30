@@ -1213,6 +1213,18 @@ def _domain_ipv4(dom: str) -> str:
     return cands[0] if cands else ""
 
 
+def _root_unreadable() -> bool:
+    """True when /root cannot be looked into, i.e. a run as a user.
+
+    Every path under /root/darksite then reads as absent, and "absent" is an
+    answer: as anthony on onyx (2026-09-29) the charts check said "this
+    install carries no darksite" and the AI payload check said ok,
+    "reclaimed", neither of which it had looked at. Checks that read /root
+    ask this first and report that they did not run.
+    """
+    return os.geteuid() != 0 and not os.access("/root", os.R_OK | os.X_OK)
+
+
 def check_darksite_charts():
     """Can this box deploy Kubernetes with no network?
 
@@ -1225,6 +1237,9 @@ def check_darksite_charts():
     being broken (fiend, 2026-08-16).
     """
     d = "/root/darksite/helm-charts"
+    if _root_unreadable():
+        return _result("k8s-stack", "darksite charts", "skip", "",
+                       "not checked -- run as root")
     # No darksite at all: a net-image install, or EL, which installs from its
     # vendor and never carries one. Missing charts inside a darksite is still a
     # failure -- that is the 2026-08-16 defect above -- but a machine that was
@@ -1263,6 +1278,9 @@ def check_darksite_images():
     registries on a machine advertised as air-gapped.
     """
     d = "/root/darksite/k8s-images"
+    if _root_unreadable():
+        return _result("k8s-stack", "darksite images", "skip", "",
+                       "not checked -- run as root")
     if not os.path.isdir(d):
         return _result("k8s-stack", "darksite images", "skip", "",
                        "no /root/darksite/k8s-images on this install")
@@ -1467,6 +1485,9 @@ def check_ai_payload_reclaimed():
     weights are staged; afterwards the copy under /root is dead weight on
     every installed machine. Kept deliberately on LAN-mirror hosts.
     """
+    if _root_unreadable():
+        return _result("disk", "AI payload reclaimed", "skip", "",
+                       "not checked -- run as root")
     if os.path.exists("/etc/kldload/keep-darksite"):
         return _result("disk", "AI payload reclaimed", "ok",
                        "kept (LAN-mirror mode)", "kept by policy")
