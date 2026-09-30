@@ -2037,6 +2037,20 @@ if [[ "$EDITION" != "core" ]]; then
     else
         log "WARN: no component definitions found — kldload-component will have an empty registry"
     fi
+    # The network plan (docs/NETWORK-PLAN.md): the library and the shipped
+    # defaults every tool reads a range through. Only components/ was copied
+    # out of /usr/lib/kldload, so build 163 carried kldload-netplan and no plan
+    # for it to read (squashfs check, 2026-09-29). FATAL: a plan-reading tool
+    # without its plan silently falls back to literals, which is the drift the
+    # plan exists to end.
+    for _np in netplan.sh network-plan.defaults; do
+        install -D -m 0644 "/build/live-build/config/includes.chroot/usr/lib/kldload/${_np}" \
+            "${ROOTFS}/usr/lib/kldload/${_np}" ||
+            die "network plan: /usr/lib/kldload/${_np} did not copy into the rootfs"
+        [[ -s "${ROOTFS}/usr/lib/kldload/${_np}" ]] ||
+            die "network plan: ${ROOTFS}/usr/lib/kldload/${_np} is missing or empty after the copy"
+    done
+    log "network plan: netplan.sh + network-plan.defaults in the rootfs"
 
     # Bob's sbin tools — boot splash (hardware detect + progress + quotes)
     # and the appliance UI launcher. These live at /usr/local/sbin.

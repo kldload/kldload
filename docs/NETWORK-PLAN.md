@@ -94,10 +94,14 @@ routes and addresses; API certificates name the mesh addresses. So:
 
 Each phase is its own build and a sweep of the editions it touches.
 
-## Open decisions (operator)
+## Decisions (operator, 2026-09-29)
 
-1. The `kld-k8s` move takes the cluster off libvirt's `default` network. Any
-   operator VMs placed on `default` by hand stay where they are. Acceptable?
-2. Is a /12 of 10/8 right for your sites, or should the block itself be a
-   single answers-file setting (`KLDLOAD_NET_BLOCK`) with the plan derived
-   from it? The design supports either; the setting costs little.
+1. The cluster moves off libvirt's `default` network to `kld-k8s`; VMs an
+   operator placed on `default` by hand stay where they are. **Yes.**
+2. The block is **a setting**: `KLDLOAD_NET_BLOCK` in the answers file
+   (default 10.240.0.0/12), and every range above is derived from it at a
+   fixed offset (the table's third and fourth octets become offsets into the
+   block). `kldload-netplan check` refuses a block that overlaps the host's
+   LAN before anything is created. **The ZFS test lab (ztxplore, kzfs-lab)
+   follows the same block**: its networks are cut from the plan like every
+   other, not from libvirt's `default`.
