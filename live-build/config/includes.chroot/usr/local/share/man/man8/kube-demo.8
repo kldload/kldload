@@ -1,0 +1,104 @@
+.Dd September 30, 2026
+.Dt KUBE-DEMO 8
+.Os
+.Sh NAME
+.Nm kube-demo
+.Nd narrated demonstrations of Kubernetes on ZFS instant clones, one at a time or from a menu
+.Sh SYNOPSIS
+.Nm
+.Op Fl -no-pause
+.Nm
+.Fl -list
+.Nm
+.Ar demo
+.Op Ar argument ...
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+With no
+.Ar demo ,
+.Nm
+shows a menu of demonstrations on the cluster
+.Xr kube-cluster 8
+built, each narrated and pausing between sections.
+With one, a name
+.Fl -list
+prints, it runs that demonstration once without pauses and exits; the web
+console's Demos panel runs them that way.
+.Pp
+Among them: the platform and its ZFS layout; cloning a node from the
+golden in milliseconds and adding or removing nodes; Cilium, Hubble,
+CoreDNS, network policy, MetalLB and the Gateway API; ZFS-backed volumes,
+snapshotting and restoring one, a database on one; scaling, rolling
+updates, self-healing, draining, rolling a node back, replacing nodes;
+eBPF from the kernel up, and a packet's path; and a Java storefront with
+a database, deployed, broken, recovered and checked.
+.Pp
+The demonstrations change the cluster.
+.Cm cleanup
+removes what they made;
+.Cm javaapi_destroy
+removes the storefront, and asks first on a terminal.
+It runs itself under
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -no-pause , Fl n
+No waiting between sections, for output that is piped or captured.
+.It Fl -list
+Every demonstration's name.
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KUBE_DEMO_COUNT
+How many clones the clone demonstration makes; default 1.
+.It Ev KUBECONFIG
+Default
+.Pa /root/.kube/config .
+.It Ev KLDLOAD_DEMO_YES
+1:
+.Cm javaapi_destroy
+does not ask.
+With no terminal it does not ask either.
+.El
+.Sh EXIT STATUS
+The demonstration's own; 1 when no control plane answers; 2 for a name
+that is not a demonstration.
+.Sh EXAMPLES
+On a kldload desktop with no cluster, on 2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+$ kube-demo frob
+No Kubernetes control plane found.
+# (exited 1)
+.Ed
+.Pp
+On a cluster; not run for this page:
+.Bd -literal -offset indent
+# kube-demo zfs_clones
+# kube-demo remove_nodes 3
+# kube-demo --no-pause | tee demo.log
+.Ed
+.Sh SEE ALSO
+.Xr kube-bluegreen 8 ,
+.Xr kube-cluster 8 ,
+.Xr kube-demo-image 8 ,
+.Xr kube-demo-publish 8 ,
+.Xr kvm-demo 8
+.Sh HISTORY
+Before build 45 the storefront's destroy button in the web console did
+nothing: with no terminal, its question read end of input as
+.Dq no .
+On 2026-09-30, writing this page: the clone step booted and then
+destroyed any machine already called
+.Ql demo-vm ,
+and the help described a read-only tool that took no arguments.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Every function named
+.Ql demo_ Ns Ar name
+can be run by name, including ones the list leaves out.
