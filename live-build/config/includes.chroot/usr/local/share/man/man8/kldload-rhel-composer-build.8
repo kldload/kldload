@@ -1,0 +1,60 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-RHEL-COMPOSER-BUILD 8
+.Os
+.Sh NAME
+.Nm kldload-rhel-composer-build
+.Nd build the lab's RHEL golden on a registered RHEL host with Red Hat's image builder
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+Red Hat no longer lets a portal user name and password download its cloud
+image through the API.
+On a kldload host installed as RHEL and registered with Red Hat,
+.Nm
+has osbuild-composer assemble one from the host's own entitlement
+instead, writes it to the ZFS volume
+.Pa rpool/vms/klab-golden-rhel
+and snapshots it as
+.Ql @golden ,
+the sixth distribution beside the lab's other five.
+It takes 15 to 25 minutes, in the background.
+.Pp
+.Pa kldload-rhel-composer.service
+runs it at first boot when the installer left
+.Pa /var/lib/klab/.rhel-composer-pending
+and the lab was asked for.
+It does nothing when the golden exists, and stops early, saying why, when
+the host is not registered, composer is not installed, or a volume of that
+name is left from a run that did not finish.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/klab/.rhel-composer-pending
+Present until the golden is built.
+.It Pa /usr/local/share/kldload/rhel-cloud.toml
+The blueprint.
+.It Pa /var/lib/klab/images/
+Where the image is downloaded before it is written to the volume.
+.El
+.Sh EXIT STATUS
+0 when built, already built, or not wanted; 1 when it could not build,
+logged to the journal as
+.Ql kldload-rhel-composer .
+.Sh EXAMPLES
+Building it by hand after registering; not run for this page:
+.Bd -literal -offset indent
+# subscription-manager register
+# systemctl start kldload-rhel-composer
+# journalctl -t kldload-rhel-composer -f
+.Ed
+.Sh SEE ALSO
+.Xr composer-cli 1 ,
+.Xr klab 8 ,
+.Xr kvm-clone 8 ,
+.Xr subscription-manager 8
+.Sh HISTORY
+On 2026-09-19 it ran on every RHEL install, the lab asked for or not, and
+failed on a plain desktop.
+On 2026-09-30, writing this page: a volume left by an unfinished run made
+it fail again only after the whole compose.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
