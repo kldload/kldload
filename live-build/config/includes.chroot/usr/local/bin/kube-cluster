@@ -64,7 +64,6 @@ if [[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]]; then exec sudo "$0
 # stops the 30-vCPU / 51-GB cluster eating the entire dev box.
 WORKERS="${WORKERS:-0}"
 DESTROY_ALL="${DESTROY_ALL:-0}"
-CILIUM_CLI_VERSION="${CILIUM_CLI_VERSION:-0.19.2}"
 _host_ram_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 16384)
 _host_cpus=$(nproc 2>/dev/null || echo 4)
 # Sane fixed defaults — a bootstrap K8s cluster needs surprisingly little
@@ -3138,12 +3137,81 @@ KBYAML
         ;;
     esac
 
+    # SAFETY: everything below installs root binaries into /usr/local/bin when
+    # the darksite has no copy. It was unverified: helm by piping
+    # raw.githubusercontent.com/helm/helm/MAIN/scripts/get-helm-3 into bash,
+    # the cilium CLI at a stale literal (0.19.2) rather than the lock's, and
+    # kubectl and hubble at whatever the stable pointer said that day
+    # (2026-09-30). Now each is the lock's version -- or, with no lock, the
+    # latest release, as kube-setup does -- and is checked against the SHA-256
+    # its release publishes before it is installed.
+    #
+    # _host_fetch_verified <url> <sums-url> <dest>: kube-setup's
+    # _fetch_verified again (the two tools share no library), plus the bare
+    # one-hash form dl.k8s.io publishes beside kubectl. 1, file removed, on
+    # a failed download, a missing sum or a mismatch.
+    _host_fetch_verified() {
+        local url="$1" sums="$2" dest="$3" name want got
+        name="${url##*/}"
+        curl -fsSL --max-time 300 -o "$dest" "$url" || {
+            rm -f "$dest"
+            return 1
+        }
+        # a missing sum file leaves want empty, which is refused below
+        want="$(curl -fsSL --max-time 30 "$sums" |
+            awk -v n="$name" 'NF == 1 && w == "" { w = $1 } $2 == n || $2 == "*" n { w = $1 } END { print w }')" || want=""
+        got="$(sha256sum "$dest" | awk '{ print $1 }')"
+        if [[ -z "$want" || "$want" != "$got" ]]; then
+            rm -f "$dest"
+            warn "${name}: the release publishes sha256 '${want:-none}', the download is ${got}"
+            return 1
+        fi
+    }
+    # _host_ver <lock key> <owner/repo> — the lock's version, else the repo's
+    # latest release tag; empty when neither answers.
+    _host_ver() {
+        local v=""
+        if [[ -r /root/darksite/k8s-stack.lock ]]; then
+            v="$(sed -n "s/^$1=//p" /root/darksite/k8s-stack.lock | awk 'NR == 1')"
+        fi
+        if [[ -z "$v" && -n "${2:-}" ]]; then
+            # offline or rate-limited: empty, and the caller says what it skipped
+            v="$(curl -fsSL --max-time 15 "https://api.github.com/repos/$2/releases/latest" 2>/dev/null |
+                sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | awk 'NR == 1')" || v=""
+        fi
+        printf '%s' "$v"
+    }
+    # _host_install_tar <tool> <url> <sums-url> — verify, unpack, install.
+    _host_install_tar() {
+        local _t
+        _t="$(mktemp -d)"
+        if _host_fetch_verified "$2" "$3" "${_t}/a.tar.gz" && tar -xzf "${_t}/a.tar.gz" -C "$_t" &&
+            _bin="$(find "$_t" -type f -name "$1" | awk 'NR == 1')" && [[ -n "$_bin" ]]; then
+            install -m 0755 "$_bin" "/usr/local/bin/$1"
+            rm -rf "$_t"
+            log "$1 installed (sha256 verified)"
+            return 0
+        fi
+        rm -rf "$_t"
+        warn "$1 install failed"
+        return 1
+    }
+
     # kubectl
     if ! command -v kubectl >/dev/null 2>&1; then
         log "Installing kubectl on host..."
-        curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${arch_dl}/kubectl" \
-            -o /usr/local/bin/kubectl 2>/dev/null && chmod +x /usr/local/bin/kubectl && log "kubectl installed" ||
+        local _kv
+        _kv="$(_host_ver K8S_VERSION)"
+        [[ -n "$_kv" ]] || _kv="$(curl -fsSL --max-time 15 https://dl.k8s.io/release/stable.txt 2>/dev/null)" || _kv=""
+        if [[ -n "$_kv" ]] &&
+            _host_fetch_verified "https://dl.k8s.io/release/${_kv}/bin/linux/${arch_dl}/kubectl" \
+                "https://dl.k8s.io/release/${_kv}/bin/linux/${arch_dl}/kubectl.sha256" /usr/local/bin/kubectl.part; then
+            install -m 0755 /usr/local/bin/kubectl.part /usr/local/bin/kubectl
+            rm -f /usr/local/bin/kubectl.part
+            log "kubectl ${_kv} installed (sha256 verified)"
+        else
             warn "kubectl install failed"
+        fi
     fi
 
     # helm, cilium, hubble, k9s: the ISO bakes each at the lock's version into
@@ -3170,38 +3238,38 @@ KBYAML
         _host_tool_from_darksite "${_tool%%:*}" "${_tool#*:}" || true # swallow: absent copy; the online installs below run for whatever is still missing
     done
 
-    # helm
+    # helm, cilium, hubble, k9s -- whatever the darksite did not supply
+    local _v
     if ! command -v helm >/dev/null 2>&1; then
         log "Installing helm on host..."
-        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 |
-            HELM_INSTALL_DIR=/usr/local/bin bash 2>/dev/null && log "helm installed" ||
-            warn "helm install failed"
+        _v="$(_host_ver HELM_CLI_VERSION helm/helm)"
+        [[ -n "$_v" ]] && _host_install_tar helm "https://get.helm.sh/helm-${_v}-linux-${arch_dl}.tar.gz" \
+            "https://get.helm.sh/helm-${_v}-linux-${arch_dl}.tar.gz.sha256sum" ||
+            warn "helm not installed (no version, or it did not verify)"
     fi
-
-    # cilium CLI
     if ! command -v cilium >/dev/null 2>&1; then
         log "Installing cilium CLI on host..."
-        curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/v${CILIUM_CLI_VERSION}/cilium-linux-${arch_dl}.tar.gz" |
-            tar -xz -C /usr/local/bin cilium 2>/dev/null && log "cilium CLI installed" ||
-            warn "cilium CLI install failed"
+        _v="$(_host_ver CILIUM_CLI_VERSION cilium/cilium-cli)"
+        [[ -n "$_v" ]] && _host_install_tar cilium \
+            "https://github.com/cilium/cilium-cli/releases/download/${_v}/cilium-linux-${arch_dl}.tar.gz" \
+            "https://github.com/cilium/cilium-cli/releases/download/${_v}/cilium-linux-${arch_dl}.tar.gz.sha256sum" ||
+            warn "cilium CLI not installed (no version, or it did not verify)"
     fi
-
-    # hubble CLI
     if ! command -v hubble >/dev/null 2>&1; then
         log "Installing hubble CLI on host..."
-        local hubble_ver
-        hubble_ver="$(curl -fsSL https://raw.githubusercontent.com/cilium/hubble/master/stable.txt 2>/dev/null || echo "v1.17.1")"
-        curl -fsSL "https://github.com/cilium/hubble/releases/download/${hubble_ver}/hubble-linux-${arch_dl}.tar.gz" |
-            tar -xz -C /usr/local/bin hubble 2>/dev/null && log "hubble CLI installed" ||
-            warn "hubble CLI install failed"
+        _v="$(_host_ver HUBBLE_CLI_VERSION cilium/hubble)"
+        [[ -n "$_v" ]] && _host_install_tar hubble \
+            "https://github.com/cilium/hubble/releases/download/${_v}/hubble-linux-${arch_dl}.tar.gz" \
+            "https://github.com/cilium/hubble/releases/download/${_v}/hubble-linux-${arch_dl}.tar.gz.sha256sum" ||
+            warn "hubble CLI not installed (no version, or it did not verify)"
     fi
-
-    # k9s
     if ! command -v k9s >/dev/null 2>&1; then
         log "Installing k9s on host..."
-        curl -fsSL "https://github.com/derailed/k9s/releases/latest/download/k9s_Linux_${arch_k9s}.tar.gz" |
-            tar -xz -C /usr/local/bin k9s 2>/dev/null && log "k9s installed" ||
-            warn "k9s install failed"
+        _v="$(_host_ver K9S_VERSION derailed/k9s)"
+        [[ -n "$_v" ]] && _host_install_tar k9s \
+            "https://github.com/derailed/k9s/releases/download/${_v}/k9s_Linux_${arch_k9s}.tar.gz" \
+            "https://github.com/derailed/k9s/releases/download/${_v}/checksums.sha256" ||
+            warn "k9s not installed (no version, or it did not verify)"
     fi
 
     # Add KUBECONFIG to root's profile
