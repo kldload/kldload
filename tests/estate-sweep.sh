@@ -197,6 +197,47 @@ kick_pxe() {
     ssh_bench "$ip" 'e=$(sudo -n efibootmgr -v | grep -i "MAC('"$macre"'" | grep -i IPv4 | head -n1 | sed -n "s/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p"); [ -n "$e" ] || exit 3; sudo -n efibootmgr -n "$e" >/dev/null && (sleep 2; sudo -n systemctl reboot) >/dev/null 2>&1 &'
 }
 
+# ─── Out-of-band power (kldload-power) ───────────────────────────────────────
+# With a power record for the bench MAC the sweep stops needing a human: it
+# can switch a machine on that is off, cycle one that is hung, and send an
+# IPMI machine to PXE without an OS to ssh into. On 2026-09-29 fiend stalled
+# fetching its root image, sat in the initrd, and 3-kvm waited for someone to
+# press the button. With no record (or a status-only one, like abyss's, which
+# refuses with exit 6) every path below is the old one, unchanged.
+POWER_BIN="${POWER_BIN:-/usr/local/sbin/kldload-power}"
+POWER_DIR="${POWER_DIR:-/etc/kldload/power}"
+
+# power <verb> — kldload-power against the bench MAC; its exit status, or 7
+# when the tool is not installed. Output goes to the log.
+power() {
+    [[ -x "$POWER_BIN" ]] || return 7
+    sudo -n "$POWER_BIN" "$MAC" "$@" >>"$LOG" 2>&1 </dev/null
+}
+
+# power_can <verb> — 0 when the bench's record exists, answers, and allows the
+# verb. The allow-list is read from the record, because trying a cycle to
+# find out is not an option. Only a YES is remembered: a BMC that timed out
+# once must not switch power control off for the rest of the sweep.
+declare -A _POWER_CAN=()
+power_can() {
+    local v="$1" rec allow
+    [[ -n "${_POWER_CAN[$v]:-}" ]] && return 0
+    power status || return 1
+    rec="$(sudo -n sh -c 'cat "$1"' _ "${POWER_DIR}/${MAC,,}.env" 2>/dev/null)" || return 1
+    allow="$(sed -n 's/^POWER_ALLOW=//p' <<<"$rec" | tail -n 1)"
+    [[ -z "$allow" || ",${allow}," == *",${v},"* ]] || return 1
+    # pxe-once is an IPMI verb; an outlet cannot pick the boot device
+    [[ "$v" != pxe-once ]] || grep -qx 'POWER_CONTROLLER=ipmi' <<<"$rec" || return 1
+    _POWER_CAN[$v]=0
+}
+
+# power_kick — send the bench to PXE by power alone: next boot from the
+# network, then a cycle. IPMI only; returns 1 when the record cannot do it.
+power_kick() {
+    power_can pxe-once && power_can cycle || return 1
+    power pxe-once && power cycle
+}
+
 # ── Preconditions ───────────────────────────────────────────────────────────
 [[ -x "$SERVER" ]] || {
     echo "estate-sweep: ${SERVER} is not installed" >&2
@@ -233,7 +274,14 @@ say "results: ${RESULTS}"
 RC=0
 _ran=0
 _skipped=0
-for ed in "${EDITIONS[@]}"; do
+# A queue, not a plain for: a stalled edition is re-inserted once (power
+# retry, below), which a for over a fixed list cannot do.
+declare -A _RETRIED=()
+_QUEUE=("${EDITIONS[@]}")
+_QI=0
+while ((_QI < ${#_QUEUE[@]})); do
+    ed="${_QUEUE[_QI]}"
+    _QI=$((_QI + 1))
     ANS="${REPO}/live-build/pxe/matrix/${ed}/$(tr ':' '-' <<<"$MAC").env"
     OUT="${RESULTS}/${ed}"
     mkdir -p "$OUT"
@@ -305,6 +353,24 @@ for ed in "${EDITIONS[@]}"; do
             [[ -n "$cur" ]] && break
         done
         [[ -n "$cur" || "$_adopt" == 1 ]] && break
+        # Not on the network. A machine that can be sent to PXE by power alone
+        # does not need to be found: arm it and kick it (step 2). Otherwise,
+        # once per edition, switch it on if it is off or cycle it if it is on
+        # and silent (hung), and keep looking.
+        if power_can pxe-once && power_can cycle; then
+            say "${ed}: bench not on the network; it has IPMI -- installing without it"
+            cur="power"
+            break
+        fi
+        if ((_bw == 0)) && power_can cycle; then
+            if [[ "$(sudo -n "$POWER_BIN" "$MAC" status 2>/dev/null </dev/null)" == off ]]; then
+                say "${ed}: bench is powered off -- switching it on"
+                power on || say "${ed}: kldload-power on FAILED (see ${LOG})"
+            else
+                say "${ed}: bench is powered but silent -- power-cycling it"
+                power cycle || say "${ed}: kldload-power cycle FAILED (see ${LOG})"
+            fi
+        fi
         ((_bw >= ${BENCH_WAIT:-1200})) && break
         say "${ed}: bench machine not on ${SUBNET}.0/24 yet — looking again (${_bw}s of ${BENCH_WAIT:-1200}s)"
         sleep 60
@@ -335,7 +401,13 @@ for ed in "${EDITIONS[@]}"; do
             RC=1
             continue
         }
-        kick_pxe "$cur" || say "${ed}: could not set BootNext — power-cycle and pick network boot"
+        if power_kick; then
+            say "${ed}: sent to PXE by kldload-power (pxe-once, cycle)"
+        elif [[ "$cur" == power ]]; then
+            say "${ed}: kldload-power could not send it to PXE (see ${LOG})"
+        else
+            kick_pxe "$cur" || say "${ed}: could not set BootNext — power-cycle and pick network boot"
+        fi
 
         # 3. wait for the answers fetch, then disarm
         fetched=0 t=0
@@ -352,6 +424,18 @@ for ed in "${EDITIONS[@]}"; do
         # sweep, because leaving a machine armed loops it back into the installer.
         sudo -n "$SERVER" disarm "$MAC" >>"$LOG" 2>&1 || true
         if ((fetched == 0)); then
+            # One retry, by power: a stalled live boot (fiend, 2026-09-29: the
+            # root image crawled at 3 MB/s and was cut at 300 s) is transient,
+            # and the machine is unreachable until someone cycles it. The failed
+            # attempt keeps its row; the retry gets its own.
+            if [[ -z "${_RETRIED[$ed]:-}" ]] && power_can cycle; then
+                _RETRIED[$ed]=1
+                say "${ed}: the installer never fetched its answers (${FETCH_WAIT}s) — power-cycling and retrying once"
+                printf '| %s | %s/%s | never PXE-booted; power-cycled, retried | RETRY | | | |  |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
+                power cycle || say "${ed}: kldload-power cycle FAILED (see ${LOG})"
+                _QUEUE=("${_QUEUE[@]:0:_QI}" "$ed" "${_QUEUE[@]:_QI}")
+                continue
+            fi
             say "${ed}: the installer never fetched its answers (${FETCH_WAIT}s) — disarmed"
             printf '| %s | %s/%s | never PXE-booted | FAIL | | | |  |\n' "$ed" "$want_distro" "$want_profile" >>"$SUMMARY"
             RC=1
