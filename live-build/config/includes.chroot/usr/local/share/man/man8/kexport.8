@@ -1,0 +1,331 @@
+.Dd September 29, 2026
+.Dt KEXPORT 8
+.Os
+.Sh NAME
+.Nm kexport
+.Nd export a disk as a VM image, a container image or a Firecracker bundle
+.Sh SYNOPSIS
+.Nm
+.Ar source
+.Ar format
+.Op Ar output-dir
+.Op Fl -seal | Fl -no-seal
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+turns a disk \(em a machine's ZFS volume, a physical disk, or an image
+file in any format
+.Xr qemu-img 1
+reads \(em into a file another platform can use:
+.Bl -tag -width "firecracker"
+.It Li qcow2
+KVM, Proxmox, OpenStack; compressed.
+.It Li raw
+A plain disk image, sparse.
+.It Li vhd
+Azure and Hyper-V; fixed size.
+.It Li vmdk
+VMware ESXi and vSphere; stream-optimised.
+.It Li ova
+An OVF descriptor and a stream-optimised VMDK in one tar, for VMware and
+VirtualBox.
+.It Li oci
+The root filesystem as a tar.gz for
+.Ql docker import
+or
+.Ql podman import .
+.It Li lxc
+The root filesystem and a metadata tarball for
+.Ql lxc-create -t local .
+.It Li firecracker
+The root filesystem as an ext4 image, the kernel found in its
+.Pa /boot ,
+a
+.Pa config.json
+and a
+.Pa launch.sh ;
+see
+.Sx CAVEATS .
+.It Li all
+.Li qcow2 , raw , vhd , vmdk
+and
+.Li ova
+in turn.
+.El
+.Pp
+By default the output is sealed with
+.Xr kldload-seal 8 :
+the machine-id, ssh host keys, hostid, cloud-init state, logs and mesh
+keys are removed, so every machine made from the image is a new one.
+The seal is applied to a copy, and the source is never written:
+.Bl -bullet
+.It
+a ZFS volume is snapshotted and cloned, which takes no time and no space;
+the clone is sealed and exported, and it and the snapshot are removed at
+the end.
+A machine that is running can be exported this way: its disk is taken as
+it is at that instant, as after a power cut;
+.It
+anything else is copied to a sparse raw file in
+.Ar output-dir ,
+which is sealed, exported and removed.
+It needs room for what the disk holds.
+.El
+.Pp
+The container formats and
+.Li firecracker
+mount the disk's largest partition, taken to be its root filesystem.
+They too work from a clone of a ZFS volume, sealed or not; any other
+source is mounted read-only, and refused while any of it is mounted on
+this host.
+.Pp
+Output files are named
+.Ar NAME Ns Pa \&. Ns Ar format ,
+where
+.Ar NAME
+is
+.Ev KEXPORT_NAME ,
+or
+.Ql kldload-export- Ns Ar YYYYMMDD-HHMM .
+.Pp
+It must run as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Ar source
+A block device, a ZFS volume
+.Pq Pa /dev/zvol/ Ns Ar dataset ,
+or an image file.
+.It Ar format
+One of the formats above.
+.It Ar output-dir
+Where the output goes; made if missing.
+Default
+.Pa /root/exports .
+.It Fl -seal
+Seal the copy; the default.
+.It Fl -no-seal
+Export the source as it is: the image keeps its identity, which suits
+moving one machine, and does not suit making many.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KEXPORT_NAME
+The output files' base name.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Exported.
+.It 1
+The source is not a disk or file, not root, a tool is missing, the seal
+failed, or a conversion failed.
+.It 2
+A usage error.
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on a kldload host on 2026-09-29.
+The source was
+.Ql kx-3334812 ,
+a clone of a Rocky Linux golden made for the purpose; a snapshot taken of
+it before the first export showed no byte written to it after the last.
+It, and every output, were deleted afterwards.
+Progress lines of
+.Xr qemu-img 1
+are left out.
+.Ss A machine to qcow2, sealed
+.Bd -literal -offset indent
+# KEXPORT_NAME=kx-3334812 kexport /dev/zvol/rpool/vms/kx-3334812 qcow2 /var/tmp/kx-3334812-out
+[kexport] Working from a clone of rpool/vms/kx-3334812, not the source: rpool/vms/kx-3334812-kexport-3335131
+[kexport] Sealing /dev/zvol/rpool/vms/kx-3334812-kexport-3335131
+[seal] detected shape: fs on /dev/zvol/rpool/vms/kx-3334812-kexport-3335131
+[seal] resolved /dev/zvol/rpool/vms/kx-3334812-kexport-3335131 → /dev/zd496
+[seal] mounting root partition /dev/zd496p4 (39856 MB) at /var/tmp/kldload-seal.s8mR1p
+[seal] sealing /var/tmp/kldload-seal.s8mR1p
+[seal]   cleared /etc/machine-id
+[seal]   removed /etc/ssh/ssh_host_* keys
+[seal]   removed /etc/hostid
+[seal]   cloud-init: cleared seed + wrote portable datasource_list
+[seal]   cleared journald + wtmp/btmp/lastlog
+[seal]   stamped /etc/kldload/seal.info
+[seal] seal complete
+[kexport] Seal complete; proceeding to format conversion
+[kexport] Source: /dev/zvol/rpool/vms/kx-3334812-kexport-3335131 (raw)
+[kexport] Exporting /dev/zvol/rpool/vms/kx-3334812 → /var/tmp/kx-3334812-out/kx-3334812.qcow2 (compressed)
+
+[kexport] Done: /var/tmp/kx-3334812-out/kx-3334812.qcow2 (2.1G)
+[kexport] Export complete → /var/tmp/kx-3334812-out/
+# (exited 0)
+.Ed
+.Ss An image file to OVA, sealed (ova)
+The qcow2 made above as the source:
+.Bd -literal -offset indent
+# KEXPORT_NAME=kx-3334812-b kexport /var/tmp/kx-3334812-out/kx-3334812.qcow2 ova /var/tmp/kx-3334812-out
+[kexport] Copying /var/tmp/kx-3334812-out/kx-3334812.qcow2 to /var/tmp/kx-3334812-out/.kx-3334812-b.sealing.raw to seal the copy, not the source
+[kexport] Sealing /var/tmp/kx-3334812-out/.kx-3334812-b.sealing.raw
+[seal] loop-attached /var/tmp/kx-3334812-out/.kx-3334812-b.sealing.raw as /dev/loop0
+\&...
+[seal] seal complete
+[kexport] Seal complete; proceeding to format conversion
+[kexport] Source: /var/tmp/kx-3334812-out/.kx-3334812-b.sealing.raw (raw)
+[kexport] Exporting /var/tmp/kx-3334812-out/kx-3334812.qcow2 → /var/tmp/kx-3334812-out/kx-3334812-b.ova
+[kexport] Done: /var/tmp/kx-3334812-out/kx-3334812-b.ova (1.8G)
+[kexport] Export complete → /var/tmp/kx-3334812-out/
+# (exited 0)
+.Ed
+.Ss 1:1, unsealed (raw, vmdk, vhd, --no-seal)
+.Bd -literal -offset indent
+# KEXPORT_NAME=kx-3334812-c kexport /var/tmp/kx-3334812-out/kx-3334812.qcow2 raw /var/tmp/kx-3334812-out --no-seal
+[kexport][warn] --no-seal: skipping sysprep. Output will carry the source's machine-id, ssh host keys, hostid, and cloud-init seed — DO NOT deploy this image multiple times.
+[kexport] Source: /var/tmp/kx-3334812-out/kx-3334812.qcow2 (qcow2)
+[kexport] Exporting /var/tmp/kx-3334812-out/kx-3334812.qcow2 → /var/tmp/kx-3334812-out/kx-3334812-c.raw (sparse)
+
+[kexport] Done: /var/tmp/kx-3334812-out/kx-3334812-c.raw (2.1G)
+[kexport] Export complete → /var/tmp/kx-3334812-out/
+# (exited 0)
+# KEXPORT_NAME=kx-3334812-f kexport /var/tmp/kx-3334812-out/kx-3334812.qcow2 vmdk /var/tmp/kx-3334812-out --no-seal
+\&...
+[kexport] Done: /var/tmp/kx-3334812-out/kx-3334812-f.vmdk (1.9G)
+\&...
+# (exited 0)
+# KEXPORT_NAME=kx-3334812-g kexport /var/tmp/kx-3334812-out/kx-3334812.qcow2 vhd /var/tmp/kx-3334812-out --no-seal
+\&...
+[kexport] Done: /var/tmp/kx-3334812-out/kx-3334812-g.vhd (2.0G)
+\&...
+# (exited 0)
+.Ed
+.Ss A container image (oci)
+.Bd -literal -offset indent
+# KEXPORT_NAME=kx-3334812-d kexport /dev/zvol/rpool/vms/kx-3334812 oci /var/tmp/kx-3334812-out --no-seal
+[kexport] Working from a clone of rpool/vms/kx-3334812, not the source: rpool/vms/kx-3334812-kexport-3342246
+[kexport][warn] --no-seal: skipping sysprep. Output will carry the source's machine-id, ssh host keys, hostid, and cloud-init seed — DO NOT deploy this image multiple times.
+[kexport] Source: /dev/zvol/rpool/vms/kx-3334812-kexport-3342246 (raw)
+[kexport] Mounting /dev/zd496p4 on /var/tmp/kexport-root.mpRfVN (rw)
+[kexport] Exporting rootfs → /var/tmp/kx-3334812-out/kx-3334812-d-oci.tar.gz (Docker importable)
+tar: ./var/lib/gssproxy/default.sock: socket ignored
+[kexport] Done: /var/tmp/kx-3334812-out/kx-3334812-d-oci.tar.gz (877M)
+[kexport]   Import: docker import /var/tmp/kx-3334812-out/kx-3334812-d-oci.tar.gz kldload:20260929
+[kexport]   Import: podman import /var/tmp/kx-3334812-out/kx-3334812-d-oci.tar.gz kldload:20260929
+[kexport] Export complete → /var/tmp/kx-3334812-out/
+# (exited 0)
+.Ed
+.Pp
+And run, as a user:
+.Bd -literal -offset indent
+$ sudo cat /var/tmp/kx-3334812-out/kx-3334812-d-oci.tar.gz | podman import - localhost/kexport-test:1
+sha256:517bfe3768d8b49426e94f8254ba87604a5bae146f58f2e528aa25f14cc81fb1
+$ podman run --rm localhost/kexport-test:1 sh -c '. /etc/os-release; echo $PRETTY_NAME'
+Rocky Linux 9.8 (Blue Onyx)
+# (exited 0)
+.Ed
+.Ss An LXC template (lxc)
+.Bd -literal -offset indent
+# KEXPORT_NAME=kx-3334812-h kexport /dev/zvol/rpool/vms/kx-3334812 lxc /var/tmp/kx-3334812-out --no-seal
+\&...
+[kexport] Exporting rootfs → /var/tmp/kx-3334812-out/kx-3334812-h-lxc.tar.xz (LXC template)
+tar: ./var/lib/gssproxy/default.sock: socket ignored
+[kexport] Done: /var/tmp/kx-3334812-out/kx-3334812-h-lxc.tar.xz + /var/tmp/kx-3334812-out/kx-3334812-h-lxc-meta.tar.xz
+[kexport]   Deploy on LXC host:
+[kexport]     lxc-create -n mycontainer -t local -- \e
+[kexport]       --metadata /var/tmp/kx-3334812-out/kx-3334812-h-lxc-meta.tar.xz --fstree /var/tmp/kx-3334812-out/kx-3334812-h-lxc.tar.xz
+[kexport] Export complete → /var/tmp/kx-3334812-out/
+\&...
+# (exited 0)
+.Ed
+.Pp
+That run's clone had been snapshotted by the scheduled snapshots
+mid-export and could not be removed; the fix is in
+.Sx HISTORY .
+.Ss A Firecracker bundle (firecracker)
+.Bd -literal -offset indent
+# KEXPORT_NAME=kx-3334812-e kexport /dev/zvol/rpool/vms/kx-3334812 firecracker /var/tmp/kx-3334812-out
+\&...
+[kexport] Mounting /dev/zd496p4 on /var/tmp/kexport-root.wknzSq (rw)
+[kexport] Building Firecracker bundle → /var/tmp/kx-3334812-out/kx-3334812-e-firecracker/
+[kexport] WARNING: no kernel found in /boot — you'll need to supply one
+[kexport]   building rootfs.ext4...
+tar: ./var/lib/gssproxy/default.sock: socket ignored
+[kexport]   rootfs: 3492MB
+[kexport] Done: /var/tmp/kx-3334812-out/kx-3334812-e-firecracker/ (1.3G)
+\&...
+# (exited 0)
+.Ed
+.Pp
+This image keeps
+.Pa /boot
+on a partition of its own, which is not the one mounted.
+.Ss What it refuses
+.Bd -literal -offset indent
+$ kexport /dev/nosuch qcow2
+ERROR: /dev/nosuch is not a block device or file
+# (exited 1)
+$ kexport /var/tmp
+# (exited 2)  (usage printed on stderr)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "ERROR: kldload-seal failed on the copy of SOURCE \(em refusing to ship an unsealed image. ..."
+The seal's reason is above.
+Nothing is exported; the copy is removed.
+.It "[kexport][warn] could not remove the clone CLONE"
+.It "[kexport][warn] could not remove the snapshot SNAPSHOT"
+The export finished; remove them with
+.Ql zfs destroy -r .
+.It "ERROR: a FORMAT file cannot be mounted for FORMAT; ..."
+The container formats and
+.Li firecracker
+read a raw image or a disk; convert the file first, or give the volume.
+.It "ERROR: SOURCE or a partition of it is mounted on this host \(em refusing to mount it again"
+.El
+.Sh SEE ALSO
+.Xr lxc-create 1 ,
+.Xr podman-import 1 ,
+.Xr qemu-img 1 ,
+.Xr kfire 8 ,
+.Xr kldload-seal 8 ,
+.Xr kvm-clone 8
+.Sh HISTORY
+On 2026-09-29, writing this page:
+the seal was applied to the source itself, so exporting a stopped machine
+removed its identity and mesh keys for good;
+every conversion treated the source as raw, so a qcow2 file was exported
+as the bytes of its container;
+the container formats could not work at all, the mount step's own log
+line being captured as part of the mountpoint;
+the OVF inside every OVA used an undeclared namespace prefix and was not
+valid XML;
+.Xr kldload-seal 8
+could not seal an image file;
+and the clone was removed without
+.Fl r ,
+which failed when the scheduled snapshots had taken one of it mid-export.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The OVA's descriptor is valid XML and names 4 processors and 4096 MB of
+memory; it has not been imported into VMware or VirtualBox here.
+.Pp
+The Firecracker bundle carries the distribution's compressed kernel,
+which Firecracker boots only from 1.17.0, and no initrd, which most
+distribution kernels need to find their root disk; it has not been booted.
+.Xr kfire 8
+makes Firecracker machines that do.
+.Pp
+Only the largest partition is read for the container formats; a separate
+.Pa /boot
+or
+.Pa /home
+partition is not in the result.
+.Pp
+The
+.Li vhd
+format is fixed-size: the file is the disk's full size, sparse where the
+filesystem allows.
+.Pp
+The fix for a clone snapshotted mid-export
+.Pq Fl r
+was not re-run against the scheduled snapshots.
