@@ -621,14 +621,16 @@ Options:
 
 Flow:
   kube-cluster bootstrap --workers 3
-    1. Find/download cloud image (CentOS or Debian qcow2)
+    1. Find/download a cloud image: the host's own family -- Debian or
+       Ubuntu -- or Fedora for every RPM host
     2. Import to ZFS zvol, boot with cloud-init
     3. Run kube-setup inside VM (install kubeadm, containerd, etc.)
     4. Shut down + snapshot = golden image (cached for next time)
     5. Clone golden → control planes + N workers (~100ms each)
     6. Boot all, configure WireGuard mesh
     7. kube-init on CP (Cilium + MetalLB + ZFS CSI + Gateway API + Hubble)
-    8. kube-join on workers
+    8. Join the workers: kubeadm join, driven from this host, a fresh
+       token each attempt (the standalone kube-join is not used)
     9. Smoke test → done
 
 Subsequent runs skip steps 1-4 (golden image is cached).
