@@ -223,8 +223,22 @@ _snap_source() {
     esac
 }
 
+# _tag_width <rows> — the widest snapshot tag in _snapshots output, at least 34.
+# WHY: the column used to CUT tags at 34 characters, and sanoid's are 35 and
+# 36 ("autosnap_..._weekly", "..._monthly"): `list` printed "..._month", and
+# that name pasted into `rollback to` was "no such snapshot" (onyx,
+# 2026-09-30). A table a little wider beats a name that does not work.
+_tag_width() {
+    local w=34 name _rest tag
+    while IFS=$'\t' read -r name _rest; do
+        tag="${name#*@}"
+        if ((${#tag} > w)); then w=${#tag}; fi
+    done <<<"$1"
+    printf '%s\n' "$w"
+}
+
 cmd_list() {
-    local rows
+    local rows w
     rows="$(_snapshots)"
     if [[ -z "$rows" ]]; then
         say "No snapshots of $BE."
@@ -233,18 +247,19 @@ cmd_list() {
         say "fresh install you may simply not have run one yet."
         return 0
     fi
+    w="$(_tag_width "$rows")"
     say "Snapshots of $BE (newest last):"
     say ""
-    printf '  %-34s %-22s %8s  %s\n' "SNAPSHOT" "CREATED" "USED" "SOURCE"
+    printf '  %-*s %-22s %8s  %s\n' "$w" "SNAPSHOT" "CREATED" "USED" "SOURCE"
     # Built by repetition rather than `printf '%.34s'`: that truncates by BYTE
     # and this rule is drawn with a 3-byte box character, so the precision cut
     # landed mid-character and printed a replacement glyph followed by short
     # columns. Repetition is encoding-agnostic.
-    printf '  %s %s %s  %s\n' "$(_rule 34)" "$(_rule 22)" "$(_rule 8)" "$(_rule 12)"
+    printf '  %s %s %s  %s\n' "$(_rule "$w")" "$(_rule 22)" "$(_rule 8)" "$(_rule 12)"
     while IFS=$'\t' read -r name creation used; do
         [[ -z "$name" ]] && continue
         local tag="${name#*@}"
-        printf '  %-34s %-22s %8s  %s\n' "${tag:0:34}" "${creation:0:22}" "$used" "$(_snap_source "$tag")"
+        printf '  %-*s %-22s %8s  %s\n' "$w" "$tag" "${creation:0:22}" "$used" "$(_snap_source "$tag")"
     done <<<"$rows"
     say ""
     say "Roll back with:  rollback to <snapshot>"
@@ -760,21 +775,22 @@ cmd_pick() {
     fi
 
     local -a tags=()
-    local n=0 default_n=0 dtag name creation used tag
+    local n=0 default_n=0 dtag name creation used tag w
     dtag="$(_pick_last)"
+    w="$(_tag_width "$rows")"
 
     say "Snapshots of $BE (newest last):"
     say ""
-    printf '   #  %-34s %-22s %8s  %s\n' "SNAPSHOT" "CREATED" "USED" "SOURCE"
-    printf '  %s  %s %s %s  %s\n' "$(_rule 2)" "$(_rule 34)" "$(_rule 22)" "$(_rule 8)" "$(_rule 12)"
+    printf '   #  %-*s %-22s %8s  %s\n' "$w" "SNAPSHOT" "CREATED" "USED" "SOURCE"
+    printf '  %s  %s %s %s  %s\n' "$(_rule 2)" "$(_rule "$w")" "$(_rule 22)" "$(_rule 8)" "$(_rule 12)"
     while IFS=$'\t' read -r name creation used; do
         [[ -z "$name" ]] && continue
         tag="${name#*@}"
         n=$((n + 1))
         tags+=("$tag")
         [[ "$tag" == "$dtag" ]] && default_n=$n
-        printf '  %2d  %-34s %-22s %8s  %s\n' \
-            "$n" "${tag:0:34}" "${creation:0:22}" "$used" "$(_snap_source "$tag")"
+        printf '  %2d  %-*s %-22s %8s  %s\n' \
+            "$n" "$w" "$tag" "${creation:0:22}" "$used" "$(_snap_source "$tag")"
     done <<<"$rows"
     # No pre-transaction snapshot on this box yet: default to the newest of
     # whatever does exist rather than offering no default at all.
@@ -933,10 +949,20 @@ cmd_status() {
     if [[ "$mode" == direct ]]; then
         # Show what GRUB will really do, not what bootfs says, because on this
         # path they can disagree and only one of them is the truth.
-        local cfg_be
-        cfg_be="$(grep -oE 'root=ZFS=[^ ]+' "$ESP_GRUB_CFG" 2>/dev/null | awk 'NR==1{n=split($0,a,"="); print a[n]}')"
+        # WHY awk alone, and only on a readable file: the ESP is 0700, and
+        # grep's exit 2 on it went through pipefail to the ERR trap, so
+        # `rollback status` as a user died "FAIL at line 953" (onyx,
+        # 2026-09-30) -- as would root on a machine missing the file.
+        local cfg_be="" cfg_note="unknown"
+        if [[ -r "$ESP_GRUB_CFG" ]]; then
+            cfg_be="$(awk 'match($0, /root=ZFS=[^ ]+/) && !f { s = substr($0, RSTART + 9, RLENGTH - 9); f = 1 } END { print s }' "$ESP_GRUB_CFG")"
+        elif ((EUID != 0)); then
+            cfg_note="not readable without root"
+        else
+            cfg_note="unknown (no $ESP_GRUB_CFG)"
+        fi
         say "Boot path        : direct kernel (Secure Boot compatible)"
-        say "grub.cfg boots   : ${cfg_be:-unknown}"
+        say "grub.cfg boots   : ${cfg_be:-$cfg_note}"
         if [[ -n "$cfg_be" && -n "$running" && "$cfg_be" != "$running" ]]; then
             say ""
             say "  ** A rollback is STAGED — GRUB will boot $cfg_be on next"
