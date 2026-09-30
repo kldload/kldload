@@ -1,0 +1,155 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-TRUST-CERT 8
+.Os
+.Sh NAME
+.Nm kldload-trust-cert
+.Nd make Chrome and Firefox trust the machine's certificate authority
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl -system
+.Sh DESCRIPTION
+Browsers on Linux do not read the system trust store; each user's browser
+reads its own NSS database,
+.Pa ~/.pki/nssdb .
+.Nm
+adds the machine's root certificate,
+.Pa /etc/kldload/ca/root/ca.crt
+from
+.Xr kldload-ca 8 ,
+to that database, trusted to issue server certificates, so the web
+console and everything else the authority signs open without a warning.
+.Pp
+It adds the root, not the console's own certificate: that one is replaced
+whenever the machine's addresses change, and a trusted copy of it would
+stop matching.
+.Pp
+It does nothing to a database that already trusts the current root.
+A database that holds an older root, or the right one with the wrong trust
+flags, has the entry replaced.
+An entry named
+.Ql kldload-webui ,
+left by installs that trusted the console's certificate directly, is
+removed.
+.Pp
+Without arguments it updates the invoking user's database, creating it if
+there is none; the desktop runs it this way at every login.
+With
+.Fl -system ,
+run as root, it updates
+.Pa /etc/skel ,
+so users created later start with the root trusted,
+.Pa /root ,
+and every directory under
+.Pa /home ,
+as the user who owns it.
+.Pa kldload-tls-cert.service
+runs it so each time it runs.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -system
+Every user's database, as described above.
+Needs root.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/ca/root/ca.crt
+The root it trusts; if that is missing,
+.Pa /etc/pki/ca-trust/source/anchors/kldload-ca.crt .
+.It Pa ~/.pki/nssdb/
+A user's browser trust database.
+.It Pa /etc/xdg/autostart/kldload-trust-cert.desktop
+Runs it at each desktop login.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Every database trusts the root, or there is no root or no
+.Xr certutil 1
+to do it with, which it says.
+.It 1
+A database could not be updated;
+.Fl -system
+goes on to the others first and then says how many failed.
+.Fl -system
+run as a user.
+.El
+.Sh EXAMPLES
+Printed on 2026-09-30 in a Fedora 44 container with a throwaway authority
+and one user,
+.Ql alice .
+.Ss Before there is an authority
+.Bd -literal -offset indent
+# kldload-trust-cert --system
+kldload-trust-cert: no kldload CA root at /etc/kldload/ca/root/ca.crt; nothing to trust
+# (exited 0)
+.Ed
+.Ss Every user, then again
+After
+.Ql kldload-ca init :
+.Bd -literal -offset indent
+# kldload-trust-cert --system
+kldload-trust-cert: imported kldload-ca (5E4495E5F8A71409...) into /etc/skel/.pki/nssdb
+kldload-trust-cert: imported kldload-ca (5E4495E5F8A71409...) into /root/.pki/nssdb
+kldload-trust-cert: imported kldload-ca (5E4495E5F8A71409...) into /home/alice/.pki/nssdb
+# (exited 0)
+# su - alice -c 'certutil -L -d sql:$HOME/.pki/nssdb'
+
+Certificate Nickname                                         Trust Attributes
+                                                             SSL,S/MIME,JAR/XPI
+
+kldload-ca                                                   CT,C,
+# (exited 0)
+# kldload-trust-cert --system
+# (exited 0)
+.Ed
+.Pp
+The second run had nothing to do.
+.Ss A database it cannot write
+After
+.Ql kldload-ca init --force
+made a new root, with alice's database made read-only:
+.Bd -literal -offset indent
+# kldload-trust-cert --system
+kldload-trust-cert: imported kldload-ca (630CD6178BD9D72F...) into /etc/skel/.pki/nssdb
+kldload-trust-cert: imported kldload-ca (630CD6178BD9D72F...) into /root/.pki/nssdb
+certutil: function failed: SEC_ERROR_READ_ONLY: security library: read-only database.
+kldload-trust-cert: FAILED to import kldload-ca into /home/alice/.pki/nssdb
+kldload-trust-cert: 1 database(s) NOT updated; see above
+# (exited 1)
+# su - alice -c kldload-trust-cert
+certutil: function failed: SEC_ERROR_READ_ONLY: security library: read-only database.
+kldload-trust-cert: FAILED to import kldload-ca into /home/alice/.pki/nssdb
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr certutil 1 ,
+.Xr kldload-ca 8 ,
+.Xr kldload-tls-cert 8
+.Sh HISTORY
+It first trusted the console's certificate, and the warning came back each
+time that certificate was replaced (seen 2026-07-28).
+On 2026-06-09 the copy run for each user was found to be given no trust
+flags, so every browser window of the console opened on the warning.
+.Pp
+On 2026-09-30, writing this page: a database it could not write was
+reported as
+.Dq imported
+and the run exited 0, because its callers ignored the failure; and it
+exited 0 without a word when there was no authority.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Only
+.Pa /root
+and directories directly under
+.Pa /home
+are visited; a user whose home is elsewhere is updated at their next
+desktop login.
+.Pp
+The system trust store, which
+.Xr curl 1
+and most programs use, is
+.Xr kldload-ca 8 Ns 's
+.Cm trust-install ,
+not this.
