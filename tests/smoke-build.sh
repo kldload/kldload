@@ -3091,6 +3091,25 @@ else
     fi
 fi
 
+# ── No references to the assistant or its vendor in the tree ───────────────
+# The pre-commit hook is the first line; this is the second. On 2026-09-30 a
+# man page example carried an assistant's scratch path under /tmp into a
+# pushed commit and the hook let it through, for a reason not found (the same
+# hook blocks the same file in every test since). The words are assembled
+# here, not written, so this gate does not match itself. Exempt: the ignore
+# rules, the hook (it must name the words to search for them), and
+# ci/README.md's rsync --exclude -- tools told what to skip, not attribution.
+_section "No assistant references"
+_aw="cl""aude|anth""ropic"
+# WHY || true: git grep exits 1 when nothing matches, which is the pass.
+_cref="$(cd "$ROOT" && git grep -nIiE "$_aw" -- . ':!.gitignore' ':!.githooks/pre-commit' 2>/dev/null |
+    grep -vE "^ci/README\.md:[0-9]+:.*--exclude='\.(${_aw%%|*})'" || true)"
+if [[ -n "$_cref" ]]; then
+    _fail "assistant reference in tracked files" "$(printf '%s\n' "$_cref" | head -5 | cut -c1-160)"
+else
+    _pass "no assistant reference in tracked files"
+fi
+
 # ── grep -q pipeline ratchet ─────────────────────────────────────────────────
 # `producer | grep -q PATTERN` under pipefail: grep -q exits at its first
 # match, the producer's next write takes SIGPIPE, and the pipeline is 141 --
