@@ -3157,6 +3157,28 @@ fi
 # and "$(link add)"; every join ran both on the host, as root (2026-09-29,
 # harmless only because they had no arguments). tests/dq-comment-scan.py asks
 # shfmt's syntax tree, not a regex. Zero exist; any is a failure.
+_section "Two-line counts"
+# `$(grep -c ... || echo 0)`: grep -c prints 0 AND exits 1 when nothing
+# matches, so the echo adds a second 0. "0\n0" made a debug bundle's
+# meta.json invalid, broke a status table and failed arithmetic (the
+# 2026-08-22 incident; nine more sites found and fixed 2026-09-30). Zero
+# tolerance: assign and fall back instead, x="$(... | grep -c y)" || x=0.
+if [[ ${#SHELL_SCRIPTS[@]} -eq 0 ]]; then
+    _warn "two-line counts" "no scripts — gate did not run"
+else
+    _tl=""
+    for f in "${SHELL_SCRIPTS[@]}"; do
+        # grep exits 1 on a clean file; the loop collects only real hits
+        _tl+="$(grep -nHE 'grep -c[^|#]*[|][|][[:space:]]*echo[[:space:]]+0' "$ROOT/$f" 2>/dev/null |
+            grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')" || :
+    done
+    if [[ -n "$_tl" ]]; then
+        _fail "two-line counts" "a count with an echo-0 fallback prints 0 twice on no match: $(printf '%s' "$_tl" | head -3 | cut -c1-140)"
+    else
+        _pass "two-line counts: none in ${#SHELL_SCRIPTS[@]} scripts"
+    fi
+fi
+
 _section "Comments the host executes"
 if [[ ${#SHELL_SCRIPTS[@]} -eq 0 ]] || ! command -v shfmt >/dev/null 2>&1; then
     _warn "executed comments" "no scripts or no shfmt — gate did not run"
