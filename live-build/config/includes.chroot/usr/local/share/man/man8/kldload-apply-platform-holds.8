@@ -1,0 +1,179 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-APPLY-PLATFORM-HOLDS 8
+.Os
+.Sh NAME
+.Nm kldload-apply-platform-holds
+.Nd pin the kernel, ZFS, boot chain and NVIDIA packages so that no update moves them
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+ZFS and the NVIDIA driver are modules built for one kernel.
+An update that brings a new kernel, and a module build that then fails,
+leaves a machine that cannot mount its pool at the next boot.
+So kldload lets userspace take its security updates and pins the
+packages that are coupled to the kernel.
+.Nm
+finds the ones installed and pins them with the package manager's own
+mechanism:
+.Bl -tag -width "pacman"
+.It apt
+.Ql apt-mark hold ,
+for the Debian and Ubuntu kernel meta-packages, ZFS, GRUB, shim and
+mokutil, and every NVIDIA package.
+dpkg does not wait for its lock, so while any hold is missing it tries
+again every 5 seconds, for up to 5 minutes.
+.It dnf
+.Ql dnf versionlock ,
+for every package named kernel*, the ZFS libraries, GRUB, shim, mokutil
+and NVIDIA.
+Where the versionlock plugin is not installed it adds the names to
+.Ql exclude=
+in
+.Pa /etc/dnf/dnf.conf
+instead, and says so: an excluded package cannot be installed at all,
+which is more than a pin.
+.It pacman
+.Ql IgnorePkg
+in
+.Pa /etc/pacman.conf .
+.El
+.Pp
+The NVIDIA container toolkit is left out, since it follows its own
+releases, not the driver's; so are
+.Ql kernel-srpm-macros
+and
+.Ql zfs-release ,
+the repository definition.
+.Pp
+It then reads the pins back from the package manager, writes those it
+found to
+.Pa /var/lib/kldload/platform-holds.list ,
+and fails if any package it asked for is not among them.
+The list is what the web console and
+.Xr kldload-rollback 8
+read to say whether the machine is pinned.
+.Pa /var/lib/kldload
+is its own dataset on a kldload install; the list is not written until
+it is mounted there.
+.Pp
+.Pa kldload-package-holds.service
+runs it at every boot, so a package installed since is pinned at the
+next.
+Running it again changes nothing already pinned.
+It needs root.
+.Pp
+To move the kernel on purpose: unpin, update, check with
+.Ql dkms status
+that ZFS and NVIDIA built for the new kernel, and run
+.Nm
+again.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0, pinning nothing.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_STATE_DATASET
+The dataset that must be mounted on
+.Pa /var/lib/kldload
+before the list is written; default
+.Ql rpool/kldload/state .
+Where it does not exist the check is skipped.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/platform-holds.list
+One package name a line: what is pinned.
+.It Pa /var/log/kldload/platform-holds.log
+Each run: the package manager's own output, the mechanism and how to
+undo it, the count pinned, and anything that was not.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Everything asked for is pinned; or there was nothing to pin; or there is
+no apt, dnf or pacman, which is warned on standard error.
+.It 1
+A platform package is not pinned, named on standard error; or the state
+dataset could not be mounted.
+.El
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30:
+.Bd -literal -offset indent
+$ wc -l /var/lib/kldload/platform-holds.list
+33 /var/lib/kldload/platform-holds.list
+$ head -5 /var/lib/kldload/platform-holds.list
+akmod-nvidia
+grub2-common
+grub2-efi-x64
+grub2-tools
+grub2-tools-minimal
+# (exited 0)
+$ dnf versionlock list | grep -A1 "^Package name: kernel-core$"
+Package name: kernel-core
+evr = 7.2.2-300.fc44
+# (exited 0)
+.Ed
+.Pp
+In a Debian 13 container with
+.Ql mokutil
+installed, run twice:
+.Bd -literal -offset indent
+# kldload-apply-platform-holds
+# (exited 0)
+# kldload-apply-platform-holds
+# (exited 0)
+# apt-mark showhold
+mokutil
+# (exited 0)
+# cat /var/log/kldload/platform-holds.log
+mokutil set on hold.
+2026-09-30T09:47:11 unpin with: apt-mark unhold <pkg>
+2026-09-30T09:47:11 [apt] pinned 1 package(s)
+mokutil was already set on hold.
+2026-09-30T09:47:11 unpin with: apt-mark unhold <pkg>
+2026-09-30T09:47:11 [apt] pinned 1 package(s)
+.Ed
+.Pp
+In a Fedora 44 container with
+.Ql mokutil
+installed, and
+.Xr dnf 8
+replaced by a script that ignores
+.Ql versionlock add
+and so pins nothing:
+.Bd -literal -offset indent
+# kldload-apply-platform-holds
+kldload: WARNING — these platform packages were not pinned: mokutil
+kldload: an upgrade could move them independently; see /var/log/kldload/platform-holds.log
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr pacman.conf 5 ,
+.Xr apt-mark 8 ,
+.Xr dnf 8 ,
+.Xr kldload-rollback 8
+.Sh HISTORY
+Through 1.4.0-rc14 it pinned on apt only, so Fedora and RHEL installs had
+no pins at all (2026-08-17).
+On 2026-08-16 it tried to hold every Ubuntu kernel name on a Debian
+machine; on 2026-08-27 it stopped seeing the packages it had already
+held, found nothing to pin, and emptied the list.
+On 2026-08-28 the list was written before its dataset mounted, and the
+mount hid it; again on 2026-09-15.
+On 2026-09-28 a first boot pinned none of its packages because dpkg was
+busy, and reported success.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+On a dnf system
+.Xr kldload-firstboot 8
+adds versionlocks of its own, from a fixed list that includes the eBPF
+tools and NVIDIA package names that may not be installed.
+Those are not in the list; the machine above has 49 locks and 33 listed,
+and
+.Ql nvidia-driver ,
+not installed, locked at two versions.
