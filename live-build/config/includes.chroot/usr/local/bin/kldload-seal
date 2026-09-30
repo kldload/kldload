@@ -192,14 +192,20 @@ if [[ -f "$DISK" ]]; then
     LOOP=$(losetup -fP --show "$DISK")
     log "loop-attached $DISK as $LOOP"
     SHAPE=$(detect_shape "$LOOP")
-    SHAPE="${SHAPE/$LOOP/$DISK}" # report nicely
+    # HISTORY: SHAPE itself used to be rewritten to the file's path "to
+    # report nicely", so the mount below looked for partitions on the file,
+    # not the loop device, and no image file could ever be sealed ("no
+    # partitions found ... not a block device", found through kexport,
+    # 2026-09-29). The file's name is for the log line only.
+    SHAPE_SHOWN="${SHAPE/$LOOP/$DISK}"
     PROBE_DEV="$LOOP"
 else
     SHAPE=$(detect_shape "$DISK")
+    SHAPE_SHOWN="$SHAPE"
     PROBE_DEV="$DISK"
 fi
 
-log "detected shape: ${SHAPE%%:*} on ${SHAPE#*:}"
+log "detected shape: ${SHAPE%%:*} on ${SHAPE_SHOWN#*:}"
 
 # ── Mount according to shape ──────────────────────────────────────────
 case "${SHAPE%%:*}" in
