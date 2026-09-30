@@ -1,0 +1,105 @@
+.Dd September 30, 2026
+.Dt ZPOOL-SCRUB-EXPORTER 8
+.Os
+.Sh NAME
+.Nm zpool-scrub-exporter
+.Nd write each pool's scrub state and error counts where node_exporter will serve them
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+For every imported pool,
+.Nm
+reads
+.Ql zpool status
+and writes:
+.Bl -tag -width Ds
+.It Ql zpool_scrub_last_timestamp{pool}
+When the last completed scrub ended, in seconds since the epoch.
+.It Ql zpool_scrub_last_duration_seconds{pool}
+How long it took.
+.It Ql zpool_scrub_last_errors{pool}
+The errors it reported.
+.It Ql zpool_scrub_in_progress{pool}
+1 while a scrub runs, else 0.
+.It Ql zpool_scrub_progress_ratio{pool}
+From 0 to 1; only while a scrub runs.
+.It Ql zpool_read_errors{pool,vdev} , Ql zpool_write_errors{pool,vdev} , Ql zpool_checksum_errors{pool,vdev}
+The three error columns of every device in the pool's configuration.
+.El
+.Pp
+The file is written beside the real one and renamed over it.
+.Pa zpool-scrub-exporter.timer
+runs it 15 seconds after boot and every 60 seconds after that, as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0, writing nothing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/node_exporter/textfile_collector/zpool-scrub.prom
+What it writes.
+.El
+.Sh EXIT STATUS
+0.
+A pool whose status cannot be read, or a line that does not parse, is
+left out rather than failing the run.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with two pools:
+.Bd -literal -offset indent
+$ grep -v '^#' /var/lib/node_exporter/textfile_collector/zpool-scrub.prom
+zpool_scrub_last_duration_seconds{pool="rpool"} 20
+zpool_scrub_last_timestamp{pool="rpool"} 1788098883
+zpool_scrub_last_errors{pool="rpool"} 0
+zpool_scrub_in_progress{pool="rpool"} 0
+zpool_read_errors{pool="rpool",vdev="nvme0n1p2"} 0
+zpool_write_errors{pool="rpool",vdev="nvme0n1p2"} 0
+zpool_checksum_errors{pool="rpool",vdev="nvme0n1p2"} 0
+zpool_scrub_last_duration_seconds{pool="tank"} 1839
+zpool_scrub_last_timestamp{pool="tank"} 1785218199
+zpool_scrub_last_errors{pool="tank"} 0
+zpool_scrub_in_progress{pool="tank"} 0
+zpool_read_errors{pool="tank",vdev="nvme-WD_BLACK_SN850X_4000GB_24405U800433"} 0
+zpool_write_errors{pool="tank",vdev="nvme-WD_BLACK_SN850X_4000GB_24405U800433"} 0
+zpool_checksum_errors{pool="tank",vdev="nvme-WD_BLACK_SN850X_4000GB_24405U800433"} 0
+# (exited 0)
+.Ed
+.Pp
+The same numbers as node_exporter serves them:
+.Bd -literal -offset indent
+$ curl -s http://127.0.0.1:9100/metrics | grep -E '^zpool_scrub_(in_progress|last_duration)'
+zpool_scrub_in_progress{pool="rpool"} 0
+zpool_scrub_in_progress{pool="tank"} 0
+zpool_scrub_last_duration_seconds{pool="rpool"} 20
+zpool_scrub_last_duration_seconds{pool="tank"} 1839
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr arcstats-exporter 8 ,
+.Xr kfire-exporter 8 ,
+.Xr zpool-scrub 8 ,
+.Xr zpool-status 8
+.Sh HISTORY
+On 2026-09-30, writing this page, both found by giving it the output
+.Xr zpool-status 8
+prints in those cases:
+a scrub that took more than a day, which
+.Xr zpool 8
+prints as
+.Ql 1 days 02:03:04 ,
+got no duration at all; and a scrub in progress past 10% was misread
+from its last digit, so 12.08% was reported as 0.0208.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Only scrubs are counted.
+A finished resilver, a cancelled scrub, or a pool never scrubbed has
+.Ql zpool_scrub_in_progress
+0 and no timestamp, so an alert on the age of the last scrub fires for
+it, which is usually what is wanted.
+.Pp
+The timestamp comes from the date
+.Xr zpool 8
+prints, read in the local time zone.

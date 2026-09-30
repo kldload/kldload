@@ -1,0 +1,95 @@
+.Dd September 30, 2026
+.Dt ARCSTATS-EXPORTER 8
+.Os
+.Sh NAME
+.Nm arcstats-exporter
+.Nd write the ZFS ARC counters where node_exporter will serve them
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+reads
+.Pa /proc/spl/kstat/zfs/arcstats
+and writes every row whose value is a whole number as one gauge,
+.Ql zfs_arcstat{metric="name"} value ,
+to a file in node_exporter's textfile directory.
+It writes a temporary file beside the real one and renames it over, so a
+scrape never reads half a file.
+.Pp
+It exists because node_exporter's own ZFS collector fails on current
+kernels with
+.Dq could not parse expected integer value
+for a field it does not know; kldload turns that collector off
+.Pq Fl -no-collector.zfs
+and reads the kstat directly.
+.Pp
+.Pa arcstats-exporter.timer
+runs it 10 seconds after boot and every 15 seconds after that.
+It must run as root to write the file.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0, writing nothing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/node_exporter/textfile_collector/arcstats.prom
+What it writes.
+.It Pa /etc/systemd/system/node_exporter.service.d/textfile.conf
+Points node_exporter at the directory, and turns its ZFS collector off.
+.El
+.Sh EXIT STATUS
+0 when the file is written.
+When the kstat cannot be read \(em the ZFS module is not loaded \(em it
+exits 2 with the failing line on standard error and leaves the last file
+it wrote in place;
+.Ql node_textfile_mtime_seconds
+shows how old that file is.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30.
+The ARC's size against its ceiling, and its hits and misses since boot:
+.Bd -literal -offset indent
+$ grep -E 'metric="(size|c_max|hits|misses)"' /var/lib/node_exporter/textfile_collector/arcstats.prom
+zfs_arcstat{metric="hits"} 49593778714
+zfs_arcstat{metric="misses"} 93809708
+zfs_arcstat{metric="c_max"} 8589934592
+zfs_arcstat{metric="size"} 8579714552
+# (exited 0)
+$ grep -c '^zfs_arcstat' /var/lib/node_exporter/textfile_collector/arcstats.prom
+148
+# (exited 0)
+.Ed
+.Pp
+When the three exporters last ran and will next run:
+.Bd -literal -offset indent
+$ systemctl list-timers arcstats-exporter.timer zpool-scrub-exporter.timer kfire-exporter.timer
+NEXT                        LEFT LAST                         PASSED UNIT                       ACTIVATES
+Wed 2026-09-30 02:41:43 PDT   6s Wed 2026-09-30 02:41:28 PDT  8s ago arcstats-exporter.timer    arcstats-exporter.service
+Wed 2026-09-30 02:41:43 PDT   6s Wed 2026-09-30 02:41:28 PDT  8s ago kfire-exporter.timer       kfire-exporter.service
+Wed 2026-09-30 02:42:06 PDT  29s Wed 2026-09-30 02:41:06 PDT 30s ago zpool-scrub-exporter.timer zpool-scrub-exporter.service
+
+3 timers listed.
+Pass --all to see loaded but inactive timers, too.
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr systemd.timer 5 ,
+.Xr kfire-exporter 8 ,
+.Xr zpool-scrub-exporter 8
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Every value is a gauge, the counters among them; a dashboard takes
+.Fn rate
+of
+.Ql hits
+and
+.Ql misses
+all the same.
+.Pp
+The names are the kstat's, not node_exporter's: a query written for
+.Ql node_zfs_arc_size
+finds nothing here and wants
+.Ql zfs_arcstat{metric="size"} .
