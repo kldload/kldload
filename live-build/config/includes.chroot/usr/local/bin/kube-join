@@ -119,6 +119,29 @@ _fresh_cert_key() {
         awk '/Using certificate key:/ { getline; gsub(/[[:space:]]/, ""); print; exit }'
 }
 
+# _parse_join <text> — kubeadm's join command as a fixed argv in JOIN_ARGV.
+# Returns 1, JOIN_ARGV untouched, unless the first non-empty line is exactly
+#   kubeadm join <host>:<port> --token <token> --discovery-token-ca-cert-hash sha256:<hex>
+# which is what `kubeadm token create --print-join-command` prints.
+# SAFETY: the text comes over ssh, host key unchecked, from whatever answers
+# at <cp-endpoint>, with a fixed password as the fallback -- and it was run
+# with `eval` as root. Anything that answered there could run anything here
+# (read against the code, 2026-09-30). Now nothing from it reaches a shell:
+# four fields are checked and passed as arguments.
+JOIN_ARGV=()
+_parse_join() {
+    local line
+    local -a w
+    line="$(printf '%s\n' "$1" | awk 'NF && !f { print; f = 1 }')"
+    read -r -a w <<<"$line"
+    [[ ${#w[@]} -eq 7 && "${w[0]}" == kubeadm && "${w[1]}" == join &&
+        "${w[3]}" == --token && "${w[5]}" == --discovery-token-ca-cert-hash ]] || return 1
+    [[ "${w[2]}" =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}$ || "${w[2]}" =~ ^\[[0-9A-Fa-f:]+\]:[0-9]{1,5}$ ]] || return 1
+    [[ "${w[4]}" =~ ^[a-z0-9]{6}\.[a-z0-9]{16}$ ]] || return 1
+    [[ "${w[6]}" =~ ^sha256:[a-f0-9]{64}$ ]] || return 1
+    JOIN_ARGV=(kubeadm join "${w[2]}" --token "${w[4]}" --discovery-token-ca-cert-hash "${w[6]}")
+}
+
 # ── Pre-flight ───────────────────────────────────────────────────────────────
 command -v kubeadm >/dev/null 2>&1 || die "kubeadm not found. Run kube-setup first."
 systemctl is-active containerd >/dev/null 2>&1 || die "containerd is not running"
@@ -132,17 +155,28 @@ if command -v zfs >/dev/null 2>&1; then
     pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
     if [[ -n "${pool:-}" ]]; then
         snap="${pool}@pre-kube-join-$(date -u +%Y%m%dT%H%M%SZ)"
-        zfs snapshot -r "$snap" 2>/dev/null || true
-        log "ZFS snapshot: $snap"
+        # A failed snapshot is said, not logged as taken (2026-09-30). The join
+        # goes on: on a node that has never joined there is little to lose.
+        if zfs snapshot -r "$snap"; then
+            log "ZFS snapshot: $snap"
+        else
+            warn "could not take $snap -- this join cannot be rolled back"
+        fi
     fi
 fi
 
 # ── Fetch the base join command (fresh bootstrap token) ──────────────────────
 log "Fetching join command from $CONTROL_PLANE..."
+# no saved command, or no ssh: the fallback and the check below decide
 JOIN_CMD="$(_ssh_cp 'cat /etc/kubernetes/join-command.sh')" || true
-[[ -n "$JOIN_CMD" ]] || JOIN_CMD="$(_ssh_cp 'kubeadm token create --print-join-command')" || true
-[[ -n "$JOIN_CMD" ]] ||
-    die "Could not get join command from $CONTROL_PLANE. Ensure SSH access is configured."
+if ! _parse_join "$JOIN_CMD"; then
+    # a failure leaves JOIN_CMD empty, which _parse_join refuses below
+    JOIN_CMD="$(_ssh_cp 'kubeadm token create --print-join-command')" || true
+    [[ -n "$JOIN_CMD" ]] ||
+        die "Could not get join command from $CONTROL_PLANE. Ensure SSH access is configured."
+    _parse_join "$JOIN_CMD" ||
+        die "the join command from $CONTROL_PLANE is not kubeadm's -- refusing to run it: ${JOIN_CMD:0:120}"
+fi
 log "Join command received"
 
 # ── Join ─────────────────────────────────────────────────────────────────────
@@ -160,7 +194,7 @@ if [[ "$AS_CONTROL_PLANE" == 1 ]]; then
         die "could not obtain a valid certificate key from $CONTROL_PLANE (got: '${cert_key:0:16}…'). Is the target a healthy control plane?"
 
     node_ip="$(_this_node_ip)"
-    [[ -n "$node_ip" ]] || die "could not determine this node's IP toward $CONTROL_PLANE"
+    [[ "$node_ip" =~ ^[0-9A-Fa-f.:]+$ ]] || die "could not determine this node's IP toward $CONTROL_PLANE"
 
     log "Joining as an ADDITIONAL CONTROL PLANE"
     log "  endpoint:   $CONTROL_PLANE   advertise: $node_ip"
@@ -168,7 +202,7 @@ if [[ "$AS_CONTROL_PLANE" == 1 ]]; then
 
     # --certificate-key lets kubeadm pull the shared CA/SA/etcd certs from the
     # kubeadm-certs Secret; --apiserver-advertise-address pins this CP's apiserver.
-    eval "$JOIN_CMD --control-plane --certificate-key $cert_key --apiserver-advertise-address $node_ip" 2>&1
+    "${JOIN_ARGV[@]}" --control-plane --certificate-key "$cert_key" --apiserver-advertise-address "$node_ip" 2>&1
 
     # kubeconfig for root + the primary human user (mirrors kube-init).
     mkdir -p /root/.kube
@@ -198,7 +232,7 @@ fi
 
 # ── Worker join (default) ────────────────────────────────────────────────────
 log "Joining cluster at $CONTROL_PLANE as a worker..."
-eval "$JOIN_CMD" 2>&1
+"${JOIN_ARGV[@]}" 2>&1
 
 echo ""
 log "Successfully joined the cluster"
