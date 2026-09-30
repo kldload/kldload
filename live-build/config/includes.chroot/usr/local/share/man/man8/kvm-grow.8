@@ -1,0 +1,243 @@
+.Dd September 29, 2026
+.Dt KVM-GROW 8
+.Os
+.Sh NAME
+.Nm kvm-grow
+.Nd grow a running virtual machine's root disk, partition and filesystem
+.Sh SYNOPSIS
+.Nm
+.Ar vm
+.Ar GiB
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+makes the root disk of the running machine
+.Ar vm
+.Ar GiB
+gibibytes, and makes the guest use all of it.
+A larger disk alone is not enough: the partition table and the filesystem
+inside still describe the old size, so a guest given 50G can still only
+use 40G.
+.Nm
+grows all three layers, in order:
+.Bl -enum
+.It
+The disk.
+A disk on a ZFS volume, as every machine kldload makes has, is grown with
+.Ql zfs set volsize .
+A disk in a file is grown in the next step, by qemu, which holds the file
+locked while the guest runs.
+.It
+The guest is told, with
+.Ql virsh blockresize .
+.It
+Inside the guest, over
+.Xr ssh 1
+as root: the root partition is grown to the end of the disk with
+.Xr growpart 1 ,
+and the filesystem to fill the partition \(em
+.Xr resize2fs 8
+for ext2, ext3 and ext4,
+.Xr xfs_growfs 8
+for XFS,
+.Ql btrfs filesystem resize
+for Btrfs,
+.Xr resize.f2fs 8
+for F2FS.
+Then the filesystem's size is compared with its size before: a run that
+changed nothing succeeds only if the partition already reached the end of
+the disk.
+.El
+.Pp
+The first disk in the machine's definition is taken to be its root disk,
+as it is on every image kldload ships.
+.Pp
+Each layer reports what it did.
+Running it again is safe, and is how a run that stopped part-way is
+finished: a layer already at the size says so and the next one carries on.
+.Pp
+The machine must be running, so its filesystem can be grown, and must have
+an address this host can reach and log in to as root with its key, as
+machines made by
+.Xr kvm-clone 8
+can.
+Its address is found with
+.Xr kldload-vm-ip 8 .
+.Pp
+.Nm
+must run as root; run as a user it re-executes itself with
+.Xr sudo 8
+.Pq without a password prompt .
+.Fl -help
+needs neither.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Ar GiB
+The new size, a whole number of gibibytes.
+A size smaller than the disk is refused; the same size grows only the
+layers inside that have not caught up.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Grown, or every layer was already at full size.
+.It 1
+A layer failed, or the guest had no address or could not be logged in to;
+the lines before say how far it got.
+.It 2
+Refused before changing anything \(em a usage error, a size that is not a
+whole number or is smaller than the disk, a machine that is not running
+\(em or the guest's root is on a layout the guest step does not grow; the
+disk has been grown by then, and
+.Nm
+says so.
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on a kldload host on 2026-09-29, against
+.Ql gr-3246078 ,
+a throwaway clone of a Rocky Linux golden with a 40G disk and XFS on
+.Pa /dev/vda4 ,
+and
+.Ql gr-3246078-f ,
+a machine with a disk in a qcow2 file and no operating system; both were
+deleted afterwards.
+.Ss Growing
+.Bd -literal -offset indent
+# kvm-grow gr-3246078 44
+block:      rpool/vms/gr-3246078 40G -> 44G
+guest:      virsh blockresize gr-3246078 vda 44G
+root:       /dev/vda4 (xfs) on /dev/vda partition 4
+filesystem: 39G before
+partition:  grown -- CHANGED: partition=4 start=2258944 old: size=81627103 end=83886046 new: size=90015711 end=92274654
+            meta-data=/dev/vda4              isize=512    agcount=18, agsize=584767 blks
+\&...
+            data blocks changed from 10203387 to 11251963
+filesystem: 43G after
+RESULT: grown
+# (exited 0)
+.Ed
+.Ss Running it again
+.Bd -literal -offset indent
+# kvm-grow gr-3246078 44
+block:      rpool/vms/gr-3246078 is already 44G
+guest:      virsh blockresize gr-3246078 vda 44G
+root:       /dev/vda4 (xfs) on /dev/vda partition 4
+filesystem: 43G before
+partition:  already at full size
+            meta-data=/dev/vda4              isize=512    agcount=20, agsize=584767 blks
+\&...
+filesystem: 43G after
+RESULT: already at full size
+# (exited 0)
+.Ed
+.Ss A disk in a file
+The machine had no operating system, so there was nobody to log in to;
+the disk itself was grown:
+.Bd -literal -offset indent
+# kvm-grow gr-3246078-f 2
+block:      /var/lib/libvirt/images/gr-3246078-f.qcow2 1G -> 2G (by blockresize)
+guest:      virsh blockresize gr-3246078-f vda 2G
+kvm-grow: gr-3246078-f has no address yet — the block device is grown; run again for the filesystem
+# (exited 1)
+.Ed
+.Ss A guest that cannot be logged in to
+Here with
+.Xr sshd 8
+stopped inside the guest:
+.Bd -literal -offset indent
+# kvm-grow gr-3246078 45
+block:      rpool/vms/gr-3246078 44G -> 45G
+guest:      virsh blockresize gr-3246078 vda 45G
+ssh: connect to host 192.168.122.3 port 22: Connection refused
+kvm-grow: could not ssh to root@192.168.122.3 -- the block device is 45G; run again for the filesystem
+# (exited 1)
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+# kvm-grow gr-3246078 42
+kvm-grow: refusing to shrink rpool/vms/gr-3246078 (44G -> 42G)
+# (exited 2)
+# kvm-grow gr-3246078 4.5
+kvm-grow: size must be whole GiB, got '4.5'
+# (exited 2)
+# kvm-grow klab-golden-rocky 50
+kvm-grow: klab-golden-rocky is not running — the guest has to be up to grow its filesystem
+# (exited 2)
+# kvm-grow web/1 50
+kvm-grow: 'web/1' is not a VM name
+# (exited 2)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kvm-grow: VM is not running \(em the guest has to be up to grow its filesystem"
+Start it and run again.
+.It "kvm-grow: refusing to shrink DISK (CUR -> NEW)"
+Nothing was changed.
+Shrinking a disk under a filesystem destroys what lies past the new end.
+.It "kvm-grow: VM has no address yet \(em the block device is grown; run again for the filesystem"
+.Xr kldload-vm-ip 8
+found no address; a guest still booting has none yet.
+.It "kvm-grow: could not ssh to root@ADDRESS -- the block device is SIZE; run again for the filesystem"
+The guest refused the login or did not answer.
+.It "partition:  growpart NOT INSTALLED on NAME -- install PACKAGE"
+The guest lacks
+.Xr growpart 1 ;
+the package that has it on that distribution is named.
+The filesystem is still grown as far as its partition allows.
+.It "growroot: root is the LVM volume DEVICE: ..."
+The root filesystem is on LVM, which is not grown; the message names the
+commands.
+The disk has been grown and the exit status is 2.
+.It "growroot: root is DATASET (zfs), not a partition: grow its pool or volume by hand"
+A guest with ZFS on root.
+Grow its partition with
+.Xr growpart 1 ,
+then its pool with
+.Ql zpool online -e .
+.It "growroot: NOT grown -- the filesystem did not change size; see the lines above"
+Every step ran and the filesystem is the size it was, though the
+partition had not reached the end of the disk.
+.It "kvm-grow: FAIL at line N: COMMAND"
+A command on this host failed; it is named.
+.El
+.Sh SEE ALSO
+.Xr ssh 1 ,
+.Xr virsh 1 ,
+.Xr growpart 1 ,
+.Xr kldload-vm-ip 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-create 8 ,
+.Xr resize2fs 8 ,
+.Xr xfs_growfs 8 ,
+.Xr zfsprops 7
+.Sh HISTORY
+.Nm
+was ported from the grow verb of
+.Xr vmxplore 1
+on 2026-09-26.
+.Pp
+On 2026-09-29, writing this page: a machine with its disk in a file could
+never be grown, since both
+.Xr qemu-img 1
+commands it ran were refused the running guest's lock; an unreachable
+guest exited 255 instead of 1; and an LVM root failed with a message that
+did not say it was LVM.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Only the root disk, and only the partition and filesystem mounted at
+.Pa / ,
+are grown.
+A second disk, a separate
+.Pa /home ,
+LVM and ZFS inside the guest are left to be grown by hand.
+.Pp
+A disk cannot be shrunk.
+.Pp
+The guest's host key is not checked: machines made from goldens get a new
+one each time they are made.
