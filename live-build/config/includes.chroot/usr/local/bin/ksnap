@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "ksnap: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # ksnap — simplified ZFS snapshot interface
 # Usage:
@@ -24,7 +25,12 @@ Usage: ksnap [list|rollback <path>|destroy <snap>|<path>]
   ksnap rollback /x  Roll back to last snapshot
   ksnap destroy NAME Destroy a snapshot
 
+A path is resolved to the ZFS dataset holding it; a path that is not on
+ZFS is refused. The root filesystem is never rolled back here: use
+kldload-rollback, which boots an earlier boot environment instead.
+
 Exit: 0 done, 1 a snapshot or rollback failed, 2 usage error.
+See ksnap(8).
 EOF
 }
 case "$cmd" in
@@ -38,9 +44,15 @@ _ts() { date +%Y%m%d-%H%M%S; }
 _log() { printf '\033[0;32m[ksnap]\033[0m %s\n' "$*"; }
 _err() { printf '\033[0;31m[ksnap]\033[0m %s\n' "$*" >&2; }
 
-# Resolve a path to its ZFS dataset
+# _path_to_ds PATH -- the ZFS dataset holding PATH on stdout, or nothing.
+# WHY findmnt and the fstype: `df --output=source` answered for any
+# filesystem, so a path on tmpfs came back as "tmpfs" and the rollback said
+# "No snapshots found for tmpfs" (found writing ksnap(8), 2026-09-29).
 _path_to_ds() {
-    df --output=source "$1" 2>/dev/null | tail -1
+    local src fst
+    read -r src fst < <(findmnt -no SOURCE,FSTYPE -T "$1" 2>/dev/null) || return 0
+    [[ "$fst" == zfs ]] && printf '%s\n' "$src"
+    return 0
 }
 
 case "$cmd" in
@@ -57,12 +69,22 @@ list)
     ;;
 
 rollback)
-    target="${2:?Usage: ksnap rollback /path}"
+    [[ -n "${2:-}" ]] || {
+        _err "rollback needs a path: ksnap rollback /path"
+        exit 2
+    }
+    target="$2"
     ds="$(_path_to_ds "$target")"
     [[ -n "$ds" ]] || {
-        _err "Cannot find ZFS dataset for $target"
+        _err "$target is not on a ZFS dataset"
         exit 1
     }
+    # SAFETY: rolling back the dataset mounted at / rewrites the running
+    # system under itself. A boot environment is the way to go back there.
+    if [[ "$ds" == "$(findmnt -no SOURCE /)" ]]; then
+        _err "$ds is the running root filesystem; roll it back with kldload-rollback (boot environments), not here"
+        exit 1
+    fi
     # Newest snapshot without `| head`: mapfile reads all of `zfs list` in-
     # process, so the producer never takes SIGPIPE (exit 141 under pipefail) on
     # a dataset with enough snapshots to overflow the pipe buffer. Same crash
@@ -75,33 +97,55 @@ rollback)
         exit 1
     }
     _log "Rolling back $ds to $last_snap"
-    sudo zfs rollback "$last_snap"
+    sudo zfs rollback "$last_snap" || {
+        _err "zfs refused the rollback (above); $target is unchanged"
+        exit 1
+    }
     _log "Done. $target is now at: $last_snap"
     ;;
 
 destroy)
-    snap="${2:?Usage: ksnap destroy <snapshot-name>}"
+    [[ -n "${2:-}" ]] || {
+        _err "destroy needs a snapshot: ksnap destroy dataset@name"
+        exit 2
+    }
+    snap="$2"
     if [[ "$snap" != *@* ]]; then
         _err "Error: expected a snapshot (dataset@name), not a dataset. This would destroy the dataset."
-        exit 1
+        exit 2
     fi
     _log "Destroying snapshot: $snap"
-    sudo zfs destroy "$snap"
+    sudo zfs destroy "$snap" || {
+        _err "could not destroy $snap (above)"
+        exit 1
+    }
     _log "Done."
     ;;
 
 all)
     ts="$(_ts)"
     _log "Snapshotting key datasets (manual-${ts})"
+    # WHY counted: each failure was swallowed (2>/dev/null ... || true) and the
+    # run said "Done." and exited 0 with nothing taken (found writing ksnap(8),
+    # 2026-09-29). A missing dataset is skipped; a failed snapshot is not.
+    made=0 failed=0
     for ds in $(zfs list -H -o name -d1 rpool/ROOT 2>/dev/null) \
         $(zfs list -H -o name -d1 rpool/home 2>/dev/null) \
         rpool/srv rpool/var/lib; do
-        if zfs list "$ds" &>/dev/null; then
-            sudo zfs snapshot "${ds}@manual-${ts}" 2>/dev/null &&
-                _log "  ${ds}@manual-${ts}" || true
+        zfs list "$ds" &>/dev/null || continue # not every install has /srv or a /home dataset
+        if _e="$(sudo zfs snapshot "${ds}@manual-${ts}" 2>&1)"; then
+            _log "  ${ds}@manual-${ts}"
+            made=$((made + 1))
+        else
+            _err "  ${ds}: ${_e}"
+            failed=$((failed + 1))
         fi
     done
-    _log "Done."
+    if ((failed || made == 0)); then
+        _err "${made} taken, ${failed} failed"
+        exit 1
+    fi
+    _log "Done: ${made} snapshot(s)."
     ;;
 
 /*)
@@ -109,12 +153,15 @@ all)
     ts="$(_ts)"
     ds="$(_path_to_ds "$cmd")"
     [[ -n "$ds" ]] || {
-        _err "Cannot find ZFS dataset for $cmd"
+        _err "$cmd is not on a ZFS dataset"
         exit 1
     }
     snap="${ds}@manual-${ts}"
     _log "Snapshotting $ds"
-    sudo zfs snapshot "$snap"
+    sudo zfs snapshot "$snap" || {
+        _err "could not snapshot $ds (above)"
+        exit 1
+    }
     _log "Done: $snap"
     ;;
 
