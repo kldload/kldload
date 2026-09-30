@@ -635,11 +635,20 @@ demo_vm_lifecycle() {
         golden_snap="$(zfs list -t snapshot -H -o name rpool/vms/k8s-golden 2>/dev/null | head -1)"
     fi
 
-    if [[ -n "$golden_snap" ]]; then
+    # SAFETY: demo-vm is a plain name anyone may have. The clone below failed
+    # silently when rpool/vms/demo-vm already existed, the block device was
+    # then there, the demo booted it, and the cleanup destroyed, undefined and
+    # `zfs destroy`ed the user's machine (read against the code, 2026-09-30).
+    # The demo's clone carries com.kldload:demo=kube-demo; one without it is
+    # left alone and the step skipped.
+    if [[ -n "$golden_snap" ]] && zfs list -H rpool/vms/demo-vm >/dev/null 2>&1 &&
+        [[ "$(zfs get -H -o value com.kldload:demo rpool/vms/demo-vm 2>/dev/null)" != kube-demo ]]; then
+        echo -e "  ${R}rpool/vms/demo-vm exists and is not this demo's — skipping the clone step${N}"
+    elif [[ -n "$golden_snap" ]]; then
         echo -ne "  ${Y}Cloning 40GB VM disk...${N} "
         local vm_start vm_end
         vm_start=$(date +%s%N)
-        zfs clone -o volsize=40G "${golden_snap}" rpool/vms/demo-vm 2>/dev/null
+        zfs clone -o volsize=40G -o com.kldload:demo=kube-demo "${golden_snap}" rpool/vms/demo-vm 2>/dev/null
         vm_end=$(date +%s%N)
         local ms=$(((vm_end - vm_start) / 1000000))
         echo -e "${G}done in ${ms}ms${N}"
