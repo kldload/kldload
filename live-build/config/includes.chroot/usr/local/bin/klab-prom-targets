@@ -23,6 +23,20 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 
+# --help answers without regenerating anything: it ran the whole tool,
+# writing under /etc/prometheus (2026-09-30).
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "klab-prom-targets: takes no arguments (got: $*)" >&2
+    exit 2
+    ;;
+esac
+
 TARGETS_DIR="/etc/prometheus/targets"
 mkdir -p "$TARGETS_DIR"
 

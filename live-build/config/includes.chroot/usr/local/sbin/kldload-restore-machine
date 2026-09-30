@@ -69,7 +69,9 @@ die() {
 }
 
 usage() {
-    cat >&2 <<EOF
+    # asked for: stdout, 0; a usage error: stderr, 2 (--help exited 2, 2026-09-30)
+    local rc="${1:-2}"
+    cat >&$((rc == 0 ? 1 : 2)) <<EOF
 usage: kldload-restore-machine --archive-host HOST --archive DATASET --disk DEV --yes
        kldload-restore-machine --archive-url URL --disk DEV --yes
                                [--pool NAME] [--hostname NAME] [--esp-size SIZE]
@@ -99,7 +101,7 @@ usage: kldload-restore-machine --archive-host HOST --archive DATASET --disk DEV 
 EXIT STATUS
   0  restored and verified   1  a step failed   2  usage or validation
 EOF
-    exit 2
+    exit "$rc"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -153,7 +155,7 @@ while [[ $# -gt 0 ]]; do
         DRY_RUN=1
         shift
         ;;
-    -h | --help) usage ;;
+    -h | --help) usage 0 ;;
     *) die "unknown argument: $1" 2 ;;
     esac
 done

@@ -47,7 +47,9 @@ export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 XML_DIR="${KLDLOAD_NETWORK_DIR:-/usr/local/share/kldload-networks}"
 LOG=/var/log/kldload/networks.log
-mkdir -p "$(dirname "$LOG")"
+# the log directory only for work that writes it: --help must answer as
+# anyone, anywhere (a sandboxed --help failed on this mkdir, 2026-09-30)
+case "${1:-apply}" in help | -h | --help) ;; *) mkdir -p "$(dirname "$LOG")" ;; esac
 
 _ts() { date '+%Y-%m-%dT%H:%M:%S'; }
 log() { echo "$(_ts) $*" >>"$LOG"; }

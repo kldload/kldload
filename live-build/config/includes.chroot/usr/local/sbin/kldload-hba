@@ -399,7 +399,9 @@ cmd_json() {
 }
 
 usage() {
-    cat >&2 <<'EOF'
+    # asked for: stdout, 0; a usage error: stderr, 2 (--help exited 2, 2026-09-30)
+    local rc="${1:-2}"
+    cat >&$((rc == 0 ? 1 : 2)) <<'EOF'
 usage: kldload-hba [status | drives | enclosures | json]
 
   status       controllers, their driver, firmware where the kernel exposes it,
@@ -414,7 +416,7 @@ It NEVER writes to a controller. Flashing an HBA is deliberately not here.
 EXIT STATUS
   0  the report ran   1  a step failed   2  usage
 EOF
-    exit 2
+    exit "$rc"
 }
 
 case "${1:-status}" in
@@ -422,6 +424,6 @@ status) cmd_status ;;
 drives) cmd_drives ;;
 enclosures) cmd_enclosures ;;
 json) cmd_json ;;
--h | --help | help) usage ;;
+-h | --help | help) usage 0 ;;
 *) die "unknown subcommand: $1" 2 ;;
 esac
