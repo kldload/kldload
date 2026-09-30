@@ -1,0 +1,156 @@
+.Dd September 29, 2026
+.Dt KVM-LIST 8
+.Os
+.Sh NAME
+.Nm kvm-list
+.Nd list the virtual machines on this host with their state, size and disk
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+prints a line for every machine libvirt knows on this host, running or
+not, with the columns:
+.Bl -tag -width "ZVOL USED"
+.It Li NAME
+The libvirt name.
+.It Li STATE
+As libvirt reports it:
+.Ql running ,
+.Ql paused ,
+.Ql shut off
+and so on.
+.It Li RAM
+The machine's maximum memory, in MiB (written MB).
+.It Li VCPUS
+Its virtual processors.
+.It Li ZVOL USED
+The space its disk,
+.Pa rpool/vms/ Ns Ar name ,
+takes in the pool: what it holds, not its size.
+.Ql n/a
+when the machine's disk is not there \(em a machine made by hand, or
+whose disk is a file or lives in another dataset.
+.El
+.Pp
+Below the table is the space used by, and available to,
+.Pa rpool/vms
+as a whole.
+.Pp
+Machines are listed in libvirt's order, running ones first.
+.Pp
+.Nm
+must run as root; run as a user it re-executes itself with
+.Xr sudo 8 .
+.Fl -help
+needs neither.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+The machines were listed, or there are none.
+.It 1
+libvirt could not be asked.
+.It 2
+An argument was given.
+.El
+.Sh EXAMPLES
+Printed by
+.Nm
+on a kldload desktop on 2026-09-29.
+.Ss Every machine
+.Bd -literal -offset indent
+# kvm-list
+NAME                 STATE        RAM        VCPUS  ZVOL USED
+app-adguard-ho       shut off     1024MB     1      713M
+app-icecast-st       shut off     4096MB     8      1.41G
+\&...
+klab-blue-centos     shut off     384MB      1      5.70M
+klab-blue-debian     shut off     384MB      1      n/a
+\&...
+klab-golden-centos   shut off     4096MB     2      2.41G
+\&...
+vdi                  shut off     2048MB     2      8K
+vdi-1                shut off     2048MB     2      2.01G
+web-golden           shut off     2048MB     2      1.92G
+
+ZFS pool space:
+NAME        USED  AVAIL
+rpool/vms  74.7G   170G
+# (exited 0)
+.Ed
+.Pp
+.Ql klab-blue-centos
+is a clone of
+.Ql klab-golden-centos Ns @golden :
+its 5.70M is what it has written since, the rest is shared
+with its golden.
+.Ql klab-blue-debian
+has no disk under
+.Pa rpool/vms .
+.Ss Arguments are not a filter
+.Bd -literal -offset indent
+$ kvm-list web01
+kvm-list: takes no arguments (got: web01); try kvm-list --help
+# (exited 2)
+.Ed
+.Pp
+To pick machines out, filter the output:
+.Bd -literal -offset indent
+# kvm-list | grep -E '^(NAME|klab-golden)'
+NAME                 STATE        RAM        VCPUS  ZVOL USED
+klab-golden-centos   shut off     4096MB     2      2.41G
+klab-golden-debian   shut off     4096MB     2      1.14G
+klab-golden-fedora   shut off     4096MB     2      2.27G
+klab-golden-rocky    shut off     4096MB     2      2.34G
+klab-golden-ubuntu   shut off     4096MB     2      1.25G
+NAME        USED  AVAIL
+.Ed
+.Pp
+The last line is the pool summary's header, which the pattern also
+matches.
+.Ss When libvirt does not answer
+Here pointed at a socket that does not exist:
+.Bd -literal -offset indent
+# LIBVIRT_DEFAULT_URI='qemu+unix:///system?socket=/nonexistent' kvm-list
+error: failed to connect to the hypervisor
+error: Failed to connect socket to '/nonexistent': No such file or directory
+kvm-list: could not ask libvirt for its machines (see above)
+# (exited 1)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kvm-list: could not ask libvirt for its machines (see above)"
+.Xr virsh 1
+could not reach libvirt; its own error is printed above.
+.It "kvm-list: takes no arguments (got: ARGS); try kvm-list --help"
+There are no options or filters.
+.El
+.Sh SEE ALSO
+.Xr kld 1 ,
+.Xr virsh 1 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-create 8 ,
+.Xr kvm-delete 8 ,
+.Xr kvm-snap 8
+.Sh HISTORY
+On 2026-09-29, writing this page: with libvirt unreachable the table
+printed its header and no rows and exited 0, the same as a host with no
+machines; arguments were ignored, so
+.Ql kvm-list web01
+listed everything; and names longer than 20 characters pushed their rows
+out of line.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Only the disk at
+.Pa rpool/vms/ Ns Ar name
+is measured.
+A machine's data disk,
+.Ar name Ns Pa -data ,
+is not; its space appears only in the pool total.
