@@ -586,6 +586,11 @@ cmd_sign_module() {
         exit 0
     }
 
+    # SAFETY: sign-file appends to the file as given, so a compressed module
+    # comes out corrupt with exit 0 (tried on a copy of zfs.ko.xz,
+    # 2026-09-30). DKMS hands its sign tool the .ko before compressing;
+    # anything else is refused.
+    [[ "${mod}" == *.ko ]] || die "not an uncompressed .ko: ${mod} (signing it in place would corrupt it)"
     exec "${sign_file}" sha256 "${ROOT_KEY}" "${ROOT_CRT}" "${mod}"
 }
 
