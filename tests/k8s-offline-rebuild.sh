@@ -138,8 +138,11 @@ case "$_brc" in
 124) _fail "kube-cluster bootstrap" "did not finish in ${BOOT_MAX}s" ;;
 *) _fail "kube-cluster bootstrap" "exit ${_brc} after ${_secs}s — tail ${BOOTLOG}" ;;
 esac
-# The golden's own count of images it loaded from the darksite, as it logged it.
-_img="$(grep -oiE '[0-9]+/[0-9]+ images?[^.]*' "$BOOTLOG" | tail -n 1 || true)"
+# The golden's own count of images it loaded from the darksite, as it logged it:
+# "container images: 38 of 38 from the darksite, 0 pulled from the internet,
+# 0 missing". The pattern here had looked for "N/M images", a form kube-setup
+# no longer prints, so the count was never read (build 163, 2026-09-29).
+_img="$(grep -oE 'container images: [0-9]+ of [0-9]+ from the darksite[^.]*' "$BOOTLOG" | tail -n 1 || true)" # no line: warned just below
 [[ -n "$_img" ]] && _pass "golden images: ${_img}" || _warn "golden images" "no image count in ${BOOTLOG}"
 
 # ─── The cluster that came back ─────────────────────────────────────────────
