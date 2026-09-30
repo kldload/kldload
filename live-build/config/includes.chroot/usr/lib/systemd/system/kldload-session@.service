@@ -25,6 +25,13 @@ Type=simple
 # whitespace-split of ExecStart=. The wrapper builds argv as a bash
 # array and execs ttyd — clean and debuggable.
 ExecStart=/usr/libexec/kldload-session-run %i
+# The session is a root terminal on a unix socket. UMask=0077 binds it 0600
+# root:root; kldload-web-socket then gives it to nginx's group, 0660, or
+# leaves it root-only and fails the start. It was a 127.0.0.1 port any local
+# account could open until 2026-09-30. The session's own shell gets 022 back
+# in kldload-session-run.
+UMask=0077
+ExecStartPost=/usr/libexec/kldload-web-socket /run/kldload/session/%i.sock
 
 # Low-noise restart policy: if the user's command exits (they typed
 # `exit`), let the unit die — kldload-session prune reaps the metadata

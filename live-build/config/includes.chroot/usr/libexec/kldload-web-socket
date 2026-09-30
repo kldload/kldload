@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-web-socket — hand a root backend's unix socket to nginx, and no one else
+#
+# What it does, in order:
+#   1. Waits up to 10 s for SOCKET to appear (the backend binds it after its
+#      unit starts; this runs as that unit's ExecStartPost).
+#   2. Finds the group nginx runs as: the `user` line of nginx.conf, else the
+#      first of nginx / www-data / http that exists.
+#   3. chgrp's the socket to it and makes it 0660, then reads both back.
+#
+# Why: ttyd-k9s and every kldload-session terminal are ROOT consoles. They
+# listened on 127.0.0.1:<port>, which every local account can connect to,
+# and nginx's sign-in gate is no gate if the backend is one connect() away
+# (onyx, 2026-09-30: :7681 was a root tmux console, open to any local user).
+# On a unix socket, connecting needs write permission on the socket, so
+# 0660 root:<nginx group> leaves nginx as the only way in.
+#
+# The unit starts the backend under UMask=0077, so until this runs the socket
+# is 0600 root:root: nothing but root can connect. A failure here leaves it
+# that way, which fails closed (nginx answers 502), and exits non-zero so
+# the unit reports it. ttyd's own -U owner option is not used: Fedora's
+# ttyd 1.7.7 ignores it (the socket stays root:root, 0755 or per umask).
+#
+# Usage:  kldload-web-socket SOCKET
+# Exit:   0 socket handed to nginx's group; 1 no socket, no group, or the
+#         mode did not land; 2 usage.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kldload-web-socket: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+"")
+    echo "usage: kldload-web-socket SOCKET" >&2
+    exit 2
+    ;;
+esac
+sock="$1"
+
+for _ in $(seq 1 100); do
+    [[ -S "$sock" ]] && break
+    sleep 0.1
+done
+if [[ ! -S "$sock" ]]; then
+    echo "kldload-web-socket: $sock never appeared" >&2
+    exit 1
+fi
+
+# The user line wins: profiles.sh rewrites it to www-data on Debian, and a
+# site may run nginx as something else entirely.
+grp=""
+_u="$(awk '$1 == "user" { sub(/;$/, "", $2); print $2; exit }' /etc/nginx/nginx.conf 2>/dev/null)" ||
+    _u="" # no nginx.conf: fall through to the known names
+if [[ -n "$_u" ]] && id -gn "$_u" >/dev/null 2>&1; then
+    grp="$(id -gn "$_u")"
+else
+    for _g in nginx www-data http; do
+        if getent group "$_g" >/dev/null; then
+            grp="$_g"
+            break
+        fi
+    done
+fi
+if [[ -z "$grp" ]]; then
+    echo "kldload-web-socket: no nginx group found; $sock stays root-only" >&2
+    exit 1
+fi
+
+chgrp "$grp" "$sock"
+chmod 0660 "$sock"
+_got="$(stat -c '%a %G' "$sock")"
+if [[ "$_got" != "660 $grp" ]]; then
+    echo "kldload-web-socket: $sock is '$_got', wanted '660 $grp'" >&2
+    exit 1
+fi
+echo "kldload-web-socket: $sock -> 0660 root:$grp"
