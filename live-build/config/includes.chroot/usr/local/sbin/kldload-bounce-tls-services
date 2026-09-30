@@ -30,6 +30,9 @@ set +o pipefail
 
 CERT=/var/lib/kldload/tls/webui.crt
 KEY=/var/lib/kldload/tls/webui.key
+# WARN: this loosens the key kldload-tls-cert writes 0600 to 0640 (group
+# root) on every run. The directory is 0700, so nothing but root reaches
+# either file; I have not found the reader this was for (2026-09-30).
 [[ -e "$CERT" ]] && chmod 0644 "$CERT" 2>/dev/null || true
 [[ -e "$KEY" ]] && chmod 0640 "$KEY" 2>/dev/null || true
 
@@ -64,7 +67,7 @@ fi
 #      right move for 1.0.6.
 #
 #   2. RESTART (full): used for kldload-webui because it loads the
-#      cert via kldload-tls-cert stdin and has no reload signal. Also
+#      cert files once at start and has no reload signal. Also
 #      for ttyd-k9s / grafana-server on 1.0.5 images where the Python
 #      kldload-proxy was the :8443 terminator.
 #
