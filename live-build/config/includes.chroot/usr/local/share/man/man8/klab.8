@@ -1,0 +1,197 @@
+.Dd September 30, 2026
+.Dt KLAB 8
+.Os
+.Sh NAME
+.Nm klab
+.Nd build golden images of five distributions, run blue and green sites from them, and test ZFS across them
+.Sh SYNOPSIS
+.Nm
+.Op Cm menu
+.Nm
+.Cm golden | golden-ztest | golden-desktop | golden-xfce | golden-kde | golden-db
+.Op Ar distro ... | Cm all
+.Nm
+.Cm deploy | promote | destroy
+.Ar site
+.Nm
+.Cm rollback | build-all | status
+.Nm
+.Cm test
+.Op Fl -quick | -full
+.Op Fl -distro Ar list
+.Nm
+.Cm verify
+.Op Ar distro | Cm all
+.Nm
+.Cm results
+.Op Ar run-id
+.Nm
+.Cm kubernetes
+.Op Fl -workers Ar n
+.Op Ar distro
+.Nm
+.Cm run-playbook Ar script
+.Nm
+.Cm fetch-rhel-image
+.Op Fl -output Ar path
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+builds a golden image of each of CentOS, Rocky, Fedora, Debian and Ubuntu
+\(em a cloud image made into a ZFS volume, set up, validated, shut down
+and snapshotted \(em and makes machines from them as instant clones.
+There are several lineages:
+.Bl -tag -width "golden-desktop" -compact
+.It Cm golden
+The regular image, ZFS included, kept small.
+.It Cm golden-ztest
+With the OpenZFS test suite, its dependencies and loopback devices, for
+.Cm test .
+.It Cm golden-desktop , golden-xfce , golden-kde
+GNOME, Xfce or KDE Plasma desktops, without ZFS in the guest.
+.It Cm golden-db
+PostgreSQL with a generated dataset, to clone one per developer.
+.El
+.Pp
+A golden that exists and validated is kept, so building again takes
+seconds; one whose last validation failed is rebuilt.
+The blue site is the running set of machines and green the next;
+.Cm promote
+makes green the new blue after snapshotting blue, and
+.Cm rollback
+returns blue to that snapshot.
+.Pp
+It runs itself under
+.Xr sudo 8 .
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm golden Oo Ar distro ... | Cm all Oc
+And the other lineages, as above.
+.It Cm deploy Cm blue | green
+Clone the goldens into that site.
+.It Cm promote Cm green
+Green becomes blue.
+.It Cm rollback
+Blue back to its snapshot from before the last promotion.
+.It Cm build-all
+Every golden, then both sites, in one run; a second run while one is
+going is refused.
+.It Cm test Oo Fl -quick | Fl -full Oc Op Fl -distro Ar list
+The OpenZFS test suite on the ztest goldens' clones.
+.It Cm verify Op Ar distro | Cm all
+Boot each golden's clone and check it.
+.It Cm status
+The goldens, the sites, the last results and the logs.
+.It Cm results Op Ar run-id
+A run's matrix of passes and failures.
+.It Cm kubernetes Oo Fl -workers Ar n Oc Op Ar distro
+A cluster by
+.Xr kube-cluster 8 ;
+three workers by default.
+.It Cm run-playbook Ar script
+Run a script on the blue site's machines.
+.It Cm destroy Cm blue | green | all | goldens
+Remove a site, both, or the goldens.
+.It Cm fetch-rhel-image
+Download the RHEL guest image with saved Red Hat credentials.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -zfs-version Ar v , Fl -zfs-git Ar repo@branch , Fl -zfs-tarball Ar path
+Build ZFS into the goldens from a release, a git branch or a tarball.
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLAB_DB_SCALE
+The size of
+.Cm golden-db Ns 's
+dataset: 200 is about 3 GB, 3400 about 500 GB.
+.It Ev KLAB_ZFS_DEV
+1 puts the test suite into the image;
+.Cm golden-ztest
+sets it.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/klab/
+Logs and results:
+.Pa klab.log ,
+.Pa goldens/ Ns Ar distro Ns Pa -latest.log
+with each golden's validation, and one directory per test run.
+.El
+.Sh EXIT STATUS
+0 when done; 1 on a failure, named.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+# klab status
+[klab] os-variant 'fedora44' unknown to osinfo-db; using 'fedora43' for fedora
+[klab] TPM 2.0: enabled (swtpm)
+══════════════════════════════════════════════════════════════════════════════════════════════
+  klab — Multi-Distro Test Platform
+  Host: onyx • 24 cores • 31GB RAM • NVIDIA: YES • ZFS: repo
+══════════════════════════════════════════════════════════════════════════════════════════════
+
+  Golden Images:
+
+  DISTRO     STATUS   SIZE       KERNEL                       ZFS              DKMS     TESTS  KSH
+  ────────── ──────── ────────── ──────────────────────────── ──────────────── ──────── ────── ──────
+  centos     READY    2.5G       5.14.0-741.el9.x86_64        zfs-2.2.11-1     OK       MISSING MISSING
+  rocky      READY    2.4G       5.14.0-687.10.1.el9_8.0.1.x8 zfs-2.2.11-1     OK       MISSING MISSING
+  fedora     READY    2.3G       6.19.10-300.fc44.x86_64      zfs-2.4.4-1      OK       MISSING MISSING
+  debian     READY    1.2G       6.12.107+deb13-cloud-amd64   zfs-2.3.9-0+deb1 OK       MISSING MISSING
+  ubuntu     READY    1.3G       6.8.0-138-generic            zfs-2.2.2-0ubunt OK       MISSING MISSING
+  ────────── ──────── ────────── ──────────────────────────── ──────────────── ──────── ────── ──────
+  Ready: 5  Failed: 0  Not built: 0  Total: 5
+
+  Storage: 75G used / 150G available on rpool/vms
+
+  Site blue:
+    klab-blue-centos          --               shut off
+    klab-blue-ubuntu          --               shut off
+
+  Site green:
+    klab-green-centos         --               shut off
+    klab-green-ubuntu         --               shut off
+
+  Results:
+    No test runs yet
+
+  Logs: /root/klab/
+    Master log: /root/klab/klab.log (1167 lines)
+══════════════════════════════════════════════════════════════════════════════════════════════
+# (exited 0)
+.Ed
+.Pp
+The test suite is not in regular goldens; the TESTS and KSH columns say
+so, and only
+.Cm golden-ztest
+images need it.
+.Sh SEE ALSO
+.Xr klab-exporter 8 ,
+.Xr klab-prom-targets 8 ,
+.Xr klab-vm-debug-bundle 8 ,
+.Xr kube-cluster 8 ,
+.Xr kzfs-lab 8 ,
+.Xr kzfs-test 8
+.Sh HISTORY
+It grew from
+.Xr kzfs-test 8
+and
+.Xr kzfs-lab 8 .
+On 2026-09-30, writing this page: every regular golden was judged
+.Dq PARTIAL (no tests)
+because the test suite, which it leaves out on purpose, was missing \(em
+so every build rebuilt all of them, and the sites cloned from them went
+with them.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A golden is rebuilt with
+.Ql zfs destroy -R ,
+which takes every clone of it, whoever made them.
