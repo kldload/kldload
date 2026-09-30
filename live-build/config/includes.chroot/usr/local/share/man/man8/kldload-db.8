@@ -1,0 +1,352 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-DB 8
+.Os
+.Sh NAME
+.Nm kldload-db
+.Nd record machines, nodes, clusters and deployments in the kldload state database
+.Sh SYNOPSIS
+.Nm
+.Cm init
+.Nm
+.Cm vm-register
+.Fl -name Ar name
+.Op Ar options
+.Nm
+.Cm vm-status
+.Fl -name Ar name
+.Fl -status Ar status
+.Op Fl -ip Ar address
+.Nm
+.Cm vm-mesh
+.Fl -name Ar name
+.Fl -mesh-id Ar id
+.Fl -wg-pubkey Ar key | Fl -clear
+.Nm
+.Cm vm-show | vm-delete
+.Fl -name Ar name
+.Nm
+.Cm node-register
+.Fl -hostname Ar host
+.Op Ar options
+.Nm
+.Cm node-status
+.Fl -hostname Ar host
+.Fl -status Ar status
+.Nm
+.Cm node-delete
+.Fl -hostname Ar host
+.Nm
+.Cm cluster-upsert
+.Fl -name Ar name
+.Op Fl -template Ar t
+.Op Fl -status Ar s
+.Op Fl -data Ar json
+.Nm
+.Cm event
+.Fl -type Ar t
+.Op Fl -subject Ar s
+.Fl -message Ar m
+.Op Fl -data Ar json
+.Nm
+.Cm deploy-start
+.Fl -playbook Ar p
+.Op Fl -cluster Ar c
+.Op Fl -target Ar t
+.Op Fl -extras Ar json
+.Nm
+.Cm deploy-finish
+.Fl -id Ar n
+.Fl -rc Ar rc
+.Op Fl -status Ar s
+.Op Fl -log Ar path
+.Nm
+.Cm dump
+.Sh DESCRIPTION
+The state database,
+.Pa /var/lib/kldload/state.db ,
+is kldload's record of its estate: the virtual machines it made, the
+hosts that are cluster nodes, the clusters, the Ansible runs and a log of
+events.
+.Xr kldload-inventory 8
+turns it into Ansible's inventory, and the web console,
+.Xr kld 1
+and
+.Xr kldload-estate 8
+read it.
+.Nm
+is how the tools that make and remove machines \(em
+.Xr kvm-create 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-delete 8 ,
+.Xr kube-cluster 8 ,
+.Xr kldload-networks 8
+and others \(em write to it.
+.Pp
+The database holds the schema itself: every connection creates any
+missing table and adds any missing column first, so the first tool to use
+it, whichever it is, sets it up.
+Run as root,
+.Nm
+also makes the database and its directory writable by the
+.Ql kldload
+group, so tools running as a member can write too.
+.Pp
+The register verbs are upserts: a row that exists is updated, and an
+option left empty never overwrites what is there.
+Deleting is soft: a deleted row keeps its history, is hidden from the
+inventory, and comes back if the name is registered again \(em as a new
+machine, without the old one's mesh identity.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Cm init
+Create the database and its tables, and report them.
+.It Cm vm-register Fl -name Ar name
+Record a virtual machine.
+.Bl -tag -width "--default-role r" -compact
+.It Fl -cluster Ar c
+a cluster id or name; a new name makes an empty cluster
+.It Fl -role Ar r
+its role, set on every call
+.It Fl -default-role Ar r
+its role only if the row is new
+.It Fl -ip Ar a
+.It Fl -cpu Ar n , Fl -ram-gb Ar n , Fl -disk-gb Ar n
+.It Fl -golden-src Ar g
+the golden it was cloned from
+.It Fl -status Ar s
+.El
+.It Cm vm-status Fl -name Ar name Fl -status Ar s Op Fl -ip Ar a
+Set a machine's state, and its address if
+.Fl -ip
+is given; an empty
+.Fl -ip
+clears it, which takes the machine out of the inventory.
+.It Cm vm-mesh Fl -name Ar name Fl -mesh-id Ar id Fl -wg-pubkey Ar key
+Record the machine's WireGuard identity, which
+.Xr kvm-delete 8
+uses to take it off the mesh;
+.Fl -clear
+removes it.
+.It Cm vm-show Fl -name Ar name
+Print the machine's row as JSON.
+.It Cm vm-delete Fl -name Ar name
+Mark the machine deleted.
+.It Cm node-register Fl -hostname Ar host
+Record a host that is a member of a cluster:
+.Fl -role , -cluster , -status , -ip-mgmt , -ip-wg0 , -ip-wg1 , -wg-pubkey .
+.It Cm node-status , Cm node-delete
+As for machines.
+.It Cm cluster-upsert Fl -name Ar name
+Record or update a cluster.
+.It Cm event
+Append a line to the event log.
+.It Cm deploy-start
+Open a record of an Ansible run and print its number.
+.It Cm deploy-finish Fl -id Ar n Fl -rc Ar rc
+Close it, with the run's exit status, and
+.Ql ok
+or
+.Ql failed
+unless
+.Fl -status
+says otherwise.
+.It Cm dump
+Every table as JSON.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_DB
+Use this database instead.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/state.db
+The database, in SQLite's write-ahead-log mode.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done.
+.It 1
+A database error; or, for
+.Cm vm-show , vm-status , vm-mesh , node-status
+and
+.Cm deploy-finish ,
+no row of that name or number.
+The deletes return 0 for a row that is not there: that is what they ask
+for.
+.It 2
+A usage error.
+.El
+.Sh EXAMPLES
+Printed on a kldload host on 2026-09-29, against a database made for the
+purpose in
+.Pa /var/tmp/dbdemo ,
+from empty.
+The machines named in it did not exist; the database records what it is
+told.
+.Ss A database, a cluster and two machines (init, cluster-upsert, vm-register)
+.Bd -literal -offset indent
+$ export KLDLOAD_DB=/var/tmp/dbdemo/state.db
+$ kldload-db init
+kldload-db: /var/tmp/dbdemo/state.db ready (9 tables: bob_conversations, clusters, deployments, events, nodes, secrets, services, templates, vms)
+# (exited 0)
+$ kldload-db cluster-upsert --name lab --template k8s-ha --status ready
+# (exited 0)
+$ kldload-db vm-register --name lab-cp-1 --cluster lab --role control_plane --ip 192.168.122.21 --cpu 4 --ram-gb 8 --disk-gb 40 --golden-src k8s-golden --status running
+# (exited 0)
+$ kldload-db vm-register --name lab-w-1 --cluster lab --role worker --ip 192.168.122.31 --status running
+# (exited 0)
+.Ed
+.Ss A cluster node (node-register, node-status)
+.Bd -literal -offset indent
+$ kldload-db node-register --hostname lab-cp-1 --role control_plane --cluster lab --ip-mgmt 192.168.122.21 --ip-wg0 10.250.0.21 --status ready
+# (exited 0)
+$ kldload-db node-status --hostname lab-cp-1 --status draining
+# (exited 0)
+.Ed
+.Ss A new address, and a misspelt name (vm-status)
+.Bd -literal -offset indent
+$ kldload-db vm-status --name lab-w-1 --status running --ip 192.168.122.32
+# (exited 0)
+$ kldload-db vm-status --name lab-w-l --status running
+kldload-db: no VM named lab-w-l; nothing changed
+# (exited 1)
+.Ed
+.Ss The mesh identity, and the row (vm-mesh, vm-show)
+.Bd -literal -offset indent
+$ kldload-db vm-mesh --name lab-w-1 --mesh-id 31 --wg-pubkey 'k1YxZmFrZS1rZXktZm9yLXRoZS1tYW4tcGFnZS0wMDA9'
+# (exited 0)
+$ kldload-db vm-show --name lab-w-1
+{
+  "cluster_id": "ae613fd9-5331-4bc1-ab3b-4cac122bb23b",
+  "cpu": 2,
+  "created_at": "2026-09-30T06:39:10Z",
+  "data": "{}",
+  "deleted_at": "",
+  "disk_gb": 64,
+  "golden_src": "",
+  "id": "536a09d8-a560-423a-b6b6-0a3015b1f8cf",
+  "ip_addr": "192.168.122.32",
+  "last_seen": "2026-09-30T06:39:10Z",
+  "mesh_id": "31",
+  "name": "lab-w-1",
+  "node_id": "",
+  "ram_gb": 4,
+  "role": "worker",
+  "status": "running",
+  "wg_pubkey": "k1YxZmFrZS1rZXktZm9yLXRoZS1tYW4tcGFnZS0wMDA9"
+}
+# (exited 0)
+.Ed
+.Pp
+The key is not a real one.
+.Ss Deleted, then registered again (vm-delete)
+The row comes back without the old machine's mesh identity:
+.Bd -literal -offset indent
+$ kldload-db vm-delete --name lab-w-1
+# (exited 0)
+$ kldload-db vm-show --name lab-w-1
+kldload-db: no live VM named lab-w-1
+# (exited 1)
+$ kldload-db vm-register --name lab-w-1 --cluster lab --status running --ip 192.168.122.33
+# (exited 0)
+$ kldload-db vm-show --name lab-w-1
+{
+\&...
+  "ip_addr": "192.168.122.33",
+  "last_seen": "2026-09-30T06:39:11Z",
+  "mesh_id": "",
+\&...
+  "wg_pubkey": ""
+}
+# (exited 0)
+.Ed
+.Ss The log (event, deploy-start, deploy-finish)
+.Bd -literal -offset indent
+$ kldload-db event --type vm --subject lab-w-1 --message "resized to 8 GB"
+# (exited 0)
+$ kldload-db deploy-start --playbook site.yml --cluster lab --target all
+1
+# (exited 0)
+$ kldload-db deploy-finish --id 1 --rc 0 --log /var/log/kldload/ansible-1.log
+# (exited 0)
+.Ed
+.Ss Everything (dump)
+.Bd -literal -offset indent
+$ kldload-db dump
+{
+  "clusters": [
+    {
+      "created_at": "2026-09-30T06:39:10Z",
+      "data": "{}",
+      "id": "ae613fd9-5331-4bc1-ab3b-4cac122bb23b",
+      "name": "lab",
+      "status": "ready",
+      "template_id": "k8s-ha",
+      "updated_at": "2026-09-30T06:39:10Z"
+    }
+  ],
+  "deployments": [
+    {
+      "cluster_id": "ae613fd9-5331-4bc1-ab3b-4cac122bb23b",
+      "extras": "{}",
+      "finished_at": "2026-09-30T06:39:11Z",
+      "id": 1,
+      "log_path": "/var/log/kldload/ansible-1.log",
+      "playbook": "site.yml",
+      "rc": 0,
+      "started_at": "2026-09-30T06:39:10Z",
+      "status": "ok",
+      "target": "all"
+    }
+  ],
+\&...
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kldload-db: no VM named NAME; nothing changed"
+.It "kldload-db: no node named HOST; nothing changed"
+.It "kldload-db: no deployment N; nothing changed"
+Nothing matched; check the name.
+.It "kldload-db: no live VM named NAME"
+From
+.Cm vm-show :
+never registered, or deleted.
+.It "kldload-db: attempt to write a readonly database"
+Run as a user outside the
+.Ql kldload
+group, or before a root run has set the group up.
+.El
+.Sh SEE ALSO
+.Xr kld 1 ,
+.Xr sqlite3 1 ,
+.Xr kldload-estate 8 ,
+.Xr kldload-inventory 8 ,
+.Xr kldload-networks 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-delete 8
+.Sh HISTORY
+Until 2026-09-26 the schema lived in the web console and was created only
+when it started; on a host where it never had, every write here failed
+with
+.Dq no such table ,
+every caller ignored it, and the estate was empty.
+On 2026-09-28 a control plane rebuilt under its old name kept its dead
+predecessor's mesh key and read as off the mesh; registering a deleted
+name clears it since.
+.Pp
+On 2026-09-29, writing this page: a status update that matched no row
+returned success.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The database records what it is told: nothing here checks that a machine
+exists.
+.Xr kldload-networks 8
+reconciles it with libvirt.
+.Pp
+.Ql bob_conversations
+holds the web console's assistant conversations;
+.Cm dump
+does not print it.
