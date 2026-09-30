@@ -19,6 +19,7 @@
 # Output: show/get on stdout (data); check reports on stdout, one line each,
 # ending "netplan: N ranges, M problems".
 # Exit: 0 clean, 1 an overlap or a malformed range, 2 usage, 3 no plan file.
+# See kldload-netplan(8).
 # Environment: NETPLAN_DEFAULTS, NETPLAN_FILE (paths, for tests); NETPLAN_ROUTES
 # a file of `ip -4 route` output to check against instead of this host's.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -26,8 +27,10 @@ set -Eeuo pipefail
 trap 'echo "kldload-netplan: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 usage() {
-    sed -n '2,/^# ──*$/{/^# ──/d; s/^# \{0,1\}//; p}' "$0" | sed -n '1,10p'
-    exit "${1:-2}"
+    # asked for: stdout, 0; a usage error: stderr, 2
+    local rc="${1:-2}"
+    sed -n '2,/^# ──*$/{/^# ──/d; s/^# \{0,1\}//; p}' "$0" | sed -n '1,10p' >&$((rc == 0 ? 1 : 2))
+    exit "$rc"
 }
 case "${1:-}" in -h | --help) usage 0 ;; show | get | check) ;; *) usage 2 ;; esac
 

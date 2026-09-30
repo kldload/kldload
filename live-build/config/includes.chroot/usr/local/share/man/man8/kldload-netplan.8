@@ -1,0 +1,272 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-NETPLAN 8
+.Os
+.Sh NAME
+.Nm kldload-netplan
+.Nd show and check the address ranges kldload uses for its own networks
+.Sh SYNOPSIS
+.Nm
+.Cm show
+.Nm
+.Cm get
+.Ar key
+.Nm
+.Cm check
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+kldload runs networks of its own: the Kubernetes pod and service ranges,
+the network its cluster machines sit on, WireGuard meshes, lab networks
+and libvirt networks.
+Their ranges are listed in one place, the network plan, and
+.Nm
+prints it and checks it.
+.Pp
+The plan is read from
+.Pa /usr/lib/kldload/network-plan.defaults ,
+then
+.Pa /etc/kldload/network-plan.env ,
+whose lines replace the defaults' key by key.
+Both hold
+.Ar KEY Ns = Ns Ar range
+lines, where a range is an address, a CIDR block or two addresses joined
+by
+.Ql - ;
+.Ql #
+starts a comment.
+The files are parsed, never run as shell.
+A line of any other shape is ignored, and
+.Cm check
+names it.
+.Pp
+The keys and what uses them are described in the defaults file itself.
+.Ql NET_BLOCK
+is the block every kldload network is meant to move into; until they have,
+.Cm check
+lists those outside it without calling it a problem.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Cm show
+Print every key and its range, one per line, in the order the files give
+them.
+.It Cm get Ar key
+Print the range for
+.Ar key
+alone, for use in scripts.
+.It Cm check
+Report, one line each:
+.Bl -bullet -compact
+.It
+a line in either file that is not a
+.Ar KEY Ns = Ns Ar range ;
+.It
+a value that is not an address, a range or a CIDR block;
+.It
+any two of the plan's networks that overlap;
+.It
+.Ql K8S_VIP
+or
+.Ql K8S_LB_POOL
+outside
+.Ql K8S_NODE_NET ,
+or the VIP inside the pool;
+.It
+a network of the plan that overlaps a route this host has through an
+interface kldload does not own \(em a LAN on a bridge or a NIC, a VPN.
+Interfaces named
+.Ql virbr* , kld-* , wg* , cilium_* , lxc* , vnet* , tap*
+and
+.Ql fc-*
+are kldload's or libvirt's, and are not compared.
+.El
+.Pp
+Each problem is a
+.Ql FAIL
+line; the last line counts ranges and problems.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev NETPLAN_DEFAULTS
+Read the defaults from this file instead.
+.It Ev NETPLAN_FILE
+Read the overrides from this file instead: how to try a change before
+making it.
+.It Ev NETPLAN_ROUTES
+Check against the routes in this file, in the form
+.Ql ip -4 route show
+prints, instead of this host's.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /usr/lib/kldload/network-plan.defaults
+The plan as kldload ships it.
+.It Pa /etc/kldload/network-plan.env
+This host's changes to it.
+.It Pa /usr/lib/kldload/netplan.sh
+The reader every kldload tool that uses the plan sources.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done;
+.Cm check
+found nothing.
+.It 1
+.Cm check
+found a problem, or
+.Cm get
+was given a key the plan does not have.
+.It 2
+A usage error.
+.It 3
+Neither plan file could be read.
+.El
+.Sh EXAMPLES
+Printed by
+.Nm
+on a kldload desktop on 2026-09-29, whose LAN,
+.Ql 10.100.10.0/24 ,
+is on
+.Ql br0 .
+.Ss The plan (show)
+.Bd -literal -offset indent
+$ kldload-netplan show
+NET_BLOCK            10.240.0.0/12
+K8S_POD_CIDR         10.244.0.0/16
+K8S_SVC_CIDR         10.96.0.0/16
+K8S_NODE_NET         192.168.122.0/24
+K8S_VIP              192.168.122.240
+K8S_LB_POOL          192.168.122.200-192.168.122.220
+WG_MGMT_NET          10.250.0.0/24
+WG_K8S_NET           10.251.0.0/24
+KLAB_BLUE_NET        10.252.0.0/24
+KLAB_GREEN_NET       10.253.0.0/24
+KVM_MESH_BLOCK       10.254.0.0/16
+PLANE_WG0_NET        10.77.0.0/16
+PLANE_WG1_NET        10.78.0.0/16
+PLANE_WG2_NET        10.79.0.0/16
+PLANE_WG3_NET        10.80.0.0/16
+MASTER_CLUSTER_CIDR  10.78.0.0/20
+VMNET_KLAB           192.168.150.0/24
+VMNET_ZFSLAB         192.168.151.0/24
+VMNET_VMS            192.168.152.0/24
+# (exited 0)
+.Ed
+.Ss One range (get)
+.Bd -literal -offset indent
+$ kldload-netplan get K8S_SVC_CIDR
+10.96.0.0/16
+# (exited 0)
+$ echo "services are $(kldload-netplan get K8S_SVC_CIDR)"
+services are 10.96.0.0/16
+$ kldload-netplan get NO_SUCH_KEY
+kldload-netplan: no key NO_SUCH_KEY in the plan
+# (exited 1)
+.Ed
+.Ss The shipped plan checked (check)
+It carries one known overlap, reported until it is moved:
+.Bd -literal -offset indent
+$ kldload-netplan check
+  FAIL  PLANE_WG1_NET 10.78.0.0/16 overlaps MASTER_CLUSTER_CIDR 10.78.0.0/20
+  INFO  checked against 1 route(s) through interfaces kldload does not own
+  INFO  outside 10.240.0.0/12 (moved in phase 2 and 3 of docs/NETWORK-PLAN.md): K8S_SVC_CIDR K8S_NODE_NET PLANE_WG0_NET PLANE_WG1_NET PLANE_WG2_NET PLANE_WG3_NET MASTER_CLUSTER_CIDR VMNET_KLAB VMNET_ZFSLAB VMNET_VMS
+netplan: 19 ranges, 1 problem(s)
+# (exited 1)
+.Ed
+.Ss Trying a change first (NETPLAN_FILE)
+This file puts the service range back to the
+.Ql /12
+it had before 2026-09-29, moves the VIP, and has a line that is not a
+setting:
+.Bd -literal -offset indent
+$ cat override.env
+K8S_SVC_CIDR=10.96.0.0/12
+K8S_VIP=10.0.0.5
+this is not a line
+$ NETPLAN_FILE=override.env kldload-netplan check
+  FAIL  not a KEY=range line, ignored: override.env:3: this is not a line
+  FAIL  PLANE_WG1_NET 10.78.0.0/16 overlaps MASTER_CLUSTER_CIDR 10.78.0.0/20
+  FAIL  K8S_VIP 10.0.0.5 is not inside K8S_NODE_NET 192.168.122.0/24
+  FAIL  K8S_SVC_CIDR 10.96.0.0/12 overlaps 10.100.10.0/24, which this host reaches via br0 -- not a kldload network
+  INFO  checked against 1 route(s) through interfaces kldload does not own
+\&...
+netplan: 19 ranges, 4 problem(s)
+# (exited 1)
+.Ed
+.Ss Another host's routes (NETPLAN_ROUTES)
+A route through
+.Ql wg-mgmt
+is kldload's own and is not compared; one through
+.Ql eth1
+is:
+.Bd -literal -offset indent
+$ cat routes.txt
+10.244.8.0/22 dev eth1 proto kernel scope link src 10.244.8.1
+10.250.0.0/24 dev wg-mgmt proto kernel scope link src 10.250.0.1
+$ NETPLAN_ROUTES=routes.txt kldload-netplan check
+  FAIL  PLANE_WG1_NET 10.78.0.0/16 overlaps MASTER_CLUSTER_CIDR 10.78.0.0/20
+  FAIL  K8S_POD_CIDR 10.244.0.0/16 overlaps 10.244.8.0/22, which this host reaches via eth1 -- not a kldload network
+  INFO  checked against 1 route(s) through interfaces kldload does not own
+\&...
+netplan: 19 ranges, 2 problem(s)
+# (exited 1)
+.Ed
+.Ss No plan (NETPLAN_DEFAULTS)
+.Bd -literal -offset indent
+$ NETPLAN_DEFAULTS=/nonexistent kldload-netplan show
+kldload-netplan: no plan file (/nonexistent)
+# (exited 3)
+.Ed
+.Ss Usage (-h, --help)
+.Bd -literal -offset indent
+$ kldload-netplan --help
+kldload-netplan — show and check the ranges kldload uses for its own networks.
+
+  kldload-netplan show        every range, one per line: KEY VALUE
+  kldload-netplan get KEY     one value (for scripts)
+  kldload-netplan check       exit 1 if any two kldload ranges overlap, if
+                              the VIP or MetalLB pool falls outside its node
+                              network, or if a range overlaps a route this
+                              host reaches through an interface kldload does
+                              not own (a LAN on br0, eth0, ...)
+
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "FAIL  A RANGE overlaps B RANGE"
+Two of kldload's networks share addresses; traffic for one can be routed
+to the other.
+.It "FAIL  KEY RANGE overlaps DEST, which this host reaches via DEV -- not a kldload network"
+A kldload network covers addresses of a network this host is really on:
+the machines there become unreachable from anything that routes the
+kldload range.
+.It "FAIL  not a KEY=range line, ignored: FILE:LINE: TEXT"
+The line was skipped; the default for that key stands.
+.It "kldload-netplan: no plan file (PATH)"
+Neither file could be read; tools that use the plan fall back to the
+ranges they carried before it existed.
+.El
+.Sh SEE ALSO
+.Xr ip-route 8 ,
+.Xr kube-cluster 8
+.Sh HISTORY
+.Nm
+was written on 2026-09-29, the day the Kubernetes service range,
+.Ql 10.96.0.0/12 ,
+was found to contain the bench LAN
+.Ql 10.100.10.0/24
+with nothing able to say so.
+The service range is
+.Ql 10.96.0.0/16
+since.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Not every tool reads the plan yet; some still carry their ranges as
+literals.
+Changing a range here moves only the tools that read it, and a range that
+is in use \(em a running cluster's pod range \(em does not move with it.
+.Pp
+Only IPv4 is planned and checked.
