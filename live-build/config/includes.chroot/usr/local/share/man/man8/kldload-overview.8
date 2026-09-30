@@ -1,0 +1,95 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-OVERVIEW 8
+.Os
+.Sh NAME
+.Nm kldload-overview
+.Nd one screen of what this machine is running
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+prints, once, what this machine has and what it is running: the kldload
+version, distribution, kernel, cores, memory and uptime; each pool's size
+and use, and how many datasets and snapshots there are; every virtual
+machine and its state; Podman containers; whether a Kubernetes cluster is
+up; the GPU's temperature, power and memory; the addresses of the main
+interfaces; the eBPF tools present; and whether the core services are
+running.
+It ends with the commands that go further.
+A section that has nothing to show \(em no cluster, no GPU, no containers
+\(em says so or is left out; none makes the whole report fail.
+.Pp
+It runs itself under
+.Xr sudo 8 ,
+since the virtual machines and some services can only be read as root.
+It changes nothing.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print what it shows and exit 0.
+.El
+.Sh EXIT STATUS
+0.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30:
+.Bd -literal -offset indent
+$ kldload-overview
+══════════════════════════════════════════════════════════════
+  kldloadOS 1.4.2-b1265 — onyx
+  kldload (fedora 44) • 7.2.2-300.fc44.x86_64 • 510236f5
+  24 cores • 15Gi / 31Gi RAM • up 1 day, 20 hours, 34 minutes
+══════════════════════════════════════════════════════════════
+
+  ZFS Storage
+    ● rpool  1.81T  (1.61T used, 207G free)
+    ● tank  3.62T  (3.31T used, 327G free)
+    459 datasets, 2121 snapshots
+
+  KVM Virtual Machines
+    ○ app-adguard-ho  shut off
+    ○ app-icecast-st  shut off
+\&...
+    0 running, 49 stopped
+
+  Podman Containers
+    ● open-webui  Up 45 hours
+
+  Kubernetes Cluster
+    No cluster running
+    Deploy: kube-cluster bootstrap --workers 3
+
+  GPU
+    ● NVIDIA GeForce RTX 3080  55°C  39.35 W  1033 MiB, 10240 MiB
+    1 compute processes
+
+  Network
+    ● br0  10.100.10.121
+    ● virbr0  192.168.122.1
+
+  eBPF
+    ● bpftool
+    ● libbpf-tools (CO-RE)
+    ● bpftrace
+
+  Services
+    ● kldload-webui
+    ● libvirtd
+    ● sshd
+    ● zfs-zed
+\&...
+.Ed
+.Pp
+The version line is the installed system's; this desktop was installed
+from an older image than the tool shown here.
+.Sh SEE ALSO
+.Xr kldload-doctor 8 ,
+.Xr kldload-estate 8 ,
+.Xr kst 8
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It reports; it does not judge.
+For whether anything is wrong, see
+.Xr kldload-doctor 8 .
