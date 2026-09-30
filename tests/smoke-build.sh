@@ -3122,6 +3122,25 @@ else
     fi
 fi
 
+# ── Comments the host executes ───────────────────────────────────────────────
+# A "comment" inside a double-quoted string is not a comment: it is text, and
+# a $(...) or backquote in it runs on THIS host when the string is built.
+# kvm-mesh sent its guests a script in "..." whose comment read "$(ip link del)"
+# and "$(link add)"; every join ran both on the host, as root (2026-09-29,
+# harmless only because they had no arguments). tests/dq-comment-scan.py asks
+# shfmt's syntax tree, not a regex. Zero exist; any is a failure.
+_section "Comments the host executes"
+if [[ ${#SHELL_SCRIPTS[@]} -eq 0 ]] || ! command -v shfmt >/dev/null 2>&1; then
+    _warn "executed comments" "no scripts or no shfmt — gate did not run"
+else
+    _dq_out="$(cd "$ROOT" && python3 tests/dq-comment-scan.py "${SHELL_SCRIPTS[@]}" 2>/dev/null)" || _dq_out="scan failed"
+    if [[ -z "$_dq_out" ]]; then
+        _pass "executed comments: none in ${#SHELL_SCRIPTS[@]} scripts"
+    else
+        _fail "executed comments" "a \$( ) or backquote in a comment inside a double-quoted string runs on the host: $(head -3 <<<"$_dq_out" | tr '\n' ' ')"
+    fi
+fi
+
 # ── Strict-mode ratchet ──────────────────────────────────────────────────────
 # Every script is supposed to open with `set -Eeuo pipefail`. On 2026-09-06
 # 84 of 234 did not, and the same day the installer's whole storage phase

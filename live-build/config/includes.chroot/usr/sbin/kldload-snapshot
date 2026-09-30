@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
+# kldload-snapshot — take one @auto-YYYYMMDD-HHMMSS snapshot of the running
+# boot environment (the pool's bootfs) and prune those snapshots to the
+# newest KLDLOAD_ROOT_SNAP_KEEP (default 48, two days of hourly ones).
+# Run by its timer; logs to /var/log/kldload/bootstrap.log. No arguments.
 set -Eeuo pipefail
+
+# --help answers without taking a snapshot: it took one (as root), since
+# nothing read the arguments (2026-09-30).
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "kldload-snapshot: takes no arguments (got: $*)" >&2
+    exit 2
+    ;;
+esac
 
 LOG=/var/log/kldload/bootstrap.log
 mkdir -p /var/log/kldload

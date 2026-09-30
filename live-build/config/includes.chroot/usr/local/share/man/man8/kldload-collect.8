@@ -1,0 +1,126 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-COLLECT 8
+.Os
+.Sh NAME
+.Nm kldload-collect
+.Nd record what the kernel, ZFS, eBPF, Kubernetes and the host report, once a minute, as JSON lines
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+runs a fixed set of read-only commands and appends each one's output,
+with the time, host, cluster, exit status and duration, as one JSON line
+to a file of its own:
+.Bd -literal -offset indent
+/var/lib/kldload/training-corpus/YYYY-MM-DD/<command, as a file name>.jsonl
+.Ed
+.Pp
+The commands cover the loaded eBPF programs, maps and attachments;
+Cilium's status, load-balancer and connection-tracking tables, map
+pressure, endpoints and identities, and Tetragon's tracing policies and
+five seconds of its events, where they run; the pools, the ARC,
+snapshots and the ZFS debug log; Kubernetes nodes, pods, services,
+policies, usage and events when a cluster answers; and the host's load,
+memory, disk, established connections, kernel messages, virtual machines
+and GPU.
+Each runs for at most five seconds.
+Output that is JSON is also stored parsed, as
+.Li output_struct .
+.Pp
+.Pa kldload-collect.timer
+runs it a minute after boot and every minute after that.
+Day directories older than
+.Ev KLDLOAD_COLLECT_KEEP_DAYS
+are removed at the end of each run.
+.Pp
+It was written to collect a record of the machine's own behaviour to
+train the web console's assistant on; nothing in kldload reads the
+corpus today.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+Set in the environment or in
+.Pa /etc/kldload/collect.conf .
+.Bl -tag -width Ds
+.It Ev KLDLOAD_COLLECT_DIR
+The corpus directory; default
+.Pa /var/lib/kldload/training-corpus .
+.It Ev KLDLOAD_COLLECT_TIMEOUT
+Seconds each command may take; default 5.
+.It Ev KLDLOAD_COLLECT_HOST , Ev KLDLOAD_COLLECT_CLUSTER
+The host and cluster written into each record; default the host name, and
+.Pa /etc/kldload/cluster
+or the host name.
+.It Ev KLDLOAD_COLLECT_KEEP_DAYS
+Days of corpus kept; default 30, and 0 keeps everything.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/collect.conf
+Settings, read as shell by root.
+.It Pa /var/lib/kldload/training-corpus/
+The corpus.
+.El
+.Sh EXIT STATUS
+0; a command that fails is recorded with its exit status, and the run
+goes on.
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30.
+.Ss One day's files, and one record
+.Bd -literal -offset indent
+# ls /var/lib/kldload/training-corpus/2026-09-30
+bpftool-j-map-show.jsonl
+bpftool-j-net-show.jsonl
+bpftool-j-prog-show.jsonl
+cat-proc-loadavg.jsonl
+\&...
+virsh-list-all.jsonl
+zfs-list-t-snapshot-o-name-used-creation-s-creation.jsonl
+zpool-list-o-name-size-alloc-free-frag-cap-dedup-health.jsonl
+# tail -1 /var/lib/kldload/training-corpus/2026-09-30/cat-proc-loadavg.jsonl | python3 -m json.tool
+{
+    "ts": "2026-09-30T07:18:21Z",
+    "host": "onyx",
+    "cluster": "onyx",
+    "cmd": "cat /proc/loadavg",
+    "desc": "Load avg (raw kernel)",
+    "category": "host",
+    "exit_code": 0,
+    "duration_ms": 8,
+    "output_text": "26.37 23.41 14.18 25/2351 3616168"
+}
+.Ed
+.Ss What it costs
+Before retention existed:
+.Bd -literal -offset indent
+# du -sh /var/lib/kldload/training-corpus
+874M	/var/lib/kldload/training-corpus
+.Ed
+.Pp
+That was 32 days.
+.Ss Keeping less, or none
+Not run for this page:
+.Bd -literal -offset indent
+# echo 'KLDLOAD_COLLECT_KEEP_DAYS=7' >> /etc/kldload/collect.conf
+# systemctl disable --now kldload-collect.timer
+.Ed
+.Sh SEE ALSO
+.Xr systemd.timer 5 ,
+.Xr bpftool 8 ,
+.Xr kldload-debug-bundle 8 ,
+.Xr kldload-doctor 8
+.Sh HISTORY
+On 2026-09-30, writing this page: nothing removed the corpus, and a
+desktop had 874 MB of it after a month.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+.Pa collect.conf
+is run as shell, as root: only root should be able to write it.
+.Pp
+Connection lists and kernel messages are recorded as they are.

@@ -1,20 +1,53 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+# 141 is the reader going away (`kdf | head`), not a failure to report
+trap '_rc=$?; ((_rc == 141)) || echo "kdf: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # kdf — ZFS-aware disk usage (shows compression ratio and quotas)
 
-B='\033[1m'
-N='\033[0m'
-C='\033[0;36m'
-G='\033[0;32m'
-Y='\033[0;33m'
+# --help answers before anything runs: `kdf --help` printed the whole table,
+# since nothing read the arguments at all (found writing kdf(8), 2026-09-29).
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kdf
+
+Every dataset in rpool with its space used, space available, compression
+ratio, quota and mountpoint, then the pool's size, allocation, free space
+and fragmentation. Ratios above 1.0x and 1.5x are coloured on a terminal.
+Takes no arguments.
+
+Exit: 0, 1 when rpool cannot be read, 2 on an argument. See kdf(8).
+USAGE
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "kdf: takes no arguments (got: $*); try kdf --help" >&2
+    exit 2
+    ;;
+esac
+
+zpool list -H -o name rpool >/dev/null 2>&1 || {
+    echo "kdf: no pool named rpool here" >&2
+    exit 1
+}
+
+# Colour only for a person: piped, the escapes land in the text.
+if [[ -t 1 ]]; then
+    B='\033[1m' N='\033[0m' C='\033[0;36m' G='\033[0;32m'
+else
+    B='' N='' C='' G=''
+fi
 
 echo ""
 printf "  ${B}%-35s %6s  %6s  %5s  %6s  %s${N}\n" "DATASET" "USED" "AVAIL" "RATIO" "QUOTA" "MOUNTPOINT"
-printf "  %-35s %6s  %6s  %5s  %6s  %s\n" "───────" "────" "─────" "─────" "─────" "──────────"
+# ASCII: printf pads by BYTES, and each box-drawing dash is three, so the
+# old "───" row sat a column-width short of the header above it.
+printf "  %-35s %6s  %6s  %5s  %6s  %s\n" "-------" "----" "-----" "-----" "-----" "----------"
 
 zfs list -H -o name,used,avail,compressratio,quota,mountpoint -r rpool 2>/dev/null |
-    grep -v '^rpool$' |
+    awk -F '\t' '$1 != "rpool"' | # the pool's root: its row is the summary below. `grep -v '^rpool$'` never matched -- zfs puts a tab after the name
     sort |
     while IFS=$'\t' read -r name used avail ratio quota mountpoint; do
         # Color quota

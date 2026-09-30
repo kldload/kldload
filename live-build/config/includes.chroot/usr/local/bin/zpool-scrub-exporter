@@ -31,6 +31,16 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 set +o pipefail
+# --help answers first, before anything is created, installed or run (rule
+# 9; found by the sandboxed --help capture, 2026-09-30: this ran or wrote
+# something instead).
+case "${1:-}" in
+-h | --help)
+    awk 'NR > 1 && /^#/ { p = 1 } p && !/^#/ { exit } p { sub(/^# ?/, ""); print }' "$0"
+    exit 0
+    ;;
+esac
+
 OUT=/var/lib/node_exporter/textfile_collector/zpool-scrub.prom
 TMP=${OUT}.tmp
 mkdir -p "$(dirname "$OUT")"

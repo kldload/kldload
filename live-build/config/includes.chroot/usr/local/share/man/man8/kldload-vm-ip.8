@@ -1,0 +1,165 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-VM-IP 8
+.Os
+.Sh NAME
+.Nm kldload-vm-ip
+.Nd the address of a virtual machine, found one way for every kldload tool
+.Sh SYNOPSIS
+.Nm
+.Ar machine
+.Nm
+.Fl -all
+.Op Fl -json
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+prints the IPv4 address a machine on this host can be reached at.
+Every kldload tool that needs one asks here, so they all agree.
+.Pp
+For one
+.Ar machine ,
+in order:
+.Bl -enum
+.It
+A Firecracker machine made by
+.Xr kfire 8 ,
+which has no libvirt domain: the address it registered when its guest
+answered.
+.It
+A libvirt domain that is not running has no address, and
+.Nm
+says so.
+.It
+The guest agent, asked for at most five seconds: its first IPv4 address
+that is not loopback and not on a WireGuard interface \(em a machine on a
+mesh reports its mesh address too, and that is not where to reach it
+from here.
+.It
+The DHCP leases of every libvirt network, matched to the machine by the
+MAC address its definition gives it \(em not by the host name in the
+lease, which a clone copies from its golden \(em the newest lease winning.
+.El
+.Pp
+.Fl -all
+does the same for every running domain and every Firecracker machine in
+one pass.
+.Pp
+It needs to read the system libvirt: root, or a member of the
+.Ql libvirt
+group.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Ar machine
+Print its address.
+.It Fl -all
+Print
+.Ql name address
+for every running machine that has one.
+.It Fl -json
+With
+.Fl -all :
+one JSON object,
+.Ql {"name":"address",...} .
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev LIBVIRT_DEFAULT_URI
+The libvirt to ask; default
+.Ql qemu:///system .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kfire/instances/ Ns Ar name Ns Pa /instance.json
+A Firecracker machine's record, read with
+.Xr jq 1 .
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+An address was printed.
+.It 1
+None: the machine is not running, does not exist, or has no address yet;
+with
+.Fl -all ,
+no machine had one.
+.It 2
+A usage error, or a name that is not a plain name.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, as a user in the
+.Ql libvirt
+group, with a throwaway clone,
+.Ql vi-3545202 ,
+running, then powered off, then deleted.
+.Ss One machine
+.Bd -literal -offset indent
+$ kldload-vm-ip vi-3545202
+192.168.122.47
+# (exited 0)
+.Ed
+.Ss Every running machine (--all, --json)
+.Bd -literal -offset indent
+$ kldload-vm-ip --all
+vi-3545202 192.168.122.47
+# (exited 0)
+$ kldload-vm-ip --all --json
+{"vi-3545202":"192.168.122.47"}
+# (exited 0)
+.Ed
+.Ss A machine that is off
+Its lease still exists, and is not an answer:
+.Bd -literal -offset indent
+$ virsh -c qemu:///system destroy vi-3545202   # (as root)
+$ kldload-vm-ip vi-3545202
+kldload-vm-ip: vi-3545202 is shut off, so it has no address
+# (exited 1)
+.Ed
+.Ss In a script
+.Bd -literal -offset indent
+ip=$(kldload-vm-ip web01) || { echo "web01 has no address" >&2; exit 1; }
+ssh "root@$ip" uptime
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+$ kldload-vm-ip web/1
+kldload-vm-ip: 'web/1' is not a domain name
+# (exited 2)
+$ kldload-vm-ip no-such-vm
+kldload-vm-ip: no domain or kfire machine named no-such-vm
+# (exited 1)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kldload-vm-ip: MACHINE is STATE, so it has no address"
+.It "kldload-vm-ip: no domain or kfire machine named MACHINE"
+.It "kldload-vm-ip: virsh is not installed \(em this is not a hypervisor"
+.El
+A running machine with no address yet \(em still booting, no guest agent,
+no lease \(em exits 1 without a message.
+.Sh SEE ALSO
+.Xr virsh 1 ,
+.Xr kfire 8 ,
+.Xr kldload-estate 8 ,
+.Xr kldload-networks 8 ,
+.Xr kvm-grow 8 ,
+.Xr kvm-mesh 8
+.Sh HISTORY
+.Nm
+was written on 2026-09-26, when six tools each found addresses their own
+way \(em one network only, the agent only, leases by host name \(em and
+disagreed about the same machine within the same minute.
+.Pp
+On 2026-09-29, writing this page: a machine that was off was given its
+old lease's address, which DHCP hands on to others; run as a user it
+asked the user's own, empty, libvirt and found nothing; and usage errors
+went to standard output.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+An address is where the machine was last seen, not proof it answers
+there; a caller that is about to log in should expect to be refused.
+.Pp
+Only IPv4 is looked for.

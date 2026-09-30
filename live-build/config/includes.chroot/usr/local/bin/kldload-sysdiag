@@ -25,6 +25,21 @@ trap - ERR # and NOT re-armed below: an ERR trap fires on every
 # failing command whether or not errexit is set, so leaving
 # one here would spam a tool that tolerates failures by design
 
+# --help answers and returns. It built and attached the tmux session, since
+# nothing read the arguments (found writing the command reference, 2026-09-30).
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0" | sed '/^═/d'
+    echo "Usage: kldload-sysdiag      (no options: opens, or reattaches to, the tmux session 'sysdiag')"
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "kldload-sysdiag: takes no arguments (got: $*); try kldload-sysdiag --help" >&2
+    exit 2
+    ;;
+esac
+
 export TERM=xterm-256color
 export KUBECONFIG=/root/.kube/config
 SESSION=sysdiag

@@ -1,0 +1,158 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-DEBUG-BUNDLE 8
+.Os
+.Sh NAME
+.Nm kldload-debug-bundle
+.Nd gather what it takes to diagnose a kldload machine into one tarball, secrets left out
+.Sh SYNOPSIS
+.Nm
+.Op Fl -out Ar dir
+.Op Fl -quiet
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+collects, into one compressed tarball, the state that a diagnosis of a
+kldload machine starts from:
+.Bl -bullet -compact
+.It
+kldload's identity files, the list of what is in
+.Pa /etc/kldload ,
+the host id, and the kernel command line with any password values
+removed;
+.It
+hardware: PCI devices and their drivers, loaded modules, the system's
+DMI tables, CPU, memory and block devices;
+.It
+the installer's and kldload's logs,
+.Pa /var/log/installer
+and
+.Pa /var/log/kldload ;
+.It
+the kernel log and the journal of this boot and the one before, and the
+state of every unit;
+.It
+Secure Boot, the enrolled and pending machine owner keys, the SBAT
+revocations, the EFI boot entries and the EFI partition's files;
+.It
+every pool's topology and properties, and every dataset's;
+.It
+DKMS: what is built, and the build log of any module that failed;
+.It
+module options and blacklists, and the X server's configuration;
+.It
+addresses, routes, DNS and NetworkManager's view;
+.It
+the installer's answers, and the public half of the module signing key.
+.El
+.Pp
+It leaves out: the signing key's private half, WireGuard's keys, the ssh
+host keys, the shadow password files, and the secrets under
+.Pa /etc/kldload
+\(em the root ssh key, the web console's token, the CA's private key,
+the ZFS passphrase \(em which are copied by an allowlist, never the whole
+directory.
+Every
+.Pa .env ,
+.Pa .conf
+and
+.Pa .cfg
+file in the bundle has any value whose name contains
+.Ql PASS ,
+.Ql PASSWORD ,
+.Ql PASSPHRASE ,
+.Ql SECRET ,
+.Ql TOKEN ,
+.Ql KEY
+or
+.Ql CREDENTIAL
+replaced by
+.Ql <redacted> .
+.Pp
+The tarball is created readable by root alone.
+It changes nothing on the machine.
+It must run as root; run as a user it re-executes itself with
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -out Ar dir
+Write the tarball in
+.Ar dir
+instead of
+.Pa /root .
+.It Fl -quiet
+Do not name each section on standard error as it is collected.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/kldload-debug- Ns Ar host Ns Pa - Ns Ar YYYYMMDD-HHMMSSZ Ns Pa .tar.gz
+The bundle, mode 0600.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 2n -compact
+.It 0
+Written.
+.It 64
+A usage error.
+.It 66
+The output directory does not exist.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30; the bundle was removed
+afterwards.
+.Bd -literal -offset indent
+# kldload-debug-bundle --out /var/tmp/dbgtest-3609855
+  kldload + system identity
+  hardware (lspci, lsmod, /proc/{cpuinfo,meminfo})
+  install-time logs (/var/log/installer)
+  dmesg + journalctl (current + previous boot)
+  Secure Boot / MOK / EFI
+  ZFS pools, datasets, props
+  DKMS modules
+  modprobe + xorg config (nouveau-blacklist class of bugs)
+  network state
+  installer answers (passwords redacted)
+  redacting secrets in every *.env/*.conf/*.cfg in the bundle
+  compressing → /var/tmp/dbgtest-3609855/kldload-debug-onyx-20260930-071448Z.tar.gz
+
+kldload-debug-bundle written: /var/tmp/dbgtest-3609855/kldload-debug-onyx-20260930-071448Z.tar.gz (65MB)
+Inspect with: tar -tzf /var/tmp/dbgtest-3609855/kldload-debug-onyx-20260930-071448Z.tar.gz | head -40
+Extract with: mkdir x && tar -C x -xzf /var/tmp/dbgtest-3609855/kldload-debug-onyx-20260930-071448Z.tar.gz
+.Ed
+.Pp
+It took two minutes: the pool had 2,100 snapshots, whose properties are
+all collected.
+.Bd -literal -offset indent
+$ kldload-debug-bundle --out
+--out needs a directory
+# (exited 64)
+$ kldload-debug-bundle --out /nonexistent
+output dir does not exist: /nonexistent
+# (exited 66)
+.Ed
+.Sh SEE ALSO
+.Xr journalctl 1 ,
+.Xr kldload-doctor 8 ,
+.Xr kldload-sysdiag 8
+.Sh HISTORY
+Until 2026-09-23 the bundle copied
+.Pa /etc/kldload
+whole, and with it the root ssh key, WireGuard keys, the web console's
+token, the CA's private key and the ZFS passphrase; and it redacted two
+answer names by list.
+.Pp
+On 2026-09-30, writing this page: settings files were still copied raw
+beside their redacted copies, the tarball was readable by anyone until it
+was
+.Xr chmod 1 Ns -ed ,
+and it claimed to take about three seconds.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Logs and the journal are included as they are; a program that wrote a
+secret to one of them sends it on in the bundle.
+Read the bundle before handing it on.
+.Pp
+The time and size grow with the number of snapshots.

@@ -7,6 +7,16 @@ set -euo pipefail
 # Contexts: apt-pre, apt-post, dnf-pre, dnf-post, srv, manual
 # ---------------------------------------------------------------------------
 
+# --help answers first, before anything is created, installed or run (rule
+# 9; found by the sandboxed --help capture, 2026-09-30: this ran or wrote
+# something instead).
+case "${1:-}" in
+-h | --help)
+    awk 'NR > 1 && /^#/ { p = 1 } p && !/^#/ { exit } p { sub(/^# ?/, ""); print }' "$0"
+    exit 0
+    ;;
+esac
+
 CONTEXT="${1:-manual}"
 LOG_DIR=/var/log/kldload
 mkdir -p "$LOG_DIR"

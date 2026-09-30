@@ -33,6 +33,22 @@ set -Eeuo pipefail
 # explicit. See project_strict-sweep-overrode-soft-set-lines.
 set +e +E
 
+# --help answers and returns: it started following, forever, since nothing
+# read the arguments (found writing kldload-follow(8), 2026-09-30).
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0" | sed '/^Implementation/,$d'
+    echo "Usage: kldload-follow       (no options; Ctrl-C ends it)"
+    echo "See kldload-follow(8)."
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "kldload-follow: takes no arguments (got: $*); try kldload-follow --help" >&2
+    exit 2
+    ;;
+esac
+
 # Colors — ANSI 256. Falls through to no-color if TERM is dumb.
 if [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]]; then
     C_RESET=$'\e[0m'

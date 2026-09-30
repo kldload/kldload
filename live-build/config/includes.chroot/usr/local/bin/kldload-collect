@@ -34,6 +34,9 @@
 #   KLDLOAD_COLLECT_TIMEOUT per-command timeout in seconds (default 5)
 #   KLDLOAD_COLLECT_HOST    host label (default `hostname`)
 #   KLDLOAD_COLLECT_CLUSTER cluster label (default from /etc/kldload/cluster or hostname)
+#   KLDLOAD_COLLECT_KEEP_DAYS  days of corpus kept (default 30; 0 keeps all)
+#
+# See kldload-collect(8).
 
 set -Eeuo pipefail
 case "${1:-}" in
@@ -194,6 +197,21 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 if command -v zfs_exporter >/dev/null 2>&1 || systemctl is-active --quiet zfs_exporter 2>/dev/null; then
     emit host "curl -s http://localhost:9134/metrics | head -100" "zfs_exporter Prometheus metrics (head)"
+fi
+
+# ─── Retention ──────────────────────────────────────────────────────
+# WHY: nothing removed the corpus. onyx held 874 MB in 32 day-directories,
+# about 27 MB a day, on the state dataset (2026-09-30); a year of it is
+# 10 GB nobody reads. Day directories older than KEEP_DAYS go -- only names
+# that ARE a date, only directly under the corpus directory.
+: "${KLDLOAD_COLLECT_KEEP_DAYS:=30}"
+if [[ "$KLDLOAD_COLLECT_KEEP_DAYS" =~ ^[0-9]+$ ]] && ((KLDLOAD_COLLECT_KEEP_DAYS > 0)); then
+    _cutoff="$(date -u -d "${KLDLOAD_COLLECT_KEEP_DAYS} days ago" +%Y-%m-%d)"
+    for _d in "$KLDLOAD_COLLECT_DIR"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]; do
+        [[ -d "$_d" ]] || continue
+        # the names sort as dates; strictly older than the cutoff goes
+        [[ "${_d##*/}" < "$_cutoff" ]] && rm -rf -- "$_d"
+    done
 fi
 
 # Optional: nightly tar-gz of the previous day's corpus for shipping

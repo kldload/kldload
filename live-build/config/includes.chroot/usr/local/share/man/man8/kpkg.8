@@ -1,0 +1,136 @@
+.Dd September 30, 2026
+.Dt KPKG 8
+.Os
+.Sh NAME
+.Nm kpkg
+.Nd one package command for every distribution kldload installs, with a snapshot first
+.Sh SYNOPSIS
+.Nm
+.Cm install | remove
+.Ar package ...
+.Nm
+.Cm update | upgrade
+.Nm
+.Cm search
+.Ar term
+.Nm
+.Cm list | info
+.Op Ar package
+.Nm
+.Cm help
+.Sh DESCRIPTION
+kldload installs Fedora, the Enterprise Linux family, Debian, Ubuntu and
+Arch.
+.Nm
+takes the same words on all of them and runs the distribution's own tool:
+.Xr pacman 8 ,
+.Xr dnf 8
+or
+.Xr apt-get 8 ,
+whichever it finds first, in that order.
+.Pp
+Before
+.Cm install ,
+.Cm remove
+and
+.Cm upgrade
+it snapshots the running boot environment,
+.Ar root Ns Pa @kpkg- Ns Ar YYYYMMDD-HHMMSS ,
+and keeps the newest ten, so a transaction that breaks the machine can be
+undone with
+.Xr kldload-rollback 8 .
+On a kldload install
+.Ql dnf
+and
+.Ql apt
+are kldload's wrapper, which takes that snapshot itself; then
+.Nm
+takes none, to avoid a second copy of each.
+.Pp
+Changing packages runs through
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Cm install Ar package ...
+Install, without asking.
+.It Cm remove Ar package ...
+Remove, without asking.
+.It Cm update
+Refresh the package lists.
+.It Cm upgrade
+Upgrade everything, without asking
+.Pq Ql apt-get dist-upgrade
+on Debian and Ubuntu).
+.It Cm search Ar term
+.It Cm list Op Ar package
+Installed packages, or those named.
+.It Cm info Ar package
+.It Cm help , Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh EXIT STATUS
+The package manager's own; 2 for an unknown command; 1 when no package
+manager is found.
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30.
+.Bd -literal -offset indent
+$ kpkg list bash
+bash-5.3.9-3.fc44.x86_64
+# (exited 0)
+.Ed
+.Pp
+Adding and taking away a package; not run for this page:
+.Bd -literal -offset indent
+$ kpkg install htop
+$ kpkg remove htop
+# each: a snapshot of the running root, then dnf, apt-get or pacman
+.Ed
+.Pp
+A typo:
+.Bd -literal -offset indent
+$ kpkg frob
+kpkg: unknown command: frob
+kpkg — universal package manager (auto-detects apt/dnf/pacman)
+\&...
+# (exited 2)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kpkg: WARNING: no snapshot of ROOT was taken; the transaction goes ahead without one"
+The snapshot failed (the reason is above); the change is not undoable by
+rollback.
+.It "No package manager found"
+.El
+.Sh SEE ALSO
+.Xr apt-get 8 ,
+.Xr dnf 8 ,
+.Xr kldload-rollback 8 ,
+.Xr ksnap 8 ,
+.Xr pacman 8
+.Sh HISTORY
+On 2026-09-15 each transaction left two snapshots, this tool's and the
+wrapper's; it takes none when the wrapper will.
+On 2026-09-26 its snapshots were found never pruned.
+.Pp
+On 2026-09-30, writing this page: the snapshot ran without
+.Xr sudo 8
+and any failure was discarded, so run as a user it took none and the
+transaction went ahead; and an unknown command printed the usage and
+exited 0.
+Testing it on a Fedora 44 desktop also showed the NVIDIA container
+repository kldload wrote could never load there, which was fixed in the
+installer.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+.Cm update
+on Fedora and Enterprise Linux is
+.Ql dnf check-update ,
+which lists what would be upgraded.
+.Pp
+Only the running boot environment is snapshotted; a package that writes
+to
+.Pa /home
+or
+.Pa /srv
+is not undone by rolling back.

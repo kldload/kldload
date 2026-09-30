@@ -52,6 +52,15 @@
 # =============================================================================
 set -Eeuo pipefail
 
+# --help answers first, before anything is started or waited on (rule 9;
+# found by the sandboxed --help capture, 2026-09-30: this ran instead).
+case "${1:-}" in
+-h | --help)
+    awk 'NR > 1 && /^#/ { p = 1 } p && !/^#/ { exit } p { sub(/^# ?/, ""); print }' "$0"
+    exit 0
+    ;;
+esac
+
 readonly STATE_DIR=/var/lib/kldload
 readonly LOG_DIR=/var/log/kldload
 readonly FIRSTBOOT_DONE="${STATE_DIR}/firstboot-done"

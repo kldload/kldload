@@ -57,6 +57,13 @@ if [[ ! -f /etc/yum.repos.d/nvidia-container-toolkit.repo ]]; then
         >/etc/yum.repos.d/nvidia-container-toolkit.repo 2>/dev/null ||
         log "NOTE: could not fetch nvidia-container-toolkit.repo — GPU-in-container path will fall back to internet at install time"
 fi
+# NVIDIA's file names sslcacert=/etc/pki/tls/certs/ca-bundle.crt, which Fedora
+# 44 does not have, and the repo then cannot load (onyx, 2026-09-30); the
+# system trust store is what dnf uses without it. Also removes the line from a
+# file an earlier build left in place.
+if [[ -f /etc/yum.repos.d/nvidia-container-toolkit.repo ]]; then
+    sed -i '/^sslcacert=\/etc\/pki\/tls\/certs\/ca-bundle\.crt$/d' /etc/yum.repos.d/nvidia-container-toolkit.repo
+fi
 
 # Add OpenZFS for Fedora. As of 2026-06-12 the 2.4 line ships OpenZFS 2.4.3
 # for both fc43 and fc44 (cap raised to kernel-uname-r > 7.0.999), so the

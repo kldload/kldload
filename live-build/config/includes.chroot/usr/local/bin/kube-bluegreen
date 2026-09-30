@@ -47,8 +47,15 @@ _die() {
     exit 1
 }
 
-command -v kubectl >/dev/null || _die "kubectl not found"
-command -v helm >/dev/null || _die "helm not found"
+# The tools are needed for the work, not for --help: it died "kubectl not
+# found" before the help at the bottom could answer (2026-09-30).
+case "${1:-}" in
+-h | --help | help) ;;
+*)
+    command -v kubectl >/dev/null || _die "kubectl not found"
+    command -v helm >/dev/null || _die "helm not found"
+    ;;
+esac
 
 # `|| true`: no Service means the demo is not deployed, which the caller reports
 # in words; without it the ERR trap fired three times for `status` on a cluster
