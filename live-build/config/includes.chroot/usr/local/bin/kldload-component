@@ -64,6 +64,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 trap 'echo "kldload-component: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+# The system libvirt for the components' status checks: plain virsh as a user
+# asked the user's session, so `list` showed klab "absent" on a host with
+# five klab goldens (onyx, 2026-09-29; "unmanaged" as root).
+export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 readonly REG_DIR="${KLDLOAD_COMPONENT_REG:-/usr/lib/kldload/components}"
 readonly STATE_DIR="${KLDLOAD_COMPONENT_STATE:-/var/lib/kldload/components}"
@@ -378,6 +382,13 @@ main() {
     install | remove)
         [[ $# -ge 1 ]] || {
             echo "usage: kldload-component $_cmd <name>..." >&2
+            exit 1
+        }
+        # Root: the work runs as a system unit and writes /var/lib. As a user
+        # systemd-run waited 25 s on a polkit prompt nobody could answer and
+        # died "Connection timed out" through the ERR trap (2026-09-29).
+        ((EUID == 0)) || {
+            echo "kldload-component: $_cmd must run as root (list, status and log do not)" >&2
             exit 1
         }
         local _n _rc=0
