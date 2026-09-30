@@ -9,7 +9,12 @@ shelly1 Basic auth, shelly2 RFC 7616 SHA-256 digest with user admin, tasmota
 user/password in the query. Writes every request line (never the password)
 to requests.log so a test can see what the tool sent.
 """
-import base64, hashlib, json, os, sys, urllib.parse
+import base64
+import hashlib
+import json
+import os
+import sys
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 KIND, PORT = sys.argv[1], int(sys.argv[2])

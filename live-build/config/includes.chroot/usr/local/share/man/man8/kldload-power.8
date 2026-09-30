@@ -27,9 +27,14 @@
 .Ar machine
 .Cm pxe-once
 .Nm
+.Ar machine
+.Cm selftest
+.Op Fl -cycle
+.Op Fl -self
+.Nm
 .Ar mac
 .Cm set
-.Fl -controller Cm outlet | ipmi
+.Fl -controller Cm outlet | ipmi | redfish
 .Fl -address Ar host Ns Op : Ns Ar port
 .Op Fl -kind Cm shelly1 | shelly2 | tasmota
 .Op Fl -outlet Ar n
@@ -37,6 +42,8 @@
 .Op Fl -name Ar name
 .Op Fl -cycle-off Ar seconds
 .Op Fl -allow Ar verbs
+.Op Fl -system Ar path
+.Op Fl -insecure
 .Op Fl -password-stdin
 .Nm
 .Cm list
@@ -46,7 +53,7 @@
 .Nm
 controls a machine's power without the machine's help: through a smart
 plug it is plugged into, or through its baseboard management controller
-(BMC) over IPMI.
+(BMC) over IPMI or Redfish.
 It is what lets a netboot reinstall, a test sweep or an operator recover a
 machine that is off, hung, sitting at a passphrase prompt or stuck in an
 initrd, none of which answers ssh.
@@ -71,8 +78,8 @@ A reply from a plug or a BMC that the request was accepted is not taken as
 evidence that the power changed.
 Asking for the state a machine is already in succeeds and says so.
 .Pp
-Two controllers are supported:
-.Bl -tag -width "outlet"
+Three controllers are supported:
+.Bl -tag -width "redfish"
 .It Cm outlet
 A smart plug with a local HTTP API, chosen by
 .Fl -kind :
@@ -124,6 +131,27 @@ removes power at once, and
 .Cm pxe-once
 sets the next boot, once, to UEFI network boot and reads the BMC's boot
 flags back.
+.It Cm redfish
+A BMC reached over DMTF Redfish, HTTPS and JSON: the system's
+.Ql PowerState ,
+its
+.Ql ComputerSystem.Reset
+action
+.Pq Ql On , Ql GracefulShutdown , Ql ForceOff ,
+checked against the values the BMC says it allows, and its
+.Ql Boot
+override
+.Pq Ql Pxe , Ql Once , Ql UEFI .
+Current Dell and HPE BMCs ship with IPMI over the network turned off and
+Redfish on.
+.Cm set
+pins the public key of the certificate the BMC presents (BMC certificates
+are self-signed, so there is no authority to check); a different key later
+is refused.
+Some BMCs sell Redfish separately: Supermicro X11 boards answer every
+Redfish request with a license error, and there
+.Cm ipmi
+is the controller to use.
 .El
 .Pp
 .Nm
@@ -169,6 +197,23 @@ Pair it with
 .Cm cycle ,
 or with the next reboot, and arm the machine first with
 .Xr kldload-netboot-server 8 .
+.It Cm selftest
+The acceptance test for one machine's controller, meant for the first box
+of a new rack before the rest are trusted.
+It reads the power state and the boot override, sets
+.Cm pxe-once
+and clears it again (each read back, so the machine is left as it was),
+and with
+.Fl -cycle
+cycles the machine, confirms it comes back on and, if it was off, switches
+it off again.
+Steps the record does not allow, or the controller cannot do, are reported
+as SKIP; the report is on standard output and the exit status is 0 only
+when nothing failed.
+A status-only record runs the two reads and nothing else.
+.It Fl -cycle
+.Pq Cm selftest
+Include the power cycle.
 .It Cm set
 Create or replace the record for
 .Ar mac .
@@ -229,6 +274,17 @@ and
 Every other verb exits 6 before the controller is contacted, and nothing
 on the command line overrides it; widening it takes a new
 .Cm set .
+.It Fl -system Ar path
+.Pq Cm set , Cm redfish
+Which ComputerSystem to drive, as a path such as
+.Pa /redfish/v1/Systems/1 ,
+for a BMC that manages several.
+The default is the first member the BMC lists.
+.It Fl -insecure
+.Pq Cm set , Cm redfish
+Do not pin the certificate.
+Every later call then prints a warning, because an unpinned endpoint can be
+impersonated and would receive the password.
 .It Fl -password-stdin
 .Pq Cm set
 Read the password as one line from standard input.
@@ -271,7 +327,10 @@ and are parsed as data, never sourced:
 .Ev POWER_PASSWORD ,
 .Ev POWER_NAME ,
 .Ev POWER_CYCLE_OFF ,
-.Ev POWER_ALLOW .
+.Ev POWER_ALLOW ,
+.Ev POWER_SYSTEM ,
+.Ev POWER_TLS_PIN ,
+.Ev POWER_TLS .
 .It Pa /var/log/kldload/power.log
 One line per verb that changed or tried to change power, and per
 .Cm set :
@@ -292,7 +351,8 @@ was not given
 .It 3
 the controller cannot do that verb (a plug:
 .Cm off ,
-.Cm pxe-once )
+.Cm pxe-once ;
+a BMC that does not offer the reset type, or wants a license for Redfish)
 .It 4
 the controller did not answer
 .It 5
@@ -416,6 +476,59 @@ was not run)
 $ echo $?
 6
 .Ed
+.Ss selftest, on a machine that may only be read
+abyss's record allows
+.Cm status
+alone, so the test reads and changes nothing:
+.Bd -literal -offset indent
+$ sudo kldload-power abyss selftest
+selftest: abyss (ipmi at 10.100.10.76)
+  PASS  power state reads: on
+  PASS  boot override reads: No override (invalid, once)
+  SKIP  pxe-once round trip: the record does not allow pxe-once
+  SKIP  power cycle: not asked for (--cycle)
+selftest: 2 passed, 0 failed, 2 skipped
+.Ed
+.Ss selftest --cycle, and a BMC that cannot boot the network once
+Against the Redfish emulator, which writes every boot override as
+permanent: the test fails that step, undoes it, and says so; the power
+cycle passes and the machine is put back off:
+.Bd -literal -offset indent
+$ sudo kldload-power rfprobe selftest --cycle
+selftest: rfprobe (redfish at 127.0.0.1:18443)
+  PASS  power state reads: off
+  PASS  boot override reads: Pxe (Continuous, UEFI)
+kldload-power: the BMC took the request but its boot override reads:
+Pxe (Continuous, UEFI)
+kldload-power: WARNING: the override could NOT be cleared (Pxe
+(Continuous, UEFI)): this machine may boot from the network on every
+restart until it is fixed on the BMC
+  FAIL  pxe-once did not stick; the override now reads: Pxe
+(Continuous, UEFI)
+  PASS  power cycle: off, held 3s, on again
+  PASS  put back off, as it was
+selftest: 4 passed, 1 failed, 0 skipped
+.Ed
+.Ss set: a Redfish BMC (--controller redfish, --system, --insecure)
+.Bd -literal -offset indent
+$ printf '%s\en' "$PW" | sudo kldload-power 02:00:00:00:18:43 set \e
+      --controller redfish --address 127.0.0.1:18443 --user admin \e
+      --name rfprobe --cycle-off 3 --password-stdin
+# writes /etc/kldload/power/02:00:00:00:18:43.env; for a Redfish
+# record that includes the pinned key, a line of the form
+# POWER_TLS_PIN=sha256//<44 characters of base64>
+# --system /redfish/v1/Systems/2 picks the second system of a
+# multi-node BMC; --insecure skips the pin and warns on every call
+.Ed
+.Ss A Supermicro BMC without the Redfish license
+abyss's BMC, through a temporary status-only Redfish record:
+.Bd -literal -offset indent
+$ sudo kldload-power abyss-rf status
+kldload-power: this BMC needs a license for Redfish (SUM DCMS OOB);
+use --controller ipmi
+$ echo $?
+3
+.Ed
 .Ss --self
 Run on onyx, whose own NIC carries the MAC:
 .Bd -literal -offset indent
@@ -449,6 +562,24 @@ The record's
 .Fl -allow
 list refused the verb.
 Exit 6.
+.It "this BMC needs a license for Redfish (LICENSE); use --controller ipmi"
+The BMC refused Redfish with a vendor license error.
+Exit 3.
+.It "the BMC at ADDRESS presented a different certificate than the one pinned at set"
+The certificate's key changed since
+.Cm set .
+If the BMC's certificate was replaced on purpose, run
+.Cm set
+again; otherwise something else is answering at that address.
+Exit 1.
+.It "the override could NOT be cleared (STATE): this machine may boot from the network on every restart"
+A BMC took a one-time network boot as permanent and would not take it
+back.
+Fix it on the BMC before the machine next restarts.
+.It "this BMC has no 'no override'; the next boot goes to the disk instead"
+Not an error: an IPMI BMC without the standard
+.Ql none
+setting was sent to the disk, which is the normal boot.
 .It "NAME is this machine; --self to cut its power anyway"
 Exit 2.
 .It "the plug is on; the machine starts only if its firmware powers on after AC loss"
@@ -472,6 +603,13 @@ produced the same message from
 and a refused login was reported as unreachable;
 .Nm
 has run it verbose since, where the two differ.
+The Redfish driver and
+.Cm selftest
+were added the same evening for a rack in someone else's data center.
+The Redfish emulator it was first run against ignores one-time boot
+overrides entirely, which is how the first version of
+.Cm selftest
+was caught hiding a failed clean-up.
 .Sh AUTHORS
 .An kldload Aq Mt anthony@kldload.com
 .Sh CAVEATS
@@ -492,6 +630,17 @@ asks for UEFI network boot
 .Pq Ql options=efiboot .
 The emulator it was tested against ignores that option, so UEFI network
 boot through a real BMC has not been demonstrated.
+.Pp
+.Cm pxe-once
+and
+.Cm selftest
+through Redfish have been run against a test double and against
+sushy-tools, and through IPMI against virtualbmc; on real hardware only
+the reads (abyss, a Supermicro X11) have been.
+Until
+.Cm selftest Fl -cycle
+has passed on a box of a given make, treat its one-time network boot as
+unproven there.
 .Pp
 The password never appears on a command line: plugs are driven by
 .Xr curl 1
