@@ -161,9 +161,19 @@ cmd_deploy() {
 
         log "Creating ${vm_name}..."
 
-        # Destroy existing
-        virsh destroy "$vm_name" 2>/dev/null || true
-        virsh undefine "$vm_name" --nvram --remove-all-storage 2>/dev/null || true
+        # Replace only a machine this command made: one whose disk is the
+        # file below. SAFETY: this was destroy + undefine
+        # --remove-all-storage on the NAME, so anyone's kldload-node-1 lost
+        # its definition and every disk it had (2026-09-30, the class fixed
+        # across the kvm tools that day).
+        if virsh dominfo "$vm_name" >/dev/null 2>&1; then
+            local _blk
+            _blk="$(virsh domblklist "$vm_name" 2>/dev/null)" || _blk=""
+            grep -qF -- "$vm_disk" <<<"$_blk" ||
+                die "${vm_name} exists and is not one kimage made (no ${vm_disk}) — not touching it"
+            virsh destroy "$vm_name" 2>/dev/null || true                               # not running
+            virsh undefine "$vm_name" --nvram --remove-all-storage 2>/dev/null || true # judged by the define below
+        fi
 
         # Create disk from golden image (instant CoW copy if on same FS)
         cp --reflink=auto "$image" "$vm_disk"
