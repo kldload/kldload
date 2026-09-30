@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
-# kvm-snap — ZFS snapshot a VM's zvol
+# ─────────────────────────────────────────────────────────────────────────────
+# kvm-snap — snapshot a VM's disk, list its snapshots, roll back, delete.
+#
+#   kvm-snap <vm>                   snapshot now (a running VM is paused for
+#   kvm-snap <vm> snap <name>       the moment it takes, and always resumed)
+#   kvm-snap <vm> list
+#   kvm-snap <vm> rollback [<snap>] back to <snap>, or the newest; newer
+#                                   snapshots are destroyed; the VM is left
+#                                   running or stopped as it was
+#   kvm-snap <vm> delete <snap>
+#
+# <snap> may be written stable, @stable or rpool/vms/<vm>@stable -- kld passes
+# "@name", and until 2026-09-29 only the full form worked here, so every
+# rollback and delete from kld's Snapshots tab failed (the rollback after
+# force-stopping the VM). The same bug was fixed in kvm-clone on 2026-09-03.
+# Man page: kvm-snap(8).
+#
+# Exit: 0 done, 1 failed, 2 usage error.
+# ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 trap 'echo "kvm-snap: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
@@ -29,9 +47,15 @@ Examples:
   kvm-snap myvm list               # list snapshots
   kvm-snap myvm rollback           # rollback to latest
   kvm-snap myvm delete @2026-03-30
+
+<snap> is stable, @stable or rpool/vms/<vm>@stable.
+Rollback destroys every snapshot newer than <snap>, and powers the VM
+off for the rollback; it is left running or stopped as it was.
+
+Exit: 0 done, 1 failed, 2 usage error.
 EOF
-    # asked-for help is 0; a usage error is 1
-    exit "${1:-1}"
+    # asked-for help is 0; a usage error is 2 (it was 1, like a failure)
+    exit "${1:-2}"
 }
 
 # --help used to be taken as a VM name ("zvol rpool/vms/--help not found")
@@ -40,15 +64,34 @@ EOF
 NAME="$1"
 shift
 ACTION="${1:-snap}"
-shift 2>/dev/null || true
+shift 2>/dev/null || true # no action given: the default, snap
+
+die() {
+    echo "kvm-snap: $*" >&2
+    exit 1
+}
+# SAFETY: the name is a dataset path; a "/" would reach outside rpool/vms/<vm>
+[[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || {
+    echo "kvm-snap: '${NAME}' is not a plain name (letters, digits, . _ -)" >&2
+    usage
+}
 
 ZVOL="rpool/vms/${NAME}"
+zfs list "${ZVOL}" >/dev/null 2>&1 || die "no volume ${ZVOL}"
 
-# Verify zvol exists
-if ! zfs list "${ZVOL}" >/dev/null 2>&1; then
-    echo "Error: VM zvol '${ZVOL}' not found"
-    exit 1
-fi
+# _snapname <stable|@stable|rpool/vms/<vm>@stable> — the full snapshot name.
+# SAFETY: a full name must be THIS VM's; `rollback rpool/other@x` would
+# otherwise roll back someone else's data.
+_snapname() {
+    local s="$1"
+    case "$s" in
+    */*@*) ;;
+    *) s="${ZVOL}@${s#@}" ;;
+    esac
+    [[ "$s" == "${ZVOL}@"* ]] || die "${1} is not a snapshot of ${ZVOL}"
+    [[ "${s#*@}" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]*$ ]] || die "'${1}' is not a snapshot name"
+    printf '%s\n' "$s"
+}
 
 case "$ACTION" in
 snap | create)
@@ -57,40 +100,53 @@ snap | create)
     # up after the @ of a zfs argument.
     _label="${1:-$(date +%Y-%m-%d_%H%M%S)}"
     if [[ ! "$_label" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]]; then
-        echo "Error: '${_label}' is not a snapshot name (letters, digits, - _ . :; not starting with -)" >&2
+        echo "kvm-snap: '${_label}' is not a snapshot name (letters, digits, - _ . :; not starting with -)" >&2
         exit 2
     fi
     SNAP="${ZVOL}@${_label}"
-    if zfs list -H -o name "${SNAP}" >/dev/null 2>&1; then
-        echo "Error: ${SNAP} already exists" >&2
-        exit 1
-    fi
-    # Stop VM briefly for consistent snapshot (optional)
+    zfs list -H -o name "${SNAP}" >/dev/null 2>&1 && die "${SNAP} already exists"
+    # A running VM is paused for the moment the snapshot takes, so its disk
+    # is consistent. SAFETY: it is resumed whatever the snapshot did -- a failed
+    # `zfs snapshot` used to exit under set -e with the VM left paused, the same
+    # defect kvm-clone had (man page review, 2026-09-29).
     STATE=$(virsh domstate "${NAME}" 2>/dev/null || echo "unknown")
+    _paused=0
     if [[ "$STATE" == "running" ]]; then
-        echo "Pausing VM for consistent snapshot..."
-        virsh suspend "${NAME}" 2>/dev/null || true
+        echo "Pausing ${NAME} for a consistent snapshot..."
+        if virsh suspend "${NAME}" >/dev/null; then
+            _paused=1
+        else
+            echo "kvm-snap: WARNING: could not pause ${NAME}; the snapshot is taken live (crash-consistent)" >&2
+        fi
     fi
-    zfs snapshot "${SNAP}"
-    if [[ "$STATE" == "running" ]]; then
-        virsh resume "${NAME}" 2>/dev/null || true
+    _rc=0
+    zfs snapshot "${SNAP}" || _rc=$?
+    if ((_paused)); then
+        virsh resume "${NAME}" >/dev/null ||
+            echo "kvm-snap: WARNING: ${NAME} is still PAUSED -- virsh resume ${NAME}" >&2
     fi
-    echo "✔ Snapshot: ${SNAP}"
+    ((_rc == 0)) || die "could not snapshot ${ZVOL}"
+    echo "Snapshot: ${SNAP}"
     ;;
 list | ls)
     echo "Snapshots for ${NAME}:"
     zfs list -t snapshot -o name,creation,used -r "${ZVOL}" 2>/dev/null || echo "  (none)"
     ;;
 rollback)
-    SNAP="${1:-}"
-    if [[ -z "$SNAP" ]]; then
-        # Get most recent snapshot
-        SNAP=$(zfs list -t snapshot -o name -r "${ZVOL}" -S creation 2>/dev/null | head -2 | tail -1)
+    if [[ -n "${1:-}" ]]; then
+        # || exit: _snapname dies in the $() subshell, which alone would end in
+        # the ERR trap instead of its own message's exit status
+        SNAP="$(_snapname "$1")" || exit 1
+    else
+        # the newest; -H so no header line has to be skipped
+        SNAP="$(zfs list -H -t snapshot -o name -S creation -d 1 "${ZVOL}" 2>/dev/null | sed -n 1p)"
+        [[ -n "$SNAP" ]] || die "${NAME} has no snapshots"
     fi
-    if [[ -z "$SNAP" || "$SNAP" == "NAME" ]]; then
-        echo "No snapshots found for ${NAME}"
-        exit 1
-    fi
+    zfs list -H -t snapshot "${SNAP}" >/dev/null 2>&1 || die "no snapshot ${SNAP}"
+    # The VM is left as it was found: rolled back while stopped, it stays
+    # stopped. It was always started afterwards, so rolling back a stopped VM
+    # also powered it on (man page review, 2026-09-29).
+    _was="$(virsh domstate "${NAME}" 2>/dev/null || echo "undefined")"
     echo "Rolling back to: ${SNAP}"
     # -r: the hourly kldload-vm-snapshot timer puts @auto- snapshots on every
     # zvol under rpool/vms, so any target older than the newest one has newer
@@ -102,22 +158,32 @@ rollback)
         echo "  destroying $(wc -l <<<"$_newer") newer snapshot(s):"
         sed 's/^/    /' <<<"$_newer"
     fi
-    virsh destroy "${NAME}" 2>/dev/null || true
-    if ! zfs rollback -r "${SNAP}"; then
-        echo "✘ zfs rollback -r ${SNAP} failed — ${NAME} left as it was; starting it again" >&2
-        virsh start "${NAME}" 2>/dev/null || true
-        exit 1
+    # a rollback under a running guest corrupts it: the VM is powered off
+    if [[ "$_was" == running || "$_was" == paused ]]; then
+        virsh destroy "${NAME}" >/dev/null || die "could not power ${NAME} off for the rollback"
     fi
-    virsh start "${NAME}" 2>/dev/null || true
-    echo "✔ Rolled back to ${SNAP}"
+    if ! zfs rollback -r "${SNAP}"; then
+        if [[ "$_was" == running ]]; then
+            virsh start "${NAME}" >/dev/null || echo "kvm-snap: could not start ${NAME} again" >&2
+        fi
+        die "zfs rollback -r ${SNAP} failed; ${NAME}'s disk is as it was"
+    fi
+    if [[ "$_was" == running ]]; then
+        virsh start "${NAME}" >/dev/null || die "rolled back, but ${NAME} did not start again"
+    fi
+    echo "Rolled back to ${SNAP} (${NAME} is $([[ "$_was" == running ]] && echo running || echo "shut off"))"
     ;;
 delete | rm)
-    SNAP="${1:?Usage: kvm-snap $NAME delete <snapshot>}"
-    [[ "$SNAP" != *@* ]] && SNAP="${ZVOL}@${SNAP}"
-    zfs destroy "${SNAP}"
-    echo "✔ Deleted: ${SNAP}"
+    [[ -n "${1:-}" ]] || {
+        echo "kvm-snap: delete needs a snapshot name" >&2
+        usage
+    }
+    SNAP="$(_snapname "$1")" || exit 1
+    zfs destroy "${SNAP}" || die "could not delete ${SNAP}"
+    echo "Deleted: ${SNAP}"
     ;;
 *)
+    echo "kvm-snap: unknown action: ${ACTION}" >&2
     usage
     ;;
 esac
