@@ -1,0 +1,327 @@
+.Dd September 29, 2026
+.Dt KVM-CLONE 8
+.Os
+.Sh NAME
+.Nm kvm-clone
+.Nd make a new virtual machine from an existing one as a ZFS clone
+.Sh SYNOPSIS
+.Nm
+.Ar source
+.Ar name
+.Op Fl -snap Ar snapshot
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+makes a new virtual machine called
+.Ar name
+whose disk is a ZFS clone of
+.Ar source Ns 's .
+The clone copies nothing: it shares every block with the snapshot it was
+made from, and only what either machine writes afterwards takes new space.
+It is how a golden image becomes many machines, and every kldload tool
+that makes machines from a golden
+.Po
+.Xr klab 8 ,
+.Xr kube-cluster 8 ,
+.Xr kld 1 ,
+the web console
+.Pc
+does it through
+.Nm .
+.Pp
+In order,
+.Nm :
+.Bl -enum -compact
+.It
+checks both names, that
+.Ar source
+has a volume
+.Pq Pa rpool/vms/ Ns Ar source
+and a libvirt domain, and that nothing is called
+.Ar name
+yet;
+.It
+without
+.Fl -snap ,
+takes a snapshot of the source,
+.Pa rpool/vms/ Ns Ar source Ns Pa @clone- Ns Ar timestamp .
+A running source is paused for the moment the snapshot takes, so its disk
+is consistent, and is always resumed, whether the snapshot succeeded or
+not;
+.It
+clones the snapshot to
+.Pa rpool/vms/ Ns Ar name ,
+recording the snapshot in the clone's
+.Ql com.kldload:clone-origin
+property;
+.It
+gives the clone its own UEFI variable store, a copy of the source's, and a
+copy of the source's libvirt definition pointing at the new volume, with a
+new MAC address and UUID;
+.It
+attaches a cloud-init seed,
+.Pa /var/lib/libvirt/images/ Ns Ar name Ns Pa -seed.iso ,
+so that on its first boot the clone sets its own hostname and machine-id,
+installs this host's root ssh key, permits root to log in with a key, and
+starts sshd and the QEMU guest agent;
+.It
+registers the clone in the kldload state database.
+A name ending in
+.Ql -cp
+or
+.Ql -cp- Ns Ar N
+is registered as a control plane, and one ending in
+.Ql -w- Ns Ar N
+or containing
+.Ql worker
+as a worker, of the cluster named by what comes before \(em the names
+.Xr kube-cluster 8
+gives its nodes.
+.El
+.Pp
+The clone is defined, not started.
+.Pp
+If anything fails after the clone was made, everything this run created
+is removed again: the domain, the variable store, the volume, and the
+snapshot if this run took it.
+A snapshot named with
+.Fl -snap
+is never removed.
+The seed is the exception: without it the clone still boots, under the
+source's identity, and
+.Nm
+says so.
+.Pp
+Names are letters, digits,
+.Ql \&. ,
+.Ql _
+and
+.Ql - ,
+up to 63 characters, starting with a letter or a digit.
+.Pp
+.Nm
+must run as root; run as a user it re-executes itself with
+.Xr sudo 8 .
+.Fl -help
+needs neither.
+.Sh OPTIONS
+.Bl -tag -width "--snap snapshot"
+.It Fl -snap Ar snapshot
+Clone from an existing snapshot of the source instead of taking a new one.
+Three spellings name the same snapshot:
+.Ql golden ,
+.Ql @golden
+and
+.Ql rpool/vms/ Ns Ar source Ns Ql @golden .
+The source is not paused.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+Needs no root and changes nothing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa rpool/vms/ Ns Ar name
+The clone's volume.
+.It Pa rpool/vms/ Ns Ar source Ns Pa @clone- Ns Ar timestamp
+The snapshot a clone without
+.Fl -snap
+is made from.
+It lives as long as a clone of it does.
+.It Pa /var/lib/libvirt/qemu/nvram/ Ns Ar name Ns Pa _VARS Ns \&. Ns Ar ext
+The clone's UEFI variables, copied from the source's store; the extension
+is the source's
+.Pq Ql qcow2
+on current libvirt).
+.It Pa /var/lib/libvirt/images/ Ns Ar name Ns Pa -seed.iso
+The cloud-init seed, attached as a CD on the SATA bus.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+The clone was made.
+.It 1
+The source, its domain or the snapshot does not exist, the new name is
+taken, or a step failed; whatever this run created has been removed.
+.It 2
+A usage error; nothing was touched.
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on a kldload host on 2026-09-29.
+The source was a throwaway machine,
+.Ql cl-3191174-src ,
+made with
+.Xr kvm-create 8
+for the purpose, and it and every clone were deleted afterwards with
+.Xr kvm-delete 8 .
+.Ss A clone of a running machine
+.Bd -literal -offset indent
+# kvm-clone cl-3191174-src cl-3191174-a
+Cloning rpool/vms/cl-3191174-src@clone-20260929_222853010746173 -> rpool/vms/cl-3191174-a...
+Cloning VM definition...
+  Seed:   /var/lib/libvirt/images/cl-3191174-a-seed.iso (hostname, ssh key, guest agent)
+
+Cloned 'cl-3191174-src' -> 'cl-3191174-a' (instant, zero bytes copied)
+  Source: /dev/zvol/rpool/vms/cl-3191174-src
+  Clone:  /dev/zvol/rpool/vms/cl-3191174-a
+  Start:  virsh start cl-3191174-a
+  Snap:   kvm-snap cl-3191174-a
+.Ed
+.Pp
+The source was paused for the snapshot and is running again; the clone is
+defined, not started, and knows where it came from:
+.Bd -literal -offset indent
+# zfs get -H -o name,property,value origin,com.kldload:clone-origin \e
+      rpool/vms/cl-3191174-a
+rpool/vms/cl-3191174-a	origin	rpool/vms/cl-3191174-src@clone-20260929_222853010746173
+rpool/vms/cl-3191174-a	com.kldload:clone-origin	rpool/vms/cl-3191174-src@clone-20260929_222853010746173
+# virsh domblklist cl-3191174-a --details | awk 'NR>2 && NF'
+ block   disk     vda      /dev/zvol/rpool/vms/cl-3191174-a
+ file    cdrom    sda      /var/lib/libvirt/images/cl-3191174-a-seed.iso
+.Ed
+.Pp
+Its UEFI variables are its own, so it can run beside its source:
+.Bd -literal -offset indent
+# virsh dumpxml cl-3191174-b | grep -oE '>[^<]*</nvram>'
+>/var/lib/libvirt/qemu/nvram/cl-3191174-b_VARS.qcow2</nvram>
+# virsh start cl-3191174-b
+Domain 'cl-3191174-b' started
+.Ed
+.Ss From a named snapshot (--snap)
+The snapshot was taken with
+.Xr kvm-snap 8 ;
+all three spellings clone it:
+.Bd -literal -offset indent
+# kvm-snap cl-3191174-src snap stable
+\&...
+# kvm-clone cl-3191174-src cl-3191174-c --snap @stable
+Cloning rpool/vms/cl-3191174-src@stable -> rpool/vms/cl-3191174-c...
+\&...
+# kvm-clone cl-3191174-src cl-3191174-d --snap stable
+Cloning rpool/vms/cl-3191174-src@stable -> rpool/vms/cl-3191174-d...
+\&...
+# kvm-clone cl-3191174-src cl-3191174-e --snap rpool/vms/cl-3191174-src@stable
+Cloning rpool/vms/cl-3191174-src@stable -> rpool/vms/cl-3191174-e...
+\&...
+.Ed
+.Ss Many machines from one golden
+.Bd -literal -offset indent
+# for n in 1 2 3; do kvm-clone web-golden web-$n --snap golden; done
+# three machines, one snapshot, no data copied
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+# kvm-clone nosuch-vm cl-3191174-x
+kvm-clone: no volume rpool/vms/nosuch-vm
+# kvm-clone cl-3191174-src cl-3191174-b
+kvm-clone: rpool/vms/cl-3191174-b already exists
+# kvm-clone cl-3191174-src cl-3191174-x --snap @nosuch
+kvm-clone: no snapshot rpool/vms/cl-3191174-src@nosuch
+# kvm-clone cl-3191174-novm cl-3191174-x
+kvm-clone: cl-3191174-novm has a volume but no libvirt domain to copy
+# (each of the four above exited 1)
+# kvm-clone web/1 x
+kvm-clone: 'web/1' is not a plain name (letters, digits, . _ -)
+# kvm-clone a a
+kvm-clone: the new name is the source's name
+# kvm-clone a b --snap
+kvm-clone: --snap needs a snapshot name
+# kvm-clone a b --foo
+kvm-clone: unknown option: --foo
+# (each of the four above exited 2)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kvm-clone: no volume rpool/vms/NAME"
+There is no machine of that name, or its disk is not in
+.Pa rpool/vms .
+.It "kvm-clone: NAME has a volume but no libvirt domain to copy"
+The volume exists but there is no definition to copy; a bare volume can be
+turned into a machine with
+.Xr kvm-create 8
+and a
+.Xr zfs-send 8
+into its volume.
+.It "kvm-clone: no snapshot rpool/vms/SOURCE@SNAP"
+.Fl -snap
+names a snapshot the source does not have;
+.Ql kvm-snap SOURCE list
+shows the ones it does.
+.It "kvm-clone: could not snapshot rpool/vms/SOURCE"
+Taking the snapshot failed (the pool is full, or it is read-only).
+If the source was running it was paused and has been resumed; nothing was
+created.
+.It "kvm-clone: WARNING: SOURCE is still PAUSED -- virsh resume SOURCE"
+The snapshot step could not resume the source.
+Run the command it names.
+.It "kvm-clone: WARNING: could not pause SOURCE; the snapshot is taken live (crash-consistent)"
+The clone is made from a snapshot of a running disk: as consistent as a
+power cut, which journaling filesystems recover from.
+.It "kvm-clone: could not define NAME from SOURCE's definition"
+libvirt rejected the copied definition; the volume and variable store made
+for it have been removed.
+.It "NOTE: no genisoimage/mkisofs/xorrisofs -- clone will boot as 'SOURCE'"
+No tool to build the seed with.
+The clone boots with the source's hostname, keys and machine-id; install
+one of them and clone again, or give the clone an identity by hand.
+.It "kvm-clone: WARNING: NAME is not in the kldload state DB (kldload-db vm-register failed)"
+The clone exists, but the estate and the Ansible inventory will not show
+it until it is registered.
+.El
+.Sh SEE ALSO
+.Xr kld 1 ,
+.Xr virsh 1 ,
+.Xr klab 8 ,
+.Xr kldload-db 8 ,
+.Xr kube-cluster 8 ,
+.Xr kvm-create 8 ,
+.Xr kvm-delete 8 ,
+.Xr kvm-golden 8 ,
+.Xr kvm-snap 8 ,
+.Xr zfs-clone 8
+.Sh HISTORY
+The identity seed was added after clones on a test machine came up named
+.Ql localhost
+and refused ssh (2026-08-21); it moved to the SATA bus when a seed asked
+for as the 26th SCSI device was never seen by the guest (2026-08-22); root
+login by key was added when clones could not be enrolled on the mesh
+(2026-09-22).
+.Pp
+On 2026-09-29, writing this page, three defects were found and fixed.
+Clones of UEFI machines had kept their source's variable store, because the
+store's file name was assumed
+.Pq Ql _VARS.fd
+rather than read, and current libvirt names it
+.Ql _VARS.qcow2 ;
+such a clone would not start while its source ran
+.Po
+.Ql Failed to get "write" lock
+.Pc ,
+and deleting it with
+.Xr kvm-delete 8
+deleted the source's variables.
+A failed snapshot could leave a running source paused.
+A failure after the clone was made could leave the clone behind.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A clone made by an earlier
+.Nm
+may still point at its source's UEFI variable store; it will not run
+beside the source.
+Its definition can be pointed at a copy by hand, or it can be deleted
+(the fixed
+.Xr kvm-delete 8
+keeps the shared store) and cloned again.
+.Pp
+The seed gives the clone this host's root ssh key.
+A clone meant for someone else should have that key replaced.
+.Pp
+The source's snapshot, and so the source's volume, cannot be destroyed
+while a clone of it exists;
+.Xr kvm-delete 8
+says which clones hold it.
+.Xr zfs-promote 8
+turns a clone into an independent volume.
