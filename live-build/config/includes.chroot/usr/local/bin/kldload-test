@@ -12,7 +12,8 @@
 #
 # Exit: the suite's status; 2 when SUITE names no installed file (it used to
 #       exec a missing path, so `kldload-test dekstop` said "No such file"
-#       and returned 127, 2026-09-23).
+#       and returned 127, 2026-09-23), a name that is not a plain word, or
+#       more than one argument. See kldload-test(8).
 set -Eeuo pipefail
 trap 'echo "kldload-test: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
@@ -43,6 +44,17 @@ case "${1:-}" in
 esac
 
 SUITE="${1:-auto}"
+# SAFETY: the name becomes a path that is run as root; "../x" would leave
+# SUITE_DIR. Suite names are plain words. One argument only: a second one
+# used to be ignored without a word.
+if [[ ! "$SUITE" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+    printf 'kldload-test: %s is not a suite name\n' "$SUITE" >&2
+    exit 2
+fi
+if (($# > 1)); then
+    printf 'kldload-test: one suite at a time (got: %s)\n' "$*" >&2
+    exit 2
+fi
 FILE="${SUITE_DIR}/smoke-${SUITE}.sh"
 [[ -f "$FILE" ]] || {
     printf 'kldload-test: no suite named %s (looked for %s)\n' "$SUITE" "$FILE" >&2

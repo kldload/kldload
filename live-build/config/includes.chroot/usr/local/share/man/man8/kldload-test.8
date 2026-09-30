@@ -1,0 +1,190 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-TEST 8
+.Os
+.Sh NAME
+.Nm kldload-test
+.Nd run one of the smoke test suites shipped with kldload against this machine
+.Sh SYNOPSIS
+.Nm
+.Op Ar suite
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+runs a test suite that shipped with the install,
+.Pa /usr/local/share/kldload/tests/smoke- Ns Ar suite Ns Pa .sh ,
+and returns what it prints and its exit status unchanged.
+The suites are the ones kldload's own builds are checked with; each check
+prints
+.Ql PASS ,
+.Ql FAIL
+or
+.Ql WARN
+and the suite ends with a count.
+.Pp
+Without
+.Ar suite ,
+.Ql auto
+runs the suite for the profile the machine was installed with.
+.Pp
+The suites need root to look at ZFS, libvirt and the services; run it
+with
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Ar suite
+Which suite to run; the list is in
+.Fl -help .
+The usual ones:
+.Bl -tag -width "features" -compact
+.It Li auto
+the suite for this machine's profile
+.It Li core , server , desktop , kvm
+one profile's suite
+.It Li all
+every suite
+.It Li features
+one check for each feature kldload ships, on any profile
+.It Li estate
+the machines are reachable and monitored, not only listed
+.It Li unit , show
+the installer's and the first-boot show's own checks
+.El
+.It Fl h , Fl -help
+Print the usage and the suites installed on this machine, and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /usr/local/share/kldload/tests/
+The suites, and
+.Pa lib-test.sh ,
+which they share.
+.El
+.Sh EXIT STATUS
+The suite's own: 0 when nothing failed, and otherwise what the suite
+returns, usually 1.
+.Nm
+itself exits 2 for a suite that is not installed, a name that is not a
+plain word, or more than one argument.
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-29.
+.Ss The suites here (-h, --help)
+.Bd -literal -offset indent
+$ kldload-test --help
+kldload-test — run a smoke suite against this kldloadOS system
+
+Usage:  sudo kldload-test [SUITE]      (default: auto)
+        kldload-test -h | --help       lists the suites installed here
+
+SUITE names a file /usr/local/share/kldload/tests/smoke-<SUITE>.sh, copied
+from the repo's tests/ at build time: auto picks by the installed profile;
+core, server, desktop, kvm test one profile; all runs everything; features,
+estate, unit and show are the narrower ones. The suite's own output and
+exit status are what this tool returns.
+
+Exit: the suite's status; 2 when SUITE names no installed file (it used to
+      exec a missing path, so `kldload-test dekstop` said "No such file"
+      and returned 127, 2026-09-23), a name that is not a plain word, or
+      more than one argument. See kldload-test(8).
+
+Suites installed in /usr/local/share/kldload/tests:
+  all
+  auto
+  build
+  core
+  desktop
+  features
+  javaapi-rollback
+  kvm
+  server
+  unit
+# (exited 0)
+.Ed
+.Ss A suite (suite)
+This machine's older lab machines have no sound device, and the suite
+says so:
+.Bd -literal -offset indent
+$ sudo kldload-test features
+
+  ── Shipped desktop apps ──────────────────────────────────────────
+  ✓ PASS  Timer: binary, launcher and icon all installed
+  ✓ PASS  Timer: PyGObject + Gtk4 import on this machine
+  ✓ PASS  Timer: .desktop validates
+
+  ── Rollback ──────────────────────────────────────────
+  ✓ PASS  rollback is on PATH (/usr/bin/kldload-rollback)
+  ✓ PASS  kldload-rollback installed
+\&...
+  ── Golden images ──────────────────────────────────────────
+  ✓ PASS  all 10 golden image(s) carry their @golden snapshot
+
+  ── Guest audio ──────────────────────────────────────────
+  ✗ FAIL  guest audio (host half) — no <sound> device: debian-desktop-ud30 klab-blue-centos ...
+\&...
+  ── WireGuard meshes ──────────────────────────────────────────
+  ⚠ WARN  WireGuard — no interfaces up
+\&...
+  Results:  9 passed  1 failed  2 warnings  (12 total)
+\&...
+# (exited 1)
+.Ed
+.Pp
+The failing line is trimmed; it names 23 machines.
+.Ss What it refuses
+.Bd -literal -offset indent
+$ kldload-test dekstop
+kldload-test: no suite named dekstop (looked for /usr/local/share/kldload/tests/smoke-dekstop.sh)
+kldload-test: installed: all auto build core desktop features javaapi-rollback kvm server unit
+# (exited 2)
+$ kldload-test ../../tmp/x
+kldload-test: ../../tmp/x is not a suite name
+# (exited 2)
+$ kldload-test core extra
+kldload-test: one suite at a time (got: core extra)
+# (exited 2)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kldload-test: no suite named SUITE (looked for PATH)"
+Followed by the suites that are installed.
+.It "kldload-test: FAIL at line N: COMMAND"
+.Nm
+itself failed; the suite did not run.
+.El
+Everything else is the suite's.
+.Sh SEE ALSO
+.Xr kldload-doctor 8 ,
+.Xr kldload-estate 8
+.Sh HISTORY
+Until 2026-09-23 a mistyped suite name ran a path that did not exist and
+returned 127.
+On 2026-09-20 an estate sweep found it had printed
+.Dq verified and ready for production
+having run no check at all; a missing suite has been fatal since.
+On 2026-09-29, writing this page: a suite name was not checked before it
+became a path run as root, and a second argument was ignored.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The suites are the copies made when the machine was installed; they are
+not updated with the machine.
+.Pp
+.Ql unit
+and
+.Ql build
+check the installer and the ISO.
+On an installed machine the files they check are not there, and they
+fail:
+.Bd -literal -offset indent
+$ sudo kldload-test unit
+
+  ── mTLS operator CA (kldload-gen-operator-ca) ──
+  ✗ operator-CA — tool missing or not executable: /usr/local/share/kldload/tools/kldload-gen-operator-ca
+\&...
+  1 passed, 7 failed
+# (exited 1)
+.Ed
+.Pp
+.Nm
+compares nothing with a known-good machine; that is
+.Xr kldload-doctor 8 .
