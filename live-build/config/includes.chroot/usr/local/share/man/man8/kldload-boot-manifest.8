@@ -1,0 +1,164 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-BOOT-MANIFEST 8
+.Os
+.Sh NAME
+.Nm kldload-boot-manifest
+.Nd record what a restore needs that a ZFS archive does not hold
+.Sh SYNOPSIS
+.Nm
+.Op Fl -host Ar host Op Fl -ssh-key Ar path
+.Op Fl -pool Ar pool
+.Op Fl -esp-archive Ar file
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+Replicating a pool keeps the data and nothing around it.
+The EFI system partition is not in the pool; the host id that ZFS records
+pool ownership against, the boot environment, the kernel to build an
+initramfs for, the disks' shape, the network cards and the Secure Boot
+state are facts about the machine, not files in it.
+.Nm
+writes them down, as one JSON object on standard output, for
+.Xr kldload-restore-machine 8
+to read with
+.Fl -manifest .
+.Pp
+It reads the local machine, or with
+.Fl -host
+another over
+.Xr ssh 1 .
+It captures facts, not secrets: no keys and no passphrases.
+Messages go to standard error, so the output can be piped straight to
+.Xr jq 1 .
+.Pp
+The object holds: host name, time, where it was captured from, pool,
+.Cm bootfs ,
+boot environment, host id, machine id, operating system, running kernel,
+ZFS version, Secure Boot state and number of enrolled machine owner keys,
+the EFI partition's device, UUID, size in whole MiB and EFI binaries, the
+archive's path, the kernels installed, the pool's devices, the network
+cards and their MAC addresses,
+.Pa /etc/fstab
+lines that name a device, and the pool's size and sector shift.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -host Ar host
+Read this machine over
+.Xr ssh 1 ,
+without prompting; exit 2 if it cannot be reached.
+.It Fl -ssh-key Ar path
+The key for
+.Fl -host .
+.It Fl -pool Ar pool
+The pool to describe; default
+.Ql rpool .
+It must exist there.
+.It Fl -esp-archive Ar file
+Also copy the whole EFI partition into
+.Ar file ,
+as a tar, so a restore can put the old boot path back without a network.
+.It Fl h , Fl -help
+Print the description at the top of the script and exit 0.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Captured.
+.It 2
+The host could not be reached, the pool name was refused, or there is no
+such pool; or an unknown argument.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30.
+The machine id, MAC addresses and host id are left out here with
+.Xr jq 1 .
+.Bd -literal -offset indent
+# kldload-boot-manifest | jq 'del(.machine_id, .nics, .hostid)'
+capturing boot manifest for onyx
+{
+  "hostname": "onyx",
+  "captured_at": "2026-09-30T01:13:02-07:00",
+  "captured_from": "local",
+  "pool": "rpool",
+  "bootfs": "rpool/ROOT/onyx",
+  "boot_environment": "rpool/ROOT/onyx",
+  "os": "kldload (fedora 44)",
+  "kernel_running": "7.2.2-300.fc44.x86_64",
+  "zfs_version": "2.4.4-1",
+  "secure_boot": "SecureBoot enabled",
+  "mok_enrolled": "4",
+  "esp_device": "/dev/nvme0n1p1",
+  "esp_uuid": "23E8-C11A",
+  "esp_size": "511M",
+  "esp_archive": "",
+  "esp_files": [
+    "EFI/BOOT/BOOTX64.EFI",
+\&...
+    "EFI/zbm/mmx64.efi"
+  ],
+  "kernels_installed": [
+    "7.2.2-300.fc44.x86_64"
+  ],
+  "pool_vdevs": [
+    "/dev/nvme0n1p2"
+  ],
+  "fstab_device_mounts": [
+    "UUID=23E8-C11A /boot/efi vfat umask=0077 0 1"
+  ],
+  "pool_layout": "rpool 1.81T 12",
+  "schema": 1
+}
+# (exited 0)
+.Ed
+.Ss Keeping the EFI partition too
+The archive was removed afterwards:
+.Bd -literal -offset indent
+# kldload-boot-manifest --esp-archive /tmp/claude-1000/-home-anthony-kldload/6855086c-946d-4098-b02a-36da6bad6828/scratchpad/esp.tar >/dev/null
+capturing boot manifest for onyx
+ESP archived: /tmp/claude-1000/-home-anthony-kldload/6855086c-946d-4098-b02a-36da6bad6828/scratchpad/esp.tar (389M)
+.Ed
+.Pp
+It is not small: most of that was a 244 MB initrd and two 65 MB
+ZFSBootMenu images.
+.Ss A pool that is not there
+.Bd -literal -offset indent
+# kldload-boot-manifest --pool nosuch
+FATAL: no pool named nosuch on this host
+# (exited 2)
+.Ed
+.Ss For another machine
+Not run for this page; from the backup host, before the machine is lost:
+.Bd -literal -offset indent
+# kldload-boot-manifest --host root@fiend --esp-archive fiend-esp.tar >fiend.json
+# prints "capturing boot manifest for fiend" and the archive's size on
+# standard error
+.Ed
+.Sh SEE ALSO
+.Xr jq 1 ,
+.Xr ssh 1 ,
+.Xr kldload-restore-machine 8 ,
+.Xr syncoid 8
+.Sh HISTORY
+Written after fiend was restored on 2026-09-09: the pool was perfect and
+the machine did not boot, and every fact above had to be found again by
+looking.
+.Pp
+On 2026-09-30, writing this page: a pool that did not exist gave a
+manifest of empty fields and exit 0; the EFI size was recorded as
+.Xr findmnt 8
+prints it, which a restore could hand to
+.Xr sgdisk 8
+as a decimal that it silently truncates; and a 389 MB archive was reported
+as 1.0K.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Every fact other than the pool's existence is read without checking
+whether the read worked: a field that could not be read is empty, not an
+error.
+.Pp
+The EFI archive holds whatever is on the partition, and is written with
+the default file mode.
+.Pp
+It does not capture Secure Boot keys, only their number; re-enrolling
+needs someone at the console.
