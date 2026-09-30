@@ -1,0 +1,252 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-ROLLBACK 8
+.Os
+.Sh NAME
+.Nm kldload-rollback ,
+.Nm rollback
+.Nd boot the system as it was before a package transaction, from a snapshot of its boot environment
+.Sh SYNOPSIS
+.Nm rollback
+.Op Fl -no-reboot
+.Nm rollback
+.Cm last | to Ar snapshot
+.Op Fl -no-reboot
+.Nm rollback
+.Cm list | status | cancel
+.Nm rollback
+.Cm activate Ar environment
+.Nm rollback
+.Cm migrate-pkgdb
+.Nm rollback
+.Cm help | Fl h | Fl -help
+.Sh DESCRIPTION
+The apt and dnf hooks snapshot the boot environment \(em the root
+dataset under
+.Ar pool Ns Pa /ROOT
+\(em before every transaction.
+.Nm rollback
+clones one of those snapshots into a new boot environment, points the
+pool's
+.Ql bootfs
+at it and restarts the machine into it.
+.Pp
+It clones rather than running
+.Xr zfs-rollback 8 ,
+which cannot act on a mounted root and destroys every snapshot newer than
+its target.
+The environment rolled away from is left as it was, and until the restart
+.Cm cancel
+undoes everything.
+Nothing is ever destroyed.
+.Pp
+Only the root moves: home directories, other datasets and volumes are
+left alone.
+The clone gets the boot environment's properties, among them the
+ZFSBootMenu kernel command line, which a clone does not otherwise
+inherit.
+On a Secure Boot install, where GRUB boots a signed kernel from the EFI
+system partition rather than through ZFSBootMenu, it also copies the
+clone's kernel and initramfs there and rewrites
+.Pa grub.cfg ,
+keeping the old ones to put back on
+.Cm cancel .
+It refuses before changing anything when the snapshot does not exist,
+when the partition has no room, or when the package database lives
+outside the boot environment, since the files would then go back and
+the database would not.
+.Pp
+It also answers as
+.Ql apt rollback
+and
+.Ql dnf rollback ,
+through
+.Xr kldload-pkg-wrapper 8 .
+Everything but
+.Cm help ,
+.Cm list
+and
+.Cm status
+needs root.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Nm rollback
+Show the snapshots, numbered, and ask which one; the default is the
+newest taken before a transaction.
+Then as
+.Cm to .
+With no terminal it changes nothing and exits 2: it will not restart a
+machine for someone who was shown no question.
+.It Cm last
+The newest snapshot taken before a transaction
+.Pq Ql apt-pre- , Ql dnf-pre- , Ql kpkg- ;
+never one taken after, which holds the state being left.
+.It Cm to Ar snapshot
+That snapshot, by the name
+.Cm list
+shows or in full.
+.It Cm list
+The snapshots of the running environment, oldest first, with who took
+each.
+.It Cm status
+Which environment is running, which boots next, how it boots, whether a
+rollback is staged, how many snapshots there are, and how many platform
+packages are pinned.
+.It Cm cancel
+Point
+.Ql bootfs ,
+and on the Secure Boot path the boot files, back at the running
+environment.
+.It Cm activate Ar environment
+Boot an existing environment next, the same way; never restarts.
+.Xr kbe 8
+uses this.
+.It Cm migrate-pkgdb
+For pools installed before the package database was part of the boot
+environment: copy it in, and stop the separate dataset from mounting.
+Takes one restart.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl n , Fl -no-reboot
+Stage the rollback and stop; it takes effect whenever the machine next
+starts.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_ROLLBACK_REBOOT
+0 is
+.Fl -no-reboot .
+.It Ev KLDLOAD_ROLLBACK_DELAY
+Seconds counted down before the restart; default 2.
+Interrupting the countdown leaves the rollback staged.
+.It Ev KLDLOAD_ROLLBACK_ALLOW_SPLIT_PKGDB
+1 goes ahead although the package database is outside the boot
+environment.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/kldload/rollback.log
+Every action.
+.It Pa /var/lib/kldload/esp-backup/
+The Secure Boot path's kernel, initramfs and
+.Pa grub.cfg
+as they were before a rollback was staged, with the environment they
+came from;
+.Cm cancel
+restores them only into that environment, then removes them.
+.It Pa /var/lib/kldload/platform-holds.list
+Read by
+.Cm status .
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done, or nothing chosen.
+.It 1
+Refused or failed, named; a failure after
+.Ql bootfs
+moved says so and names
+.Cm cancel .
+.It 2
+An unknown command, or a bare
+.Nm rollback
+with no terminal; nothing changed.
+.El
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with this release's
+.Nm rollback
+first on the path:
+.Bd -literal -offset indent
+# rollback status
+Pool             : rpool
+Running from     : rpool/ROOT/onyx
+Next boot        : rpool/ROOT/onyx
+Boot path        : direct kernel (Secure Boot compatible)
+grub.cfg boots   : rpool/ROOT/onyx
+
+Snapshots of the running environment: 65
+Newest pre-transaction snapshot     : dnf-pre-20260927-103832
+Pinned platform packages           : 33
+# (exited 0)
+# rollback list
+Snapshots of rpool/ROOT/onyx (newest last):
+
+  SNAPSHOT                             CREATED                    USED  SOURCE
+  ──────────────────────────────────── ────────────────────── ────────  ────────────
+  autosnap_2026-08-30_13:45:02_monthly Sun Aug 30  6:45 2026        0B  sanoid
+  autosnap_2026-08-30_13:45:02_weekly  Sun Aug 30  6:45 2026        0B  sanoid
+  install-20260830T135330Z             Sun Aug 30  6:53 2026     39.6M  install
+  kpkg-20260830-070749                 Sun Aug 30  7:07 2026      860K  kpkg
+\&...
+  auto-20260930-010000                 Wed Sep 30  1:00 2026     10.7M  scheduled
+  auto-20260930-020000                 Wed Sep 30  2:00 2026     13.0M  scheduled
+
+Roll back with:  rollback to <snapshot>
+Or the newest pre-transaction one:  rollback last
+.Ed
+.Pp
+What it refuses:
+.Bd -literal -offset indent
+# rollback to no-such-snapshot --no-reboot
+rollback: no such snapshot: rpool/ROOT/onyx@no-such-snapshot (see: rollback list)
+# (exited 1)
+# rollback </dev/null
+rollback: refusing to choose a snapshot with no terminal.
+NOTHING has been changed. Name the one you mean:
+
+    rollback last            newest pre-transaction snapshot
+    rollback to <snapshot>   a specific one (see: rollback list)
+
+Both reboot into it; add --no-reboot to stage it and stop.
+# (exited 2)
+.Ed
+.Pp
+Rolling back; not run for this page, since it restarts the machine:
+.Bd -literal -offset indent
+# rollback last
+# clones dnf-pre-20260927-103832 into a new environment and restarts
+# rollback to dnf-pre-20260923-104427 --no-reboot
+# rollback cancel
+.Ed
+.Sh SEE ALSO
+.Xr kldload-snapshots 7 ,
+.Xr kbe 8 ,
+.Xr kldload-apply-platform-holds 8 ,
+.Xr kldload-pkg-wrapper 8 ,
+.Xr zfs-clone 8 ,
+.Xr zfs-promote 8
+.Sh HISTORY
+On 2026-08-29 a
+.Cm cancel
+piped into
+.Xr head 1
+was killed part-way, and the pool was left with no
+.Ql bootfs ;
+it now ignores a closed output.
+On 2026-08-30 a bare
+.Nm rollback
+with no terminal rolled back and restarted the machine.
+On 2026-08-26 it reported the Secure Boot path on machines booting
+through ZFSBootMenu.
+.Pp
+On 2026-09-30, writing this page:
+.Cm list
+cut snapshot names at 34 characters, so sanoid's weekly and monthly
+names were shown short and refused by
+.Cm to ;
+.Cm status
+run as a user, who cannot read the EFI system partition, died with
+.Dq FAIL at line 953 ;
+and every command acted on the alphabetically first pool imported, not
+the running one \(em shown with a throwaway pool named to sort first.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The clone depends on its origin snapshot, so the old environment cannot
+be destroyed while the clone exists;
+.Xr zfs-promote 8
+reverses that once the rollback is settled.
+.Pp
+The machine starts from the snapshot's files but the pool's other
+datasets as they are now: a service whose data moved on since, a
+database's for one, meets data newer than itself.
