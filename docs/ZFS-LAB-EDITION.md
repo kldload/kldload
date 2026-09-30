@@ -32,6 +32,26 @@ One engine, two deliveries, one plan format:
    number of benches with power control, and collects the results
    centrally (sections 10 and 12).
 
+### Dispatch: plans to benches (operator, 2026-09-30)
+
+Arm many benches with their workloads, press go. Four modes, one plan:
+
+| Mode | Operator says | Behaviour |
+|---|---|---|
+| pinned | "server 1 gets this, server 2 gets that" | each item to its named bench; all arm at once and run in parallel |
+| pool | "these items, these benches" | a queue drained by whichever bench is idle; scaling is adding boxes |
+| single | "all of them on this one" | the items in order on one bench, each from a wiped disk (what the appliance ISO does alone) |
+| every | "this item on all my benches" | one build across different hardware; the diff between benches is the hardware |
+
+Rules: only enrolled MACs can be armed (abyss); per-bench state idle /
+installing / testing / reporting / off / failed; a dead bench is a failed
+item, requeued once in pool mode and never forever; power records make a
+bench cold-to-cold, otherwise it waits for a button; results are keyed by
+build AND bench. Already present: `kldload-netboot-server arm-all <dir>`
+arms many MACs from per-MAC answers files, and `tests/estate-sweep.sh` runs
+the per-bench loop serially on one MAC. The dispatcher is the layer between
+them: plan to per-bench answers, then one sweep loop per bench.
+
 Plan lines, for example:
 ```
 fedora 44  kernel=7.2  zfs=2.4.4  modules=nvidia  tools=lsi  suite=full
