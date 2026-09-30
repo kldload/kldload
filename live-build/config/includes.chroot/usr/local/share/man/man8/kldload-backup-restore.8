@@ -1,0 +1,236 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-BACKUP-RESTORE 8
+.Os
+.Sh NAME
+.Nm kldload-backup-restore
+.Nd receive a stream made by kldload-backup-pack into a new dataset tree
+.Sh SYNOPSIS
+.Nm
+.Fl -host Ar host
+.Op Fl -file Ar name | Fl -latest
+.Op Fl -src-dir Ar dir
+.Op Fl -target Ar dataset
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+reads a stream written by
+.Xr kldload-backup-pack 8
+from
+.Ar host
+over
+.Xr ssh 1 ,
+decompresses it and receives it into this machine's root pool, under a
+dataset of its own:
+.Bd -literal -offset indent
+rpool/restore/NAME/<the sender's dataset, without its pool>
+.Ed
+.Pp
+where
+.Ar NAME
+is the file's name without
+.Ql .zfs.zst .
+The live system is never touched, and nothing received is mounted: the
+restored tree is there to be looked at, copied from, or promoted by hand.
+.Pp
+Without
+.Fl -file
+or
+.Fl -latest
+it lists the streams on
+.Ar host ,
+newest first, and asks which.
+.Pp
+A target that exists is refused, so a restore never overwrites.
+If the receive fails, what it had made is removed again and the run can be
+repeated.
+.Pp
+A stream sent raw, as every encrypted source is, arrives encrypted with
+the sender's key, as its own encryption root; its facts file says
+.Ql send_raw=1 .
+To read it,
+.Ql zfs load-key
+it with the sender's passphrase or key, then mount it.
+A stream from an unencrypted source lands unencrypted, even in an
+encrypted pool.
+.Pp
+Everything the run prints is also appended to
+.Pa /var/log/kldload/backup-restore.log .
+It must run as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -host Ar host
+Where the streams are.
+Required, unless
+.Ev BACKUP_REMOTE_HOST
+is set.
+.It Fl -file Ar name
+The stream to restore: a file name in the directory, ending in
+.Ql .zfs.zst ,
+not a path.
+.It Fl -latest
+The newest stream in the directory.
+.It Fl -src-dir Ar dir
+The directory on
+.Ar host ;
+default
+.Pa /var/lib/kldload-backups .
+.It Fl -target Ar dataset
+Receive under
+.Ar dataset
+instead of
+.Pa rpool/restore/ Ns Ar NAME .
+It must not exist.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev BACKUP_REMOTE_HOST , BACKUP_REMOTE_DIR , BACKUP_SSH_OPTS
+As for
+.Xr kldload-backup-pack 8 .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/kldload/backup-restore.log
+Every run's output.
+.It Pa rpool/restore/
+Where restored trees are received.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Received.
+.It 1
+Not root,
+.Ar host
+or the file unreachable, the target exists, or the receive failed.
+.It 2
+A usage error, or an invalid answer to the list.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop with an encrypted pool on 2026-09-29,
+restoring the streams made in the examples of
+.Xr kldload-backup-pack 8 .
+.Xr ssh 1
+was replaced by a stand-in that runs the remote command on the same
+machine, so
+.Ql backup1
+is this host.
+The restored datasets were destroyed afterwards.
+.Ss The newest (--latest)
+.Bd -literal -offset indent
+# kldload-backup-restore --host backup1 --src-dir /var/tmp/bptest-3308726-out --latest
+[2026-09-29 23:18:05] [restore] using pool: rpool
+[2026-09-29 23:18:05] [restore] verifying ssh access to backup1...
+[2026-09-29 23:18:05] [restore] --latest → onyx-20260930T061103Z.zfs.zst
+[2026-09-29 23:18:05] [restore] metadata for this backup:
+    source_host=onyx
+    source_dataset=rpool/bptest-3308726
+    source_snapshot=backup-20260930T061103Z
+    created_utc=20260930T061103Z
+    created_local=2026-09-29T23:11:04-07:00
+    stream_bytes_compressed=16742
+    stream_bytes_estimated_raw=72928
+    send_raw=1
+    kldload_edition=free
+    kldload_profile=desktop
+    kernel=7.2.2-300.fc44.x86_64
+[2026-09-29 23:18:05] [restore] restoring → rpool/restore/onyx-20260930T061103Z/<sender's tree>
+[2026-09-29 23:18:05] [restore] creating rpool/restore/onyx-20260930T061103Z
+[2026-09-29 23:18:05] [restore] streaming + decompressing + receiving (this is the slow part)...
+[2026-09-29 23:18:05] [restore] DONE — restored tree rooted at: rpool/restore/onyx-20260930T061103Z
+
+Next steps (operator):
+  1) Inspect: zfs list -r rpool/restore/onyx-20260930T061103Z
+  2) Nothing is mounted (-u). Pick a dataset and give it a mountpoint:
+       zfs set mountpoint=/mnt/restored <dataset>
+     It came raw, still encrypted: first
+       zfs load-key <its encryption root>
+     with the SENDER's passphrase or key.
+  3) To PROMOTE back to live root, you must reboot into the live USB
+     recovery shell and rename/swap the datasets. This script will
+     not do that — too easy to brick a running system.
+# (exited 0)
+.Ed
+.Ss A named stream (--file)
+The command the pack printed, as it printed it:
+.Bd -literal -offset indent
+# kldload-backup-restore --host backup1 --src-dir /var/tmp/bptest-3308726-out --file onyx-20260930T061850Z.zfs.zst
+\&...
+# (exited 0)
+.Ed
+.Ss Opening a raw restore
+On a pair of throwaway pools with a key file, where the key was at hand:
+.Bd -literal -offset indent
+# zfs get -H -o name,value encryption,encryptionroot,keystatus kldenc-3322473/restore/raw/secret
+kldenc-3322473/restore/raw/secret	aes-256-gcm
+kldenc-3322473/restore/raw/secret	kldenc-3322473/restore/raw/secret
+kldenc-3322473/restore/raw/secret	unavailable
+# zfs load-key -L file:///var/tmp/kldpool-3322473/key kldenc-3322473/restore/raw/secret
+# zfs set mountpoint=/var/tmp/kldpool-3322473/rx kldenc-3322473/restore/raw/secret
+# cat /var/tmp/kldpool-3322473/rx/f.txt
+secret
+.Ed
+.Ss When it cannot
+.Bd -literal -offset indent
+# kldload-backup-restore --host backup1 --src-dir /var/tmp/bptest-3308726-out --file onyx-20260930T061103Z.zfs.zst
+\&...
+[2026-09-29 23:18:12] [restore] FATAL: rpool/restore/onyx-20260930T061103Z already exists — refusing to overwrite.
+[2026-09-29 23:18:12] [restore]   remove it first: zfs destroy -r rpool/restore/onyx-20260930T061103Z
+# (exited 1)
+# kldload-backup-restore --host backup1 --src-dir /var/tmp/bptest-3308726-out --file onyx-truncated.zfs.zst
+\&...
+[2026-09-29 23:18:12] [restore] creating rpool/restore/onyx-truncated
+[2026-09-29 23:18:12] [restore] streaming + decompressing + receiving (this is the slow part)...
+/*stdin*\e : Read error (39) : premature end
+cannot receive: failed to read from stream
+[2026-09-29 23:18:12] [restore] FATAL: recv pipeline failed
+[2026-09-29 23:18:12] [restore] removed the partial rpool/restore/onyx-truncated
+# (exited 1)
+# kldload-backup-restore --host backup1 --src-dir /var/tmp/bptest-3308726-out --file ../etc/shadow.zfs.zst
+kldload-backup-restore: --file is a NAME.zfs.zst in the directory, not a path: '../etc/shadow.zfs.zst'
+# (exited 2)
+# kldload-backup-restore --latest
+kldload-backup-restore: no source: give --host HOST (or BACKUP_REMOTE_HOST)
+# (exited 2)
+.Ed
+.Pp
+.Ql onyx-truncated.zfs.zst
+was the first 8000 bytes of a good stream.
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "[restore] FATAL: cannot reach HOST:DIR"
+.It "[restore] FATAL: no .zfs.zst files in HOST:DIR"
+.It "[restore] FATAL: HOST:PATH not found"
+.It "[restore] FATAL: TARGET already exists \(em refusing to overwrite."
+Destroy it, or give another
+.Fl -target .
+.It "[restore] FATAL: recv pipeline failed"
+ZFS's or
+.Xr zstd 1 Ns 's
+reason is above; the partial target has been removed.
+.El
+.Sh SEE ALSO
+.Xr ssh 1 ,
+.Xr zstd 1 ,
+.Xr kldload-backup-pack 8 ,
+.Xr zfs-load-key 8 ,
+.Xr zfs-receive 8
+.Sh HISTORY
+On 2026-09-29, writing this page: every restore had failed with
+.Dq specified fs does not exist ,
+because the target was never created, and after that failure the run hung
+for good in
+.Xr pv 1 ,
+which does not exit when SIGPIPE is ignored; the host defaulted to
+.Ql fiend ;
+and the file name reached a remote shell unchecked.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Promoting a restored root back to being the running system is not done
+here: it means booting something else first.
+.Pp
+Received datasets keep the sender's mountpoints, unmounted; setting one
+that another dataset uses would cover it.

@@ -1,0 +1,258 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-BACKUP-PACK 8
+.Os
+.Sh NAME
+.Nm kldload-backup-pack
+.Nd send a snapshot of this machine to another host as one compressed ZFS stream
+.Sh SYNOPSIS
+.Nm
+.Fl -host Ar host
+.Op Fl -dataset Ar dataset | Fl -full
+.Op Fl -dest-dir Ar dir
+.Op Fl -keep-snapshot
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+takes a recursive snapshot of a dataset, sends it with
+.Ql zfs send -R
+\(em the dataset, its children and every snapshot in their history \(em
+compresses it with
+.Xr zstd 1 ,
+and writes it over
+.Xr ssh 1
+to a file on
+.Ar host ,
+with a small text file of facts about it beside:
+.Bd -literal -offset indent
+DIR/HOSTNAME-TIMESTAMP.zfs.zst    the stream
+DIR/HOSTNAME-TIMESTAMP.meta       where it came from
+.Ed
+.Pp
+The other host needs nothing but
+.Xr ssh 1 ,
+a shell and room: it stores a file, not a pool.
+.Xr kldload-backup-restore 8
+brings the file back into a pool, on this machine or another.
+.Pp
+Without
+.Fl -dataset ,
+the dataset is the one mounted at
+.Pa / ,
+the running boot environment
+.Pq Pa rpool/ROOT/ Ns Ar name :
+the operating system and its configuration.
+.Pa /home ,
+.Pa /srv ,
+the machines under
+.Pa rpool/vms
+and container storage are datasets of their own beside it, and are not
+included; send them with
+.Fl -dataset ,
+or everything with
+.Fl -full .
+.Pp
+When anything in what is sent is encrypted, as on an install with
+encryption, the stream is sent raw
+.Pq Ql zfs send -w :
+it stays encrypted on the other host, which never needs the key, and
+restoring it needs the sender's passphrase or key.
+ZFS will not send an encrypted dataset with its properties any other way.
+.Pp
+The snapshot,
+.Ar dataset Ns Pa @backup- Ns Ar TIMESTAMP ,
+is removed when the run ends, whether it succeeded or not, unless
+.Fl -keep-snapshot .
+.Pp
+Everything the run prints is also appended to
+.Pa /var/log/kldload/backup-pack.log .
+It must run as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -host Ar host
+Where the file goes: a host name
+.Xr ssh 1
+reaches as whoever root is set up to log in as there, or
+.Ar user Ns @ Ns Ar host .
+Required, unless
+.Ev BACKUP_REMOTE_HOST
+is set.
+.It Fl -dataset Ar dataset
+Send this dataset and its children instead of the running root.
+.It Fl -full
+Send the whole pool the running root is on.
+.It Fl -dest-dir Ar dir
+The directory on
+.Ar host ,
+made if missing; an absolute path of letters, digits and
+.Ql _ . / + - .
+Default
+.Pa /var/lib/kldload-backups .
+.It Fl -keep-snapshot
+Leave the snapshot on this machine after sending.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev BACKUP_REMOTE_HOST
+The host when
+.Fl -host
+is not given.
+.It Ev BACKUP_REMOTE_DIR
+The directory when
+.Fl -dest-dir
+is not given.
+.It Ev BACKUP_SSH_OPTS
+Options for every
+.Xr ssh 1
+call, split on spaces; default
+.Ql -o BatchMode=yes -o StrictHostKeyChecking=accept-new .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/kldload/backup-pack.log
+Every run's output.
+.It Ar dir Ns Pa / Ns Ar hostname Ns Pa - Ns Ar timestamp Ns Pa .meta
+On
+.Ar host :
+the source host and dataset, the snapshot, times, sizes, whether the
+stream is raw
+.Pq Ql send_raw ,
+the kldload profile and the kernel.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Sent, and the file on
+.Ar host
+is not empty.
+.It 1
+Not root, a tool missing,
+.Ar host
+unreachable or its directory not writable, or the send failed.
+.It 2
+A usage error.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop with an encrypted pool on 2026-09-29.
+.Xr ssh 1
+was replaced for these runs by a stand-in that runs the remote command on
+the same machine, so
+.Ql backup1
+is this host; everything else is the real tool.
+.Ql rpool/bptest-3308726
+was made for the purpose and destroyed afterwards.
+.Ss One dataset (--host, --dataset, --dest-dir)
+.Bd -literal -offset indent
+# kldload-backup-pack --host backup1 --dataset rpool/bptest-3308726 --dest-dir /var/tmp/bptest-3308726-out
+[2026-09-29 23:18:50] [pack] source dataset: rpool/bptest-3308726
+[2026-09-29 23:18:50] [pack] verifying ssh access to backup1...
+[2026-09-29 23:18:50] [pack] remote ready: backup1:/var/tmp/bptest-3308726-out
+[2026-09-29 23:18:50] [pack] taking recursive snapshot: rpool/bptest-3308726@backup-20260930T061850Z
+[2026-09-29 23:18:50] [pack] encrypted datasets in rpool/bptest-3308726: sending raw -- the stream stays encrypted, and a restore needs the key
+[2026-09-29 23:18:50] [pack] estimated uncompressed stream size: 72928 bytes
+[2026-09-29 23:18:50] [pack] sending → backup1:/var/tmp/bptest-3308726-out/onyx-20260930T061850Z.zfs.zst
+[2026-09-29 23:18:50] [pack] remote file: 16744 bytes compressed
+[2026-09-29 23:18:50] [pack] DONE
+[2026-09-29 23:18:50] [pack]   remote: backup1:/var/tmp/bptest-3308726-out/onyx-20260930T061850Z.zfs.zst
+[2026-09-29 23:18:50] [pack]   meta:   backup1:/var/tmp/bptest-3308726-out/onyx-20260930T061850Z.meta
+[2026-09-29 23:18:50] [pack]   to restore: sudo kldload-backup-restore --host backup1 --src-dir /var/tmp/bptest-3308726-out --file onyx-20260930T061850Z.zfs.zst
+[2026-09-29 23:18:50] [pack] removing local backup snapshot: rpool/bptest-3308726@backup-20260930T061850Z
+# (exited 0)
+.Ed
+.Pp
+The facts file of an earlier run to the same place:
+.Bd -literal -offset indent
+source_host=onyx
+source_dataset=rpool/bptest-3308726
+source_snapshot=backup-20260930T061103Z
+created_utc=20260930T061103Z
+created_local=2026-09-29T23:11:04-07:00
+stream_bytes_compressed=16742
+stream_bytes_estimated_raw=72928
+send_raw=1
+kldload_edition=free
+kldload_profile=desktop
+kernel=7.2.2-300.fc44.x86_64
+.Ed
+.Ss Keeping the snapshot (--keep-snapshot)
+.Bd -literal -offset indent
+# kldload-backup-pack --host backup1 --dataset rpool/bptest-3308726 --dest-dir /var/tmp/bptest-3308726-out --keep-snapshot
+\&...
+[2026-09-29 23:18:38] [pack] keeping local backup snapshot (--keep-snapshot): rpool/bptest-3308726@backup-20260930T061838Z
+# (exited 0)
+# zfs list -H -t snapshot -o name -r rpool/bptest-3308726
+rpool/bptest-3308726@earlier
+rpool/bptest-3308726@backup-20260930T061838Z
+.Ed
+.Ss The running system, or all of it (--full)
+Not run for this page; the first sends the boot environment, the second
+the whole pool, machines and all:
+.Bd -literal -offset indent
+# kldload-backup-pack --host backup1
+# kldload-backup-pack --host backup1 --full
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+$ kldload-backup-pack
+kldload-backup-pack: no destination: give --host HOST (or BACKUP_REMOTE_HOST)
+# (exited 2)
+$ kldload-backup-pack --host -oProxyCommand=x
+kldload-backup-pack: '-oProxyCommand=x' is not a host name
+# (exited 2)
+$ kldload-backup-pack --host backup1 --dest-dir "/srv/it's"
+kldload-backup-pack: --dest-dir must be an absolute path of plain characters: '/srv/it's'
+# (exited 2)
+$ kldload-backup-pack --host backup1
+kldload-backup-pack: must run as root (zfs send)
+# (exited 1)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "[pack] FATAL: cannot reach HOST or write to DIR"
+.Xr ssh 1
+could not log in with
+.Ql BatchMode=yes
+\(em no key accepted, or the host is down \(em or the directory could not
+be made or written.
+.It "[pack] FATAL: send pipeline failed (check ssh + remote disk space)"
+The send, the compression or the copy stopped; ZFS's or ssh's reason is
+above.
+The snapshot is removed.
+.It "[pack] FATAL: remote file is empty or missing"
+.It "[pack] WARNING: could not remove SNAPSHOT; remove it by hand"
+.El
+.Sh SEE ALSO
+.Xr ssh 1 ,
+.Xr zstd 1 ,
+.Xr kldload-backup-restore 8 ,
+.Xr ksnap 8 ,
+.Xr zfs-send 8
+.Sh HISTORY
+On 2026-09-29, writing this page: no machine with an encrypted pool could
+be backed up, since ZFS refuses to send an encrypted dataset with its
+properties unless raw; the destination defaulted to one particular host
+name,
+.Ql fiend ;
+host and directory reached
+.Xr ssh 1
+unchecked; and this tool's own description said
+.Pa /home
+was sent with the root, which on a kldload install it never was.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Each run is a full stream: nothing is incremental, and every run costs the
+whole size again.
+.Pp
+The check after sending is that the file is there and not empty.
+A stream is proved only by receiving it; see
+.Xr kldload-backup-restore 8 .
+.Pp
+A raw stream is useless without the key.
+Keep the passphrase somewhere that is not this machine.
+.Pp
+The other host's key is accepted the first time it is seen
+.Pq Ql accept-new
+and checked after.
