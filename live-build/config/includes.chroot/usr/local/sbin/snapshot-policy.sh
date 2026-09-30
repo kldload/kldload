@@ -10,6 +10,11 @@ set -euo pipefail
 declare -A POLICY_LIMITS=(
     ["apt-pre"]=10
     ["apt-post"]=10
+    # dnf's were missing, so every snapshot on an RPM machine read UNMANAGED
+    # (2026-09-30). auto- is kldload-snapshot's hourly one.
+    ["dnf-pre"]=10
+    ["dnf-post"]=10
+    ["auto"]=48
     ["srv"]=4
     ["manual"]=10
     ["pre-upgrade"]=10
