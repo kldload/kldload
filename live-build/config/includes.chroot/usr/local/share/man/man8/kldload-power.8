@@ -1,0 +1,504 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-POWER 8
+.Os
+.Sh NAME
+.Nm kldload-power
+.Nd switch a machine on, off or through a power cycle from outside it
+.Sh SYNOPSIS
+.Nm
+.Ar machine
+.Cm status
+.Nm
+.Ar machine
+.Cm on
+.Nm
+.Ar machine
+.Cm off
+.Op Fl -self
+.Nm
+.Ar machine
+.Cm force-off
+.Op Fl -self
+.Nm
+.Ar machine
+.Cm cycle
+.Op Fl -self
+.Nm
+.Ar machine
+.Cm pxe-once
+.Nm
+.Ar mac
+.Cm set
+.Fl -controller Cm outlet | ipmi
+.Fl -address Ar host Ns Op : Ns Ar port
+.Op Fl -kind Cm shelly1 | shelly2 | tasmota
+.Op Fl -outlet Ar n
+.Op Fl -user Ar user
+.Op Fl -name Ar name
+.Op Fl -cycle-off Ar seconds
+.Op Fl -allow Ar verbs
+.Op Fl -password-stdin
+.Nm
+.Cm list
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+controls a machine's power without the machine's help: through a smart
+plug it is plugged into, or through its baseboard management controller
+(BMC) over IPMI.
+It is what lets a netboot reinstall, a test sweep or an operator recover a
+machine that is off, hung, sitting at a passphrase prompt or stuck in an
+initrd, none of which answers ssh.
+.Pp
+A
+.Ar machine
+is named by one of its MAC addresses, in any case and with
+.Ql \&:
+or
+.Ql - ,
+or by the
+.Ar name
+its record was given with
+.Cm set Fl -name .
+Each machine has one record, written by
+.Cm set
+and read by every other verb.
+.Pp
+Every verb that changes power reads the state back from the controller
+until it matches, within a bound, before it reports success.
+A reply from a plug or a BMC that the request was accepted is not taken as
+evidence that the power changed.
+Asking for the state a machine is already in succeeds and says so.
+.Pp
+Two controllers are supported:
+.Bl -tag -width "outlet"
+.It Cm outlet
+A smart plug with a local HTTP API, chosen by
+.Fl -kind :
+.Bl -tag -width "tasmota"
+.It Cm shelly1
+Shelly Gen1:
+.Ql GET /relay/ Ns Ar n Ns ?turn=on|off ,
+state from the
+.Ql ison
+field; HTTP Basic authentication when a login is set.
+.It Cm shelly2
+Shelly Gen2 and later:
+.Ql GET /rpc/Switch.Set?id= Ns Ar n Ns &on=true|false
+and
+.Ql /rpc/Switch.GetStatus ,
+state from the
+.Ql output
+field; SHA-256 digest authentication, user always
+.Ql admin .
+.It Cm tasmota
+Tasmota:
+.Ql GET /cm?cmnd=Power Ns Ar n Ns %20On ,
+state from
+.Ql POWER Ns Ar n
+or, on a one-relay plug,
+.Ql POWER .
+Tasmota takes its password in the URL, so the URL itself is kept off the
+command line (see
+.Sx CAVEATS ) .
+.El
+.Pp
+A plug switches mains power and cannot shut an operating system down:
+.Cm off
+is refused and
+.Cm force-off
+cuts the power.
+A plug cannot choose a boot device either, so
+.Cm pxe-once
+is refused.
+.It Cm ipmi
+A BMC reached with
+.Xr ipmitool 1
+over IPMI 2.0
+.Pq Fl I Cm lanplus .
+.Cm off
+asks the operating system to shut down (ACPI soft off),
+.Cm force-off
+removes power at once, and
+.Cm pxe-once
+sets the next boot, once, to UEFI network boot and reads the BMC's boot
+flags back.
+.El
+.Pp
+.Nm
+refuses to
+.Cm off ,
+.Cm force-off
+or
+.Cm cycle
+the machine it is running on (any local interface carrying the
+.Ar machine Ns 's
+MAC) unless
+.Fl -self
+is given: a host that cuts its own power cannot report the outcome, and on
+a netboot server it takes the rack's provisioning down with it.
+.Sh OPTIONS
+.Bl -tag -width "--password-stdin"
+.It Cm status
+Print the power state,
+.Ql on
+or
+.Ql off ,
+as one word on standard output.
+.It Cm on
+Switch the machine on and wait until the controller reports it on.
+Through a plug this powers the socket; the machine starts only if its
+firmware is set to power on after AC loss.
+.It Cm off
+Graceful shutdown: an ACPI soft off through the BMC, then a wait of at
+least 180 seconds for the machine to report off.
+A plug cannot do this; the verb exits 3.
+.It Cm force-off
+Remove power now, then wait until the controller reports off.
+.It Cm cycle
+.Cm force-off ,
+hold the power off for the record's
+.Fl -cycle-off
+seconds (10 by default), then
+.Cm on .
+.It Cm pxe-once
+IPMI only: boot from the network on the next boot, once, then back to the
+normal boot order.
+Pair it with
+.Cm cycle ,
+or with the next reboot, and arm the machine first with
+.Xr kldload-netboot-server 8 .
+.It Cm set
+Create or replace the record for
+.Ar mac .
+Only a MAC is accepted here; the name is given with
+.Fl -name .
+.It Cm list
+Print every record: MAC, name, controller (with the plug kind) and address.
+.It Fl -self
+Allow
+.Cm off ,
+.Cm force-off
+or
+.Cm cycle
+of the machine running the command.
+.It Fl -controller Cm outlet | ipmi
+.Pq Cm set
+How the machine is reached.
+.It Fl -address Ar host Ns Op : Ns Ar port
+.Pq Cm set
+The plug's or the BMC's address.
+A port selects a non-default HTTP or IPMI port.
+.It Fl -kind Cm shelly1 | shelly2 | tasmota
+.Pq Cm set
+The plug's API.
+Required with
+.Fl -controller Cm outlet ,
+refused with
+.Cm ipmi .
+.It Fl -outlet Ar n
+.Pq Cm set
+The relay on a multi-outlet plug.
+Shelly counts from 0 and Tasmota from 1; the defaults are 0 and 1.
+.It Fl -user Ar user
+.Pq Cm set
+The login.
+For
+.Cm ipmi
+the default is
+.Ql ADMIN ,
+the Supermicro factory user; for
+.Cm shelly2
+it is ignored, because the API fixes it to
+.Ql admin .
+.It Fl -name Ar name
+.Pq Cm set
+A name the machine can be addressed by instead of its MAC.
+.It Fl -cycle-off Ar seconds
+.Pq Cm set
+How long
+.Cm cycle
+holds the power off.
+.It Fl -allow Ar verbs
+.Pq Cm set
+The only verbs this machine accepts, comma separated, from
+.Cm status , on , off , force-off , cycle
+and
+.Cm pxe-once .
+Every other verb exits 6 before the controller is contacted, and nothing
+on the command line overrides it; widening it takes a new
+.Cm set .
+.It Fl -password-stdin
+.Pq Cm set
+Read the password as one line from standard input.
+Without it the record has no password, which suits a plug with no login.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+Needs no root and has no side effect.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_POWER_DIR
+Records directory instead of
+.Pa /etc/kldload/power .
+When set,
+.Nm
+does not re-execute itself under
+.Xr sudo 8 ,
+so a test can run it as a user against its own records.
+.It Ev KLDLOAD_POWER_LOG
+Log file instead of
+.Pa /var/log/kldload/power.log .
+.It Ev KLDLOAD_POWER_WAIT
+Seconds to wait for a state to read back; default 30.
+.Cm off
+waits at least 180.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/power/ Ns Ar mac Ns Pa .env
+One record per machine, root-owned, mode 0600, in a mode 0700 directory.
+Lines are
+.Ar KEY Ns = Ns Ar value
+and are parsed as data, never sourced:
+.Ev POWER_MAC ,
+.Ev POWER_CONTROLLER ,
+.Ev POWER_ADDRESS ,
+.Ev POWER_OUTLET_KIND ,
+.Ev POWER_OUTLET ,
+.Ev POWER_USER ,
+.Ev POWER_PASSWORD ,
+.Ev POWER_NAME ,
+.Ev POWER_CYCLE_OFF ,
+.Ev POWER_ALLOW .
+.It Pa /var/log/kldload/power.log
+One line per verb that changed or tried to change power, and per
+.Cm set :
+time, the invoking user, MAC, name, verb and outcome.
+Never the password.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+done, and the state read back matched
+.It 1
+failed: no record, a malformed record, or the state never read back as
+asked
+.It 2
+usage, or the machine is this host and
+.Fl -self
+was not given
+.It 3
+the controller cannot do that verb (a plug:
+.Cm off ,
+.Cm pxe-once )
+.It 4
+the controller did not answer
+.It 5
+the controller refused the login
+.It 6
+the machine's record does not allow the verb
+.Pq Fl -allow
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on onyx on 2026-09-29: against abyss's Supermicro BMC, against an IPMI
+emulator
+.Pq virtualbmc
+in front of a throwaway virtual machine, and against a test double of a
+Shelly Gen2 plug.
+.Ss set: a BMC, status-only (--controller, --address, --user, --name, --allow, --password-stdin)
+abyss holds a storage pool that must never lose power by accident, so its
+record allows nothing but
+.Cm status .
+Typing the password at a prompt keeps it out of the shell history and the
+process list:
+.Bd -literal -offset indent
+$ read -rsp 'BMC password: ' PW; echo
+$ printf '%s\en' "$PW" | sudo kldload-power 3c:ec:ef:45:86:c0 set \e
+      --controller ipmi --address 10.100.10.76 --user ADMIN \e
+      --name abyss --allow status --password-stdin
+kldload-power: record written: /etc/kldload/power/3c:ec:ef:45:86:c0.env
+$ unset PW
+.Ed
+.Ss set: a smart plug (--kind, --cycle-off)
+fiend on a Shelly Gen2 plug, holding the power off for ten seconds on a
+cycle:
+.Bd -literal -offset indent
+$ printf '%s\en' "$PLUGPASS" | sudo kldload-power f0:2f:74:cd:27:50 set \e
+      --controller outlet --kind shelly2 --address 10.100.10.40 \e
+      --name fiend --cycle-off 10 --password-stdin
+.Ed
+.Ss set: one outlet of a multi-outlet plug (--outlet)
+.Bd -literal -offset indent
+$ sudo kldload-power 02:00:00:00:00:31 set --controller outlet \e
+      --kind tasmota --address 10.100.10.41 --outlet 3 --user admin \e
+      --name rack-sw --password-stdin </root/plug.pw
+# the record now switches relay 3 (Power3) only
+.Ed
+.Ss list
+.Bd -literal -offset indent
+$ sudo kldload-power list
+MAC                NAME          CONTROLLER       ADDRESS
+3c:ec:ef:45:86:c0  abyss         ipmi             10.100.10.76
+.Ed
+.Ss status
+One word on standard output, so it can be tested in a script:
+.Bd -literal -offset indent
+$ sudo kldload-power abyss status
+on
+$ [ "$(sudo kldload-power fiend status)" = off ] && echo "fiend is off"
+.Ed
+.Ss on
+.Bd -literal -offset indent
+$ sudo kldload-power fiend on
+kldload-power: the plug is on; the machine starts only if its firmware
+powers on after AC loss
+$ sudo kldload-power fiend on
+kldload-power: fiend is already on
+.Ed
+.Ss off
+Through a BMC the machine is asked to shut down.
+The emulated machine had no operating system to answer, and the verb
+reported that instead of success:
+.Bd -literal -offset indent
+$ sudo kldload-power ipmiprobe off
+kldload-power: asked for off, still on after 180s
+$ echo $?
+1
+.Ed
+.Pp
+Through a plug it is refused:
+.Bd -literal -offset indent
+$ sudo kldload-power fiend off
+kldload-power: a plug cannot shut an OS down; force-off cuts the power
+$ echo $?
+3
+.Ed
+.Ss force-off
+Prints nothing and exits 0 once the controller reads off:
+.Bd -literal -offset indent
+$ sudo kldload-power fiend force-off
+$ sudo kldload-power fiend status
+off
+.Ed
+.Ss cycle
+.Bd -literal -offset indent
+$ sudo kldload-power fiend cycle
+kldload-power: fiend is already off
+kldload-power: holding fiend off for 5s
+kldload-power: the plug is on; the machine starts only if its firmware
+powers on after AC loss
+.Ed
+.Ss pxe-once
+Reinstall a BMC machine that is hung, with no operating system to ssh
+into: arm it, send it to the network once, cycle it.
+.Bd -literal -offset indent
+$ sudo kldload-netboot-server arm-install 02:00:00:00:99:01 answers.env
+$ sudo kldload-power ipmiprobe pxe-once
+kldload-power: ipmiprobe boots from the network next time, once
+$ sudo kldload-power ipmiprobe cycle
+.Ed
+.Pp
+Through a plug it is refused:
+.Bd -literal -offset indent
+$ sudo kldload-power fiend pxe-once
+kldload-power: fiend's controller (outlet) cannot choose the boot
+device; arm it on the netboot server and cycle it
+.Ed
+.Ss --allow in force
+.Bd -literal -offset indent
+$ sudo kldload-power abyss cycle
+kldload-power: abyss allows only: status (its record says so; cycle
+was not run)
+$ echo $?
+6
+.Ed
+.Ss --self
+Run on onyx, whose own NIC carries the MAC:
+.Bd -literal -offset indent
+$ sudo kldload-power onyx force-off
+kldload-power: onyx is this machine; --self to cut its power anyway
+$ sudo kldload-power onyx cycle --self
+# cycles onyx; nothing reports the outcome once the power is cut
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "no power record for 'NAME' in DIR (kldload-power <mac> set ...)"
+No record has that MAC or name.
+.It "CONTROLLER at ADDRESS did not answer"
+The plug or BMC is unreachable: wrong address, powered off, or on another
+network.
+Exit 4.
+.It "CONTROLLER at ADDRESS refused the login"
+Wrong user or password.
+Exit 5.
+A BMC may lock an account after repeated failures; fix the record before
+trying again.
+.It "asked for STATE, still STATE after Ns"
+The controller accepted the request but the state never changed: a
+machine that ignored an ACPI shutdown, a plug whose relay did not switch.
+.It "the BMC took the request but its boot flags do not say PXE"
+.Cm pxe-once
+did not stick.
+Some BMCs apply a boot override only while the host is off.
+.It "NAME allows only: VERBS (its record says so; VERB was not run)"
+The record's
+.Fl -allow
+list refused the verb.
+Exit 6.
+.It "NAME is this machine; --self to cut its power anyway"
+Exit 2.
+.It "the plug is on; the machine starts only if its firmware powers on after AC loss"
+Not an error: a reminder that
+.Nm
+can see the socket, not the machine behind it.
+.El
+.Sh SEE ALSO
+.Xr ipmitool 1 ,
+.Xr kfire 8 ,
+.Xr kldload-netboot-server 8
+.Sh HISTORY
+Written on 2026-09-29, the day fiend's live boot crawled at 3 MB/s
+fetching its root image, was cut off at 300 seconds, and sat unreachable
+in the initrd until someone walked over and pressed the button.
+fiend has no BMC; a smart plug gives the same control.
+.Pp
+Against the IPMI emulator a wrong password and an absent BMC first
+produced the same message from
+.Xr ipmitool 1 ,
+and a refused login was reported as unreachable;
+.Nm
+has run it verbose since, where the two differ.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Through a plug,
+.Nm
+sees the socket, not the machine: a machine whose firmware is not set to
+power on after AC loss stays off after
+.Cm on
+or
+.Cm cycle ,
+and
+.Cm status
+reads
+.Ql on .
+.Pp
+.Cm pxe-once
+asks for UEFI network boot
+.Pq Ql options=efiboot .
+The emulator it was tested against ignores that option, so UEFI network
+boot through a real BMC has not been demonstrated.
+.Pp
+The password never appears on a command line: plugs are driven by
+.Xr curl 1
+reading its URL and user from a configuration on a pipe, and
+.Xr ipmitool 1
+reads it from its environment
+.Pq Fl E .
+Anyone who can read the record, or the environment of a running
+.Xr ipmitool 1 ,
+which on Linux means root, can read the password.

@@ -388,7 +388,7 @@ do_cycle() {
 
 do_pxe_once() {
     [[ "${R[POWER_CONTROLLER]}" == ipmi ]] ||
-        die 3 "a ${R[POWER_CONTROLLER]} cannot choose the boot device; arm the machine and cycle it"
+        die 3 "${LABEL}'s controller (${R[POWER_CONTROLLER]}) cannot choose the boot device; arm it on the netboot server and cycle it"
     _ipmi chassis bootdev pxe options=efiboot >/dev/null || return
     local flags
     flags="$(_ipmi chassis bootparam get 5)" || return
@@ -456,11 +456,11 @@ do_set() {
 
 do_list() {
     local f
-    printf '%-17s  %-12s  %-10s  %s\n' MAC NAME CONTROLLER ADDRESS
+    printf '%-17s  %-12s  %-15s  %s\n' MAC NAME CONTROLLER ADDRESS
     for f in "$DIR"/*.env; do
         [[ -f "$f" ]] || continue
         load_record "$f"
-        printf '%-17s  %-12s  %-10s  %s\n' "$(basename "$f" .env)" "${R[POWER_NAME]:--}" \
+        printf '%-17s  %-12s  %-15s  %s\n' "$(basename "$f" .env)" "${R[POWER_NAME]:--}" \
             "${R[POWER_CONTROLLER]:-?}${R[POWER_OUTLET_KIND]:+/${R[POWER_OUTLET_KIND]}}" "${R[POWER_ADDRESS]:-?}"
     done
 }
