@@ -34,6 +34,15 @@ _loaded_names() { curl -fsS --max-time 5 "$OLLAMA_API/api/ps" 2>/dev/null |
     python3 -c 'import json,sys; [print(m["name"]) for m in json.load(sys.stdin).get("models",[])]' 2>/dev/null || true; }
 _vram_free() { nvidia-smi --query-gpu=memory.free --format=csv,noheader 2>/dev/null | head -1 || echo "?"; }
 
+# --help first, before Ollama is looked for (rule 9): it answered "ollama not
+# installed" and exit 1 on a machine without it (2026-09-30).
+case "${1:-}" in
+-h | --help | help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+esac
+
 command -v ollama >/dev/null 2>&1 || {
     _notify "ollama not installed"
     exit 1
@@ -67,7 +76,7 @@ status)
     else echo "Bob: unloaded (GPU free for gaming) | VRAM free: $(_vram_free)"; fi
     ;;
 *)
-    echo "usage: bobctl {on|off|toggle|status}"
-    exit 1
+    echo "usage: bobctl {on|off|toggle|status}" >&2
+    exit 2
     ;;
 esac
