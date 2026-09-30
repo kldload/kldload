@@ -19,6 +19,22 @@
 
 set -Eeuo pipefail
 
+# --help answers before anything is changed or restarted (rule 9). Without
+# this, --help ran the tool: a chmod of the key, and restarts of the web
+# console, its terminal and Grafana whenever the certificate had changed
+# (2026-09-30).
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "kldload-bounce-tls-services: takes no arguments (try --help)" >&2
+    exit 2
+    ;;
+esac
+
 # This file's own options line is `set -u`, and that is the author's
 # intent. The 2026-09-15 strict sweep put `set -Eeuo pipefail` above it, which
 # additionally forced errexit and pipefail here; a LATER set line cannot clear an
