@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kpkg: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # kpkg — universal package manager wrapper
 # Auto-detects apt/dnf/pacman and runs the right command.
@@ -19,7 +20,12 @@ _snap() {
     if command -v zfs &>/dev/null && zpool list &>/dev/null 2>&1; then
         local ds
         ds=$(mount | awk '$3=="/" && /zfs/{print $1}')
-        [[ -n "$ds" ]] && zfs snapshot "${ds}@kpkg-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+        # sudo, and said when it fails: it ran as the caller and threw the
+        # error away, so a user's every "snapshot first" was no snapshot at
+        # all, before a transaction that then ran with sudo (2026-09-30)
+        if [[ -n "$ds" ]] && ! sudo zfs snapshot "${ds}@kpkg-$(date +%Y%m%d-%H%M%S)"; then
+            echo "kpkg: WARNING: no snapshot of ${ds} was taken; the transaction goes ahead without one" >&2
+        fi
         # the last ten; every one ever taken was kept (source audit 2026-09-26)
         if [[ -n "$ds" && -x /usr/local/sbin/snapshot-prune.sh ]]; then
             /usr/local/sbin/snapshot-prune.sh "$ds" kpkg- 10 >/dev/null 2>&1 ||
@@ -92,7 +98,16 @@ info)
     apt-get) apt-cache show "$@" ;;
     esac
     ;;
-help | *)
+help | -h | --help | *)
+    # help asked for is stdout and 0; an unknown verb is stderr and 2 (it
+    # printed the help and exited 0, so a typo read as success)
+    _rc=0
+    case "$cmd" in help | -h | --help) ;; *)
+        _rc=2
+        exec >&2
+        echo "kpkg: unknown command: $cmd"
+        ;;
+    esac
     echo "kpkg — universal package manager (auto-detects apt/dnf/pacman)"
     echo ""
     echo "  kpkg install <pkg>    Install a package (ZFS snapshot first)"
@@ -104,5 +119,8 @@ help | *)
     echo "  kpkg info <pkg>       Show package details"
     echo ""
     echo "  Using: $PKG"
+    echo ""
+    echo "  Exit: the package manager's own status; 2 for an unknown command. See kpkg(8)."
+    exit "$_rc"
     ;;
 esac
