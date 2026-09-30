@@ -200,7 +200,12 @@ fi
 # ─── [9] Grafana healthy + Loki datasource ───────────────────────────
 echo
 echo "[9] Grafana"
-_gh=$(curl -sk --max-time 5 https://localhost:3000/api/health 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['database'])" 2>/dev/null)
+# Grafana listens on loopback in PLAIN HTTP; kldload-proxy on :8443 is the TLS
+# end (kldload-firstboot writes protocol = http). Both Grafana checks asked
+# https://localhost:3000 and failed on every install -- onyx 2026-09-30: health
+# '' and every dashboard http=000, while http:// answered 200.
+GRAFANA="${KLDLOAD_GRAFANA_URL:-http://127.0.0.1:3000}"
+_gh=$(curl -s --max-time 5 "$GRAFANA/api/health" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['database'])" 2>/dev/null)
 if [[ "$_gh" == "ok" ]]; then
     _pass "Grafana database=ok"
 else
@@ -216,7 +221,9 @@ fi
 echo
 echo "[10] Grafana dashboards"
 for uid in zfs-pool-health disk-health-smart kernel-messages klab-test-debug scrub-history compression-trend block-io-latency klab-test-matrix; do
-    _code=$(curl -sk -u admin:admin --max-time 5 -o /dev/null -w "%{http_code}" "https://localhost:3000/api/dashboards/uid/$uid" 2>/dev/null)
+    # Anonymous viewer, as firstboot configures it: no password on the
+    # command line, where ps shows it (it passed admin:admin here).
+    _code=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "$GRAFANA/api/dashboards/uid/$uid" 2>/dev/null)
     if [[ "$_code" == "200" ]]; then
         _pass "dashboard $uid → 200"
     else
@@ -257,7 +264,10 @@ if [[ $FAIL -eq 0 ]]; then
     [[ -z "$_ip" ]] && _ip="localhost"
     printf '\nDashboards:\n'
     for _uid in zfs-pool-health disk-health-smart kernel-messages klab-test-debug scrub-history compression-trend block-io-latency klab-test-matrix; do
-        printf '  https://%s:3000/d/%s/\n' "$_ip" "$_uid"
+        # Through the proxy: Grafana itself answers only on loopback, so the
+        # :3000 links printed here led nowhere (onyx 2026-09-30: 000 on the LAN
+        # address, 200 at :8443/grafana/).
+        printf '  https://%s:8443/grafana/d/%s/\n' "$_ip" "$_uid"
     done
     exit 0
 else
