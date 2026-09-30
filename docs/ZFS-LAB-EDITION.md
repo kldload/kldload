@@ -344,7 +344,92 @@ Phase 0 is days and is the demo's spine; 0 to 2 are the summit story.
 
 1, 2 and 4 alone already beat CI on ergonomics; 3 is what nobody else has.
 
-## 12. Open decisions
+## 12. The thesis for the summit
+
+*Built* is in the tree today; *planned* is in this brief. Claim only the
+first kind as running.
+
+### Two paragraphs
+
+Every one of you tests OpenZFS on a filesystem that is not ZFS. CI boots a
+kernel it did not choose, on an ext4 root, and runs the suite against files.
+That covers ZFS the code. It never touches ZFS the system: the module that
+has to build and load before the root exists, the initramfs that has to
+import and unlock it, the kernel update that has to rebuild it, the rollback
+that has to boot. Those are the paths that break for users, and no runner
+can exercise them, because a runner cannot test the filesystem it is running
+on. kldload closes that gap: an installer that builds real distributions with
+ZFS as the root, offline and reproducibly, on every substrate you support,
+including the RHEL kernels that claim to be 4.18. Point it at a version of
+ZFS, a kernel and a distribution and it builds that exact machine from
+nothing, runs the suite on it, and can hand you the machine at the moment a
+test failed.
+
+The second half is hardware. A bench cabled to the lab host is powered on,
+netbooted, installed from a wiped disk, tested, reported on and powered off,
+one build at a time, so every result belongs to that build and nothing from
+the last one survives. Add benches and the queue spreads across them: ZFS
+tested against any amount of hardware, around the clock, with nobody in the
+room. Blue on 2.4.4, green on 2.4.5, on the same real disks, and the report
+is the difference between them. Not a faster CI: a test bed where a build is
+a text file, a machine is disposable, and real hardware is one line in a
+queue.
+
+### What it excels at
+
+1. **ZFS as the root filesystem, not a package** (built: the installer;
+   planned: version choice). Boot, initramfs import, encrypted unlock, module
+   rebuild on kernel update, rollback: testable. *"Does 2.4.5 still boot an
+   encrypted root on Rocky 10 after a kernel update?" is a queue line, not a
+   bug report.*
+2. **Real hardware as a disposable resource** (built: netboot, power
+   control, the nightly loop on fiend; planned: the lab queue). Wiped disk,
+   install, test, report, power off. *A bug that needs a real NVMe's flush
+   semantics, invisible on loop files, reproduced cold to cold on demand.*
+3. **Any amount of hardware, 24/7** (built: the pieces; planned: the queue
+   across benches). Every bench with a power record is a worker; the queue
+   is drained by whatever is idle; a bench that dies is a failed report, not
+   a stopped lab. *Ten cheap boxes of different vintages run the release
+   candidate all weekend and the matrix is waiting on Monday.*
+4. **Attribution over speed** (built). Offline mirrors make a build an exact
+   package set; a failure maps to a byte-identical install. *An intermittent
+   failure comes with the snapshot name of the machine the moment it failed,
+   to hand to someone.*
+5. **Blue/green as a regression diff** (built in klab for cloud goldens;
+   planned for root-on-ZFS builds). *2.4.4 vs 2.4.5 on five distros; the
+   output is only the tests that passed on blue and failed on green, known
+   per-distro failures subtracted.*
+6. **A build is a text file** (built: answers files drive every install;
+   planned: the ZFS and kernel fields).
+   `distro=debian release=13 zfs=2.4.5 kernel=stock site=green`
+   *A maintainer pastes a PR's ref into that line and it is built and tested
+   on every distro before merge.*
+7. **Every substrate, including the ones that lie** (built). Nine
+   substrates, the RHEL family among them. *A configure check that
+   version-tests instead of feature-tests fails here on Rocky before it
+   fails in the field.*
+8. **Instant disposable machines for breadth** (built). Clones in about
+   0.2 s. *The full suite sharded across copies of one build, at once, on
+   one host.*
+9. **Kernel × ZFS, impossible pairs refused** (built: the ceiling check in
+   `zfs-kernel-pin`; planned: kernel as an input). *Kernel 7.1 greyed out
+   for a release whose maximum is 7.0, not discovered mid-install.*
+10. **Observability already wired** (built). Prometheus, Grafana, Loki; ZFS
+    pool, ARC, scrub and eBPF block-latency boards. *A test that got slow on
+    green has the ARC and latency graphs from the same minute beside it.*
+
+### The one line
+
+CI tells you whether ZFS works. This tells you whether a machine running on
+ZFS survives, on real hardware, from a text file, with the failing machine
+kept for you.
+
+### The ask to the room
+
+Which first: a PR on every distro before merge, the root-on-ZFS boot suite,
+or hardware reruns of flaky tests? That picks the summit demo.
+
+## 13. Open decisions
 
 1. **Summit date.** Decides whether root-on-ZFS builds make the first cut.
 2. **ZFS sources:** release tags only, or any commit or pull-request branch?
