@@ -64,7 +64,9 @@ fi
 
 # ── 2. In-memory SSH host keys ─────────────────────────────────────────────────
 
-log "Scrubbing SSH host keys..."
+# The host keys themselves stay: they are the live image's, the same on every
+# boot of it. This stops the daemon; the log said "Scrubbing SSH host keys".
+log "Stopping SSH (the live image's host keys are not removed)..."
 ssh-keygen -R localhost 2>/dev/null || true
 if systemctl stop ssh 2>/dev/null || systemctl stop sshd 2>/dev/null; then
     log "  SSH daemon stopped"
@@ -123,9 +125,14 @@ SCRUBBED+=("fs:sync")
 # ── 7. Drop page cache ────────────────────────────────────────────────────────
 
 log "Dropping page cache..."
-echo 3 >/proc/sys/vm/drop_caches
-SCRUBBED+=("mem:drop_caches")
-log "  Page cache dropped"
+# A failure here is reported and the summary still printed: it was the last
+# step, and under set -e it hid everything already done.
+if { echo 3 >/proc/sys/vm/drop_caches; } 2>/dev/null; then
+    SCRUBBED+=("mem:drop_caches")
+    log "  Page cache dropped"
+else
+    log "  WARNING: could not drop the page cache (read-only /proc/sys?)"
+fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
@@ -136,4 +143,4 @@ for item in "${SCRUBBED[@]}"; do
 done
 log "────────────────────────────────────────────────"
 echo ""
-echo "Live session scrubbed. All ephemeral keys and credentials have been cleared."
+echo "Live session scrubbed: ${#SCRUBBED[@]} item(s), listed above and in ${LOG_FILE}."
