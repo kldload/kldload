@@ -5,8 +5,10 @@
 # Existence rationale: when something breaks in the field (a boot loop,
 # a missing module, a wrong service state, a signature rejection) we end
 # up scraping the same logs and config files by hand every time. This
-# tool captures them all in ~3 seconds so the user can attach the
-# tarball to a bug report or feed it to an analysis script. The contents
+# tool captures them all so the user can attach the tarball to a bug
+# report or feed it to an analysis script: seconds on a new install, but
+# `zfs get all` grows with the snapshots -- onyx with 2,100 took 2 minutes
+# and made 65 MB (2026-09-30). The contents
 # are read-only system state — nothing is modified.
 #
 # Usage:
@@ -42,8 +44,11 @@
 #     /etc/shadow, /etc/gshadow    — password hashes
 #     ZFS encryption keys          — never readable by user
 #
-# Output: /root/kldload-debug-<hostname>-<UTC-timestamp>.tar.gz
-# (Override with --out <dir>.)
+# Output: /root/kldload-debug-<hostname>-<UTC-timestamp>.tar.gz, mode 0600
+# (Override with --out <dir>.) Every *.env/*.conf/*.cfg in it is redacted
+# by key name; logs and the journal are included as they are.
+# Exit: 0 written; 64 usage; 66 the output directory does not exist (the
+# sysexits codes). See kldload-debug-bundle(8).
 set -Eeuo pipefail
 
 # Rule 9: -h/--help answers BEFORE this re-exec. Asking a tool to explain
@@ -58,6 +63,10 @@ QUIET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --out)
+        [[ -n "${2:-}" ]] || {
+            echo "--out needs a directory" >&2
+            exit 64
+        }
         OUT_DIR="$2"
         shift 2
         ;;
@@ -226,10 +235,32 @@ for f in /etc/kldload/install-manifest.env \
         "$f" >"$WORK/answers-$(basename "$f")"
 done
 
+# ── redact every settings file in the bundle, wherever it came from ──────────
+# _redact_tree DIR -- the same name-pattern redaction as above, over every
+# *.env / *.conf / *.cfg under DIR. WHY: the allowlist above copies
+# install-manifest.env (and netboot.env, backup.conf) RAW into etc/kldload/,
+# and /var/log/installer is copied whole, effective-config.env included --
+# while a redacted copy of the same files sat beside them. A raw copy was
+# safe only by luck of what it held (checked on onyx and a fresh fiend,
+# 2026-09-30: nothing secret in them today). Redacting the tree as packed
+# does not depend on that.
+_redact_tree() {
+    local f
+    while IFS= read -r -d '' f; do
+        sed -i -E 's/^([[:space:]]*(export[[:space:]]+)?[A-Z0-9_]*(PASS|PASSWORD|PASSPHRASE|SECRET|TOKEN|KEY|CREDENTIAL)[A-Z0-9_]*[[:space:]]*=).*/\1<redacted>/' "$f"
+    done < <(find "$1" -type f \( -name '*.env' -o -name '*.conf' -o -name '*.cfg' \) -print0)
+}
+step "redacting secrets in every *.env/*.conf/*.cfg in the bundle"
+_redact_tree "$WORK"
+
 # ── bundle it ────────────────────────────────────────────────────────────────
+# Created 0600 (umask), not chmod-ed after: the window between tar writing it
+# and the chmod was a window in which the bundle was world-readable.
 step "compressing → ${BUNDLE}"
-tar -C "$WORK" -czf "$BUNDLE" .
-chmod 0600 "$BUNDLE"
+(
+    umask 077
+    tar -C "$WORK" -czf "$BUNDLE" .
+)
 
 SIZE="$(numfmt --to=iec --suffix=B "$(stat -c%s "$BUNDLE")")"
 printf '\nkldload-debug-bundle written: %s (%s)\n' "$BUNDLE" "$SIZE"
