@@ -1,0 +1,273 @@
+.Dd September 29, 2026
+.Dt KVM-SNAP 8
+.Os
+.Sh NAME
+.Nm kvm-snap
+.Nd snapshot a virtual machine's disk, roll it back, list and delete snapshots
+.Sh SYNOPSIS
+.Nm
+.Ar vm
+.Nm
+.Ar vm
+.Cm snap
+.Ar name
+.Nm
+.Ar vm
+.Cm list
+.Nm
+.Ar vm
+.Cm rollback
+.Op Ar snapshot
+.Nm
+.Ar vm
+.Cm delete
+.Ar snapshot
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+manages ZFS snapshots of a virtual machine's disk,
+.Pa rpool/vms/ Ns Ar vm .
+A snapshot takes no time and no space when it is taken; it grows only as
+the disk moves away from it.
+It is how a machine is put back to the moment before an upgrade, and what
+.Xr kvm-clone 8
+makes new machines from.
+.Pp
+Taking a snapshot of a running machine pauses it for the moment the
+snapshot takes, so the disk is consistent, and resumes it whether the
+snapshot succeeded or not.
+.Pp
+Rolling back powers the machine off, returns its disk to the snapshot,
+destroys every snapshot newer than it (a ZFS rollback cannot jump over
+them, and
+.Nm
+names each one first), and leaves the machine running or stopped as it
+found it.
+A paused machine is left stopped.
+.Pp
+A
+.Ar snapshot
+may be written three ways, all meaning the same:
+.Ql stable ,
+.Ql @stable
+or
+.Ql rpool/vms/ Ns Ar vm Ns Ql @stable .
+A full name that is not a snapshot of
+.Ar vm Ns 's
+disk is refused, so a mistyped name can never roll back another machine.
+.Pp
+.Nm
+must run as root; run as a user it re-executes itself with
+.Xr sudo 8 .
+.Fl -help
+needs neither.
+.Sh OPTIONS
+.Bl -tag -width "rollback [snapshot]"
+.It (no action)
+Take a snapshot named for the current time,
+.Ar YYYY-MM-DD_HHMMSS .
+.It Cm snap Ar name
+Take a snapshot called
+.Ar name :
+letters, digits,
+.Ql - ,
+.Ql _ ,
+.Ql \&.
+and
+.Ql \&: ,
+up to 128 characters, not starting with
+.Ql - .
+A name that exists is refused.
+.It Cm list
+List the machine's snapshots with their creation time and the space each
+holds on its own.
+.It Cm rollback Op Ar snapshot
+Roll back to
+.Ar snapshot ,
+or to the newest snapshot without one.
+.It Cm delete Ar snapshot
+Destroy
+.Ar snapshot .
+ZFS refuses while a clone of it exists.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+Needs no root and changes nothing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa rpool/vms/ Ns Ar vm Ns Pa @ Ns Ar name
+Each snapshot.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done.
+.It 1
+The machine or the snapshot does not exist, a name is taken, a snapshot
+belongs to another machine, or ZFS or libvirt refused.
+.It 2
+A usage error: no machine, a name that is not a plain name, a bad snapshot
+name, an unknown action, or
+.Cm delete
+without a snapshot.
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on a kldload host on 2026-09-29, against a throwaway machine,
+.Ql sn-3208047 ,
+made for the purpose with
+.Xr kvm-create 8
+and deleted afterwards.
+.Ss Snapshot now (no action)
+The machine was running, so it was paused for the moment:
+.Bd -literal -offset indent
+# kvm-snap sn-3208047
+Pausing sn-3208047 for a consistent snapshot...
+Snapshot: rpool/vms/sn-3208047@2026-09-29_223451
+.Ed
+.Ss A named snapshot (snap)
+.Bd -literal -offset indent
+# kvm-snap sn-3208047 snap stable
+Pausing sn-3208047 for a consistent snapshot...
+Snapshot: rpool/vms/sn-3208047@stable
+# kvm-snap sn-3208047 snap stable
+kvm-snap: rpool/vms/sn-3208047@stable already exists
+# (exited 1)
+.Ed
+.Ss What there is (list)
+.Bd -literal -offset indent
+# kvm-snap sn-3208047 list
+Snapshots for sn-3208047:
+NAME                                    CREATION                USED
+rpool/vms/sn-3208047@2026-09-29_223451  Tue Sep 29 22:34 2026     0B
+rpool/vms/sn-3208047@stable             Tue Sep 29 22:34 2026     0B
+rpool/vms/sn-3208047@later-1            Tue Sep 29 22:34 2026     0B
+.Ed
+.Ss Back to a snapshot (rollback)
+The machine was running; the snapshot taken after
+.Ql stable
+is destroyed, and the machine is running again afterwards:
+.Bd -literal -offset indent
+# kvm-snap sn-3208047 rollback @stable
+Rolling back to: rpool/vms/sn-3208047@stable
+  destroying 1 newer snapshot(s):
+    rpool/vms/sn-3208047@later-1
+Rolled back to rpool/vms/sn-3208047@stable (sn-3208047 is running)
+.Ed
+.Pp
+A stopped machine stays stopped:
+.Bd -literal -offset indent
+# (sn-3208047 powered off with virsh destroy)
+# kvm-snap sn-3208047 rollback stable
+Rolling back to: rpool/vms/sn-3208047@stable
+Rolled back to rpool/vms/sn-3208047@stable (sn-3208047 is shut off)
+.Ed
+.Pp
+Before an upgrade, with a way back:
+.Bd -literal -offset indent
+# kvm-snap web01 snap pre-upgrade
+# ...upgrade web01; if it goes wrong:
+# kvm-snap web01 rollback pre-upgrade
+.Ed
+.Ss Deleting (delete)
+.Bd -literal -offset indent
+# kvm-snap sn-3208047 delete @del-a
+Deleted: rpool/vms/sn-3208047@del-a
+# kvm-snap sn-3208047 delete del-b
+Deleted: rpool/vms/sn-3208047@del-b
+# kvm-snap sn-3208047 delete rpool/vms/sn-3208047@del-c
+Deleted: rpool/vms/sn-3208047@del-c
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+# kvm-snap sn-3208047 rollback @nosuch
+kvm-snap: no snapshot rpool/vms/sn-3208047@nosuch
+# kvm-snap sn-3208047 rollback rpool/vms/klab-golden-centos@golden
+kvm-snap: rpool/vms/klab-golden-centos@golden is not a snapshot of rpool/vms/sn-3208047
+# kvm-snap sn-3208047-empty rollback
+kvm-snap: sn-3208047-empty has no snapshots
+# kvm-snap nosuchvm
+kvm-snap: no volume rpool/vms/nosuchvm
+# (each of the four above exited 1)
+# kvm-snap sn-3208047 snap 'bad name'
+kvm-snap: 'bad name' is not a snapshot name (letters, digits, - _ . :; not starting with -)
+# kvm-snap web/1
+kvm-snap: 'web/1' is not a plain name (letters, digits, . _ -)
+# kvm-snap sn-3208047 delete
+kvm-snap: delete needs a snapshot name
+\&...
+# kvm-snap sn-3208047 frobnicate
+kvm-snap: unknown action: frobnicate
+\&...
+# (each of the four above exited 2; the last two also print the usage)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kvm-snap: could not snapshot rpool/vms/VM"
+ZFS refused the snapshot (the pool is full, or read-only).
+A running machine was paused for it and has been resumed.
+.It "kvm-snap: WARNING: VM is still PAUSED -- virsh resume VM"
+Resuming failed; run the command it names.
+.It "kvm-snap: WARNING: could not pause VM; the snapshot is taken live (crash-consistent)"
+The snapshot is of a running disk: as consistent as after a power cut.
+.It "kvm-snap: SNAPSHOT is not a snapshot of rpool/vms/VM"
+A full snapshot name belonging to another dataset; nothing was changed.
+.It "kvm-snap: zfs rollback -r SNAPSHOT failed; VM's disk is as it was"
+The rollback did not happen, and the machine was started again if it had
+been running.
+.It "kvm-snap: rolled back, but VM did not start again"
+The disk is at the snapshot; start the machine by hand to see why it does
+not start.
+.It "kvm-snap: could not delete SNAPSHOT"
+Usually a clone made from it; ZFS names it above this line.
+.El
+.Sh SEE ALSO
+.Xr kld 1 ,
+.Xr virsh 1 ,
+.Xr kldload-vm-snapshot 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-create 8 ,
+.Xr zfs-rollback 8 ,
+.Xr zfs-snapshot 8
+.Sh HISTORY
+On 2026-09-26 a rollback to an older snapshot was found to destroy the
+running machine before
+.Xr zfs-rollback 8
+refused (the hourly
+.Xr kldload-vm-snapshot 8
+timer puts newer snapshots on every machine); rollback has used
+.Fl r ,
+and named what it destroys, since.
+.Pp
+On 2026-09-29, writing this page:
+.Cm rollback
+and
+.Cm delete
+had accepted only a full snapshot name, while
+.Xr kld 1
+passes
+.Ql @name ,
+so every rollback and delete from kld's Snapshots tab had failed \(em and
+this page's own delete example with it;
+a full name belonging to another machine was accepted;
+a failed snapshot left a running machine paused;
+and a rollback always started the machine afterwards.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Rolling back destroys every snapshot newer than the target, including the
+hourly ones
+.Xr kldload-vm-snapshot 8
+takes; that is ZFS's rule, not a choice.
+To keep a newer state, clone it first with
+.Xr kvm-clone 8 .
+.Pp
+The machine is powered off, not shut down, for a rollback: whatever it had
+not written to disk is lost, which is what rolling back means.
+.Pp
+A pause for a snapshot is short but real: a latency-sensitive guest sees a
+stall of the time
+.Xr zfs-snapshot 8
+takes.
