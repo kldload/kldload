@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kclone: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # kclone — CoW clone a ZFS dataset (near-instant, near-zero space)
 # Usage:
@@ -13,6 +14,15 @@ Usage: kclone <source-path> <dest-path>
 Clones the ZFS dataset mounted at <source-path> to a new dataset mounted at
 <dest-path>: a snapshot, then a copy-on-write clone. Instant, and 0B until
 the two diverge.
+
+<source-path> must be where a dataset is mounted, not a directory inside
+one: the whole dataset is what gets cloned. <dest-path> must not be a
+directory with anything in it, and the dataset it names goes under the
+source's pool at the same path (/srv/x -> rpool/srv/x), whose parent must
+exist.
+
+Exit: 0 cloned, 1 refused or failed (the snapshot is removed again),
+2 usage. See kclone(8).
 
 Examples:
   kclone /home/admin /home/admin-backup
@@ -39,9 +49,20 @@ _err() {
     exit 1
 }
 
-# Resolve source path to dataset
-src_ds="$(df --output=source "$src_path" 2>/dev/null | tail -1)"
-[[ -n "$src_ds" ]] || _err "Cannot find ZFS dataset for $src_path"
+# The dataset mounted AT the source path. WHY findmnt and the two checks:
+# `df --output=source` answered for any path -- a directory inside a dataset
+# gave the whole dataset, so `kclone /home/admin/work x` cloned all of /home,
+# and a tmpfs path gave the "dataset" tmpfs (found writing kclone(8),
+# 2026-09-29).
+src_ds="" src_fst="" src_mnt=""
+read -r src_ds src_fst src_mnt < <(findmnt -no SOURCE,FSTYPE,TARGET -T "$src_path" 2>/dev/null) || true # no answer: refused just below
+[[ "$src_fst" == zfs ]] || _err "$src_path is not on a ZFS dataset"
+if [[ "$(realpath -m "$src_path")" != "$src_mnt" ]]; then
+    _err "$src_path is inside $src_ds (mounted at $src_mnt), not a dataset of its own; kclone copies a whole dataset -- give $src_mnt"
+fi
+# SAFETY: the destination becomes a dataset name and a mountpoint.
+[[ "$dst_path" =~ ^/[A-Za-z0-9._/-]+$ && "$dst_path" != *..* && "$dst_path" != */ ]] ||
+    _err "'$dst_path' must be an absolute path of plain characters, without .. or a trailing /"
 
 # Derive destination dataset name from the destination path
 # e.g., /home/admin-backup → rpool/home/admin-backup
@@ -51,6 +72,12 @@ dst_ds="${pool}${dst_path}"
 # Check destination doesn't already exist
 if zfs list "$dst_ds" &>/dev/null; then
     _err "Destination already exists: $dst_ds ($dst_path)"
+fi
+zfs list "${dst_ds%/*}" &>/dev/null ||
+    _err "no dataset ${dst_ds%/*} to put $dst_ds under; create it first (zfs create -p)"
+# A clone mounted over a directory with files in it hides them.
+if [[ -d "$dst_path" && -n "$(ls -A "$dst_path" 2>/dev/null)" ]]; then
+    _err "$dst_path is a directory with files in it; the clone would hide them"
 fi
 
 ts="$(date +%Y%m%d-%H%M%S)"
@@ -63,7 +90,10 @@ _log "Creating snapshot: $snap"
 sudo zfs snapshot "$snap"
 
 _log "Cloning (CoW — near-instant, near-zero space)..."
-sudo zfs clone -o mountpoint="$dst_path" "$snap" "$dst_ds"
+if ! sudo zfs clone -o mountpoint="$dst_path" "$snap" "$dst_ds"; then
+    sudo zfs destroy "$snap" || true # said just below either way
+    _err "zfs clone failed (above); the snapshot $snap was removed"
+fi
 
 _log "Done."
 _log ""
