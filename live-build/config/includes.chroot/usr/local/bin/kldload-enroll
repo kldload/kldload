@@ -162,6 +162,14 @@ if [[ "${1:-}" == "--all" ]]; then
     _sweep_cluster=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
+        --role | --cluster)
+            [[ $# -ge 2 ]] || {
+                echo "$1 needs a value (try --help)" >&2
+                exit 2 # usage error; nothing was attempted
+            }
+            ;;
+        esac
+        case "$1" in
         --role)
             _sweep_role="$2"
             shift 2
@@ -262,6 +270,16 @@ CLUSTER=""
 FORCE_ID=""
 DO_WG=1
 while [[ $# -gt 0 ]]; do
+    # An option given last with no value was "$2: unbound variable", exit 1
+    # -- read as a failed enrollment, not a typo (2026-09-30).
+    case "$1" in
+    --ip | --role | --cluster | --id)
+        [[ $# -ge 2 ]] || {
+            echo "$1 needs a value (try --help)" >&2
+            exit 2 # usage error; nothing was attempted
+        }
+        ;;
+    esac
     case "$1" in
     --ip)
         IP="$2"
@@ -362,6 +380,8 @@ _ssh() {
     # the rest of it — the enrollment ran, printed nothing, and every command
     # after it never executed. Measured on .120 (2026-08-23): a driver script
     # vanished after the first ssh and looked exactly like a hang.
+    # WARN: no host-key check -- a guest is cloned from a golden and gets a
+    # fresh key on every rebuild, so a pinned key would refuse every clone.
     ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 -o BatchMode=yes \
         -i /root/.ssh/id_ed25519 "root@${IP}" "$@" 2>/dev/null
