@@ -572,7 +572,15 @@ _cl_destroy() {
     # else is still here. Restored by CONTENT, and the mesh is brought back up
     # rather than just having its files returned.
     local _snap _restore=0
-    _snap="$(mktemp -d)"
+    # SAFETY: these are the hypervisor's WireGuard PRIVATE keys. They went to
+    # a mktemp -d in /tmp that only the last line removed, so a failed
+    # kube-cluster destroy (_die) or a partial re-peer left seven copies
+    # there (container, 2026-09-30). Now under /root, and an EXIT trap removes
+    # them on every path. Global, because a trap runs after this function's
+    # locals are gone.
+    _snap="$(mktemp -d /root/.kube-bluegreen-hostwide.XXXXXX)"
+    _CL_SNAP="$_snap"
+    trap 'rm -rf "${_CL_SNAP:?}"' EXIT
     local _hostwide=(
         /root/.kube/config
         /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-mgmt.key /etc/wireguard/wg-mgmt.pub
@@ -624,9 +632,16 @@ _cl_destroy() {
         # Measured on fiend, 2026-09-21: straight after the restore the host had
         # 4 of 6 handshakes and could not ping 10.250.0.1; one `kldload-enroll
         # --all` took it to 6 and the ping came back.
+        # Captured, not piped: the sweep exits 1 when any machine ends
+        # incomplete, and under pipefail that killed this destroy at the
+        # `tail` with the host-wide state half restored (2026-09-30).
         if command -v kldload-enroll >/dev/null 2>&1; then
             _say "re-peering the surviving estate"
-            kldload-enroll --all 2>&1 | tail -1 | while read -r _l; do _say "  ${_l}"; done
+            local _eo _erc=0
+            _eo="$(kldload-enroll --all 2>&1)" || _erc=$?
+            _say "  $(printf '%s\n' "$_eo" | tail -n 1)"
+            ((_erc == 0)) ||
+                _say "WARNING: the re-peer left machines incomplete (exit ${_erc}) -- run: kldload-enroll --all"
         fi
     fi
     rm -rf "$_snap"
