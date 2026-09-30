@@ -1,0 +1,266 @@
+.Dd September 29, 2026
+.Dt KVM-MESH 8
+.Os
+.Sh NAME
+.Nm kvm-mesh
+.Nd put running virtual machines, and this host, on a private WireGuard mesh
+.Sh SYNOPSIS
+.Nm
+.Cm up
+.Ar mesh
+.Ar subnet
+.Ar vm ...
+.Nm
+.Cm add
+.Ar mesh
+.Ar vm ...
+.Nm
+.Cm status
+.Ar mesh
+.Nm
+.Cm down
+.Ar mesh
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+joins a set of running machines into a WireGuard mesh: every machine is a
+peer of every other, and this host joins too, so it can reach them on the
+mesh.
+The mesh needs no physical network card; it rides libvirt's bridge.
+.Pp
+.Cm up ,
+in order:
+.Bl -enum -compact
+.It
+finds each machine's address with
+.Xr kldload-vm-ip 8 ;
+.It
+logs in to it as root over
+.Xr ssh 1 ,
+makes it a key pair of its own \(em a key baked into a golden would be the
+same on every clone, which is not a mesh \(em and brings up an interface
+named after the mesh, at
+.Ar subnet Ns Pa \&. Ns Ar n ,
+the machines taking 1 upward;
+.It
+gives every machine every other as a peer;
+.It
+joins this host at
+.Ar subnet Ns Pa .254 ;
+.It
+waits for every peer to complete a handshake, and says how many did.
+.El
+.Pp
+The members, their ids, keys and addresses are recorded in
+.Pa /var/lib/kldload/mesh/ Ns Ar mesh Ns Pa .members ,
+which
+.Xr kldload-estate 8
+reads to tell a stopped member from one that left.
+The port is derived from the mesh's name, so two meshes on one host do
+not collide and a mesh keeps its port when rebuilt.
+.Pp
+Machines must be running, reachable, accept root's key, and have
+.Xr wg 8
+installed.
+One that is not is skipped with the reason, and the count of those that
+joined is printed.
+.Pp
+.Nm
+must run as root; run as a user it re-executes itself with
+.Xr sudo 8 .
+.Fl -help
+needs neither.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Cm up Ar mesh subnet vm ...
+Build the mesh, or extend it, across the named machines.
+.Ar mesh
+is also the interface's name: letters, digits,
+.Ql _
+and
+.Ql - ,
+up to 15, starting with a letter or digit.
+.Ar subnet
+is three octets,
+.Ql 10.254.0 ;
+the network plan keeps
+.Ql 10.254.0.0/16
+for these meshes
+.Pq Xr kldload-netplan 8 .
+.It Cm add Ar mesh vm ...
+Join more machines to a mesh that is up.
+A machine already in it is joined again with its old id, which refreshes
+its configuration.
+.It Cm status Ar mesh
+The members recorded, this host's address on the mesh, and how many peers
+there are and have handshaked.
+.It Cm down Ar mesh
+Remove the interface from every member it can reach and from this host,
+and forget the members.
+A member that does not answer loses its interface when it next boots.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KVM_MESH_SSH_KEY
+The key root logs in to the machines with; default
+.Pa /root/.ssh/id_ed25519 .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/mesh/ Ns Ar mesh Ns Pa .members
+One line per member: name, id, public key, address.
+.It Pa /etc/wireguard/ Ns Ar mesh Ns Pa .key , .pub , .setconf
+In each member: its key pair and interface configuration.
+The key is kept, and used again if it joins the same mesh again.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done; for
+.Cm up
+and
+.Cm add ,
+every peer handshaked.
+.It 1
+No machine joined, or not every peer handshaked, or a step failed.
+.It 2
+A usage error: a missing operand, a name that is not a mesh name, a subnet
+that is not three octets, an unknown command.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-29, with two throwaway clones of a
+Rocky Linux golden,
+.Ql mh-3457638-a
+and
+.Ql mh-3457638-b ,
+deleted afterwards.
+.Ss Building a mesh (up)
+.Bd -literal -offset indent
+# kvm-mesh up mhtest 10.254.77 mh-3457638-a mh-3457638-b
+Not enough information: "dev" argument is required.
+link: missing operand after ‘add’
+Try 'link --help' for more information.
+[kvm-mesh] mh-3457638-a joined as 10.254.77.1
+Not enough information: "dev" argument is required.
+link: missing operand after ‘add’
+Try 'link --help' for more information.
+[kvm-mesh] mh-3457638-b joined as 10.254.77.2
+[kvm-mesh] joined 2/2 VM(s)
+[kvm-mesh] peering: 4/4 programmed
+[kvm-mesh] host joined as 10.254.77.254 (mhtest, 2 peers)
+[kvm-mesh] waiting for handshakes (2 peers)...
+[kvm-mesh] mesh 'mhtest' up: 2/2 peers handshaked
+# (exited 0)
+# ping -c 2 -W 2 10.254.77.1
+\&...
+2 packets transmitted, 2 received, 0% packet loss, time 1009ms
+rtt min/avg/max/mdev = 0.246/0.268/0.291/0.022 ms
+.Ed
+.Pp
+The first three lines of each join are the defect in
+.Sx HISTORY :
+commands from a comment, run on this host.
+The run below is after the fix.
+.Ss Joining again (add)
+.Bd -literal -offset indent
+# kvm-mesh add mhtest mh-3457638-b
+[kvm-mesh] mh-3457638-b is already a member — refreshing its config
+[kvm-mesh] mh-3457638-b joined as 10.254.77.2
+[kvm-mesh] joined 1/1 VM(s)
+[kvm-mesh] peering: 4/4 programmed
+[kvm-mesh] host joined as 10.254.77.254 (mhtest, 2 peers)
+[kvm-mesh] waiting for handshakes (2 peers)...
+[kvm-mesh] mesh 'mhtest' up: 2/2 peers handshaked
+.Ed
+.Ss Looking at it (status)
+.Bd -literal -offset indent
+# kvm-mesh status mhtest
+  members recorded : 2
+  host interface   : 10.254.77.254/24
+  peers            : 2
+  handshaked       : 2
+  members:
+    mh-3457638-a             id=1    192.168.122.196
+    mh-3457638-b             id=2    192.168.122.84
+# (exited 0)
+.Ed
+.Ss Taking it down (down)
+.Bd -literal -offset indent
+# kvm-mesh down mhtest
+[kvm-mesh] removed mhtest from mh-3457638-a
+[kvm-mesh] removed mhtest from mh-3457638-b
+[kvm-mesh] mesh 'mhtest' torn down
+# (exited 0)
+# kvm-mesh status mhtest
+  members recorded : 0
+  host interface   :
+  peers            : 0
+  handshaked       : 0
+  members:            (none yet)
+# (exited 0)
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+# kvm-mesh up Bad/Name 10.254.77 mh-3457638-a
+kvm-mesh: 'Bad/Name' is not a mesh name (a-z 0-9 _ -, up to 15, starting with a letter or digit)
+# (exited 2)
+# kvm-mesh up mhtest2 10.254 mh-3457638-a
+kvm-mesh: subnet must be three octets, e.g. 10.254.0
+# (exited 2)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "[kvm-mesh] VM is not running \(em skipped"
+.It "[kvm-mesh] VM has no reachable address \(em skipped"
+.It "[kvm-mesh] VM has no 'wg' in the guest \(em install wireguard-tools there first"
+.It "[kvm-mesh] VM: key generation failed \(em skipped"
+.It "[kvm-mesh] VM: could not bring up MESH \(em skipped"
+The machine is left out; the others carry on.
+.It "[kvm-mesh] no VM joined \(em nothing to peer"
+.It "[kvm-mesh] VM (ADDRESS) did not answer; its MESH goes when it next boots (it is not persistent)"
+From
+.Cm down .
+.El
+.Sh SEE ALSO
+.Xr ssh 1 ,
+.Xr kldload-estate 8 ,
+.Xr kldload-netplan 8 ,
+.Xr kldload-vm-ip 8 ,
+.Xr kvm-clone 8 ,
+.Xr wg 8
+.Sh HISTORY
+.Nm
+was written after 2026-09-02, generalised from the meshes
+.Xr klab 8
+and
+.Xr kube-cluster 8
+already built for their own machines.
+Its first run peered one machine with its neighbours and left two with
+none, and exited 0: a child process had read the rest of the loop's
+input.
+.Pp
+On 2026-09-29, writing this page: the script each machine is sent was a
+double-quoted string with a comment in it that read
+.Ql $(ip link del)
+and
+.Ql $(link add) ,
+so every join ran both on this host, as root, before the script was sent;
+a mesh name reached a file path unchecked; and
+.Cm down
+reported removing an interface from machines it had not reached.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A mesh does not survive a reboot.
+The interfaces, on the machines and on this host, are made by hand, not
+by a unit, so a machine that restarts comes back off the mesh, and this
+host after a reboot has none of its meshes; the members files stay.
+Run
+.Cm up
+again with the same machines: each keeps its key, and, named in the same
+order, its id.
+.Pp
+The machines' host keys are not checked; clones get new ones each time.
