@@ -1,0 +1,77 @@
+.Dd September 30, 2026
+.Dt KLAB-PROM-TARGETS 8
+.Os
+.Sh NAME
+.Nm klab-prom-targets
+.Nd write Prometheus's scrape targets from the machines and cluster running now
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+No configuration file here holds an address to scrape.
+.Nm
+finds them from what is running \(em virtual machine addresses through
+.Xr kldload-vm-ip 8 ,
+cluster nodes through
+.Xr kubectl 1
+\(em and writes one JSON file per kind of target in Prometheus's
+.Ql file_sd
+format, each replaced whole so Prometheus never reads half of one:
+.Bl -tag -width Ds
+.It Pa klab-blue.json , Pa klab-green.json
+The lab's blue and green machines, port 9100, labelled with site and
+distribution.
+.It Pa klab-kspawn.json
+Machines made by
+.Xr kspawn 8 ,
+labelled with their cluster.
+.It Pa klab-vms.json
+Every other running machine.
+.It Pa kubelet.json , Pa cilium-agent.json , Pa cilium-operator.json , Pa hubble-metrics.json , Pa tetragon.json
+The cluster's nodes, on each component's metrics port.
+.El
+.Pp
+A kind with nothing running gets
+.Ql [] ,
+so Prometheus does not complain of a missing file.
+Prometheus rereads the files by itself.
+.Pa klab-prom-targets.timer
+runs it 30 seconds after boot and every 30 seconds after that.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0; any other argument is exit 2.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/prometheus/targets/
+What it writes.
+.El
+.Sh EXIT STATUS
+0.
+.Sh EXAMPLES
+On a kldload desktop with no machines running, on 2026-09-30:
+.Bd -literal -offset indent
+$ cat /etc/prometheus/targets/klab-vms.json
+[]
+# (exited 0)
+.Ed
+.Pp
+A running machine is an entry of the form
+.Ql {"targets":["<address>:9100"],"labels":{"site":"vm","vm":"<name>"}} .
+.Sh SEE ALSO
+.Xr klab 8 ,
+.Xr klab-exporter 8 ,
+.Xr kldload-vm-ip 8 ,
+.Xr kspawn 8
+.Sh HISTORY
+On 2026-09-20 five of the lab's machines were running and its target
+file was empty: machines whose DHCP lease carried no host name were
+dropped.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Names are written into the JSON as they are: a machine whose name holds
+a double quote makes its file unreadable to Prometheus, and every target
+in it is lost.
