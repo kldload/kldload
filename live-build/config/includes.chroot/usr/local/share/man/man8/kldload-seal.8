@@ -1,0 +1,206 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-SEAL 8
+.Os
+.Sh NAME
+.Nm kldload-seal
+.Nd remove a disk image's machine identity so it can be cloned
+.Sh SYNOPSIS
+.Nm
+.Ar disk
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+opens the system on
+.Ar disk ,
+a stopped machine's disk or an image file, and removes what makes it one
+particular machine, so that every machine made from it starts as a new
+one:
+.Bl -bullet -compact
+.It
+.Pa /etc/machine-id
+is emptied and
+.Pa /var/lib/dbus/machine-id
+removed; systemd makes a new one at the next boot;
+.It
+the ssh host keys are removed; they are made again at the next boot;
+.It
+.Pa /etc/hostid
+is removed;
+.It
+the WireGuard mesh keys, configurations and node id, and the units that
+start them, are removed; enrolling the machine makes new ones;
+.It
+DHCP leases are forgotten;
+.It
+cloud-init's state is cleared, and a list of every datasource it knows is
+written, so the image finds its settings on any platform;
+.It
+the journal, the login records and root's and every user's shell history
+are cleared;
+.It
+.Pa /etc/kldload/seal.info
+records when, where and from what it was sealed.
+.El
+.Pp
+Two shapes of disk are understood: a partition table whose largest
+partition holds the root filesystem (ext4, XFS, or Btrfs with the system
+in subvolumes, as cloud images are), and ZFS on root, as kldload installs,
+whose pool is imported under another name if this host has one of the same
+name, and whose boot environment is mounted and sealed.
+.Pp
+It refuses a disk that is in use: mounted, or any partition of it; swap;
+a device of a pool imported on this host; attached to a running or paused
+virtual machine; or, for a file, already attached to a loop device.
+Each is checked on the device the path resolves to, so an alias such as
+.Pa /dev/zd192
+for
+.Pa /dev/zvol/rpool/vms/web01
+is caught as well.
+.Pp
+Sealing writes to
+.Ar disk .
+To seal a copy and leave the original as it is, use
+.Xr kexport 8 ,
+which does that by default.
+.Xr kvm-golden 8
+seals the golden it builds.
+.Pp
+It must run as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Ar disk
+A block device \(em a ZFS volume, a disk, a partition \(em or a raw image
+file.
+A file is attached to a loop device for the duration.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/seal.info
+Written into the sealed system.
+.It Pa /etc/cloud/cloud.cfg.d/99-kldload-seal.cfg
+The datasource list, written when the system has cloud-init.
+.It Pa /var/tmp/kldload-seal.XXXXXX
+Where the disk is mounted while it is sealed; removed after.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Sealed.
+.It 1
+The disk is in use or is not a disk, no root filesystem was found, or a
+step failed.
+.It 2
+No disk given.
+.El
+.Sh EXAMPLES
+Printed on a kldload host on 2026-09-29, against throwaway machines cloned
+from a Rocky Linux golden, a pool made on a loop device, and a file
+attached to another; all were removed afterwards.
+.Ss Sealing a stopped machine's disk
+Before, the machine had a 32-character machine-id and six ssh host key
+files:
+.Bd -literal -offset indent
+# kldload-seal /dev/zvol/rpool/vms/sl-3359442-b
+[seal] detected shape: fs on /dev/zvol/rpool/vms/sl-3359442-b
+[seal] resolved /dev/zvol/rpool/vms/sl-3359442-b → /dev/zd192
+[seal] mounting root partition /dev/zd192p4 (39856 MB) at /var/tmp/kldload-seal.vpHwOe
+[seal] sealing /var/tmp/kldload-seal.vpHwOe
+[seal]   cleared /etc/machine-id
+[seal]   removed /etc/ssh/ssh_host_* keys
+[seal]   removed /etc/hostid
+[seal]   removed the WireGuard mesh identity (keys, configs, node id)
+[seal]   forgot DHCP leases
+[seal]   cloud-init: cleared seed + wrote portable datasource_list
+[seal]   cleared journald + wtmp/btmp/lastlog
+[seal]   stamped /etc/kldload/seal.info
+[seal] seal complete
+# (exited 0)
+.Ed
+.Pp
+After, from the disk mounted read-only:
+.Bd -literal -offset indent
+# mount -o ro,norecovery /dev/zd192p4 /var/tmp/sealtest-3359442/mnt
+# stat -c %s /var/tmp/sealtest-3359442/mnt/etc/machine-id
+0
+# ls /var/tmp/sealtest-3359442/mnt/etc/ssh/ | grep -c host
+0
+# cat /var/tmp/sealtest-3359442/mnt/etc/kldload/seal.info
+sealed: 2026-09-29T23:34:14-07:00
+sealed-by: kldload-seal 20260929
+sealed-on: onyx
+source: /dev/zvol/rpool/vms/sl-3359442-b
+.Ed
+.Ss What it refuses
+The same machine's disk, by its other name, with its root partition
+mounted on the host, then with the machine running; a pool's device; a
+file on a loop device:
+.Bd -literal -offset indent
+# kldload-seal /dev/zd192
+[seal][error] /dev/zd192 (/dev/zd192) or a partition of it is mounted or in use as swap on this host — refusing
+# (exited 1)
+# kldload-seal /dev/zd192
+[seal][error] /dev/zd192 is attached to the running libvirt domain sl-3359442 — shut it down first
+# (exited 1)
+# kldload-seal /dev/loop0
+[seal][error] /dev/loop0 (/dev/loop0) is a device of a pool imported on this host — refusing
+# (exited 1)
+# kldload-seal /var/tmp/sealtest-3359442/busy.img
+[seal][error] /var/tmp/sealtest-3359442/busy.img is attached to a loop device (/dev/loop1 ) — in use, refusing
+# (exited 1)
+# kldload-seal /dev/nosuch
+[seal][error] /dev/nosuch is not a block device or file
+# (exited 1)
+# kldload-seal
+kldload-seal — sysprep a disk image for portable / golden deployment
+\&...
+# (exited 2)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "[seal][error] DISK (DEVICE) or a partition of it is mounted or in use as swap on this host \(em refusing"
+.It "[seal][error] DISK (DEVICE) is a device of a pool imported on this host \(em refusing"
+.It "[seal][error] DISK is attached to the running libvirt domain VM \(em shut it down first"
+.It "[seal][error] DISK is attached to a loop device (LOOP) \(em in use, refusing"
+Nothing was changed.
+.It "[seal][error] no partitions found on DEVICE ..."
+The disk has no partition table; a bare filesystem image cannot be
+sealed.
+.It "[seal][error] DEVICE mounted but no /etc found \(em wrong partition?"
+The largest partition is not the root filesystem.
+.It "[seal][error] pool 'POOL' has no bootfs property \(em cannot find root dataset"
+A ZFS disk whose pool names no boot environment.
+.El
+.Sh SEE ALSO
+.Xr systemd-machine-id-setup 1 ,
+.Xr kexport 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-golden 8
+.Sh HISTORY
+The Btrfs subvolume handling dates from 2026-09-03, when a Fedora Cloud
+golden shipped with its machine-id and host keys because the top of its
+filesystem had no
+.Pa /etc .
+The mesh keys were added to the list on 2026-09-23, after six Kubernetes
+nodes cloned with one WireGuard key overwrote one another as peers.
+.Pp
+On 2026-09-29, writing this page: an image file could never be sealed,
+since the loop device was attached and then set aside; and the in-use
+checks compared the path as typed, so a running machine's disk given as
+.Pa /dev/zd192
+was mounted on the host and sealed while the machine ran, and the host's
+own pool partition passed every check.
+The first was reproduced with the version before the fix; the second was
+found by reading it.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A disk whose root filesystem is on LVM, or whose system spans partitions
+other than Btrfs subvolumes, is not understood.
+.Pp
+The seal cannot be undone; take a snapshot first, or seal a copy with
+.Xr kexport 8 .
+.Pp
+The ZFS-on-root shape was not exercised for this page.
