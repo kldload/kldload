@@ -86,7 +86,11 @@ done
 # _encryption_root — the boot dataset's encryption root on stdout, or nothing.
 _encryption_root() {
     local p bootfs er
-    p="${pool:-$(zpool list -H -o name | head -n 1)}"
+    # The running root's pool, not the first in `zpool list` (alphabetical):
+    # a second boot pool that sorts first would have had ITS key sealed. Same
+    # defect as kldload-rollback's, shown there with a decoy pool (2026-09-30).
+    p="${pool:-$(findmnt -no SOURCE -t zfs / | cut -d/ -f1)}"
+    [[ -n "$p" ]] || p="$(zpool get -H -o name,value bootfs | awk '$2 != "-" && !f {print $1; f=1}')"
     bootfs="$(zpool get -Ho value bootfs "$p" 2>/dev/null)"
     [[ -n "$bootfs" && "$bootfs" != - ]] || bootfs="$(findmnt -no SOURCE /)"
     er="$(zfs get -Ho value encryptionroot "$bootfs" 2>/dev/null)"
