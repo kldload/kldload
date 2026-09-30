@@ -1,0 +1,258 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-INVENTORY 8
+.Os
+.Sh NAME
+.Nm kldload-inventory
+.Nd Ansible inventory of the kldload estate, read from the state database
+.Sh SYNOPSIS
+.Nm
+.Op Fl -list | Fl -host Ar host | Fl -dump
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+is an Ansible dynamic inventory script.
+It reads the kldload state database, which
+.Xr kldload-db 8
+keeps, and prints every machine and cluster node that has an address,
+grouped so that plays can name them:
+.Bl -tag -width "kube_control_plane"
+.It Li all
+Every host.
+.It Li kube
+.Li kube_control_plane
+and
+.Li kube_workers .
+.It Li cluster_ Ns Ar name
+The members of a cluster.
+.It Li role_ Ns Ar role
+By role:
+.Li role_control_plane , role_worker , role_clone ,
+and so on.
+.It Li status_ Ns Ar status
+By state:
+.Li status_running , status_draining ,
+and so on.
+.It Li ungrouped
+Hosts in no cluster.
+.El
+.Pp
+Group names use
+.Ql _
+where the value had
+.Ql - ,
+.Ql \&. ,
+.Ql \&:
+or a space; Ansible reads a
+.Ql \&:
+in a group name as two patterns.
+.Pp
+Each host's
+.Li ansible_host
+is its management WireGuard address when it has one, then its second
+WireGuard address, then its address on the libvirt network, so plays go
+over the encrypted mesh whenever it is up.
+.Li ansible_user
+is root, and the key is
+.Pa /root/.ssh/id_ed25519
+when the reader can see it.
+The host's kldload role, cluster, state and mesh addresses or id travel as
+.Li kldload_*
+variables.
+.Pp
+A machine whose address was cleared \(em
+.Xr kldload-networks 8
+does that when its domain is not running \(em and a node marked offline
+or deleted are left out: an address that DHCP has given to another
+machine must not be a target.
+.Pp
+kldload's Ansible configuration names this script as its inventory, so
+.Xr ansible 1
+needs no
+.Fl i .
+The database is opened read-only; a member of the
+.Ql kldload
+group can run it.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -list
+The whole inventory as one line of JSON, with every host's variables
+under
+.Li _meta ;
+also what it prints with no option.
+.It Fl -host Ar host
+One host's variables;
+.Ql {}
+for a host it does not have.
+.It Fl -dump
+The whole inventory, indented, for reading.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_DB
+The database; default
+.Pa /var/lib/kldload/state.db .
+.It Ev KLDLOAD_SSH_KEY , Ev KLDLOAD_SSH_USER
+The key and user given to every host.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/state.db
+The state database.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Printed.
+A database that does not exist is an empty inventory, not an error.
+.It 1
+An error, named on standard error; an empty inventory is printed all the
+same, so Ansible still reads JSON.
+.It 2
+A usage error.
+.El
+.Sh EXAMPLES
+Printed on a kldload host on 2026-09-29, against the demonstration
+database built in the examples of
+.Xr kldload-db 8
+.Pq Ev KLDLOAD_DB Ns = Ns Pa /var/tmp/dbdemo/state.db :
+a cluster
+.Ql lab
+with a control plane registered as a node and a worker registered as a
+machine.
+.Ss As Ansible sees it
+.Bd -literal -offset indent
+$ ansible-inventory -i /usr/local/bin/kldload-inventory --graph
+@all:
+  |--@ungrouped:
+  |--@kube:
+  |  |--@kube_control_plane:
+  |  |  |--lab-cp-1
+  |  |--@kube_workers:
+  |  |  |--lab-w-1
+  |--@role_control_plane:
+  |  |--lab-cp-1
+  |--@status_draining:
+  |  |--lab-cp-1
+  |--@cluster_lab:
+  |  |--lab-cp-1
+  |  |--lab-w-1
+  |--@role_worker:
+  |  |--lab-w-1
+  |--@status_running:
+  |  |--lab-w-1
+# (exited 0)
+$ ansible -i /usr/local/bin/kldload-inventory kube_workers --list-hosts
+  hosts (1):
+    lab-w-1
+# (exited 0)
+.Ed
+.Ss One host (--host)
+The control plane is reached over the mesh, the worker, with no mesh
+address recorded, over the libvirt network:
+.Bd -literal -offset indent
+$ kldload-inventory --host lab-cp-1
+{"ansible_host": "10.250.0.21", "ansible_user": "root", "kldload_role": "control_plane", "kldload_cluster": "lab", "kldload_status": "draining", "kldload_wg_ips": {"wg0": "10.250.0.21", "wg1": "", "wg2": "", "wg3": ""}, "kldload_facts": {}}
+# (exited 0)
+$ kldload-inventory --host lab-w-1
+{"ansible_host": "192.168.122.33", "ansible_user": "root", "kldload_role": "worker", "kldload_cluster": "lab", "kldload_status": "running", "kldload_mesh_id": ""}
+# (exited 0)
+$ kldload-inventory --host no-such-host
+{}
+# (exited 0)
+.Ed
+.Ss Everything (--list)
+.Bd -literal -offset indent
+$ kldload-inventory --list
+{"all": {"hosts": ["lab-cp-1", "lab-w-1"], "vars": {}}, "ungrouped": {"hosts": []}, "kube": {"children": ["kube_control_plane", "kube_workers"]}, "kube_control_plane": {"hosts": ["lab-cp-1"]}, "kube_workers": {"hosts": ["lab-w-1"]}, "_meta": {"hostvars": {"lab-cp-1": {"ansible_host": "10.250.0.21", "ansible_user": "root", "kldload_role": "control_plane", "kldload_cluster": "lab", "kldload_status": "draining", "kldload_wg_ips": {"wg0": "10.250.0.21", "wg1": "", "wg2": "", "wg3": ""}, "kldload_facts": {}}, "lab-w-1": {"ansible_host": "192.168.122.32", "ansible_user": "root", "kldload_role": "worker", "kldload_cluster": "lab", "kldload_status": "running", "kldload_mesh_id": "31"}}}, "role_control_plane": {"hosts": ["lab-cp-1"]}, "status_draining": {"hosts": ["lab-cp-1"]}, "cluster_lab": {"hosts": ["lab-cp-1", "lab-w-1"]}, "role_worker": {"hosts": ["lab-w-1"]}, "status_running": {"hosts": ["lab-w-1"]}}
+# (exited 0)
+.Ed
+.Pp
+That was printed before the worker was deleted and registered again,
+with a new address and no mesh id.
+.Ss No database
+.Bd -literal -offset indent
+$ KLDLOAD_DB=/nonexistent kldload-inventory --list
+{"all": {"hosts": [], "vars": {}}, "ungrouped": {"hosts": []}, "kube": {"children": ["kube_control_plane", "kube_workers"]}, "kube_control_plane": {"hosts": []}, "kube_workers": {"hosts": []}, "_meta": {"hostvars": {}}}
+# (exited 0)
+.Ed
+.Ss For reading (--dump)
+.Bd -literal -offset indent
+$ kldload-inventory --dump
+{
+  "_meta": {
+    "hostvars": {
+      "lab-cp-1": {
+        "ansible_host": "10.250.0.21",
+        "ansible_user": "root",
+        "kldload_cluster": "lab",
+        "kldload_facts": {},
+        "kldload_role": "control_plane",
+        "kldload_status": "draining",
+        "kldload_wg_ips": {
+          "wg0": "10.250.0.21",
+          "wg1": "",
+          "wg2": "",
+          "wg3": ""
+        }
+      },
+      "lab-w-1": {
+        "ansible_host": "192.168.122.33",
+        "ansible_user": "root",
+        "kldload_cluster": "lab",
+        "kldload_mesh_id": "",
+        "kldload_role": "worker",
+        "kldload_status": "running"
+      }
+    }
+  },
+\&...
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kldload-inventory error: MESSAGE"
+Anything that stopped it; the inventory printed is empty and the exit
+status is 1.
+.It "kldload-inventory: PATH: MESSAGE; reading without its WAL -- the newest changes may be missing"
+The database could not be opened read-only as it is \(em not seen in
+practice; a member of the
+.Ql kldload
+group, and a user outside it, both read it normally.
+The inventory is then read without the changes not yet written back.
+.El
+.Sh SEE ALSO
+.Xr ansible 1 ,
+.Xr ansible-inventory 1 ,
+.Xr kldload-db 8 ,
+.Xr kldload-estate 8 ,
+.Xr kldload-networks 8
+.Sh HISTORY
+Every
+.Ql role: ,
+.Ql status:
+and
+.Ql cluster:
+group was once untargetable, Ansible reading the colon as a pattern
+separator with only a warning; they use
+.Ql _
+since.
+On 2026-08-30 two entries on onyx claimed one address, a stopped machine's
+and the one DHCP had since given it; nodes marked offline are left out
+since.
+.Pp
+On 2026-09-29, writing this page: the database was opened in a way that
+skipped its write-ahead log, so everything committed since the last
+checkpoint was missing from the inventory; and
+.Fl -host
+printed
+.Ql {}
+for every host.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The inventory is what the database says.
+A machine made outside the kldload tools is not in it until it is
+registered with
+.Xr kldload-db 8 .
