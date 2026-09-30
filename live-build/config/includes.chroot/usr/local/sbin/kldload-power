@@ -6,7 +6,8 @@
 # USAGE (the usage() text below is the contract; the man page kldload-power(8)
 # carries a worked example per verb):
 #   kldload-power <machine> status|on|off|force-off|cycle|pxe-once [--self]
-#   kldload-power <mac> set --controller outlet|ipmi --address A [...]
+#   kldload-power <machine> selftest [--cycle] [--self]
+#   kldload-power <mac> set --controller outlet|ipmi|redfish --address A [...]
 #   kldload-power list
 #
 # WHAT A VERB DOES, in order:
@@ -44,6 +45,13 @@
 #   ipmi    a BMC over IPMI 2.0 (ipmitool -I lanplus). `off` is a soft
 #           (ACPI) shutdown, `force-off` a hard one, `pxe-once` sets the next
 #           boot to PXE (UEFI) and reads the flag back.
+#   redfish a BMC over DMTF Redfish (HTTPS + JSON): PowerState, the
+#           ComputerSystem.Reset action (On, GracefulShutdown, ForceOff) and
+#           the Boot override (Pxe, Once, UEFI). Newer Dell/HPE BMCs ship
+#           with IPMI-over-LAN off and Redfish on. Supermicro X11 answers
+#           403 "SUM DCMS OOB" license needed (abyss, 2026-09-29): exit 3,
+#           use ipmi there. `set` pins the BMC certificate's public key
+#           (trust on first use); a changed key afterwards is refused.
 #
 # RECORDS: one file per machine, /etc/kldload/power/<mac>.env, root 0600,
 # written by `set` (umask 077, then mv -- never chmod after the fact). Lines
@@ -52,6 +60,9 @@
 #   POWER_OUTLET_KIND=shelly1|shelly2|tasmota   POWER_OUTLET=<relay index>
 #   POWER_USER=...   POWER_PASSWORD=...   POWER_NAME=fiend
 #   POWER_CYCLE_OFF=10   (seconds a cycle holds the power off)
+#   POWER_SYSTEM=/redfish/v1/Systems/1   (redfish; default: the first member)
+#   POWER_TLS_PIN=sha256//<base64>       (redfish; written by `set`)
+#   POWER_TLS=insecure                   (redfish; `set --insecure`: no pin)
 #   POWER_ALLOW=status   (only these verbs, comma separated; unset = all).
 #                        For a machine nothing here may ever switch: abyss
 #                        holds the operator's main pool (FreeBSD + GELI), and
@@ -81,10 +92,11 @@ trap 'echo "kldload-power: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 usage() {
     cat <<'EOF'
 Usage: kldload-power <machine> status|on|off|force-off|cycle|pxe-once [--self]
-       kldload-power <mac> set --controller outlet|ipmi --address HOST[:PORT]
+       kldload-power <machine> selftest [--cycle] [--self]
+       kldload-power <mac> set --controller outlet|ipmi|redfish --address HOST[:PORT]
                      [--kind shelly1|shelly2|tasmota] [--outlet N] [--user U]
                      [--name NAME] [--cycle-off SECONDS] [--allow VERBS]
-                     [--password-stdin]
+                     [--system PATH] [--insecure] [--password-stdin]
        kldload-power list
 
 <machine> is a MAC (any case, : or -) or the NAME a record was given.
@@ -95,12 +107,18 @@ Verbs:
   off        graceful shutdown (ipmi soft off); a plug cannot, exit 3
   force-off  cut the power now
   cycle      off, wait, on (a plug holds it off --cycle-off seconds, default 10)
-  pxe-once   next boot from the network, once (ipmi); a plug cannot, exit 3
+  pxe-once   next boot from the network, once (ipmi, redfish); a plug cannot, exit 3
+  selftest   prove the controller works: read the state and the boot override,
+             set pxe-once and clear it again (both read back); --cycle also
+             cycles the machine and puts it back as it was. Steps the record
+             does not allow are skipped and reported
   set        create or replace the machine's record (password from stdin)
   list       every machine with a record: mac, name, controller, address
 
 --self       allow a verb that cuts power on the machine running this command
 --allow      set: the only verbs this machine accepts, e.g. --allow status
+--system     set (redfish): which ComputerSystem, when a BMC has several
+--insecure   set (redfish): do not pin the BMC's certificate (warns on every call)
 
 Exit: 0 done and read back, 1 failed, 2 usage, 3 not supported by the
 controller, 4 controller unreachable, 5 authentication refused, 6 not
@@ -151,7 +169,7 @@ load_record() {
         k="${line%%=*}"
         v="${line#*=}"
         case "$k" in
-        POWER_CONTROLLER | POWER_ADDRESS | POWER_OUTLET_KIND | POWER_OUTLET | POWER_USER | POWER_PASSWORD | POWER_NAME | POWER_CYCLE_OFF | POWER_MAC | POWER_ALLOW)
+        POWER_CONTROLLER | POWER_ADDRESS | POWER_OUTLET_KIND | POWER_OUTLET | POWER_USER | POWER_PASSWORD | POWER_NAME | POWER_CYCLE_OFF | POWER_MAC | POWER_ALLOW | POWER_SYSTEM | POWER_TLS_PIN | POWER_TLS)
             R[$k]="$v"
             ;;
         esac
@@ -196,6 +214,15 @@ plog() {
         say "WARNING: could not write ${LOG}"
 }
 
+# _cq <string> — the string as a quoted value for a curl config file: curl
+# reads \ and " as escapes inside quotes, so a password holding either broke
+# the config and reached the device mangled (found writing the redfish driver).
+_cq() {
+    local v="${1//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    printf '"%s"' "$v"
+}
+
 # ─── outlet driver ───────────────────────────────────────────────────────────
 # _http <path+query> — GET from the plug; body on stdout. Exit 4 unreachable,
 # 5 auth refused, 1 any other HTTP failure. The URL and user go to curl in a
@@ -211,11 +238,11 @@ _http() {
     esac
     code="$(curl -sS -o "$tmp" -w '%{http_code}' --connect-timeout 5 --max-time 15 "${auth[@]}" \
         -K <(
-            printf 'url = "%s"\n' "$url"
+            printf 'url = %s\n' "$(_cq "$url")"
             if ((${#auth[@]})); then
                 local u="${R[POWER_USER]:-}"
                 [[ "${R[POWER_OUTLET_KIND]}" == shelly2 ]] && u="admin"
-                printf 'user = "%s:%s"\n' "$u" "${R[POWER_PASSWORD]:-}"
+                printf 'user = %s\n' "$(_cq "${u}:${R[POWER_PASSWORD]:-}")"
             fi
         ) 2>/dev/null)" || code="000"
     body="$(cat "$tmp")"
@@ -295,6 +322,22 @@ _ipmi() {
     printf '%s\n' "$out"
 }
 
+# _ipmi_boot — the next-boot override as "<selector> (<valid|invalid>, <once|persistent>)".
+_ipmi_boot() {
+    local f sel valid once
+    f="$(_ipmi chassis bootparam get 5)" || return
+    sel="$(sed -n 's/.*Boot Device Selector : //p' <<<"$f" | head -n 1)"
+    [[ -n "$sel" ]] || {
+        say "the BMC's boot flags carry no Boot Device Selector"
+        return 1
+    }
+    valid=invalid
+    grep -q 'Boot Flag Valid' <<<"$f" && valid=valid
+    once=persistent
+    grep -q 'Options apply to only next boot' <<<"$f" && once=once
+    printf '%s (%s, %s)\n' "$sel" "$valid" "$once"
+}
+
 _ipmi_state() {
     local out
     out="$(_ipmi chassis power status)" || return
@@ -308,11 +351,213 @@ _ipmi_state() {
     esac
 }
 
+# ─── redfish driver ──────────────────────────────────────────────────────────
+# Written against sushy-tools (the OpenStack Redfish emulator) and abyss's
+# Supermicro BMC read-only; the calls are DMTF Redfish ComputerSystem:
+# PowerState, Actions/#ComputerSystem.Reset (+ its AllowableValues) and the
+# Boot override properties. Basic auth; the URL, user and password reach curl
+# in a config on a pipe, never argv.
+
+# _rf <METHOD> <path> [json] — the response body on stdout. Returns 4 for no
+# answer, 5 for a refused login, 3 for a BMC that needs a license for Redfish,
+# 1 for anything else (with the BMC's own message).
+_rf() {
+    local method="$1" path="$2" data="${3:-}" url code crc=0 body msg tmp
+    url="https://${R[POWER_ADDRESS]}${path}"
+    local args=(-sS -o /dev/stdout -w '\n%{http_code}' --connect-timeout 5 --max-time 30 -k -X "$method"
+        -H 'Accept: application/json')
+    if [[ "${R[POWER_TLS]:-}" != insecure ]]; then
+        [[ -n "${R[POWER_TLS_PIN]:-}" ]] || {
+            say "no pinned certificate in the record; run set again (or set --insecure)"
+            return 1
+        }
+        args+=(--pinnedpubkey "${R[POWER_TLS_PIN]}")
+    else
+        say "WARNING: ${R[POWER_ADDRESS]} is used without a pinned certificate (set --insecure)"
+    fi
+    [[ -n "$data" ]] && args+=(-H 'Content-Type: application/json' --data-binary "$data")
+    tmp="$(curl "${args[@]}" -K <(
+        printf 'url = %s\n' "$(_cq "$url")"
+        printf 'user = %s\n' "$(_cq "${R[POWER_USER]:-}:${R[POWER_PASSWORD]:-}")"
+    ) 2>/dev/null)" || crc=$?
+    code="${tmp##*$'\n'}"
+    body="${tmp%$'\n'*}"
+    if ((crc == 90)); then
+        say "the BMC at ${R[POWER_ADDRESS]} presented a different certificate than the one pinned at set; if it was replaced on purpose, run set again"
+        return 1
+    fi
+    case "$code" in
+    2??) printf '%s\n' "$body" ;;
+    000 | "") return 4 ;;
+    401) return 5 ;;
+    403)
+        if grep -q 'OemLicenseNotPassed' <<<"$body"; then
+            say "this BMC needs a license for Redfish ($(jq -r '.error["@Message.ExtendedInfo"][0].MessageArgs[0] // "vendor license"' <<<"$body" 2>/dev/null | sed 's/ *$//')); use --controller ipmi"
+            return 3
+        fi
+        return 5
+        ;;
+    *)
+        msg="$(jq -r '.error["@Message.ExtendedInfo"][0].Message // .error.message // empty' <<<"$body" 2>/dev/null || true)" # a non-JSON error body has no message to show
+        say "redfish ${method} ${path}: HTTP ${code}${msg:+: ${msg}}"
+        return 1
+        ;;
+    esac
+}
+
+RF_SYS=""
+# _rf_sys — the ComputerSystem's path, from the record or the first member.
+_rf_sys() {
+    [[ -n "$RF_SYS" ]] && {
+        printf '%s\n' "$RF_SYS"
+        return 0
+    }
+    if [[ -n "${R[POWER_SYSTEM]:-}" ]]; then
+        RF_SYS="${R[POWER_SYSTEM]}"
+    else
+        local c n
+        c="$(_rf GET /redfish/v1/Systems)" || return
+        n="$(jq -r '.Members | length' <<<"$c")"
+        RF_SYS="$(jq -r '.Members[0]["@odata.id"] // empty' <<<"$c")"
+        [[ -n "$RF_SYS" ]] || {
+            say "the BMC lists no ComputerSystem"
+            return 1
+        }
+        ((n > 1)) && say "the BMC has ${n} systems; using ${RF_SYS} (set --system to choose)"
+    fi
+    printf '%s\n' "$RF_SYS"
+}
+
+_rf_state() {
+    local sys b ps
+    sys="$(_rf_sys)" || return
+    b="$(_rf GET "$sys")" || return
+    ps="$(jq -r '.PowerState // empty' <<<"$b")"
+    case "$ps" in
+    On) echo on ;;
+    Off) echo off ;;
+    "")
+        say "the BMC's system resource has no PowerState"
+        return 1
+        ;;
+    *) echo "${ps,,}" ;; # PoweringOn / PoweringOff: not yet either
+    esac
+}
+
+# _rf_reset <ResetType> — POST the reset, after checking the BMC offers it.
+_rf_reset() {
+    local type="$1" sys b target allowed
+    sys="$(_rf_sys)" || return
+    b="$(_rf GET "$sys")" || return
+    target="$(jq -r '.Actions["#ComputerSystem.Reset"].target // empty' <<<"$b")"
+    target="${target:-${sys}/Actions/ComputerSystem.Reset}"
+    allowed="$(jq -r '(.Actions["#ComputerSystem.Reset"]["ResetType@Redfish.AllowableValues"] // []) | join(",")' <<<"$b")"
+    if [[ -n "$allowed" && ",${allowed}," != *",${type},"* ]]; then
+        say "this BMC does not offer ResetType ${type} (it offers: ${allowed})"
+        return 3
+    fi
+    _rf POST "$target" "{\"ResetType\":\"${type}\"}" >/dev/null
+}
+
+_rf_boot() {
+    local sys b
+    sys="$(_rf_sys)" || return
+    b="$(_rf GET "$sys")" || return
+    jq -r '.Boot | "\(.BootSourceOverrideTarget // "?") (\(.BootSourceOverrideEnabled // "?")\(if .BootSourceOverrideMode then ", " + .BootSourceOverrideMode else "" end))"' <<<"$b"
+}
+
+# _rf_boot_set <Target> <Enabled> — PATCH the override (UEFI mode when setting
+# Pxe; retried without the mode for a BMC that rejects the property).
+_rf_boot_set() {
+    local sys
+    sys="$(_rf_sys)" || return
+    if [[ "$1" == Pxe ]]; then
+        _rf PATCH "$sys" "{\"Boot\":{\"BootSourceOverrideTarget\":\"Pxe\",\"BootSourceOverrideEnabled\":\"$2\",\"BootSourceOverrideMode\":\"UEFI\"}}" >/dev/null && return 0
+        _rf PATCH "$sys" "{\"Boot\":{\"BootSourceOverrideTarget\":\"Pxe\",\"BootSourceOverrideEnabled\":\"$2\"}}" >/dev/null
+    else
+        _rf PATCH "$sys" "{\"Boot\":{\"BootSourceOverrideEnabled\":\"$2\"}}" >/dev/null
+    fi
+}
+
+# ─── boot override, any controller ──────────────────────────────────────────
+boot_read() {
+    case "${R[POWER_CONTROLLER]}" in
+    ipmi) _ipmi_boot ;;
+    redfish) _rf_boot ;;
+    *) return 3 ;;
+    esac
+}
+
+# boot_pxe_once — set the override and read it back; 1 if it did not stick.
+boot_pxe_once() {
+    local b
+    case "${R[POWER_CONTROLLER]}" in
+    ipmi)
+        _ipmi chassis bootdev pxe options=efiboot >/dev/null || return
+        b="$(_ipmi_boot)" || return
+        [[ "$b" == "Force PXE (valid, once)" ]] || {
+            say "the BMC took the request but its boot flags read: ${b}"
+            return 1
+        }
+        ;;
+    redfish)
+        _rf_boot_set Pxe Once || return
+        b="$(_rf_boot)" || return
+        if [[ "$b" != "Pxe (Once"* ]]; then
+            # SAFETY: a BMC that ignores "Once" (sushy-tools' libvirt driver
+            # always writes Continuous, 2026-09-29) leaves the machine booting
+            # the network on EVERY restart. Undo it, and say whether that worked.
+            say "the BMC took the request but its boot override reads: ${b}"
+            if boot_clear 2>/dev/null; then
+                say "the override was cleared again: the next boot is the normal one"
+            else
+                say "WARNING: the override could NOT be cleared (${b}): this machine may boot from the network on every restart until it is fixed on the BMC"
+            fi
+            return 1
+        fi
+        ;;
+    *) return 3 ;;
+    esac
+}
+
+# boot_clear — no override; read back.
+boot_clear() {
+    local b
+    case "${R[POWER_CONTROLLER]}" in
+    ipmi)
+        # "none" is IPMI's "no override". A BMC that does not take it
+        # (virtualbmc knows only network, hd and optical -- 2026-09-29) gets
+        # the next boot sent to the disk, which is the normal boot anyway.
+        _ipmi chassis bootdev none >/dev/null 2>&1 || true # checked by the read-back below
+        b="$(_ipmi_boot)" || return
+        if [[ "$b" != "No override"* ]]; then
+            _ipmi chassis bootdev disk >/dev/null || return
+            b="$(_ipmi_boot)" || return
+            [[ "$b" == "Force Boot from default Hard-Drive"* ]] || {
+                say "asked for no override, then for the disk; the boot flags read: ${b}"
+                return 1
+            }
+            say "this BMC has no 'no override'; the next boot goes to the disk instead"
+        fi
+        ;;
+    redfish)
+        _rf_boot_set - Disabled || return
+        b="$(_rf_boot)" || return
+        [[ "$b" == *"(Disabled"* ]] || {
+            say "asked for no override; the boot override reads: ${b}"
+            return 1
+        }
+        ;;
+    *) return 3 ;;
+    esac
+}
+
 # ─── verbs ───────────────────────────────────────────────────────────────────
 state() {
     case "${R[POWER_CONTROLLER]}" in
     outlet) _outlet_state ;;
     ipmi) _ipmi_state ;;
+    redfish) _rf_state ;;
     esac
 }
 
@@ -342,6 +587,7 @@ do_on() {
     case "${R[POWER_CONTROLLER]}" in
     outlet) _outlet_set on || return ;;
     ipmi) _ipmi chassis power on >/dev/null || return ;;
+    redfish) _rf_reset On || return ;;
     esac
     await on || return
     [[ "${R[POWER_CONTROLLER]}" == outlet ]] &&
@@ -359,6 +605,7 @@ do_force_off() {
     case "${R[POWER_CONTROLLER]}" in
     outlet) _outlet_set off || return ;;
     ipmi) _ipmi chassis power off >/dev/null || return ;;
+    redfish) _rf_reset ForceOff || return ;;
     esac
     await off
 }
@@ -372,7 +619,10 @@ do_off() {
         say "${LABEL} is already off"
         return 0
     fi
-    _ipmi chassis power soft >/dev/null || return
+    case "${R[POWER_CONTROLLER]}" in
+    ipmi) _ipmi chassis power soft >/dev/null || return ;;
+    redfish) _rf_reset GracefulShutdown || return ;;
+    esac
     # an OS takes longer to shut down than a relay to open
     WAIT=$((WAIT > 180 ? WAIT : 180)) await off
 }
@@ -387,20 +637,76 @@ do_cycle() {
 }
 
 do_pxe_once() {
-    [[ "${R[POWER_CONTROLLER]}" == ipmi ]] ||
+    [[ "${R[POWER_CONTROLLER]}" != outlet ]] ||
         die 3 "${LABEL}'s controller (${R[POWER_CONTROLLER]}) cannot choose the boot device; arm it on the netboot server and cycle it"
-    _ipmi chassis bootdev pxe options=efiboot >/dev/null || return
-    local flags
-    flags="$(_ipmi chassis bootparam get 5)" || return
-    if [[ "$flags" != *"Force PXE"* ]]; then
-        say "the BMC took the request but its boot flags do not say PXE: $(grep -m1 -i 'Boot Device Selector' <<<"$flags")"
-        return 1
-    fi
+    boot_pxe_once || return
     say "${LABEL} boots from the network next time, once"
 }
 
+# do_selftest <cycle 0|1> — the acceptance test for one machine's controller,
+# for the first box of a new rack before the rest are trusted. The report is
+# the output (stdout); exit 0 when nothing FAILed. A step the record does not
+# allow, or the controller cannot do, is SKIPped and said so -- a status-only
+# record (abyss) runs the two reads and nothing else.
+do_selftest() {
+    local cyc="$1" pass=0 fail=0 skip=0 st0 b
+    ok() {
+        printf '  PASS  %s\n' "$*"
+        pass=$((pass + 1))
+    }
+    no() {
+        printf '  FAIL  %s\n' "$*"
+        fail=$((fail + 1))
+    }
+    sk() {
+        printf '  SKIP  %s\n' "$*"
+        skip=$((skip + 1))
+    }
+    allowed() { [[ -z "${R[POWER_ALLOW]:-}" || ",${R[POWER_ALLOW]}," == *",$1,"* ]]; }
+    echo "selftest: ${LABEL} (${R[POWER_CONTROLLER]}${R[POWER_OUTLET_KIND]:+/${R[POWER_OUTLET_KIND]}} at ${R[POWER_ADDRESS]})"
+    if st0="$(state)"; then ok "power state reads: ${st0}"; else
+        no "the power state could not be read (exit $?); nothing else is tried"
+        echo "selftest: ${pass} passed, ${fail} failed, ${skip} skipped"
+        return 1
+    fi
+    if [[ "${R[POWER_CONTROLLER]}" == outlet ]]; then
+        sk "boot override: a plug cannot see or choose the boot device"
+        sk "pxe-once round trip: a plug cannot choose the boot device"
+    else
+        if b="$(boot_read)"; then ok "boot override reads: ${b}"; else no "the boot override could not be read"; fi
+        if ! allowed pxe-once; then
+            sk "pxe-once round trip: the record does not allow pxe-once"
+        elif boot_pxe_once; then
+            ok "pxe-once set and read back: $(boot_read 2>/dev/null || echo '?')"
+            if boot_clear; then ok "override cleared and read back: $(boot_read 2>/dev/null || echo '?')"; else
+                no "the override could NOT be cleared: the next boot may go to the network"
+            fi
+        else
+            # boot_pxe_once has already tried to undo a half-set override and
+            # said so; the report still has to show where it was left.
+            no "pxe-once did not stick; the override now reads: $(boot_read 2>/dev/null || echo unknown)"
+        fi
+    fi
+    if ((!cyc)); then
+        sk "power cycle: not asked for (--cycle)"
+    elif ! allowed cycle; then
+        sk "power cycle: the record does not allow cycle"
+    elif ((!SELF)) && is_self "$MAC"; then
+        sk "power cycle: this is the machine running the test (--self)"
+    elif do_cycle >/dev/null 2>&1 && [[ "$(state)" == on ]]; then
+        ok "power cycle: off, held ${R[POWER_CYCLE_OFF]:-10}s, on again"
+        if [[ "$st0" == off ]]; then
+            if do_force_off >/dev/null 2>&1; then ok "put back off, as it was"; else no "could not put it back off"; fi
+        fi
+    else
+        no "power cycle failed; state now: $(state 2>/dev/null || echo unknown)"
+    fi
+    echo "selftest: ${pass} passed, ${fail} failed, ${skip} skipped"
+    ((fail == 0))
+}
+
 do_set() {
-    local ctl="" addr="" kind="" outlet="" user="" name="" hold="" allow="" pw="" pwin=0
+    local ctl="" addr="" kind="" outlet="" user="" name="" hold="" allow="" pw="" pwin=0 system="" insecure=0 pin=""
     while (($#)); do
         case "$1" in
         --controller) ctl="${2:?}" && shift ;;
@@ -411,6 +717,8 @@ do_set() {
         --name) name="${2:?}" && shift ;;
         --cycle-off) hold="${2:?}" && shift ;;
         --allow) allow="${2:?}" && shift ;;
+        --system) system="${2:?}" && shift ;;
+        --insecure) insecure=1 ;;
         --password-stdin) pwin=1 ;;
         *) usage 2 ;;
         esac
@@ -418,9 +726,12 @@ do_set() {
     done
     case "$ctl" in
     outlet) [[ "$kind" =~ ^(shelly1|shelly2|tasmota)$ ]] || die 2 "--kind shelly1|shelly2|tasmota is required for an outlet" ;;
-    ipmi) [[ -z "$kind" ]] || die 2 "--kind is for an outlet" ;;
-    *) die 2 "--controller outlet|ipmi" ;;
+    ipmi | redfish) [[ -z "$kind" ]] || die 2 "--kind is for an outlet" ;;
+    *) die 2 "--controller outlet|ipmi|redfish" ;;
     esac
+    [[ -z "$system" || ("$ctl" == redfish && "$system" =~ ^/redfish/v1/Systems/[A-Za-z0-9._-]+$) ]] ||
+        die 2 "--system is a redfish path like /redfish/v1/Systems/1"
+    [[ "$insecure" == 0 || "$ctl" == redfish ]] || die 2 "--insecure is for redfish"
     [[ "$addr" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die 2 "--address '${addr}' is not host[:port]"
     [[ -z "$outlet" || "$outlet" =~ ^[0-9]+$ ]] || die 2 "--outlet is a relay number"
     [[ -z "$hold" || "$hold" =~ ^[0-9]+$ ]] || die 2 "--cycle-off is seconds"
@@ -431,6 +742,20 @@ do_set() {
     if ((pwin)); then
         IFS= read -r pw || true # an empty stdin is an empty password, which a plug without a login has
         [[ "$pw" != *$'\n'* ]] || die 2 "a password cannot hold a newline"
+    fi
+    if [[ "$ctl" == redfish && "$insecure" == 0 ]]; then
+        # Trust on first use: the key the BMC presents now is the only one
+        # accepted later. BMC certificates are self-signed, so there is no CA
+        # to check; the pin is what stops a swapped endpoint collecting the
+        # password.
+        local rhost="${addr%%:*}" rport="${addr##*:}"
+        [[ "$addr" == *:* ]] || rport=443
+        pin="$(openssl s_client -connect "${rhost}:${rport}" -servername "$rhost" </dev/null 2>/dev/null |
+            openssl x509 -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform der 2>/dev/null |
+            openssl dgst -sha256 -binary | base64)" || pin=""
+        [[ "$pin" =~ ^[A-Za-z0-9+/]{43}=$ ]] ||
+            die 4 "could not read ${addr}'s certificate to pin it (is it up? --insecure to skip pinning)"
+        pin="sha256//${pin}"
     fi
     install -d -m 0700 "$DIR"
     local tmp
@@ -447,6 +772,9 @@ do_set() {
         [[ -n "$name" ]] && echo "POWER_NAME=${name}"
         [[ -n "$hold" ]] && echo "POWER_CYCLE_OFF=${hold}"
         [[ -n "$allow" ]] && echo "POWER_ALLOW=${allow}"
+        [[ -n "$system" ]] && echo "POWER_SYSTEM=${system}"
+        [[ -n "$pin" ]] && echo "POWER_TLS_PIN=${pin}"
+        ((insecure)) && echo "POWER_TLS=insecure"
     } >"$tmp"
     mv -f "$tmp" "${DIR}/${MAC}.env"
     load_record "${DIR}/${MAC}.env"
@@ -480,16 +808,24 @@ if [[ "$VERB" == set ]]; then
     do_set "$@"
     exit 0
 fi
+CYCLE=0
 for a in "$@"; do
-    case "$a" in --self) SELF=1 ;; *) usage 2 ;; esac
+    case "$a" in
+    --self) SELF=1 ;;
+    --cycle)
+        [[ "$VERB" == selftest ]] || usage 2
+        CYCLE=1
+        ;;
+    *) usage 2 ;;
+    esac
 done
-case "$VERB" in status | on | off | force-off | cycle | pxe-once) ;; *) usage 2 ;; esac
+case "$VERB" in status | on | off | force-off | cycle | pxe-once | selftest) ;; *) usage 2 ;; esac
 
 REC="$(find_record "$TARGET")" || die 1 "no power record for '${TARGET}' in ${DIR} (kldload-power <mac> set ...)"
 load_record "$REC"
 MAC="$(basename "$REC" .env)"
 LABEL="${R[POWER_NAME]:-$MAC}"
-case "${R[POWER_CONTROLLER]:-}" in outlet | ipmi) ;; *) die 1 "${REC}: POWER_CONTROLLER='${R[POWER_CONTROLLER]:-}' is not outlet or ipmi" ;; esac
+case "${R[POWER_CONTROLLER]:-}" in outlet | ipmi | redfish) ;; *) die 1 "${REC}: POWER_CONTROLLER='${R[POWER_CONTROLLER]:-}' is not outlet, ipmi or redfish" ;; esac
 [[ -n "${R[POWER_ADDRESS]:-}" ]] || die 1 "${REC}: no POWER_ADDRESS"
 if [[ "${R[POWER_CONTROLLER]}" == outlet && ! "${R[POWER_OUTLET_KIND]:-}" =~ ^(shelly1|shelly2|tasmota)$ ]]; then
     die 1 "${REC}: POWER_OUTLET_KIND='${R[POWER_OUTLET_KIND]:-}' is not shelly1, shelly2 or tasmota"
@@ -498,7 +834,10 @@ fi
 # SAFETY: the record's allow-list is checked before anything talks to the
 # controller, and nothing on the command line overrides it -- widening it
 # takes a new `set`, on purpose.
-if [[ -n "${R[POWER_ALLOW]:-}" && ",${R[POWER_ALLOW]}," != *",${VERB},"* ]]; then
+# selftest needs only `status`; its own steps check the list one by one.
+GATE="$VERB"
+[[ "$VERB" == selftest ]] && GATE=status
+if [[ -n "${R[POWER_ALLOW]:-}" && ",${R[POWER_ALLOW]}," != *",${GATE},"* ]]; then
     plog "refused: record allows only ${R[POWER_ALLOW]}"
     die 6 "${LABEL} allows only: ${R[POWER_ALLOW]} (its record says so; ${VERB} was not run)"
 fi
@@ -515,6 +854,7 @@ off) do_off || rc=$? ;;
 force-off) do_force_off || rc=$? ;;
 cycle) do_cycle || rc=$? ;;
 pxe-once) do_pxe_once || rc=$? ;;
+selftest) do_selftest "$CYCLE" || rc=$? ;;
 esac
 case "$rc" in
 0) [[ "$VERB" == status ]] || plog "done" ;;

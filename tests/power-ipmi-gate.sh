@@ -112,6 +112,25 @@ grep -q "<boot dev='network'/>" <(virsh dumpxml "$P") && ok "the domain now boot
 check 0 running "on" on
 check 1 running "soft off with no OS to answer ACPI fails after its wait" off
 
+# selftest while off (vbmc edits the domain's boot device only then): the
+# pxe-once round trip, then --cycle, which must put the domain back off.
+check 0 "shut off" "force-off before selftest" force-off
+rc=0
+st_out="$("$T" probe selftest 2>&1)" || rc=$?
+if ((rc == 0)) && grep -q 'override cleared and read back' <<<"$st_out"; then
+    ok "selftest: pxe-once round trip on the BMC"
+else
+    bad "selftest exit ${rc}: $(tr '\n' '|' <<<"$st_out" | cut -c1-300)"
+fi
+rc=0
+st_out="$("$T" probe selftest --cycle 2>&1)" || rc=$?
+st="$(virsh domstate "$P" 2>/dev/null)"
+if ((rc == 0)) && grep -q 'put back off, as it was' <<<"$st_out" && [[ "$st" == "shut off" ]]; then
+    ok "selftest --cycle: cycled and put back off (libvirt: ${st})"
+else
+    bad "selftest --cycle exit ${rc}, libvirt ${st}: $(tr '\n' '|' <<<"$st_out" | cut -c1-300)"
+fi
+
 printf 'wrong-password\n' | "$T" "$MAC" set --controller ipmi --address "127.0.0.1:${PORT}" --user admin --name probe --password-stdin 2>/dev/null
 check 5 - "wrong password" status
 printf '%s\n' "$PW" | "$T" "$MAC" set --controller ipmi --address "127.0.0.1:$((PORT + 1))" --user admin --name probe --password-stdin 2>/dev/null
