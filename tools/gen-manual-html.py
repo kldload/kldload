@@ -90,8 +90,9 @@ LANDING = """<section>
 
 
 CHROOT = "live-build/config/includes.chroot"
-MANPAGES = [f"{CHROOT}/usr/local/share/man/man8/*.8", "kld/docs/*.1", "wg/docs/*.1",
-            "ztxplore/docs/*.1"]
+# man7 holds overviews of a subsystem rather than a command (kldload-snapshots).
+MANPAGES = [f"{CHROOT}/usr/local/share/man/man8/*.8", f"{CHROOT}/usr/local/share/man/man7/*.7",
+            "kld/docs/*.1", "wg/docs/*.1", "ztxplore/docs/*.1"]
 
 # Areas, first match wins. A name is an operator's way into the reference, so
 # the areas follow what an operator is doing, not where the file lives.
@@ -102,7 +103,7 @@ AREAS: list[tuple[str, str]] = [
     ("Kubernetes", r"^kube-"),
     ("Storage, snapshots and rollback",
      r"^ksnap$|^kst|^kdf$|^kexport$|^kldload-zfs|^kldload-rollback$|^rollback$|^snapshot-|"
-     r"^kldload-backup|^kldload-snapshot$|^zexplore|^kdir$"),
+     r"^kldload-backup|^kldload-snapshots?$|^zexplore|^kdir$"),
     ("Network and mesh", r"^kldload-networks$|^kvm-mesh$|^wg|^kldload-proxy$|^kldload-tls|"
      r"^kldload-ca$|^kldload-trust-cert$"),
     ("Estate, inventory and automation", r"^kldload-(estate|db|inventory|enroll|collect|follow)"),
