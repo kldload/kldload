@@ -1,16 +1,45 @@
 #!/usr/bin/env bash
-# kldload-tls-cert — print a self-signed TLS cert + key on stdout for the
-# kldload webui. kldload-webui calls this via subprocess and feeds the
-# output to Python's ssl.SSLContext. Printing stdout (not writing files)
-# keeps key material out of the filesystem — it lives only in the webui
-# process's memory.
+# kldload-tls-cert — make sure the web console's self-signed TLS
+# certificate and key exist and are current.
+#
+# Writes /var/lib/kldload/tls/webui.{crt,key} (0600, directory 0700) when
+# they are missing, expire within a day, or no longer cover every address
+# the machine has; adds the certificate to the system trust store; and
+# prints NOTHING unless asked with --emit, when it prints the certificate
+# and then the key.
+#
+# SECURITY (2026-09-30): it printed both on stdout on every run. nginx's
+# drop-in wrote `ExecStartPre=... >/dev/null`, but systemd passes ">/dev/null"
+# as an ARGUMENT, not a redirection, so the private key went into nginx's
+# journal on every start -- found on onyx and on a fresh fiend install. No
+# caller reads the stdout (kldload-webui discards it and loads the files), so
+# the default is silent now. The literal argument ">/dev/null" is accepted as
+# a no-op, for units installed before this change.
+#
+# Usage: kldload-tls-cert [--emit]      Exit: 0 ok, 1 failed, 2 usage.
+# See kldload-tls-cert(8).
 #
 # Cert covers every hostname / IP the webui is likely reachable on so
 # Chrome's SAN check doesn't bounce mic/camera permissions. Browsers
 # will still show a one-time "certificate not trusted" warning — that's
 # expected for self-signed. getUserMedia works once the user clicks
 # through the warning.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kldload-tls-cert: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+EMIT=0
+case "${1:-}" in
+-h | --help)
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+    exit 0
+    ;;
+--emit) EMIT=1 ;;
+"" | ">/dev/null") ;; # the second: an old nginx drop-in's would-be redirection
+*)
+    echo "kldload-tls-cert: unknown argument: $1 (try --help)" >&2
+    exit 2
+    ;;
+esac
 
 CERT_DIR="${KLDLOAD_TLS_CERT_DIR:-/var/lib/kldload/tls}"
 KEY="${CERT_DIR}/webui.key"
@@ -323,6 +352,8 @@ if [[ "$_regen" -eq 1 ]]; then
     fi
 fi
 
-# Emit cert + key on stdout as one blob. kldload-webui splits it.
-cat "$CRT"
-cat "$KEY"
+# Only when asked: see SECURITY in the header.
+if ((EMIT)); then
+    cat "$CRT"
+    cat "$KEY"
+fi
