@@ -88,7 +88,7 @@ cmd_apply() {
     _wait_libvirt || die "libvirtd did not answer after 30s"
     [[ -d "$XML_DIR" ]] || die "no network definitions at $XML_DIR"
 
-    local xml name defined=0 started=0 skipped=0 failed=0
+    local xml name _info defined=0 started=0 skipped=0 failed=0
     for xml in "$XML_DIR"/*.xml; do
         [[ -f "$xml" ]] || continue
         name="$(basename "$xml" .xml)"
@@ -110,7 +110,13 @@ cmd_apply() {
         # Autostart is what makes this survive a reboot without the unit.
         virsh net-autostart "$name" >>"$LOG" 2>&1 || true # already-autostart is not an error
 
-        if ! virsh net-info "$name" 2>/dev/null | grep -qi '^Active:.*yes'; then
+        # Read whole, then test: `virsh net-info | grep -q` under pipefail is
+        # 141 whenever grep stops at its match, so an ACTIVE network read as
+        # inactive and every re-run tried to start it ("network is already
+        # active" x3 on fiend, 2026-09-29 -- hidden until apply counted
+        # failures).
+        _info="$(virsh net-info "$name" 2>/dev/null)" || _info=""
+        if ! grep -qi '^Active:.*yes' <<<"$_info"; then
             if virsh net-start "$name" >>"$LOG" 2>&1; then
                 log "started $name"
                 started=$((started + 1))
