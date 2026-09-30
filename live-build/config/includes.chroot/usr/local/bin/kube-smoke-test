@@ -256,14 +256,18 @@ fi
 # ── 11. Firewall ───────────────────────────────────────────────────────────
 section "Firewall"
 _nft_rules="$(nft list ruleset 2>/dev/null || true)"
-if echo "$_nft_rules" | grep -q 'chain input'; then
+# Here-strings, not `echo | grep -q`: grep -q leaves at the first match, echo
+# takes SIGPIPE on anything over a pipe buffer, and pipefail makes the test
+# false. A 160 KB ruleset with `chain input` on line 2 read as "No nftables
+# rules loaded" 200 times in 200 (2026-09-30); kube-proxy's rules get there.
+if grep -q 'chain input' <<<"$_nft_rules"; then
     pass "nftables rules loaded"
-    if echo "$_nft_rules" | grep -q 'wg-k8s\|wg-mgmt'; then
+    if grep -q 'wg-k8s\|wg-mgmt' <<<"$_nft_rules"; then
         pass "nftables has WireGuard rules"
     else
         warn "nftables missing WireGuard-specific rules"
     fi
-    if echo "$_nft_rules" | grep -q '6443'; then
+    if grep -q '6443' <<<"$_nft_rules"; then
         pass "K8s API port 6443 allowed"
     else
         warn "K8s API port 6443 not in firewall"
@@ -278,8 +282,8 @@ if [[ -d /root/darksite/k8s-images ]] && [[ -n "$(ls -A /root/darksite/k8s-image
     count="$(ls /root/darksite/k8s-images/*.tar 2>/dev/null | wc -l)"
     size="$(du -sh /root/darksite/k8s-images 2>/dev/null | cut -f1)"
     pass "Pre-pulled images: $count tarballs ($size)"
-elif crictl images 2>/dev/null | grep -q 'registry.k8s.io'; then
-    count="$(crictl images 2>/dev/null | grep -c 'registry.k8s.io' || true)"
+elif _imgs="$(crictl images 2>/dev/null)" && grep -q 'registry.k8s.io' <<<"$_imgs"; then
+    count="$(grep -c 'registry.k8s.io' <<<"$_imgs" || true)" # grep -c 1 is a count of 0
     pass "Pre-pulled images: $count K8s images in containerd"
 else
     warn "No pre-pulled images (will need internet for kube-init)"
