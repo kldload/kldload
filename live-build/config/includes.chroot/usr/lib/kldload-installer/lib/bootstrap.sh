@@ -3473,6 +3473,11 @@ CUSTOMREPO
             # 2. Drop the NVIDIA container-toolkit repo (distro-agnostic; always
             #    current; ships nvidia-container-toolkit + libnvidia-container).
             #    Required for GPU passthrough into pods on the K8s template.
+            #    WHY no sslcacert: NVIDIA's own .repo names
+            #    /etc/pki/tls/certs/ca-bundle.crt, which Fedora 44 no longer
+            #    has, so the repo could not load at all ("error adding trust
+            #    anchors", on onyx, 2026-09-30) and --skip-unavailable below
+            #    hid it. dnf uses the system trust store by default.
             cat >"${target}/etc/yum.repos.d/nvidia-container-toolkit.repo" <<'NCTREPO'
 [nvidia-container-toolkit]
 name=nvidia-container-toolkit
@@ -3482,7 +3487,6 @@ gpgcheck=0
 enabled=1
 gpgkey=https://nvidia.github.io/libnvidia-container/gpgkey
 sslverify=1
-sslcacert=/etc/pki/tls/certs/ca-bundle.crt
 NCTREPO
 
             # 3. Install: akmod-nvidia (driver source, akmods builds at firstboot),
