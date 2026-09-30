@@ -4344,52 +4344,78 @@ function _startHeartbeat() {
 
 // ── Auth handshake ────────────────────────────────────────────────────────
 // The webui backend drives the installer, disk wipes, VM/pod control and a
-// root shell — all as root, on 0.0.0.0:8443. A bearer token (minted 0600 to
-// /etc/kldload/webui-token) is the one gate between an unauthenticated socket
-// and root. The operator reads it once on the box:
-//     sudo cat /etc/kldload/webui-token
-// Stored in localStorage (NOT sessionStorage): every kldload console tool
-// (VMs, k8s, Grafana…) opens as its own Chrome --app window, but they all share
-// one origin + one Chrome profile dir, so localStorage is shared across all of
-// them AND survives reboots. Net effect: the operator is asked at most ONCE per
-// machine — the first window to open prompts, every other tool + every future
-// boot reuses it. (sessionStorage was per-window + wiped on close → it asked on
-// every tool, every time.) On a bad token the server closes the socket; onclose
-// reconnects, and because auth_error clears the cached token, it re-prompts.
-// The 0600 root token file remains the source of truth; this is only a cache.
-const _WEBUI_CRED_KEY = 'kld_webui_cred'; // remote {user,password} — SESSION only, never localStorage/disk
+// root shell, all as root. On an installed system the socket answers nothing
+// privileged until this browser has signed in:
+//   • signed in before → the HttpOnly session cookie rides the WebSocket
+//     handshake and the server says auth_ok before we send anything;
+//   • not signed in → auth_required, and the sign-in box asks for an admin
+//     (wheel/sudo) password. auth_ok then carries a session, which we trade
+//     at /auth/session for the cookie, so every tool window, iframe (k9s,
+//     terminals, Grafana) and reconnect after it is signed in for 30 days.
+// Being on the same machine is not enough any more: every local process can
+// reach nginx on 127.0.0.1, so loopback auto-sign-in made every local account
+// root (2026-09-30). The live ISO still signs everyone in (nothing installed
+// to protect). The password is never stored: it lives in _pendingCred only
+// until the server answers.
+const _WEBUI_CRED_KEY = 'kld_webui_cred'; // the old sessionStorage password; cleared below
+try { sessionStorage.removeItem(_WEBUI_CRED_KEY); } catch (e) {}
 let _wsAuthed = false;       // server confirmed auth_ok for this connection
-let _tokenPrompted = false;  // we already showed the login prompt this connection
+let _tokenPrompted = false;  // we already showed the sign-in box this connection
+let _pendingCred = null;     // {user, password} typed but not yet answered
 
-// Send whatever credential we have, WITHOUT prompting. Outcomes:
-//   • Live installer / local (loopback) → server auto-authes (auth_ok on
-//     connect); no credential needed, no prompt EVER.
-//   • Remote, password cached this session → authes silently.
-//   • Remote, nothing cached → server replies auth_required → THEN we prompt.
-// So on-box use is zero-prompt; only remote access asks, and only per session.
+// Send whatever credential we hold, WITHOUT prompting: a password typed while
+// the socket was reconnecting, else an empty probe the server answers with
+// auth_ok (live ISO, cookie) or auth_required.
 function _sendStoredAuth() {
   const msg = { action: 'auth' };
-  const cred = sessionStorage.getItem(_WEBUI_CRED_KEY);
-  if (cred) { try { const c = JSON.parse(cred); msg.user = c.user; msg.password = c.password; } catch (e) {} }
+  if (_pendingCred) { msg.user = _pendingCred.user; msg.password = _pendingCred.password; }
   try { ws.send(JSON.stringify(msg)); } catch (e) {}
 }
 
-// Remote sign-in: prompt for the admin PASSWORD (validated server-side via PAM,
-// wheel/sudo only). Held in sessionStorage so a WS reconnect doesn't re-ask,
-// but it is never written to disk and is gone when the window closes. Only
-// called after the server says auth is required — which local/live never do.
-function _promptAndAuth() {
+function _closeSignin() {
+  const ov = document.getElementById('kld-signin');
+  if (ov) ov.style.display = 'none';
+}
+
+// The sign-in box. A real password field, not window.prompt(), which shows
+// what is typed in clear text.
+function _promptAndAuth(errText) {
   _tokenPrompted = true;
-  const password = window.prompt(
-    'Remote kldload console.\n\nSign in with your admin password:');
-  if (password === null) {                 // operator cancelled
-    document.getElementById('status-dot').style.background = 'var(--danger)';
-    document.getElementById('status-text').textContent = 'sign-in needed — reload to retry';
-    return;
+  let ov = document.getElementById('kld-signin');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'kld-signin';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:10000;display:flex;align-items:center;'
+      + 'justify-content:center;background:rgba(0,0,0,0.55);padding:16px';
+    ov.innerHTML = '<form style="background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);'
+      + 'border-radius:var(--radius-lg);padding:1.2rem;width:20rem;max-width:100%;display:flex;flex-direction:column;gap:0.6rem">'
+      + '<strong>Sign in to the kldload console</strong>'
+      + '<span style="font-size:0.8rem;color:var(--text-dim)">An administrator account (wheel or sudo).</span>'
+      + '<input id="kld-signin-user" autocomplete="username" placeholder="user">'
+      + '<input id="kld-signin-pass" type="password" autocomplete="current-password" placeholder="password">'
+      + '<span id="kld-signin-err" style="color:var(--red);font-size:0.8rem"></span>'
+      + '<button type="submit" class="btn">Sign in</button></form>';
+    document.body.appendChild(ov);
+    ov.querySelector('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const user = document.getElementById('kld-signin-user').value.trim() || 'admin';
+      const pass = document.getElementById('kld-signin-pass');
+      if (!pass.value) return;
+      try { localStorage.setItem('kld_webui_user', user); } catch (e2) {}
+      _pendingCred = { user: user, password: pass.value };
+      pass.value = '';
+      document.getElementById('kld-signin-err').textContent = 'Signing in…';
+      // Closed after an auth_error: the reconnect sends _pendingCred itself.
+      if (ws && ws.readyState === WebSocket.OPEN) _sendStoredAuth();
+    });
   }
-  const cred = { user: 'admin', password: password };
-  sessionStorage.setItem(_WEBUI_CRED_KEY, JSON.stringify(cred));
-  try { ws.send(JSON.stringify({ action: 'auth', user: cred.user, password: password })); } catch (e) {}
+  const u = document.getElementById('kld-signin-user');
+  if (!u.value) { let last = 'admin'; try { last = localStorage.getItem('kld_webui_user') || 'admin'; } catch (e) {} u.value = last; }
+  document.getElementById('kld-signin-err').textContent = errText || '';
+  ov.style.display = 'flex';
+  document.getElementById(u.value ? 'kld-signin-pass' : 'kld-signin-user').focus();
+  document.getElementById('status-dot').style.background = 'var(--warn)';
+  document.getElementById('status-text').textContent = 'sign-in needed';
 }
 
 // Runs once the server confirms {type:'auth_ok'} — this is the data burst that
@@ -4417,10 +4443,10 @@ function connect() {
   ws.onopen = () => {
     wsReady = true;
     _lastPongAt = Date.now();
-    // The socket is open but NOT yet trusted. Send our stored token (or an
-    // empty probe) WITHOUT prompting — the server replies auth_ok (live ISO or
-    // valid cached token) or auth_required (installed, need a token), and only
-    // then do we prompt. The data burst runs in _onAuthed() on auth_ok.
+    // The socket is open but may not be trusted yet: a signed-in browser
+    // already got auth_ok from its cookie. Otherwise send a pending password
+    // or an empty probe WITHOUT prompting; only auth_required prompts. The
+    // data burst runs in _onAuthed() on auth_ok.
     // Heartbeat ping/pong IS allowed pre-auth, so start it now.
     _wsAuthed = false;
     _tokenPrompted = false;
@@ -4528,7 +4554,17 @@ function handle(msg) {
   // auth_error    → token rejected + socket closed. Drop the bad token and
   //                 re-prompt so the reconnect doesn't retry the same wrong one.
   if (msg.type === 'auth_ok') {
-    if (!_wsAuthed) { _wsAuthed = true; _onAuthed(); }
+    _pendingCred = null;
+    const _go = () => { _closeSignin(); if (!_wsAuthed) { _wsAuthed = true; _onAuthed(); } };
+    if (!msg.session) { _go(); return; }
+    // Trade the session for the HttpOnly cookie BEFORE the data burst, so the
+    // views' iframes (k9s, Grafana) load signed in. A failure still leaves
+    // this socket signed in; only the iframes and the next reconnect ask.
+    fetch('/auth/session', { headers: { 'X-Kld-Session': msg.session },
+                             credentials: 'same-origin', cache: 'no-store' })
+      .then(r => { if (!r.ok) console.warn('kldload: /auth/session answered ' + r.status); })
+      .catch(e => console.warn('kldload: /auth/session failed', e))
+      .finally(_go);
     return;
   }
   if (msg.type === 'auth_required') {
@@ -4536,11 +4572,11 @@ function handle(msg) {
     return;
   }
   if (msg.type === 'auth_error') {
-    sessionStorage.removeItem(_WEBUI_CRED_KEY);
+    _pendingCred = null;
     _tokenPrompted = false;
+    _promptAndAuth('Wrong user or password, or not an administrator.');
     document.getElementById('status-dot').style.background = 'var(--danger)';
-    document.getElementById('status-text').textContent = 'sign-in failed — re-enter password';
-    _promptAndAuth();
+    document.getElementById('status-text').textContent = 'sign-in failed';
     return;
   }
   // Pre-switch hook: if confirmInstall() is awaiting a wifi_connect_result,

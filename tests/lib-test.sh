@@ -208,6 +208,35 @@ probe_bounded() {
 }
 
 # Detect distro family
+# console_session — sign in to the web console with the root-only token and
+# print the session value, for a probe that must go through nginx's sign-in
+# gate (/ai/, /k9s/, /grafana/, /s/). Needs root. Prints nothing and returns 1
+# when it cannot sign in; the caller reports that, it is not a pass.
+#   cookie="$(console_session)" && curl -b "kld_session=$cookie" ...
+# Every proxied tool has needed this since 2026-09-30, when being local
+# stopped counting as signed in.
+console_session() {
+    local tok
+    tok="$(cat "${KLDLOAD_WEBUI_TOKEN_FILE:-/etc/kldload/webui-token}" 2>/dev/null)" || return 1
+    [[ -n "$tok" ]] || return 1
+    WEBUI_TOKEN="$tok" python3 - <<'CONSOLE_PY'
+import asyncio, json, os, ssl, sys
+import websockets
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+async def main():
+    async with websockets.connect("wss://localhost:8443/", ssl=ctx,
+                                  origin="https://localhost:8443") as ws:
+        await ws.send(json.dumps({"action": "auth", "token": os.environ["WEBUI_TOKEN"]}))
+        while True:
+            m = json.loads(await asyncio.wait_for(ws.recv(), 30))
+            if m.get("type") == "auth_ok" and m.get("session"):
+                print(m["session"]); return 0
+            if m.get("type") == "auth_error":
+                return 1
+sys.exit(asyncio.run(main()))
+CONSOLE_PY
+}
+
 detect_distro() {
     if command -v dnf >/dev/null 2>&1; then
         echo "rpm"

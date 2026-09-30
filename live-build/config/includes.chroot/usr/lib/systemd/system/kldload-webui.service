@@ -28,11 +28,11 @@ Environment=HOME=/root
 Environment=KUBECONFIG=/root/.kube/config
 # TLS is terminated by nginx on :8443. The webui runs plain HTTP on a
 # PROXY-ONLY unix socket (/run/kldload/webui.sock, 0660 root:nginx) rather
-# than a TCP port. WHY a socket, not 127.0.0.1:8444: the webui trusts nginx's
-# X-Real-IP to auto-authenticate LOCAL (loopback) console connections, so the
-# backend must be reachable by nginx ALONE — a unix socket no local process
-# can open makes that header unforgeable (a loopback TCP port could be hit
-# directly by any local process forging X-Real-IP=127.0.0.1 → root).
+# than a TCP port. WHY a socket, not 127.0.0.1:8444: the backend must be
+# reachable by nginx ALONE, so nginx's sign-in gate (auth_request) and its
+# X-Real-IP cannot be walked around by a local process connecting directly.
+# Being local is not a credential: the console signs in with a session
+# (kldload-webui(8), 2026-09-30).
 # RuntimeDirectory=kldload creates /run/kldload (0755) each start; nginx
 # traverses it to reach the 0660 socket.
 ExecStart=/usr/local/bin/kldload-webui --unix-socket /run/kldload/webui.sock --no-tls --no-browser

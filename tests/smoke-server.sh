@@ -353,10 +353,21 @@ fi
 # refused that looks exactly like a broken proxy.
 if curl -sf --max-time 4 http://127.0.0.1:8080/health >/dev/null 2>&1; then
     _pass "Open WebUI responds (127.0.0.1:8080)"
-    if [[ "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 https://localhost:8443/ai/ 2>/dev/null)" == "200" ]]; then
+    # /ai/ sits behind the console sign-in: 401 without a session is the gate
+    # working, 200 with one is the route working. Both are asserted.
+    _ai_anon="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 https://localhost:8443/ai/ 2>/dev/null)" ||
+        _ai_anon="000" # curl could not connect; reported below as not 401
+    if [[ "$_ai_anon" == "401" ]]; then
+        _pass "/ai/ refuses a caller that has not signed in (401)"
+    else
+        _fail "/ai/ sign-in gate" "answered ${_ai_anon} without a session, wanted 401"
+    fi
+    if ! _ai_cookie="$(console_session)"; then
+        _fail "Open WebUI proxied at /ai/" "could not sign in to the console with the token — route not checked"
+    elif [[ "$(curl -sk -b "kld_session=${_ai_cookie}" -o /dev/null -w '%{http_code}' --max-time 5 https://localhost:8443/ai/ 2>/dev/null)" == "200" ]]; then
         _pass "Open WebUI proxied at https://<host>:8443/ai/"
     else
-        _fail "Open WebUI proxied at /ai/" "nginx is not serving the /ai/ route on 8443"
+        _fail "Open WebUI proxied at /ai/" "nginx is not serving the /ai/ route on 8443 to a signed-in session"
     fi
 else
     _warn "Open WebUI responds" "container not up yet -- it starts on demand"
