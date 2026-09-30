@@ -1,0 +1,118 @@
+.Dd September 30, 2026
+.Dt KDF 8
+.Os
+.Sh NAME
+.Nm kdf
+.Nd space used by every dataset in the root pool, with compression and quotas
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+is
+.Xr df 1
+for a ZFS system: one line per dataset in
+.Li rpool ,
+sorted by name, with
+.Bl -tag -width "MOUNTPOINT" -compact
+.It Li USED
+the space it and its descendants take;
+.It Li AVAIL
+the space it can still grow into, which a quota lowers;
+.It Li RATIO
+how far compression shrank what it holds;
+.It Li QUOTA
+its quota, or
+.Ql - ;
+.It Li MOUNTPOINT
+where it is mounted, or
+.Ql none
+and
+.Ql -
+for one that is not.
+.El
+.Pp
+Then the pool: its size, what is allocated, what is free, and how
+fragmented its free space is.
+.Pp
+On a terminal, ratios above 1.0 and above 1.5 are coloured; piped, the
+output is plain text.
+Dataset names are shown without the leading
+.Ql rpool/ .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Printed.
+.It 1
+There is no pool named
+.Li rpool .
+.It 2
+An argument was given.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30.
+.Bd -literal -offset indent
+$ kdf
+
+  DATASET                               USED   AVAIL  RATIO   QUOTA  MOUNTPOINT
+  -------                               ----   -----  -----   -----  ----------
+  backup                               90.7G    186G  1.40x       -  none
+  backup/fiend                         90.7G    186G  1.40x       -  none
+\&...
+  home                                  933G    186G  1.05x       -  /home
+  home/anthony                          933G    186G  1.05x       -  /home/anthony
+  home/anthony/games                   31.8G    186G  1.39x       -  /home/anthony/games
+  kldload                              6.40G    186G  1.39x       -  none
+  kldload/playbooks                     192K   1024M  1.00x      1G  /var/lib/kldload/user-playbooks
+  kldload/secrets                       192K   99.8M  1.00x    100M  /var/lib/kldload/secrets
+  kldload/state                        6.40G    186G  1.39x       -  /var/lib/kldload
+\&...
+  ROOT/onyx                             343G    186G  1.04x       -  /
+\&...
+
+  Pool: rpool  Size: 1.81T  Alloc: 1.57T  Free: 244G  Frag: 36%
+
+# (exited 0)
+.Ed
+.Pp
+.Ql kldload/secrets
+has a quota of 100M, so it can grow by 99.8M whatever the pool has free.
+.Pp
+Only the rows of one part of the tree:
+.Bd -literal -offset indent
+$ kdf | grep ' home'
+  home                                  933G    186G  1.05x       -  /home
+  home/anthony                          933G    186G  1.05x       -  /home/anthony
+  home/anthony/games                   31.8G    186G  1.39x       -  /home/anthony/games
+.Ed
+.Sh SEE ALSO
+.Xr df 1 ,
+.Xr kdir 8 ,
+.Xr ksnap 8 ,
+.Xr zfs-list 8 ,
+.Xr zpool-list 8
+.Sh HISTORY
+On 2026-09-30, writing this page:
+.Fl -help
+printed the table, since nothing read the arguments; the colours'
+escape codes went into pipes; the pool's own row was listed by a filter
+that never matched; and the rule under the header was a column short,
+drawn in characters three bytes wide and padded by bytes.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Only
+.Li rpool
+is shown; other pools need
+.Ql zfs list .
+.Pp
+.Li USED
+counts snapshots and descendants, so a dataset's row is not what
+.Xr du 1
+finds under its mountpoint.

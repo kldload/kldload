@@ -1,0 +1,134 @@
+.Dd September 30, 2026
+.Dt KCLONE 8
+.Os
+.Sh NAME
+.Nm kclone
+.Nd copy a ZFS dataset instantly, as a clone mounted somewhere else
+.Sh SYNOPSIS
+.Nm
+.Ar source-path
+.Ar dest-path
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+snapshots the dataset mounted at
+.Ar source-path
+and clones the snapshot as a new dataset mounted at
+.Ar dest-path .
+The clone shares every block with the snapshot: it takes no time and no
+space until one of the two is changed.
+It is a way to try something on a copy of a database directory, a home
+or a site, and throw the copy away.
+.Pp
+The new dataset is named after
+.Ar dest-path
+under the source's pool:
+.Pa /srv/web-test
+becomes
+.Ql rpool/srv/web-test .
+.Pp
+It refuses, before changing anything:
+.Bl -bullet -compact
+.It
+a source that is not a ZFS dataset's mountpoint \(em a directory inside a
+dataset, since the whole dataset is what would be cloned, or a path on
+another filesystem;
+.It
+a destination dataset that exists, or whose parent does not;
+.It
+a destination directory with files in it, which the clone would hide;
+.It
+a destination that is not an absolute path of plain characters.
+.El
+If the clone fails, the snapshot taken for it is removed.
+.Pp
+.Nm
+calls
+.Xr zfs 8
+through
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Cloned.
+.It 1
+Refused, or the clone failed.
+.It 2
+Not two arguments.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, from a throwaway dataset,
+.Ql rpool/kct-3554540
+mounted at
+.Pa /var/tmp/kct-3554540 ,
+holding
+.Pa data.txt ;
+all removed afterwards.
+.Ss A clone
+.Bd -literal -offset indent
+$ kclone /var/tmp/kct-3554540 /srv/kct-3554540-copy
+[kclone] Source:      rpool/kct-3554540 (/var/tmp/kct-3554540)
+[kclone] Destination: rpool/srv/kct-3554540-copy (/srv/kct-3554540-copy)
+[kclone] Creating snapshot: rpool/kct-3554540@clone-20260930-000548
+[kclone] Cloning (CoW — near-instant, near-zero space)...
+[kclone] Done.
+[kclone]
+[kclone]   Source:  /var/tmp/kct-3554540 → rpool/kct-3554540
+[kclone]   Clone:   /srv/kct-3554540-copy → rpool/srv/kct-3554540-copy
+[kclone]   Size:    0B (CoW — grows only as changes are made)
+[kclone]
+[kclone]   To destroy:  sudo zfs destroy rpool/srv/kct-3554540-copy && sudo zfs destroy rpool/kct-3554540@clone-20260930-000548
+# (exited 0)
+$ cat /srv/kct-3554540-copy/data.txt
+original
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+$ kclone /var/tmp/kct-3554540/sub /srv/kct-3554540-sub
+[kclone] /var/tmp/kct-3554540/sub is inside rpool/kct-3554540 (mounted at /var/tmp/kct-3554540), not a dataset of its own; kclone copies a whole dataset -- give /var/tmp/kct-3554540
+# (exited 1)
+$ kclone /dev/shm /srv/kct-3554540-shm
+[kclone] /dev/shm is not on a ZFS dataset
+# (exited 1)
+$ kclone /var/tmp/kct-3554540 /srv/kct-3554540-copy
+[kclone] Destination already exists: rpool/srv/kct-3554540-copy (/srv/kct-3554540-copy)
+# (exited 1)
+$ kclone /var/tmp/kct-3554540 /nonexistent-3554540/x
+[kclone] no dataset rpool/nonexistent-3554540 to put rpool/nonexistent-3554540/x under; create it first (zfs create -p)
+# (exited 1)
+$ kclone /var/tmp/kct-3554540 /srv/kct-3554540-full
+[kclone] /srv/kct-3554540-full is a directory with files in it; the clone would hide them
+# (exited 1)
+$ kclone /var/tmp/kct-3554540 "/srv/a b"
+[kclone] '/srv/a b' must be an absolute path of plain characters, without .. or a trailing /
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr kdf 8 ,
+.Xr ksnap 8 ,
+.Xr kvm-clone 8 ,
+.Xr zfs-clone 8 ,
+.Xr zfs-promote 8
+.Sh HISTORY
+On 2026-09-30, writing this page: a directory inside a dataset was taken
+for the dataset, so asking to copy one directory of a home cloned the
+whole home; a path on another filesystem was taken for a dataset named
+after it; a destination directory with files in it was mounted over; and
+a destination whose parent dataset did not exist failed only after the
+snapshot was taken, and left it.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The source's snapshot, and so the source, cannot be destroyed while the
+clone exists.
+To keep the clone and let the source go, promote it with
+.Xr zfs-promote 8 .
+.Pp
+To remove the clone, destroy it and then its snapshot, as the last line
+of the output says.
