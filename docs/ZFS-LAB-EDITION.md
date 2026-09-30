@@ -418,6 +418,67 @@ queue.
     pool, ARC, scrub and eBPF block-latency boards. *A test that got slow on
     green has the ARC and latency graphs from the same minute beside it.*
 
+### Hardware compatibility is the bench's second job
+
+Every run is a fresh install onto whatever is in the box, with a chosen
+kernel and a chosen ZFS, so the bench is also a hardware rig. The matrix
+gains a column: **hardware × kernel × ZFS**. Two benches with different HBAs
+run the same spec line; the diff between them is the hardware.
+
+- **HBAs and controllers.** An LSI/Broadcom card is a driver (`mpt3sas`), a
+  firmware, and how it answers flushes and resets under load; the three
+  interact with the kernel version and surface as scrub timeouts or I/O
+  errors that never happen on a laptop. "Works on 6.12, resets under 7.2"
+  becomes a row.
+- **Disks and NVMe.** Real flush and TRIM semantics, real sector sizes (the
+  ashift choice), firmware quirks, SMART during the run (the disk-health
+  board already reads it).
+- **Memory.** Long runs are when EDAC reports corrected errors; the
+  kernel-messages board collects them. "This bench threw corrected errors
+  during the test that failed" answers "flaky test or flaky box".
+- **NICs, firmware, Secure Boot.** The netboot install is the first test: a
+  box that cannot PXE, sign the module, or boot ZFSBootMenu fails before the
+  suite starts, and that is a finding.
+
+Limits: the suite is correctness, not stress; "survives a week of scrubs"
+is a workload tier (`fio`, repeated scrubs, resilver with a pulled disk;
+the tools ship, it is another hook in the queue line). And the bench finds
+and reproduces; it does not diagnose. What it hands a vendor or the kernel
+list is what they ask for and rarely get: exact kernel, firmware and ZFS,
+an identical reinstall that reproduces it, and the logs from that minute.
+
+### eBPF: the failing machine is kept, and it was being watched
+
+Every build carries bcc, bpftrace, libbpf-tools, the eBPF exporter (block
+I/O latency, bio tracing), Tetragon and the kernel-forensics boards, because
+the profile ships them. So a `[FAIL]` line points at a minute that already
+holds per-disk latency histograms, the test process's syscalls and the
+kernel messages; nobody reproduces it to start reading.
+
+- **ZFS's own functions are traceable.** It is a module with symbols:
+  `bpftrace` hooks `zio_*`, `dmu_*`, `arc_*`, txg sync, `zfs_write` return
+  values. "Which call returned EIO, from which stack, at which offset" is a
+  one-liner on the real hardware.
+- **Hardware and software stop hiding behind each other.** One trace shows
+  whether a stall was ZFS waiting on the disk (block-layer latency) or the
+  disk waiting on ZFS (txg sync holding writers).
+- **The bundle exists.** `klab-vm-debug-bundle` already captures kernel
+  stacks, dmesg, zpool events, arcstats and dbgmsg for a failed run; the
+  eBPF captures for the failing test's window are its natural extension.
+
+Two tracing tiers, so the tracer does not pollute results: **always on, low
+overhead** (the exporters' histograms and counts, on every run, what fills
+the panels), and **deep trace on rerun** (a failed test re-run on the same
+build with the heavy scripts attached; timing tests are never measured with
+a tracer on every function).
+
+The goal is that a failure arrives as a package: build, hardware, trace,
+machine. The first two days of every hard bug (reproduce it, instrument it)
+are the part this removes; the "why" still needs a mind on it.
+
+*CI gives you a red X. This gives you the machine, the disk latency, the
+syscalls and the ZFS call stack from the second it went wrong.*
+
 ### The one line
 
 CI tells you whether ZFS works. This tells you whether a machine running on
@@ -429,7 +490,78 @@ kept for you.
 Which first: a PR on every distro before merge, the root-on-ZFS boot suite,
 or hardware reruns of flaky tests? That picks the summit demo.
 
-## 13. Open decisions
+## 13. Scope review (2026-09-30)
+
+What the sections above miss, found by reading them against the tree.
+
+### Add
+
+1. **Benches are enrolled, never guessed.** The queue wipes disks. A MAC
+   must be on an explicit bench list before `pxe-arm` will take a lab
+   answers file for it; every other machine is refused. abyss is the
+   reason this rule exists (`project_abyss-never-install`): a lab that can
+   netboot must not be able to install a production box by typo.
+2. **The suite comes from the same ref as the ZFS under test.** The package
+   factory builds the test package (`zfs-test`) from the same checkout as
+   the module and utilities. A 2.4.5 suite run against 2.4.4 tests the wrong
+   thing and reports it with confidence.
+3. **Upstream's known failures, not a private list.** ZTS ships
+   `zts-report.py` with per-platform known and maybe-failing sets. Use it as
+   the baseline and layer kldload's per-distro additions on top, so the
+   blue/green diff subtracts what upstream already expects.
+4. **A flaky-test classifier.** A failed test is re-run N times on the same
+   build (VM: fresh clones; hardware: same box) before it is called a
+   regression. "Hardware reruns of flaky tests" is one of the three asks in
+   §12; this is it.
+5. **Two more build axes the sweep already has:** encrypted root (0/1) and
+   Secure Boot (0/1; needs MOK enrolment and netboot with SB off, proven
+   2026-09-13 on 6-full-secure). Both are boot paths CI cannot test, so both
+   belong in the spec line.
+6. **A scheduler, for 24/7.** A queue drained by idle benches is not enough
+   on its own; the standing job is "upstream master, nightly, every bench",
+   plus on-demand items ahead of it. One timer, one queue, priorities.
+7. **Results are a dataset.** Runs live under `rpool/lab/results/<run>`,
+   snapshotted when complete, replicable with `zfs send` (the fiend DR
+   pattern). The lab host is otherwise the only copy of every result.
+8. **Retention.** Goldens per combination and kept failing snapshots eat the
+   pool. A policy: keep the last N goldens per distro, every failing
+   snapshot until its run is closed, prune on a timer, report space on the
+   Run board.
+9. **Workload tier.** Beyond correctness: `ztest`/`zloop` (upstream's own
+   stress tools), `fio` profiles, repeated scrubs, a resilver with a pulled
+   disk. Another hook in the queue line; the tools ship.
+10. **Notification and hand-off.** A run ends in a report URL at minimum. For
+    PR testing the integration that matters is a GitHub check on the PR;
+    design it, ship it after the summit.
+11. **Time budget, stated.** From day-165: a fiend install is about ten
+    minutes, first boot for a lab template should be under fifteen, and the
+    full suite is about two hours. A bench does three or four full runs a
+    day, or about twenty quick ones. Write the numbers on the form so the
+    queue's promise is honest.
+
+### Confirm
+
+- **VM tier first, hardware second, kernel axis last** stands. The VM tier
+  must be excellent alone: most developers have a laptop, not a bench.
+- **Serial per bench, parallel across benches and in VMs** stands.
+- **Trust is the product.** One false regression loses the room; the
+  known-failure baseline, the flaky classifier and the fidelity labels are
+  the load-bearing parts, and they come before the form and the boards.
+
+### Out of scope, said aloud
+
+- FreeBSD (OpenZFS runs there; kldload does not install it). Worth naming
+  in the room, since FreeBSD people will be in it.
+- arm64.
+- Multi-user access to the lab host: single operator, the console sign-in.
+
+### The summit cut
+
+Phases 0 to 2, plus items 1, 2, 3 and 4 above, plus the eBPF bundle for a
+failed test. Kernel axis, scheduler, GitHub check, workload tier, retention
+and the form come after.
+
+## 14. Open decisions
 
 1. **Summit date.** Decides whether root-on-ZFS builds make the first cut.
 2. **ZFS sources:** release tags only, or any commit or pull-request branch?
