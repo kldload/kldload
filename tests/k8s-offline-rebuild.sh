@@ -224,6 +224,17 @@ done
 [[ -z "$_lost" ]] && _pass "all ${#KEEP_KEYS[@]} non-cluster machines still on wg-mgmt" ||
     _fail "estate mesh" "dropped from wg-mgmt by the rebuild:${_lost}"
 
+# in_cidr <ipv4> <a.b.c.d/n> — 0 when the address is inside the range.
+in_cidr() {
+    local ip="$1" net="${2%/*}" bits="${2#*/}" a b c d x y
+    IFS=. read -r a b c d <<<"$ip" || return 1
+    x=$(((a << 24) | (b << 16) | (c << 8) | d))
+    IFS=. read -r a b c d <<<"$net" || return 1
+    y=$(((a << 24) | (b << 16) | (c << 8) | d))
+    ((bits == 0)) && return 0
+    (((x >> (32 - bits)) == (y >> (32 - bits))))
+}
+
 # ─── What tried to leave ────────────────────────────────────────────────────
 _section "Traffic that tried to leave the host"
 _drops="$("$OFFLINE" drops 2>&1)" && _drc=0 || _drc=$?
@@ -231,7 +242,32 @@ if ((_drc == 0)); then
     _pass "offline: 0 packets from the VMs tried to leave the host"
 else
     printf '%s\n' "$_drops" | sed -n '/── by destination ──/,$p' | sed 's/^/    /'
-    _fail "offline" "$(printf '%s\n' "$_drops" | tail -n 1) — the cluster reached for the internet"
+    # Which drops were the internet, and which were cluster traffic sent out
+    # the default route? build 162 had 316, every one TCP 443 to a ClusterIP
+    # (the aggregator dialling metrics-server) and not one outside address;
+    # "reached for the internet" said otherwise (2026-09-29).
+    _cfg="$(kubectl -n kube-system get cm kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null || true)" # absent: the defaults below
+    _svc="$(sed -n 's/^ *serviceSubnet: *//p' <<<"$_cfg" | head -n 1)"
+    _pod="$(sed -n 's/^ *podSubnet: *//p' <<<"$_cfg" | head -n 1)"
+    _svc="${_svc:-10.96.0.0/16}" _pod="${_pod:-10.244.0.0/16}"
+    _n_svc=0 _n_pod=0 _n_net=0 _net_dst=""
+    while read -r _cnt _src _arrow _dst _rest; do
+        [[ "$_arrow" == "->" && "$_cnt" =~ ^[0-9]+$ ]] || continue
+        if in_cidr "$_dst" "$_svc"; then
+            _n_svc=$((_n_svc + _cnt))
+        elif in_cidr "$_dst" "$_pod"; then
+            _n_pod=$((_n_pod + _cnt))
+        else
+            _n_net=$((_n_net + _cnt))
+            [[ " ${_net_dst} " == *" ${_dst} "* ]] || _net_dst+=" ${_dst}"
+        fi
+    done < <(printf '%s\n' "$_drops" | sed -n '/── by destination ──/,$p')
+    _what="$(printf '%s\n' "$_drops" | tail -n 1 | sed 's/^ *//'): ${_n_net} to the internet${_net_dst:+ (${_net_dst# })}, ${_n_svc} to the service range ${_svc}, ${_n_pod} to the pod range ${_pod}"
+    if ((_n_net > 0)); then
+        _fail "offline" "${_what} — the cluster reached for the internet"
+    else
+        _fail "offline" "${_what} — cluster traffic left by the default route (no internet destination)"
+    fi
 fi
 
 printf '\n  k8s offline rebuild: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
