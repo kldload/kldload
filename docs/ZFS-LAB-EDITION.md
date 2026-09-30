@@ -201,8 +201,20 @@ already in the stack.
 
 ## 9. The edition
 
+The download is the lab **host**, not the machine under test. The kvm
+profile already ships the netboot server (`kldload-netboot-server`, the one
+onyx installs fiend with), so one install gives both tiers from one machine:
+VM builds locally, hardware builds by netbooting whatever benches are cabled
+to it. A bench is never installed by hand; the lab host is the only USB
+install, and it is done once.
+
 - kvm profile, `zfslab` template, the terminal console (`kld`), full offline
-  payload.
+  payload, the netboot server armed for the benches.
+- **No separate netboot.** The netboot server's assemble menu already offers
+  profile, then distribution, then security; `zfslab` is one more profile in
+  it, and the lab arms a bench with a lab answers file the way the sweep
+  arms fiend. The only addition is the ZFS package cache served beside the
+  darksite.
 - The host **keeps** its offline mirrors (skip `_darksite_reclaim` on this
   edition) so builds work offline, and a set of OpenZFS release tarballs is
   baked in.
@@ -213,7 +225,113 @@ already in the stack.
 - Website: the fifth card on the download page; R2 artefacts under their own
   key; release invariant as for every edition.
 
-## 10. Suggested order toward the summit
+## 10. The build loop (decided 2026-09-30)
+
+One idea makes the two tiers one pipeline: **a build is an answers file.**
+kldload already installs from one in two ways: `tests/lifecycle.sh` boots the
+ISO in a VM, writes an answers file, installs headless and reboots; and
+`pxe-arm` + the netboot server install a physical machine from the same kind
+of file (the nightly sweep rebuilds fiend this way). Add the lab's fields to
+the answers file and both tiers get them.
+
+### The spec is a queue, and hardware runs it one item at a time
+
+Serial, one build on the bench at a time, rebuilt from a wiped disk each
+time. This is what `tests/estate-sweep.sh` already does with editions:
+
+- **The install is the teardown.** Nothing survives a reinstall, so there is
+  no cleanup step to forget or half-do. Every build starts from nothing.
+- **One machine, one result.** No neighbour competing for disks, cache or
+  CPU: every number belongs to the build under test, which is the point of
+  the hardware tier.
+- **The only step that must succeed before teardown is pulling the results.**
+  Bundle off, landed and verified, then the next arm. A failed pull stops the
+  queue with the machine intact and powered off, to be looked at.
+
+VMs are where breadth runs in parallel, since clones are free. Same spec.
+
+Each queue item is one line, and becomes one answers file:
+
+```
+distro=debian release=13 zfs=2.4.5 kernel=stock site=green
+packages="fio bpftrace"          # fatal if any is missing
+modules="nvidia"                 # extra DKMS modules, for conflicts
+post-install=hooks/debian.sh     # in the target, before first boot
+first-boot=hooks/suite.sh        # at first boot: the suite, then "done"
+arc=4G suite=quick tier=device
+```
+
+Blue and green are two lines that differ in one field; the diff is computed
+from their two bundles afterwards.
+
+### The hardware loop, per item
+
+1. `kldload-power on` (or `pxe-once` + `cycle` when the box is up); the
+   sweep's `power_kick` already does this.
+2. `pxe-arm` the bench with the item's answers file; the netboot server
+   serves the darksite **and the lab's ZFS package cache** over HTTP.
+3. Unattended install; first boot runs the post-install hooks and, as the
+   last autodeploy phase, the suite; the machine publishes "done".
+4. The controller pulls the bundle (the sweep's redacted bundle plus the
+   per-test result lines), verifies it landed.
+5. `kldload-power off`, read back as Off.
+6. Next item.
+
+A stuck iPXE loop gets a cycle; a box that never reports gets a bounded wait
+and a failed report; both exist in the sweep today.
+
+### The VM loop, per item
+
+`lifecycle.sh`'s flow with the disk on a zvol under `rpool/vms/`, sealed
+(`kldload-seal`, `@golden`) and named by its combination, so a repeated
+combination is not rebuilt. A run clones the golden (throwaway), attaches
+test disks per fidelity tier, runs the suite, keeps a failing clone's
+snapshot.
+
+### The ZFS-version axis
+
+"Version X" means packages, not a repo. klab's existing cloud-image goldens
+with dev tools (`klab golden-ztest`) are the **package factory**: clone one,
+check out the tag or ref (a pull request is just a ref), `make rpm` /
+`make deb` for the DKMS variant so the packages are kernel-independent, cache
+at `pkgs/<family>/<release>/<zfsver>/`. Built once, reused. The installer
+gets one field, `KLDLOAD_ZFS_SOURCE=<url>`, and `bootstrap.sh` installs ZFS
+from there instead of the mirror; the netboot server already serves
+directories over HTTP. This one piece of plumbing serves both tiers.
+
+This also settles the three-overlapping-tools question: klab's cloud goldens
+are the factory, the installer's goldens are the subjects.
+
+### Results
+
+Every `[PASS]/[FAIL]/[SKIP] tests/functional/...` line becomes one Loki
+record labelled build, site, tier, test and duration (klab's runner already
+greps these lines for its summary). Prometheus keeps counts (klab-exporter
+already knows goldens, sites and totals). Matrix, history, flaky tests and
+the blue/green diff are Loki queries.
+
+### Phasing
+
+| Phase | Delivers | Proves |
+|---|---|---|
+| 0. Factory + source field | ZFS packages from a tag via a klab builder; `KLDLOAD_ZFS_SOURCE`; `lifecycle.sh` installing Fedora root-on-ZFS with 2.4.4 and 2.4.5 | the axis works end to end on the cheapest path |
+| 1. Golden + run | zvol + seal; run harness; per-test Loki lines; blue/green diff | a regression report from two real builds |
+| 2. Hardware loop | the queue through the sweep's loop on fiend, cold to cold | the thing nobody else has |
+| 3. Product | post-install hooks in the installer; `kld` form; Grafana folder; the edition (keep mirrors, tarballs baked in, netboot armed, website card, R2) | the fifth download |
+| 4. Kernel axis | `KLDLOAD_KERNEL`; koji / mainline / ELRepo sources; impossible pairs refused via `zfs-kernel-pin`'s ceiling | kernel × ZFS |
+
+Phase 0 is days and is the demo's spine; 0 to 2 are the summit story.
+
+### Open for fiend
+
+- **Its power controller.** The only power record today is abyss,
+  status-only. fiend needs one for "on" from cold: a BMC, or a switched
+  outlet plus Wake-on-LAN (WoL alone cannot choose the boot device; the
+  netboot arming decides that).
+- **Its sacrificial disks.** One disk takes the install; the device tier
+  wants real spare disks for the suite. Which ones.
+
+## 11. Suggested order toward the summit
 
 1. The edition: build flag, keep mirrors, website slot, R2. *Small.*
 2. ZFS from a tag into a per-family package cache. *Moderate; the core of
@@ -226,7 +344,7 @@ already in the stack.
 
 1, 2 and 4 alone already beat CI on ergonomics; 3 is what nobody else has.
 
-## 11. Open decisions
+## 12. Open decisions
 
 1. **Summit date.** Decides whether root-on-ZFS builds make the first cut.
 2. **ZFS sources:** release tags only, or any commit or pull-request branch?
