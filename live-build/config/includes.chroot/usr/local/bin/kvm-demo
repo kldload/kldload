@@ -83,6 +83,38 @@ pause() {
 }
 
 # ── GLOBAL CLEANUP ─────────────────────────────────────────
+# DEMO_MARK -- every volume this script makes carries it, and the cleanups
+# below remove ONLY volumes that do, with their domains.
+# SAFETY (2026-09-30): the cleanups were `zfs list -r rpool/vms | grep -v
+# isos` into `zfs destroy -Rf`: EVERY virtual machine on the host, goldens,
+# the Kubernetes cluster, klab, and with -R every clone -- run first by demo 1
+# ("VM: full demo") and demo 5, which the web console's Demos panel offers
+# with "Builds a golden VM and clones 4 copies". The domains were removed by
+# a fixed list of generic names (golden, web-1, db-1 ...) that anyone's VMs
+# may have. A user's own `golden` or `web-1` is now left alone, and the demo's
+# kvm-create of that name refuses instead of destroying it.
+DEMO_MARK="com.kldload:demo=kvm-demo"
+_mark() { zfs set "$DEMO_MARK" "rpool/vms/$1" 2>/dev/null || true; } # a volume that failed to be made has nothing to mark
+# rpool/srv/demo, only when this script made it (a user's own is left)
+_demo_srv_destroy() {
+    [[ "$(zfs get -H -o value com.kldload:demo rpool/srv/demo 2>/dev/null)" == kvm-demo ]] || return 0
+    zfs destroy -r rpool/srv/demo &>/dev/null || true # busy: the next reset
+}
+_demo_destroy() {
+    local pass ds mark vm
+    # clones must go before what they were cloned from: a pass skips a volume
+    # something still depends on, and the next pass takes it
+    for pass in 1 2 3 4; do
+        while IFS=$'\t' read -r ds mark; do
+            [[ "$mark" == kvm-demo ]] || continue
+            vm="${ds#rpool/vms/}"
+            virsh destroy "$vm" &>/dev/null || true                                              # not running
+            virsh undefine "$vm" --nvram &>/dev/null || virsh undefine "$vm" &>/dev/null || true # not defined
+            zfs destroy -r "$ds" &>/dev/null || true                                             # a clone of it remains: the next pass
+        done < <(zfs list -H -o name,com.kldload:demo -t volume -r rpool/vms 2>/dev/null)
+    done
+}
+
 nuke_all() {
     echo -ne "${Y}Resetting demo environment...${N} "
 
@@ -91,24 +123,14 @@ nuke_all() {
         podman rm -f -t 2 "$ctr" &>/dev/null || true
     done
 
-    # Kill all demo VMs
-    for vm in golden web-1 web-2 web-3 web-4 db-1 db-2; do
-        virsh destroy "$vm" &>/dev/null || true
-        virsh undefine "$vm" --nvram &>/dev/null || virsh undefine "$vm" &>/dev/null || true
-    done
-
-    # Nuke all demo zvols (force recursive to handle snapshots+clones)
-    for ds in $(zfs list -H -o name -r rpool/vms -t all 2>/dev/null | grep -v isos | grep -v '^rpool/vms$' | tac); do
-        zfs destroy -Rf "$ds" &>/dev/null || true
-    done
+    # This demo's machines and volumes, and nothing else (see DEMO_MARK)
+    _demo_destroy
 
     # Nuke container datasets
-    zfs destroy -Rf rpool/srv/demo &>/dev/null || true
+    _demo_srv_destroy
 
-    # Clean NVRAM files
-    rm -f /var/lib/libvirt/qemu/nvram/golden_VARS.fd &>/dev/null
-    rm -f /var/lib/libvirt/qemu/nvram/web-*_VARS.fd &>/dev/null
-    rm -f /var/lib/libvirt/qemu/nvram/db-*_VARS.fd &>/dev/null
+    # NVRAM went with each undefine --nvram above; the old globs here
+    # (web-*_VARS.fd) matched anyone's machine of that name.
 
     echo -e "${G}clean.${N}"
 }
@@ -116,14 +138,7 @@ nuke_all() {
 # ── SECTION CLEANUPS ───────────────────────────────────────
 clean_vms() {
     echo -ne "${D}  Cleaning VMs...${N} "
-    for vm in golden web-1 web-2 web-3 web-4 db-1 db-2; do
-        virsh destroy "$vm" &>/dev/null || true
-        virsh undefine "$vm" --nvram &>/dev/null || virsh undefine "$vm" &>/dev/null || true
-    done
-    for ds in $(zfs list -H -o name -r rpool/vms -t all 2>/dev/null | grep -v isos | grep -v '^rpool/vms$' | tac); do
-        zfs destroy -Rf "$ds" &>/dev/null || true
-    done
-    rm -f /var/lib/libvirt/qemu/nvram/golden_VARS.fd /var/lib/libvirt/qemu/nvram/web-*_VARS.fd /var/lib/libvirt/qemu/nvram/db-*_VARS.fd &>/dev/null
+    _demo_destroy # this demo's machines only (see DEMO_MARK)
     echo -e "${G}done${N}"
 }
 
@@ -143,7 +158,7 @@ clean_containers() {
     for ctr in demo-nginx demo-redis demo-postgres; do
         podman rm -f -t 2 "$ctr" &>/dev/null || true
     done
-    zfs destroy -Rf rpool/srv/demo &>/dev/null || true
+    _demo_srv_destroy
     echo -e "${G}done${N}"
 }
 
@@ -231,11 +246,7 @@ fi
 # waterproof, or proof-of-concept (found writing the command reference,
 # 2026-09-30). Destroy only what was recorded.
 _proof_clean() {
-    local vm
-    for vm in proof-1 proof-2 proof-3 proof-4 proof-golden; do
-        zfs list -H -o name "rpool/vms/$vm" &>/dev/null || continue
-        zfs destroy -r "rpool/vms/$vm" || echo "kvm-demo: could not remove rpool/vms/$vm" >&2
-    done
+    _demo_destroy # marked volumes only; a user's own proof-1 is not the demo's
 }
 
 # ── MAIN LOOP ──────────────────────────────────────────────
@@ -264,7 +275,7 @@ while true; do
             continue
         fi
         echo -e "  ${D}Using ISO: ${DEMO_ISO}${N}"
-        kvm-create golden --ram 2048 --cpus 1 --disk 10 --iso "$DEMO_ISO" --os centos-stream9
+        kvm-create golden --ram 2048 --cpus 1 --disk 10 --iso "$DEMO_ISO" --os centos-stream9 && _mark golden
         sleep 1
 
         echo ""
@@ -273,7 +284,7 @@ while true; do
         for vm in web-1 web-2 web-3 db-1; do
             echo -ne "  kvm-clone golden $vm ... "
             S=$(date +%s%N)
-            kvm-clone golden $vm >/dev/null 2>&1
+            kvm-clone golden $vm >/dev/null 2>&1 && _mark "$vm"
             E=$(date +%s%N)
             echo -e "${G}done${N} (${C}$(((E - S) / 1000000))ms${N})"
         done
@@ -548,7 +559,7 @@ while true; do
         echo ""
 
         echo -e "${D}Creating ZFS datasets (per-service tuning)...${N}"
-        zfs create -o mountpoint=/srv/demo -o compression=lz4 -o atime=off rpool/srv/demo 2>/dev/null || true
+        zfs create -o mountpoint=/srv/demo -o compression=lz4 -o atime=off -o "$DEMO_MARK" rpool/srv/demo 2>/dev/null || true
         zfs create -o mountpoint=/srv/demo/nginx -o compression=lz4 rpool/srv/demo/nginx 2>/dev/null || true
         zfs create -o mountpoint=/srv/demo/redis -o recordsize=16k -o compression=lz4 rpool/srv/demo/redis 2>/dev/null || true
         zfs create -o mountpoint=/srv/demo/postgres -o recordsize=8k -o compression=lz4 rpool/srv/demo/postgres 2>/dev/null || true
@@ -792,12 +803,7 @@ while true; do
         echo ""
 
         # Clean previous
-        for vm in golden-cloud node-1 node-2 node-3 node-4; do
-            virsh destroy "$vm" &>/dev/null || true
-            virsh undefine "$vm" --nvram &>/dev/null || virsh undefine "$vm" &>/dev/null || true
-            zfs destroy -Rf "rpool/vms/$vm" &>/dev/null || true
-            rm -f "/var/lib/libvirt/qemu/nvram/${vm}_VARS.fd" &>/dev/null
-        done
+        _demo_destroy # marked volumes only (see DEMO_MARK): not anyone's node-1
 
         CLOUD_IMG="/var/lib/libvirt/isos/CentOS-Stream-9-GenericCloud.qcow2"
         if [[ ! -f "$CLOUD_IMG" ]]; then
@@ -807,7 +813,7 @@ while true; do
         fi
 
         echo -e "${D}Creating 10GB ZFS zvol for golden image...${N}"
-        zfs create -V 10G -s -o compression=off -o volblocksize=64K rpool/vms/golden-cloud
+        zfs create -V 10G -s -o compression=off -o volblocksize=64K -o "$DEMO_MARK" rpool/vms/golden-cloud
 
         echo -e "${D}Writing cloud image to ZFS zvol...${N}"
         qemu-img convert -f qcow2 -O raw "$CLOUD_IMG" /dev/zvol/rpool/vms/golden-cloud 2>&1
@@ -845,11 +851,7 @@ while true; do
         fi
 
         # Clean previous nodes
-        for vm in node-1 node-2 node-3 node-4; do
-            virsh destroy "$vm" &>/dev/null || true
-            virsh undefine "$vm" --nvram &>/dev/null || virsh undefine "$vm" &>/dev/null || true
-            zfs destroy -Rf "rpool/vms/$vm" &>/dev/null || true
-        done
+        _demo_destroy # marked volumes only (see DEMO_MARK)
 
         echo -e "${Y}Step 1: Clone golden image x4${N}"
         echo ""
@@ -858,7 +860,7 @@ while true; do
             S=$(date +%s%N)
             zfs snapshot "rpool/vms/golden-cloud@clone-node${i}-$(date +%s%N)" &>/dev/null
             SNAP=$(zfs list -t snapshot -H -o name rpool/vms/golden-cloud 2>/dev/null | tail -1)
-            zfs clone "$SNAP" "rpool/vms/node-$i"
+            zfs clone -o "$DEMO_MARK" "$SNAP" "rpool/vms/node-$i"
             E=$(date +%s%N)
             echo -e "${G}done${N} (${C}$(((E - S) / 1000000))ms${N})"
         done
@@ -1010,12 +1012,7 @@ USEREOF
     24)
         header
         echo -ne "${D}  Destroying fleet...${N} "
-        for vm in golden-cloud node-1 node-2 node-3 node-4; do
-            virsh destroy "$vm" &>/dev/null || true
-            virsh undefine "$vm" --nvram &>/dev/null || virsh undefine "$vm" &>/dev/null || true
-            zfs destroy -Rf "rpool/vms/$vm" &>/dev/null || true
-            rm -f "/var/lib/libvirt/qemu/nvram/${vm}_VARS.fd" &>/dev/null
-        done
+        _demo_destroy # marked volumes only (see DEMO_MARK): not anyone's node-1
         rm -f /tmp/cloud-init-node-*.iso &>/dev/null
         rm -rf /tmp/cloud-init-node-* &>/dev/null
         echo -e "${G}done${N}"
@@ -1041,7 +1038,7 @@ USEREOF
 
         # Create golden zvol
         echo -e "${Y}[1] Create golden image (10GB thin-provisioned ZFS zvol)${N}"
-        zfs create -V 10G -s -o compression=off -o volblocksize=64K rpool/vms/proof-golden 2>/dev/null
+        zfs create -V 10G -s -o compression=off -o volblocksize=64K -o "$DEMO_MARK" rpool/vms/proof-golden 2>/dev/null
         echo -e "    ${G}✓${N} rpool/vms/proof-golden created"
         echo ""
 
@@ -1051,7 +1048,7 @@ USEREOF
         for i in 1 2 3 4; do
             S=$(date +%s%N)
             zfs snapshot "rpool/vms/proof-golden@clone-$i"
-            zfs clone "rpool/vms/proof-golden@clone-$i" "rpool/vms/proof-$i"
+            zfs clone -o "$DEMO_MARK" "rpool/vms/proof-golden@clone-$i" "rpool/vms/proof-$i"
             E=$(date +%s%N)
             MS=$(((E - S) / 1000000))
             TOTAL_MS=$((TOTAL_MS + MS))
