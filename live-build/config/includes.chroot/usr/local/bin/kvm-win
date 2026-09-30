@@ -446,9 +446,21 @@ demo)
     demo_sccm
     ;;
 list)
-    virsh list --all | grep -iE 'win-|Name|---' || true
-    echo
-    zfs list -r "$POOL" 2>/dev/null | grep -iE 'win-|NAME' || true
+    # By the mark, not by a "win-" in the name: `kvm-win create myvm` never
+    # showed here (2026-09-30). Goldens are win-<os>-golden; VMs carry the mark.
+    printf '%-24s %-8s %-10s %s\n' NAME OS STATE ZVOL
+    for _g in win11 server; do
+        _z="$(golden_zvol "$_g")"
+        zfs list -H -o name "${_z}@golden" >/dev/null 2>&1 &&
+            printf '%-24s %-8s %-10s %s\n' "(golden)" "$_g" "-" "${_z}@golden"
+    done
+    while IFS=$'\t' read -r _z _os; do
+        [[ "$_os" =~ ^(win11|server)$ ]] || continue
+        _n="${_z##*/}"
+        _st=undefined
+        virsh dominfo "$_n" >/dev/null 2>&1 && _st="$(virsh domstate "$_n" 2>/dev/null | head -1)"
+        printf '%-24s %-8s %-10s %s\n' "$_n" "$_os" "$_st" "$_z"
+    done < <(zfs get -H -r -t volume -o name,value "$KVMWIN_MARK" "$POOL" 2>/dev/null)
     ;;
 destroy)
     name="${1:-}"
