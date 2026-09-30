@@ -141,3 +141,42 @@ func TestSnapArgv(t *testing.T) {
 		t.Fatalf("prefill %q does not run as is: %v %v", v, got, err)
 	}
 }
+
+// Sealing this host works on the running machine in place (kimage build
+// deletes its host keys and empties its machine-id), so its Build row is a
+// typed one like the DESTROY rows: x refuses it and D runs exactly
+// `kimage build`. It was a plain x row until 2026-09-29.
+func TestSealThisHostIsTyped(t *testing.T) {
+	var row []string
+	for _, r := range buildRows() {
+		if r.cmd == "kimage build" {
+			danger := ""
+			if r.danger {
+				danger = "typed"
+			}
+			row = []string{r.name, r.kind, "-", r.what, r.cmd, r.arg, danger}
+		}
+	}
+	if row == nil {
+		t.Fatal("no Build row runs kimage build")
+	}
+	var x, d verb
+	for _, v := range verbs["Machines/Build"] {
+		switch v.key {
+		case "x":
+			x = v
+		case "D":
+			d = v
+		}
+	}
+	if _, err := x.argvs(row, ""); err == nil {
+		t.Errorf("x on %q ran without the typed name", row[0])
+	}
+	argvs, err := d.argvs(row, "")
+	if err != nil || len(argvs) != 1 || strings.Join(argvs[0], " ") != "kimage build" {
+		t.Errorf("D on %q: %v %v, want [[kimage build]]", row[0], argvs, err)
+	}
+	if !d.confirm {
+		t.Error("D does not ask for the typed name")
+	}
+}

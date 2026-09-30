@@ -415,7 +415,10 @@ func buildRows() []buildRow {
 		buildRow{name: "all appliances", kind: "appliances", what: "every catalogue appliance as a VM (app-*), sealed as Firecracker goldens where kfire is", cmd: "vmxplore --build-all", have: appsHave},
 		buildRow{name: "appliance self-test", kind: "appliances", what: "build every tile as a VM and audit it (st-*), tear down the passing ones", cmd: "vmxplore --selftest"},
 		buildRow{name: "one appliance", kind: "appliances", what: "b on the Appliances tab: pick the tile, name the VM, set its KEY=VALUE fields"},
-		buildRow{name: "this host as a cloud image", kind: "images", what: "kimage build: prep this system as a cloud-init golden", cmd: "kimage build"},
+		// danger: kimage build works on THIS machine in place -- it deletes its
+		// ssh host keys and empties its machine-id and hostname -- and was one
+		// keypress away (found writing the man pages, 2026-09-29)
+		buildRow{name: "SEAL-this-host", kind: "images", what: "kimage build: THIS machine, in place: deletes its ssh host keys, empties its machine-id and hostname, snapshots @golden", cmd: "kimage build", danger: true},
 		buildRow{name: "export this host's image", kind: "images", what: "kimage export (X: qcow2 raw vhd vmdk all) to /srv/images", cmd: "kimage export qcow2", arg: "format"},
 		buildRow{name: "deploy VMs from an image", kind: "images", what: "kimage deploy (X: <image> <count>)", arg: "deploy"},
 		buildRow{name: "build your own golden", kind: "custom", what: "kvm-golden: clone a base (X: <name> <distro|vm> [post-install file or a command]), boot, run your post-install as root, shut down, seal, @golden", arg: "golden"},
