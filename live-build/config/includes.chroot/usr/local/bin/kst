@@ -1,15 +1,41 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+# 141 is the reader going away (`kst | head`), not a failure to report
+trap '_rc=$?; ((_rc == 141)) || echo "kst: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # kst — system health at a glance
 # Shows pool health, disk usage, snapshots, boot environments, and services.
 
-G='\033[0;32m' # green
-Y='\033[0;33m' # yellow
-R='\033[0;31m' # red
-C='\033[0;36m' # cyan
-B='\033[1m'    # bold
-N='\033[0m'    # reset
+# --help answers before anything runs; it printed the dashboard, since
+# nothing read the arguments (found writing kst(8), 2026-09-30).
+case "${1:-}" in
+-h | --help)
+    cat <<'USAGE'
+Usage: kst
+
+One screen: host, edition and build; the LAN address; rpool's health and
+errors; the root filesystem's use, space and compression; the number of
+snapshots and the newest; boot environments; memory, CPUs, uptime; and
+whether kldload-webui, sshd, zfs-zed, sanoid.timer and NetworkManager are
+active. Takes no arguments; it reports, it does not judge (exit 0).
+
+Exit: 0, 2 on an argument. See kst(8).
+USAGE
+    exit 0
+    ;;
+"") ;;
+*)
+    echo "kst: takes no arguments (got: $*); try kst --help" >&2
+    exit 2
+    ;;
+esac
+
+# Colour only for a person: piped, the escapes land in the text.
+if [[ -t 1 ]]; then
+    G='\033[0;32m' Y='\033[0;33m' R='\033[0;31m' C='\033[0;36m' B='\033[1m' N='\033[0m'
+else
+    G='' Y='' R='' C='' B='' N=''
+fi
 
 dot_ok="${G}●${N}"
 dot_warn="${Y}●${N}"
@@ -23,7 +49,8 @@ ONLINE) pool_dot="$dot_ok" ;;
 DEGRADED) pool_dot="$dot_warn" ;;
 *) pool_dot="$dot_fail" ;;
 esac
-pool_errors="$(zpool status "$pool_name" 2>/dev/null | grep 'errors:' | sed 's/.*errors: //')"
+# no pool, no "errors:" line: an empty field, not a silent exit under set -e
+pool_errors="$(zpool status "$pool_name" 2>/dev/null | sed -n 's/.*errors: //p')" || pool_errors=""
 
 # ── Disk usage ────────────────────────────────────────────────────────────────
 root_ds="$(mount | awk '$3=="/" && /zfs/{print $1}' || echo "rpool/ROOT/default")"
@@ -52,8 +79,10 @@ else
 fi
 
 # ── Boot environments ────────────────────────────────────────────────────────
-be_count="$(zfs list -H -o name -r rpool/ROOT 2>/dev/null | grep -c 'rpool/ROOT/' || echo 0)"
-be_active="$(zfs get -H -o value mountpoint rpool/ROOT 2>/dev/null | head -1 || echo "?")"
+# `grep -c ... || echo 0` printed "0" twice when there were none: grep -c
+# prints its own 0 and exits 1, then echo adds another (the example in the
+# engineering rules). awk counts and always exits 0.
+be_count="$(zfs list -H -o name -r rpool/ROOT 2>/dev/null | awk '/^rpool\/ROOT\// {n++} END {print n + 0}')" || be_count="?"
 
 # ── Services ──────────────────────────────────────────────────────────────────
 svc_status() {
@@ -74,7 +103,9 @@ uptime_str="$(uptime -p 2>/dev/null | sed 's/^up //' || echo "?")"
 hostname="$(hostname 2>/dev/null || echo "kldload")"
 edition="$(cat /etc/kldload/edition 2>/dev/null || echo "?")"
 build="$(cat /etc/kldload-build-sha 2>/dev/null || echo "?")"
-lan_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' | head -1 || hostname -I 2>/dev/null | awk '{print $1}' || echo "?")"
+# the word after "src", wherever it falls: field 7 moved with the route's shape
+lan_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')" || lan_ip=""
+[[ -n "$lan_ip" ]] || lan_ip="?"
 
 # ── Output ────────────────────────────────────────────────────────────────────
 echo ""
