@@ -1,0 +1,130 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-MOK-REPAIR 8
+.Os
+.Sh NAME
+.Nm kldload-mok-repair
+.Nd see which Secure Boot machine owner keys are enrolled, and put the install's own key back when it is not
+.Sh SYNOPSIS
+.Nm
+.Op Cm status
+.Nm
+.Cm repair
+.Op Fl -force
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+With Secure Boot on, a kldload machine boots only if its own machine owner
+key is enrolled: that key signs ZFSBootMenu and the ZFS and NVIDIA
+modules.
+Enrolment needs someone at the console, in MokManager's ten-second
+window, with the right password, so it is easy to miss; and every
+reinstall leaves its old key behind, so keys pile up while the one that
+matters may never be enrolled.
+The result is
+.Dq Secure Boot validation failed
+with no system to fix it from.
+.Pp
+It runs on the installed machine, or from the live image: there it
+imports the installed pool read-only and uses that key.
+It needs root.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm status
+The default.
+The firmware's Secure Boot state; how many keys are enrolled and how many
+are kldload install keys; pending requests; the install's key and whether
+it is enrolled, queued, or neither; and any loaded module signed by a
+different enrolled key.
+.It Cm repair
+Queue a reset of the whole key list, then an enrolment of the install's
+key \(em in that order, since a reset also discards anything queued \(em
+and print what to do at the next boot:
+.Dq Reset MOK list ,
+then
+.Dq Enroll MOK ,
+each with the password
+.Ql kldload .
+On a terminal it offers to reboot.
+.Pp
+It refuses while a loaded module is signed by an enrolled key other than
+the install's: the reset would stop that module loading.
+Rebuild such modules with DKMS, which signs with the install key, or give
+.Fl -force .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/dkms/mok.der
+The install's key.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Reported, or the requests are queued.
+.It 1
+No EFI, no
+.Xr mokutil 1 ,
+no install key, or
+.Cm repair
+refused.
+.El
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30:
+.Bd -literal -offset indent
+# kldload-mok-repair
+── Secure Boot ─────────────────────────────
+SecureBoot enabled
+Enrolled MOKs: 4 total, 2 kldload install key(s)
+⚠ 2 kldload keys enrolled — only the newest install's key is in use; the rest are stale NVRAM bloat.
+Pending enrollment requests: 0
+Install key: /var/lib/dkms/mok.der
+  subject=CN=kldload-mok-20260830133808-430b62b703c15c02
+✓ this key is already enrolled — Secure Boot should verify the boot chain.
+Loaded modules signed by another enrolled key: none
+# (exited 0)
+.Ed
+.Pp
+The same machine, with
+.Xr modinfo 8
+replaced by a script that reports the NVIDIA module as signed by the
+.Dq DKMS module signing key
+the machine also has enrolled:
+.Bd -literal -offset indent
+# kldload-mok-repair repair
+Not repairing: these loaded modules are signed by another enrolled key,
+and the reset would stop them loading with Secure Boot on:
+    nvidia (DKMS module signing key)
+Rebuild them with DKMS (which signs with the install key) first, or run
+  kldload-mok-repair repair --force
+# (exited 1)
+.Ed
+.Pp
+Nothing was queued.
+.Sh SEE ALSO
+.Xr mokutil 1 ,
+.Xr kldload-ca 8 ,
+.Xr kldload-secure-boot 8
+.Sh HISTORY
+On 2026-08-02 a lab machine had seventeen stale keys enrolled.
+On 2026-08-03 its key check read
+.Xr mokutil 1 Ns 's
+exit status, which is inverted, and its count took issuer lines for
+subjects.
+On 2026-08-10 a repair queued over ssh reported failure because it asked
+a question with no one to answer.
+.Pp
+On 2026-09-30, writing this page:
+.Cm repair
+reset every key without looking at what the loaded modules were signed
+with.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A reset removes every enrolled key, the distribution's certificate among
+them; shim carries its own vendor certificate, so the distribution's
+kernel still boots.
+.Pp
+The password is fixed at
+.Ql kldload ,
+whatever
+.Ev KLDLOAD_MOK_PASSWORD
+was at install.
