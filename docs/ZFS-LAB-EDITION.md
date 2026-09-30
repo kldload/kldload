@@ -636,6 +636,15 @@ and the form come after.
 
 ## 14. Open decisions
 
+0. **The suite beside a live root pool (verify first).** On bare metal the
+   machine's root is itself a ZFS pool, and ZTS creates, imports and exports
+   pools on the spare disks. Check the suite's source for anything that acts
+   on every pool (import or export of all pools, pool-wide cleanup) before
+   promising bare-metal runs; tests that must touch the running system's
+   pool belong to the root-on-ZFS suite (a disposable build, rebooted).
+   Hardware mode is VM-free and ZFS-on-root throughout; the VM tier stays as
+   an optional, labelled lower-fidelity path for developers without benches.
+
 1. **Summit date.** Decides whether root-on-ZFS builds make the first cut.
 2. **ZFS sources:** release tags only, or any commit or pull-request branch?
    Testing a PR across every distro before merge is the one OpenZFS
