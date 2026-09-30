@@ -1,0 +1,144 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-SESSION 8
+.Os
+.Sh NAME
+.Nm kldload-session
+.Nd open a terminal in the browser onto a shell, a VM console or a pod, behind the web console's address
+.Sh SYNOPSIS
+.Nm
+.Cm open
+.Ar kind
+.Ar target
+.Op Fl -user Ar name
+.Op Fl -title Ar text
+.Nm
+.Cm close
+.Ar id
+.Nm
+.Cm list | prune
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+Everything in the web console that needs a window onto something \(em a
+virtual machine's serial console, a shell in a pod, an ssh session to a
+cluster node, a klab run's log \(em opens it through
+.Nm .
+.Cm open
+picks a free port on loopback, starts
+.Pa kldload-session@ Ns Ar id Ns Pa .service ,
+a
+.Xr ttyd 1
+running the command, adds a location
+.Pa /s/ Ns Ar id Ns Pa /
+to the web server on port 8443, reloads it, and prints the address.
+.Ar id
+is eight random hexadecimal digits.
+Every open and close is logged.
+.Pp
+The kinds:
+.Bl -tag -width "vm-serial" -compact
+.It Cm shell
+.Ar target
+is the command, or
+.Ql -
+for a login shell.
+.It Cm vm-serial
+The serial console of the libvirt domain
+.Ar target .
+.It Cm vm-ssh
+ssh to the address or host name
+.Ar target ,
+as root and then as admin.
+.It Cm pod-exec
+A shell in
+.Ar namespace Ns / Ns Ar pod Ns Op / Ns Ar container .
+.It Cm node-ssh
+ssh to the host
+.Ar target
+as root.
+.It Cm klab-tail
+.Ql klab tail Ar target .
+.El
+.Pp
+Every target but a shell command must match a plain pattern of letters,
+digits and a few punctuation marks, or it is refused before anything is
+started.
+It must run as root.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm open Ar kind Ar target
+As above.
+.Fl -user
+names who asked, for the log;
+.Fl -title
+is shown in the browser tab.
+.It Cm close Ar id
+Stop the session, remove its location and reload the web server.
+.It Cm list
+The sessions open.
+.It Cm prune
+Close every session whose service has ended.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/sessions/ Ns Ar id Ns Pa .env
+The session's record, mode 0640; read back as shell, so every value is
+written quoted with
+.Ql printf %q .
+.It Pa /etc/nginx/conf.d/kldload-dyn/ Ns Ar id Ns Pa .conf
+Its location in the web server.
+.It Pa /var/log/kldload-session.log
+Every open and close.
+.El
+.Sh EXIT STATUS
+0 when done; 1 on a refusal or a failure, named.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30:
+.Bd -literal -offset indent
+# kldload-session list
+(no active sessions)
+# (exited 0)
+# kldload-session open vm-serial 'bad;name'
+[kldload-session] error: invalid VM name: bad;name
+# (exited 1)
+# kldload-session open vm-ssh '1.2.3.4;id'
+[kldload-session] error: invalid vm-ssh target: 1.2.3.4;id (expected IP or hostname)
+# (exited 1)
+# kldload-session open pod-exec 'NS/pod;x'
+[kldload-session] error: pod-exec target must be <namespace>/<pod>[/<container>]
+# (exited 1)
+# kldload-session open frob x
+[kldload-session] error: unsupported kind: frob (supported: shell vm-serial vm-ssh pod-exec node-ssh klab-tail)
+# (exited 1)
+.Ed
+.Pp
+Opening one; not run for this page, since it puts a root console on the
+network:
+.Bd -literal -offset indent
+# kldload-session open vm-serial web01
+# prints https://<host>:8443/s/<id>/
+.Ed
+.Sh SEE ALSO
+.Xr ttyd 1 ,
+.Xr kldload-webui 8 ,
+.Xr nginx 8
+.Sh HISTORY
+On 2026-09-30, writing this page:
+.Cm pod-exec
+never named the pod \(em a shell quirk emptied it \(em so no pod shell
+ever opened; and the session record was written with only the command
+quoted, so a quote in a title would have run as root when the record was
+next read.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Nothing but the address guards a session: the web server does not ask
+who is opening
+.Pa /s/ Ns Ar id Ns Pa / ,
+and the consoles run as root.
+Anyone who has the address \(em from a browser's history, a shared screen,
+a log \(em has the console, until the session is closed or the machine
+restarts.
+Sessions do not expire when idle, and
+.Cm prune
+closes only those whose service has already ended.
