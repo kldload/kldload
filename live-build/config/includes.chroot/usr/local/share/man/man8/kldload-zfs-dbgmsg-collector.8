@@ -1,0 +1,51 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-ZFS-DBGMSG-COLLECTOR 8
+.Os
+.Sh NAME
+.Nm kldload-zfs-dbgmsg-collector
+.Nd copy new ZFS debug messages into a log the metrics stack can read
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The ZFS module's debug messages are in
+.Pa /proc/spl/kstat/zfs/dbgmsg ,
+readable only by root and rewritten whole rather than appended to, so
+promtail cannot follow it.
+.Nm
+appends to
+.Pa /var/log/kldload/zfs-dbgmsg.log
+the messages newer than the last one it copied, which Loki then shows on
+the ZFS dashboard.
+Past 50 MB the log is moved to
+.Pa zfs-dbgmsg.log.1
+and a new one begun.
+.Pa kldload-zfs-dbgmsg.timer
+runs it 15 seconds after boot and ten seconds after each run ends.
+Without the ZFS module it does nothing.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the header comment and exit 0, copying nothing.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/kldload/zfs-dbgmsg.log , Pa .1
+The copy, mode 0644.
+.It Pa /var/lib/kldload/.zfs-dbgmsg.lastts
+The time of the last message copied.
+.El
+.Sh EXIT STATUS
+0.
+.Sh SEE ALSO
+.Xr arcstats-exporter 8 ,
+.Xr zpool-scrub-exporter 8
+.Sh HISTORY
+On 2026-09-05 it spent 89 seconds of processor a run on a ten-second
+timer, and a line that began with a long number once became the
+last-copied time, after which nothing was copied for 22 hours.
+On 2026-09-30, writing this page: the log was never rotated and had
+reached 81 MB.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
