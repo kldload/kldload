@@ -423,9 +423,12 @@ def render_table(est: dict[str, Any]) -> None:
     print("  " + "-" * 92)
     for m in ms:
         mesh = "yes" if m["in_mesh"] else ("--" if not m["ip"] else "NO")
+        # --probe's answer: it was in the JSON only, so --probe --table ran
+        # every login and showed none of them (found 2026-09-29)
+        ssh = "" if "ssh" not in m else ("  ssh ok" if m["ssh"] else "  ssh FAILED")
         print(f"  {m['name']:<24}{m['class']:<16}{m['power']:<11}"
               f"{m['ip'] or '-':<17}{mesh:<7}{m['k8s'] or '-':<10}"
-              f"{'yes' if m['targetable'] else 'no'}")
+              f"{'yes' if m['targetable'] else 'no'}{ssh}")
 
     tgt = sum(1 for m in ms if m["targetable"])
     print(f"\n  {len(ms)} machine(s), {tgt} targetable by Ansible.")
