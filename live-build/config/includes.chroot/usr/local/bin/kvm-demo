@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# kldload 1.0.4 — Superpower Demo for Screenshots
-# 64GB RAM / 24 cores / RTX 3080
+# kvm-demo — a menu of short live demonstrations of what KVM on ZFS does:
+# instant clones, snapshots and rollback, replication, eBPF, WireGuard.
+# With no argument it shows the menu; with one (a number or letter, as
+# `kvm-demo --list` prints them) it runs that demonstration and exits, which
+# is how the web console's Demos panel drives it. Needs root; it creates and
+# removes its own volumes and machines under rpool/vms.
 
 set -Eeuo pipefail
 
@@ -202,6 +206,12 @@ menu() {
 # stream doesn't hang on "Press Enter".
 if [[ $# -gt 0 && "$1" != "--" ]]; then
     case "$1" in
+    -h | --help)
+        sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
+        echo
+        echo "Usage: kvm-demo [DEMO | --list]"
+        exit 0
+        ;;
     --list)
         echo "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 c g x q"
         exit 0
@@ -213,6 +223,20 @@ if [[ $# -gt 0 && "$1" != "--" ]]; then
 else
     _ONESHOT=0
 fi
+
+# _proof_clean -- remove the proof demo's own five volumes, by EXACT name: the
+# clones, then the golden. SAFETY: this was `zfs list -r rpool/vms | grep proof`
+# fed to `zfs destroy -Rf`, twice -- every dataset with "proof" anywhere in its
+# name, and with -R every clone of one, whoever made it: a VM called
+# waterproof, or proof-of-concept (found writing the command reference,
+# 2026-09-30). Destroy only what was recorded.
+_proof_clean() {
+    local vm
+    for vm in proof-1 proof-2 proof-3 proof-4 proof-golden; do
+        zfs list -H -o name "rpool/vms/$vm" &>/dev/null || continue
+        zfs destroy -r "rpool/vms/$vm" || echo "kvm-demo: could not remove rpool/vms/$vm" >&2
+    done
+}
 
 # ── MAIN LOOP ──────────────────────────────────────────────
 while true; do
@@ -1013,9 +1037,7 @@ USEREOF
             virsh destroy "$vm" &>/dev/null || true
             virsh undefine "$vm" --nvram &>/dev/null || virsh undefine "$vm" &>/dev/null || true
         done
-        for ds in $(zfs list -H -o name -r rpool/vms -t all 2>/dev/null | grep proof | tac); do
-            zfs destroy -Rf "$ds" &>/dev/null || true
-        done
+        _proof_clean
 
         # Create golden zvol
         echo -e "${Y}[1] Create golden image (10GB thin-provisioned ZFS zvol)${N}"
@@ -1087,9 +1109,7 @@ USEREOF
         echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 
         # Cleanup
-        for ds in $(zfs list -H -o name -r rpool/vms -t all 2>/dev/null | grep proof | tac); do
-            zfs destroy -Rf "$ds" &>/dev/null || true
-        done
+        _proof_clean
         pause
         ;;
 
