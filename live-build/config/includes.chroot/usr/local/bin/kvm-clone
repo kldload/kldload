@@ -225,6 +225,20 @@ virsh dumpxml "${SOURCE}" |
     sed '/<uuid>/d' |
     sed '/<mac address/d' |
     virsh define /dev/stdin >/dev/null || die "could not define ${DEST} from ${SOURCE}'s definition"
+
+# The source's OWN seed comes along in the copied definition when the source
+# is itself a clone. Left there it took target sda, so the clone's seed could
+# not attach ("seed built but could not be attached"), the clone booted with
+# its source's hostname, and it pointed at the source's seed file -- which
+# kvm-delete removes with the source, after which the clone no longer starts
+# (a clone of a kvm-golden build, onyx, 2026-09-29). Only the file named for
+# SOURCE is detached; any other cdrom stays.
+while read -r _t _d _tgt _src; do
+    if [[ "$_d" == cdrom && "${_src##*/}" == "${SOURCE}-seed.iso" ]]; then
+        virsh detach-disk "$DEST" "$_tgt" --config >/dev/null ||
+            die "could not detach ${SOURCE}'s seed from ${DEST}"
+    fi
+done < <(virsh domblklist "$DEST" --details | awk 'NR > 2 && NF >= 4 {print $1, $2, $3, $4}')
 # The clone exists and is defined: from here on nothing is undone, because
 # the seed below is best effort and a clone without it still boots.
 trap - EXIT

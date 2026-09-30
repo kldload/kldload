@@ -20,39 +20,62 @@
 #
 # Inputs:   <name> --from <distro|vm>  [--post FILE] [--run 'cmd'] [--keep]
 #           [--ram MB] [--cpus N]  (applied for the next boot via virsh)
+#           A base with an @golden snapshot is cloned from that snapshot,
+#           not from whatever its disk holds now.
 # Outputs:  rpool/vms/<name> (+ @golden unless --keep), the domain <name>
 # Exit:     0 built; 1 a step failed (the machine is left for inspection,
 #           the log says which step); 2 usage
 # Notes:    the base for a distro is klab-golden-<distro>, built by
 #           `klab golden <distro>`. A seal needs partitions: a blank disk
 #           fails it, which is what kldload-seal reports.
+#           See kvm-golden(8).
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 trap 'echo "kvm-golden: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"; }
-case "${1:-}" in -h | --help | "")
-    usage
-    [[ -n "${1:-}" ]]
-    exit $?
-    ;;
+usage() {
+    # asked for: stdout, 0; a usage error: stderr, 2
+    local rc="${1:-2}"
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0" >&$((rc == 0 ? 1 : 2))
+    exit "$rc"
+}
+_bad() {
+    echo "kvm-golden: $*" >&2
+    exit 2
+}
+# HISTORY: with no arguments this ended in `[[ -n "" ]]` under set -e and
+# exited 1 through the ERR trap, and `--ram` with no value died of the shell's
+# own "parameter null or not set" (both found writing kvm-golden(8),
+# 2026-09-29). Every usage error is now a message and 2.
+case "${1:-}" in
+-h | --help) usage 0 ;;
+"") usage 2 ;;
+-*) _bad "the first argument is the new machine's name, not $1" ;;
 esac
 
+# WHY a copy: the loop below shifts the options away, and the sudo re-exec
+# further down passed "$NAME" "$@" -- the name alone -- so every run as a
+# user failed with "--from is required".
+ARGS=("$@")
 NAME="$1"
 shift
 FROM="" POST="" RUN="" KEEP=0 RAM="" CPUS=""
+_val() { [[ $# -ge 2 && -n "$2" ]] || _bad "$1 needs a value"; }
 while (($#)); do
     case "$1" in
     --from)
-        FROM="${2:?--from needs a distro or a VM}"
+        _val "$@"
+        FROM="$2"
         shift 2
         ;;
     --post)
-        POST="${2:?--post needs a file}"
+        _val "$@"
+        POST="$2"
         shift 2
         ;;
     --run)
-        RUN="${2:?--run needs a command}"
+        _val "$@"
+        RUN="$2"
         shift 2
         ;;
     --keep)
@@ -60,17 +83,20 @@ while (($#)); do
         shift
         ;;
     --ram)
-        RAM="${2:?}"
+        _val "$@"
+        [[ "$2" =~ ^[0-9]+$ ]] && (($2 >= 256)) || _bad "--ram is MiB, a whole number of at least 256: '$2'"
+        RAM="$2"
         shift 2
         ;;
     --cpus)
-        CPUS="${2:?}"
+        _val "$@"
+        [[ "$2" =~ ^[1-9][0-9]*$ ]] || _bad "--cpus is a whole number of at least 1: '$2'"
+        CPUS="$2"
         shift 2
         ;;
     *)
         echo "kvm-golden: unknown option $1" >&2
-        usage >&2
-        exit 2
+        usage 2
         ;;
     esac
 done
@@ -86,7 +112,7 @@ done
     echo "kvm-golden: cannot read --post $POST" >&2
     exit 2
 }
-if ((EUID != 0)); then exec sudo -n -- "$0" "$NAME" "$@"; fi
+if ((EUID != 0)); then exec sudo -n -- "$0" "${ARGS[@]}"; fi
 
 # the base: a distro names its klab golden; anything else must be a VM
 case "$FROM" in
@@ -94,7 +120,11 @@ centos | rocky | fedora | debian | ubuntu) BASE="klab-golden-$FROM" ;;
 *) BASE="$FROM" ;;
 esac
 virsh dominfo "$BASE" >/dev/null 2>&1 || {
-    echo "kvm-golden: no base VM '$BASE' (klab golden $FROM builds it)" >&2
+    if [[ "$BASE" == klab-golden-* ]]; then
+        echo "kvm-golden: no base VM '$BASE' (klab golden $FROM builds it)" >&2
+    else
+        echo "kvm-golden: no VM named '$BASE' to build from" >&2
+    fi
     exit 1
 }
 if virsh dominfo "$NAME" >/dev/null 2>&1 || zfs list -H "rpool/vms/$NAME" >/dev/null 2>&1; then
@@ -102,10 +132,33 @@ if virsh dominfo "$NAME" >/dev/null 2>&1 || zfs list -H "rpool/vms/$NAME" >/dev/
     exit 1
 fi
 
-echo "== clone $BASE -> $NAME"
-kvm-clone "$BASE" "$NAME"
-if [[ -n "$RAM" ]]; then virsh setmaxmem "$NAME" "${RAM}M" --config && virsh setmem "$NAME" "${RAM}M" --config; fi
-if [[ -n "$CPUS" ]]; then virsh setvcpus "$NAME" "$CPUS" --config --maximum && virsh setvcpus "$NAME" "$CPUS" --config; fi
+# WHY @golden when there is one: without --snap kvm-clone snapshots the base's
+# disk as it is now, and a golden that was booted after it was sealed is no
+# longer the golden -- it carries that boot's identity and logs.
+SNAP=()
+if zfs list -H "rpool/vms/$BASE@golden" >/dev/null 2>&1; then SNAP=(--snap golden); fi
+echo "== clone $BASE$( ((${#SNAP[@]})) && echo @golden) -> $NAME"
+kvm-clone "$BASE" "$NAME" "${SNAP[@]}" || {
+    echo "kvm-golden: kvm-clone failed; it removed what it had made" >&2
+    exit 1
+}
+# WHY each checked on its own: as `a && b` inside an if, a failed setmaxmem
+# was exempt from set -e and --ram was silently not applied. virsh prints a
+# blank line for each of these on success; that is all >/dev/null drops.
+_set() {
+    "$@" >/dev/null || {
+        echo "kvm-golden: '$*' failed; $NAME is defined, not started" >&2
+        exit 1
+    }
+}
+if [[ -n "$RAM" ]]; then
+    _set virsh setmaxmem "$NAME" "${RAM}M" --config
+    _set virsh setmem "$NAME" "${RAM}M" --config
+fi
+if [[ -n "$CPUS" ]]; then
+    _set virsh setvcpus "$NAME" "$CPUS" --config --maximum
+    _set virsh setvcpus "$NAME" "$CPUS" --config
+fi
 
 echo "== boot $NAME"
 virsh start "$NAME" >/dev/null
@@ -135,12 +188,18 @@ done
 
 if [[ -n "$POST" ]]; then
     echo "== post-install: $POST (as root in $NAME)"
-    "${SSH[@]}" "root@$IP" 'bash -s' <"$POST"
+    if ! "${SSH[@]}" "root@$IP" 'bash -s' <"$POST"; then
+        echo "kvm-golden: the post-install failed; $NAME is left running at $IP to look at" >&2
+        exit 1
+    fi
 fi
 if [[ -n "$RUN" ]]; then
     echo "== run: $RUN"
     # the command goes down stdin to bash -s, never onto a remote argv
-    printf '%s\n' "$RUN" | "${SSH[@]}" "root@$IP" 'bash -s'
+    if ! printf '%s\n' "$RUN" | "${SSH[@]}" "root@$IP" 'bash -s'; then
+        echo "kvm-golden: the --run command failed; $NAME is left running at $IP to look at" >&2
+        exit 1
+    fi
 fi
 
 if ((KEEP)); then
@@ -159,7 +218,10 @@ virsh domstate "$NAME" | grep -q 'shut off' || {
     exit 1
 }
 echo "== seal /dev/zvol/rpool/vms/$NAME"
-kldload-seal "/dev/zvol/rpool/vms/$NAME"
+kldload-seal "/dev/zvol/rpool/vms/$NAME" || {
+    echo "kvm-golden: the seal failed; $NAME is shut off and NOT a golden" >&2
+    exit 1
+}
 echo "== snapshot rpool/vms/$NAME@golden"
 zfs snapshot "rpool/vms/$NAME@golden"
 zfs list -H "rpool/vms/$NAME@golden" >/dev/null # outcome, not exit code
