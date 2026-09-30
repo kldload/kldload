@@ -1,0 +1,90 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-BOUNCE-TLS-SERVICES 8
+.Os
+.Sh NAME
+.Nm kldload-bounce-tls-services
+.Nd make the services that serve the console's certificate load a new one
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+A service reads its TLS certificate when it starts.
+After
+.Xr kldload-tls-cert 8
+writes a new one,
+.Nm
+makes each service that holds the old one pick up the new:
+.Bl -bullet -compact
+.It
+.Xr nginx 8
+is reloaded, so open connections \(em terminals, live dashboards \(em are
+not dropped;
+.It
+the console's older proxy, the web console, its terminal
+.Pq Ql ttyd-k9s
+and Grafana are restarted, those that are running.
+.El
+.Pp
+It does nothing when the certificate is the one it last acted on, which it
+knows by its SHA-256 digest; or while an install or a klab run is in
+progress, since restarting the web console then kills the install it is
+running.
+Each restart is queued, not waited for.
+.Pp
+It first sets the certificate to mode 0644 and the key to 0640.
+.Pp
+.Pa kldload-tls-cert.service
+runs it after each run of the certificate tool.
+It needs root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the description at the top of the script and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/tls/webui.crt , Pa webui.key
+The certificate and key.
+.It Pa /var/lib/kldload/tls/.bounced-sha256
+The digest of the certificate last acted on.
+.It Pa /var/run/kldload/installer-busy , Pa /var/run/klab/current-run.env
+Present while an install or a klab run is in progress.
+.El
+.Sh EXIT STATUS
+0; 2 for any argument other than
+.Fl -help .
+A reload or restart that fails is not reported.
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, whose certificate had not
+changed.
+It writes only to the journal, read here from a cursor taken just before:
+.Bd -literal -offset indent
+# cur=$(journalctl -n 0 --show-cursor -q | sed -n 's/^-- cursor: //p')
+# kldload-bounce-tls-services
+# (exited 0)
+# journalctl --after-cursor "$cur" -t kldload-bounce-tls-services -o cat --no-pager
+cert unchanged — nothing to restart
+.Ed
+.Sh SEE ALSO
+.Xr journalctl 1 ,
+.Xr systemctl 1 ,
+.Xr kldload-tls-cert 8 ,
+.Xr nginx 8
+.Sh HISTORY
+Until 2026-09-05 it restarted everything whenever it ran, and it runs on
+every network change: a desktop saw 115 runs in a day, and the web console
+and Grafana hit systemd's start limit and stopped.
+.Pp
+On 2026-09-30, writing this page:
+.Fl -help
+ran it.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The chmod loosens the key that
+.Xr kldload-tls-cert 8
+writes 0600; only the directory's mode, 0700, keeps other users out.
+What it was for is not known.
+.Pp
+Failures to reload or restart are discarded.
