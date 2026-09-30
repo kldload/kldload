@@ -39,7 +39,9 @@ every combination.
 - **Public repos enabled after install**, with the **ABI-coupled substrate
   versionlocked** (kernel, kernel-devel, zfs/zfs-dkms, nvidia + akmod-nvidia,
   bcc/bpftrace) so a routine `dnf update` can never jump the kernel and brick
-  ZFS/NVIDIA. 5 rescue kernels kept; `dnf-automatic` masked.
+  ZFS/NVIDIA. 5 rescue kernels kept; `dnf-automatic`
+  applies security-only userspace updates daily (the lock keeps it off the
+  substrate).
 - **NVIDIA proprietary** via akmod (signed, Secure-Boot-capable) with a
   **first-boot healing net** that builds + loads the driver → correct native
   resolution instead of 1024×768.

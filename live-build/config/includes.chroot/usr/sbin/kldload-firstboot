@@ -2655,13 +2655,33 @@ ZRAMCONF
                 log "WARNING: dnf install dnf-automatic failed"
             fi
         fi
-        # Enable timer if dnf-automatic is present (covers both fresh install
-        # and existing systems being firstboot-rerun). systemctl enable is
-        # idempotent.
-        if rpm -q dnf-automatic >/dev/null 2>&1; then
-            systemctl enable dnf-automatic-install.timer >>"$LOG" 2>&1 &&
-                ok "dnf-automatic-install.timer enabled (nightly security-only patches)" ||
-                log "WARNING: failed to enable dnf-automatic-install.timer"
+        # The timer that APPLIES updates has a different name per dnf
+        # generation: dnf4 (EL) ships dnf-automatic-install.timer, dnf5
+        # (Fedora 41+) ships only dnf5-automatic.timer, which obeys
+        # apply_updates in /etc/dnf/automatic.conf (dnf5 reads that path;
+        # checked on F44 2026-09-30 with download_updates=no changing its
+        # output). Naming the dnf4 unit on F44 enabled nothing, and the mask
+        # further down killed the dnf5 one through its dnf-automatic alias:
+        # onyx ran no automatic updates at all. So pick the unit that exists,
+        # clear any mask an older firstboot left, and check the result.
+        local _auto_timer=""
+        if [[ -e /usr/lib/systemd/system/dnf-automatic-install.timer ]]; then
+            _auto_timer=dnf-automatic-install.timer
+        elif [[ -e /usr/lib/systemd/system/dnf5-automatic.timer ]]; then
+            _auto_timer=dnf5-automatic.timer
+        fi
+        if [[ -n "$_auto_timer" ]]; then
+            systemctl unmask dnf-automatic.timer dnf-automatic.service "$_auto_timer" >>"$LOG" 2>&1 ||
+                log "WARNING: could not unmask the dnf-automatic units"
+            systemctl enable "$_auto_timer" >>"$LOG" 2>&1 ||
+                log "WARNING: failed to enable ${_auto_timer}"
+            if systemctl is-enabled "$_auto_timer" >/dev/null 2>&1; then
+                ok "${_auto_timer} enabled (daily security-only patches)"
+            else
+                log "WARNING: ${_auto_timer} is NOT enabled — no automatic security updates"
+            fi
+        else
+            log "WARNING: no dnf-automatic timer unit found — no automatic security updates"
         fi
     fi
 
@@ -2946,8 +2966,9 @@ SMBSHARE
     # normally. Only the substrate is frozen at the kldload-validated
     # version that shipped with this ISO.
     #
-    # Also mask dnf-automatic so even if a future package pulls it in, it
-    # never fires. And bump installonly_limit to 5 so we keep more rescue
+    # dnf-automatic is NOT masked here any more: it applies security-only
+    # userspace updates (the other half of the model), and the lock above is
+    # what keeps it off the substrate. Bump installonly_limit to 5 so we keep more rescue
     # kernels around (RHEL default = 3; we want headroom for emergency
     # rollback via grub even when ZFS BEs are the primary recovery path).
     if command -v dnf >/dev/null 2>&1; then
@@ -2978,9 +2999,6 @@ SMBSHARE
                 ok "Core packages versionlocked — userspace can still security-update via dnf" ||
                 log "WARNING: dnf versionlock add failed — operator can retry: dnf versionlock add <list>"
         fi
-        # Prevent dnf-automatic from EVER firing in the background, even if a
-        # future RPM transaction pulls it in transitively.
-        systemctl mask dnf-automatic.timer dnf-automatic.service 2>/dev/null || true
         # Keep 5 kernels installed (vs RHEL default 3) for emergency rescue boot.
         if grep -q "^installonly_limit=" /etc/dnf/dnf.conf 2>/dev/null; then
             sed -i 's/^installonly_limit=.*/installonly_limit=5/' /etc/dnf/dnf.conf
