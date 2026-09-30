@@ -98,6 +98,21 @@ pause() {
 # may have. A user's own `golden` or `web-1` is now left alone, and the demo's
 # kvm-create of that name refuses instead of destroying it.
 DEMO_MARK="com.kldload:demo=kvm-demo"
+# The containers' mark. SAFETY (2026-09-30): the cleanups removed containers
+# by fixed name -- ollama-1, demo-nginx, demo-postgres... -- whoever made
+# them, and the GPU one ran `fuser -k 11434/tcp`, killing whatever listened
+# on Ollama's default port: on onyx that is the host's own ollama, behind
+# open-webui and the assistant. Now each container is labelled at `podman
+# run` and only labelled ones are removed; a demo container from before the
+# label is left for `podman rm` by hand.
+DEMO_CTR_LABEL="com.kldload.demo=kvm-demo"
+_demo_ctr_rm() {
+    local -a ids
+    # no podman, or none of ours: nothing to remove
+    mapfile -t ids < <(podman ps -aq --filter "label=${DEMO_CTR_LABEL}" 2>/dev/null || true)
+    ((${#ids[@]})) || return 0
+    podman rm -f -t 2 "${ids[@]}" &>/dev/null || true # judged by the next listing, which the menu shows
+}
 _mark() { zfs set "$DEMO_MARK" "rpool/vms/$1" 2>/dev/null || true; } # a volume that failed to be made has nothing to mark
 # rpool/srv/demo, only when this script made it (a user's own is left)
 _demo_srv_destroy() {
@@ -122,10 +137,8 @@ _demo_destroy() {
 nuke_all() {
     echo -ne "${Y}Resetting demo environment...${N} "
 
-    # Kill all demo containers
-    for ctr in ollama-1 ollama-2 ollama-demo demo-nginx demo-redis demo-postgres gpu-bench; do
-        podman rm -f -t 2 "$ctr" &>/dev/null || true
-    done
+    # This demo's containers only (see DEMO_CTR_LABEL)
+    _demo_ctr_rm
 
     # This demo's machines and volumes, and nothing else (see DEMO_MARK)
     _demo_destroy
@@ -148,20 +161,13 @@ clean_vms() {
 
 clean_gpu() {
     echo -ne "${D}  Cleaning GPU containers...${N} "
-    for ctr in ollama-1 ollama-2 ollama-demo gpu-bench; do
-        podman rm -f -t 2 "$ctr" &>/dev/null || true
-    done
-    # Kill anything on ollama ports
-    fuser -k 11434/tcp &>/dev/null || true
-    fuser -k 11435/tcp &>/dev/null || true
+    _demo_ctr_rm # this demo's containers, not the host's ollama (see DEMO_CTR_LABEL)
     echo -e "${G}done${N}"
 }
 
 clean_containers() {
     echo -ne "${D}  Cleaning demo containers...${N} "
-    for ctr in demo-nginx demo-redis demo-postgres; do
-        podman rm -f -t 2 "$ctr" &>/dev/null || true
-    done
+    _demo_ctr_rm # see DEMO_CTR_LABEL
     _demo_srv_destroy
     echo -e "${G}done${N}"
 }
@@ -432,14 +438,14 @@ while true; do
         echo ""
 
         echo -e "${D}Starting Ollama #1 on GPU (port 11434)...${N}"
-        podman run -d --name ollama-1 \
+        podman run -d --label "$DEMO_CTR_LABEL" --name ollama-1 \
             --device nvidia.com/gpu=all \
             -p 11434:11434 \
             docker.io/ollama/ollama >/dev/null 2>&1
         sleep 2
 
         echo -e "${D}Starting Ollama #2 on GPU (port 11435)...${N}"
-        podman run -d --name ollama-2 \
+        podman run -d --label "$DEMO_CTR_LABEL" --name ollama-2 \
             --device nvidia.com/gpu=all \
             -p 11435:11434 \
             docker.io/ollama/ollama >/dev/null 2>&1
@@ -576,17 +582,17 @@ while true; do
         echo -e "${D}Starting nginx...${N}"
         mkdir -p /srv/demo/nginx
         echo "<h1>Hello from kldload on OpenZFS</h1><p>nginx running on a ZFS dataset with lz4 compression</p>" >/srv/demo/nginx/index.html
-        podman run -d --name demo-nginx -p 8080:80 \
+        podman run -d --label "$DEMO_CTR_LABEL" --name demo-nginx -p 8080:80 \
             -v /srv/demo/nginx:/usr/share/nginx/html:Z \
             docker.io/nginx:alpine >/dev/null 2>&1
 
         echo -e "${D}Starting redis (recordsize=16k)...${N}"
-        podman run -d --name demo-redis -p 6379:6379 \
+        podman run -d --label "$DEMO_CTR_LABEL" --name demo-redis -p 6379:6379 \
             -v /srv/demo/redis:/data:Z \
             docker.io/redis:7-alpine >/dev/null 2>&1
 
         echo -e "${D}Starting postgres (recordsize=8k)...${N}"
-        podman run -d --name demo-postgres -p 5432:5432 \
+        podman run -d --label "$DEMO_CTR_LABEL" --name demo-postgres -p 5432:5432 \
             -e POSTGRES_PASSWORD=demo \
             -v /srv/demo/postgres:/var/lib/postgresql/data:Z \
             docker.io/postgres:16-alpine >/dev/null 2>&1
