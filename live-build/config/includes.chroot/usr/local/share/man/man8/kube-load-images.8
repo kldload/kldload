@@ -1,0 +1,79 @@
+.Dd September 30, 2026
+.Dt KUBE-LOAD-IMAGES 8
+.Os
+.Sh NAME
+.Nm kube-load-images
+.Nd load the container images an offline cluster needs into containerd
+.Sh SYNOPSIS
+.Nm
+.Op Ar directory
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+imports every
+.Pa *.tar
+in
+.Ar directory ,
+by default
+.Pa /root/darksite/k8s-images ,
+into containerd's
+.Ql k8s.io
+namespace with
+.Ql ctr images import ,
+so that a node with no internet can start or join a cluster.
+It counts what imported against what it was given and names each archive
+that did not.
+.Pp
+A directory that is missing or empty is not an error: it says so, and
+the node pulls from the internet as it otherwise would.
+It runs itself under
+.Xr sudo 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print its description and exit 0, without root.
+.El
+.Sh EXIT STATUS
+0 when every archive imported, or there were none; 1 when
+.Xr ctr 8
+is missing or any archive did not import.
+.Sh EXAMPLES
+In a Fedora 44 container, with three empty archives:
+.Bd -literal -offset indent
+# kube-load-images /nowhere
+[kube-load-images] No pre-pulled images found at /nowhere — will pull from internet
+# (exited 0)
+# kube-load-images /img
+[kube-load-images] ctr not found — containerd not installed?
+# (exited 1)
+.Ed
+.Pp
+The same, with
+.Xr ctr 8
+replaced by a script that refuses
+.Pa cilium.tar :
+.Bd -literal -offset indent
+# kube-load-images /img
+ctr: unrecognized image format
+[kube-load-images] Loaded 2 of 3 container image archives into containerd
+[kube-load-images] FAILED to import: cilium.tar
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr ctr 8 ,
+.Xr kube-cluster 8 ,
+.Xr kube-network 8
+.Sh HISTORY
+Until 2026-09-27 it counted the archives it tried, not the ones that
+imported, and ignored failures: a golden reported every image loaded
+while Cilium's, saved by digest with no name, gave containerd nothing it
+could find.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Only
+.Pa *.tar
+files are imported; anything else in the directory is ignored and, if it
+is all there is, reported as
+.Dq Loaded 0 of 0 .
