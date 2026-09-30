@@ -50,7 +50,9 @@ die() {
 }
 
 usage() {
-    cat >&2 <<EOF
+    # asked for: stdout, 0; a usage error: stderr, 2 (--help exited 2, 2026-09-30)
+    local rc="${1:-2}"
+    cat >&$((rc == 0 ? 1 : 2)) <<EOF
 usage: kldload-restamp-identity (--dataset DS | --root DIR) [--hostname NAME] [--new-hostid]
 
   --dataset DS    a boot environment to mount and restamp, e.g. rpool/ROOT/new
@@ -63,7 +65,7 @@ usage: kldload-restamp-identity (--dataset DS | --root DIR) [--hostname NAME] [-
 EXIT STATUS
   0 restamped and verified   1 a step failed   2 usage, or refused
 EOF
-    exit 2
+    exit "$rc"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -84,7 +86,7 @@ while [[ $# -gt 0 ]]; do
         NEW_HOSTID=1
         shift
         ;;
-    -h | --help) usage ;;
+    -h | --help) usage 0 ;;
     *) die "unknown argument: $1" 2 ;;
     esac
 done

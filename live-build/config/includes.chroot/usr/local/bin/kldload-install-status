@@ -32,7 +32,9 @@ POOL="${KLDLOAD_POOL:-rpool}"
 TARGET="${KLDLOAD_TARGET_MNT:-/target}"
 
 usage() {
-    cat >&2 <<'EOF'
+    # asked for: stdout, 0; a usage error: stderr, 2 (--help exited 2, 2026-09-30)
+    local rc="${1:-2}"
+    cat >&$((rc == 0 ? 1 : 2)) <<'EOF'
 usage: kldload-install-status [-w|--watch] [-v|--verbose]
 
   (no args)   print one line and exit
@@ -42,7 +44,7 @@ usage: kldload-install-status [-w|--watch] [-v|--verbose]
 EXIT STATUS
   0  running, or finished cleanly   1  the install failed   2  usage
 EOF
-    exit 2
+    exit "$rc"
 }
 
 WATCH=0 VERBOSE=0
@@ -50,7 +52,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
     -w | --watch) WATCH=1 ;;
     -v | --verbose) VERBOSE=1 ;;
-    -h | --help) usage ;;
+    -h | --help) usage 0 ;;
     *)
         printf 'kldload-install-status: unknown argument: %s\n' "$1" >&2
         usage
