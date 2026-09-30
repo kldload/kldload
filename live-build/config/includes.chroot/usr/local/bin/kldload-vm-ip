@@ -24,13 +24,18 @@
 # the reference for the lease logic here; this is that logic, callable.
 #
 # USAGE   kldload-vm-ip <domain>          kldload-vm-ip --all [--json]
-# EXIT    0 an address was printed · 1 no address · 2 usage
+# EXIT    0 an address was printed · 1 no address (a domain that is not
+#         running has none) · 2 usage. See kldload-vm-ip(8).
 # NEEDS   virsh (read-only); jq for kfire records. Root is not required when
 #         the caller can read libvirt, which is why enroll and the timers, all
 #         root, and a plain-user console alike can call it.
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 trap 'echo "kldload-vm-ip: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+# The system libvirt, named: the header promises a plain-user console can
+# call this, and plain virsh as a user asks that user's own session, where
+# no VM exists -- a running clone had "no address" (onyx, 2026-09-29).
+export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 usage() {
     sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
@@ -157,6 +162,15 @@ case "$1" in
         echo "kldload-vm-ip: virsh is not installed — this is not a hypervisor" >&2
         exit 1
     }
+    # A libvirt domain that is not running has no address, whatever its old
+    # lease says: a lease outlives its guest, and DHCP hands the address on,
+    # so printing it pointed callers at whichever machine has it now. A
+    # powered-off clone resolved to its old lease, exit 0 (onyx, 2026-09-29).
+    # --all already asked running domains only.
+    if _st="$(virsh domstate "$1" 2>/dev/null)" && [[ "$_st" != running* ]]; then
+        echo "kldload-vm-ip: $1 is ${_st%%$'\n'*}, so it has no address" >&2
+        exit 1
+    fi
     resolve_one "$1" || exit 1
     ;;
 esac
