@@ -14,7 +14,8 @@
 #   kube-network pin-kubelet              — pin kubelet to wg-k8s interface
 #   kube-network nft                      — apply K8s-aware nftables rules
 # Exit: 0 done, 1 a step failed, 2 usage error (-h/--help is 0).
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kube-network: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Rule 9: -h/--help answers before this re-exec. These tools already had
 # perfectly good usage text -- it just could not be reached without root.
@@ -239,6 +240,17 @@ cmd_add_peer() {
     local pubkey="${2:?missing peer public key}"
     local peer_id="${3:?missing peer node-id}"
 
+    # SAFETY: all three are written into a config that wg-quick reads as
+    # root, where a PostUp= line is a command. A newline in any of them is a
+    # line of that file. Today's callers pass cleaned values (kldload-enroll
+    # strips whitespace from the key; addresses come from leases), but the
+    # file is written here, so the check is here (2026-09-30).
+    [[ "$endpoint" =~ ^[A-Za-z0-9.:-]+$ ]] || die "not an address or host name: ${endpoint}"
+    [[ "$pubkey" =~ ^[A-Za-z0-9+/]{42,43}=$ ]] || die "not a WireGuard public key: ${pubkey}"
+    [[ "$peer_id" =~ ^[0-9]+$ ]] && ((10#$peer_id >= 1 && 10#$peer_id <= 254)) ||
+        die "peer-id must be 1-254 (got '${peer_id}')"
+    peer_id=$((10#$peer_id)) # "08" would be written as 10.250.0.08
+
     [[ -f /etc/wireguard/wg-mgmt.conf ]] || die "Run 'kube-network init' first"
 
     # Add peer to management plane
@@ -298,7 +310,10 @@ cmd_remove_peer() {
     local removed=0 conf tmp
     for conf in /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-k8s.conf; do
         [[ -f "$conf" ]] || continue
-        tmp="$(mktemp)"
+        # Beside the config, not in /tmp: the file carries the PrivateKey,
+        # and a rename in one directory is the atomic replace the comment
+        # below promised and the old `cat >` was not (2026-09-30).
+        tmp="$(mktemp "${conf}.XXXXXX")"
         # Buffer each [Peer] stanza and emit it only if it is not the one asked
         # for. Everything before the first [Peer] (the [Interface] section)
         # passes through untouched.
@@ -321,11 +336,12 @@ cmd_remove_peer() {
         }
         if ! cmp -s "$conf" "$tmp"; then
             # Atomic replace: a half-written wg config is a node that cannot
-            # rejoin the mesh on the next wg-quick up.
-            cat "$tmp" >"$conf"
+            # rejoin the mesh on the next wg-quick up. mktemp made it 0600.
+            mv -f "$tmp" "$conf"
             removed=1
+        else
+            rm -f "$tmp"
         fi
-        rm -f "$tmp"
     done
 
     if ((removed)); then
