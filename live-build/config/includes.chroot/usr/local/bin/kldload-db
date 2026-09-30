@@ -37,8 +37,10 @@
 # first tool to touch the database creates it, whoever that is. The web UI
 # calls `kldload-db init` and owns nothing.
 #
-# Exit code is 0 on success, 1 on a database error or an absent row for
-# vm-show, 2 for usage. Errors go to stderr.
+# Exit code is 0 on success, 1 on a database error, or an absent row for
+# vm-show, vm-status, node-status, vm-mesh and deploy-finish (the deletes
+# are 0 for an absent row: absent is what they ask for), 2 for usage.
+# Errors go to stderr. See kldload-db(8).
 # ══════════════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -328,12 +330,29 @@ def cmd_node_register(args):
     con.close()
 
 
+def _matched(cur, what: str) -> int:
+    """Exit status for a status update: 1, said on stderr, when no row matched.
+
+    An UPDATE whose WHERE matches nothing succeeds and changes nothing. These
+    verbs returned 0 for it, so a misspelt name was a success, and
+    kldload-networks once reported "11 VMs updated" over an unchanged database
+    (it passed DHCP client-ids as names). The deletes keep 0 for an absent row
+    on purpose: absent is what a delete asks for (vmxplore deletes domains that
+    were never registered).
+    """
+    if cur.rowcount == 0:
+        sys.stderr.write(f"kldload-db: no {what}; nothing changed\n")
+        return 1
+    return 0
+
+
 def cmd_node_status(args):
     con = _connect()
-    con.execute("UPDATE nodes SET status=?, last_seen=? WHERE hostname=?",
-                (args.status, _now(), args.hostname))
+    cur = con.execute("UPDATE nodes SET status=?, last_seen=? WHERE hostname=?",
+                      (args.status, _now(), args.hostname))
     con.commit()
     con.close()
+    return _matched(cur, f"node named {args.hostname}")
 
 
 def cmd_node_delete(args):
@@ -401,9 +420,10 @@ def cmd_vm_status(args):
     if args.ip is not None:
         sets.append("ip_addr=?"); vals.append(args.ip)
     vals.append(args.name)
-    con.execute(f"UPDATE vms SET {', '.join(sets)} WHERE name=?", vals)
+    cur = con.execute(f"UPDATE vms SET {', '.join(sets)} WHERE name=?", vals)
     con.commit()
     con.close()
+    return _matched(cur, f"VM named {args.name}")
 
 
 def cmd_vm_delete(args):
@@ -506,7 +526,7 @@ def cmd_deploy_start(args):
 
 def cmd_deploy_finish(args):
     con = _connect()
-    con.execute(
+    cur = con.execute(
         "UPDATE deployments SET rc=?, status=?, log_path=?, finished_at=? WHERE id=?",
         (args.rc,
          args.status or ("ok" if args.rc == 0 else "failed"),
@@ -515,6 +535,7 @@ def cmd_deploy_finish(args):
     )
     con.commit()
     con.close()
+    return _matched(cur, f"deployment {args.id}")
 
 
 def cmd_dump(args):
