@@ -18,9 +18,12 @@ trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 #   5. Points the pool's bootfs at it. Next reboot lands in the old state.
 #
 # WHY a clone and not `zfs rollback`:
-#   `zfs rollback` cannot run against a mounted root ("dataset is busy"), and
-#   it DESTROYS every snapshot newer than the target — so the operation has no
-#   way back if the rollback itself was the mistake. Cloning is reversible:
+#   `zfs rollback` of a mounted root SUCCEEDS -- it swaps the files under
+#   every running process at once (shown 2026-09-30 on a throwaway mounted
+#   dataset with a file held open; this comment used to say it failed with
+#   "dataset is busy") -- and it DESTROYS every snapshot newer than the
+#   target, so the operation has no way back if the rollback itself was the
+#   mistake. Cloning is reversible:
 #   the environment you rolled away from is still there, untouched, and
 #   `rollback cancel` re-points bootfs at it before you even reboot.
 #   This is what boot environments are for, and what ZFSBootMenu boots from.

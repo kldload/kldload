@@ -7,7 +7,8 @@ set -euo pipefail
 #   kbe list
 #   kbe create <name>                 snapshot the running root as @<name>, clone it to rpool/ROOT/<name>
 #   kbe activate <dataset>            point the boot menu at that one for the next boot
-#   kbe rollback <snapshot>           roll the running root back to <snapshot>
+#   kbe rollback <snapshot>           roll a boot environment that is NOT running back to
+#                                     <snapshot>; for the running root, `rollback to` boots it
 #   kbe delete <dataset|snapshot>     remove a boot environment and the snapshot it was made from
 # ---------------------------------------------------------------------------
 
@@ -31,7 +32,8 @@ Commands:
   create <name>             Snapshot the running root as @<name> and clone it to
                             rpool/ROOT/<name>, so both appear in the boot menu
   activate <dataset>        Point the boot menu (pool bootfs) at that one for the next boot
-  rollback <snapshot>       Roll the running root back to <snapshot> (discards newer changes)
+  rollback <snapshot>       Roll a boot environment that is not running back to <snapshot>
+                            (discards newer changes); for the running root use 'rollback to'
   delete <dataset|snapshot> Remove a boot environment and the snapshot it was made from;
                             refuses the running root and the pool's bootfs
 
@@ -153,6 +155,19 @@ activate)
 rollback)
     SNAP="${1:-}"
     [[ -n "$SNAP" ]] || die "rollback requires a snapshot argument."
+    # SAFETY: never the RUNNING root. `zfs rollback` of a mounted dataset
+    # succeeds -- it swaps the files under every running process at once --
+    # and this said "Reboot to apply" after doing it. Shown on onyx
+    # 2026-09-30 on a throwaway mounted dataset with a file held open:
+    # rc 0, content reverted, still mounted. `rollback to` clones the
+    # snapshot and boots it instead; this stays for environments that are
+    # not running.
+    _rb_ds="${SNAP%%@*}"
+    [[ "$SNAP" == *@* ]] || _rb_ds="$(findmnt -no SOURCE -t zfs / 2>/dev/null || true)"
+    _running="$(findmnt -no SOURCE -t zfs / 2>/dev/null || true)" # empty on a live image: nothing is running from the pool
+    if [[ -n "$_running" && "$_rb_ds" == "$_running" ]]; then
+        die "${_rb_ds} is the running root: rolling it back would change files under every running process. Use: rollback to ${SNAP#*@}   (boots it; 'rollback cancel' undoes it)"
+    fi
     log "WARNING: Rolling back will DISCARD all changes made after $SNAP."
     log "Press Ctrl+C within 5 seconds to abort..."
     sleep 5
