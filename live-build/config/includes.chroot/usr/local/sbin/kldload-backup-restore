@@ -1,79 +1,106 @@
 #!/usr/bin/env bash
-# kldload-backup-restore — pull a previously-packed install stream from
-# fiend (or any remote host) and zfs-recv it into a NEW dataset tree on
-# this pool. Never touches the live root.
+# kldload-backup-restore — pull a stream made by kldload-backup-pack from a
+# remote host and zfs-recv it into a NEW dataset tree on this pool. Never
+# touches the live root.
 #
 # Restored layout:
-#   rpool/restore/<timestamp>/...        # exact mirror of the sender's
-#                                         # dataset tree, rooted under
-#                                         # rpool/restore/<ts>/
+#   rpool/restore/<file name>/<sender's dataset path without its pool>
 #
 # Why never in-place: replacing the dataset mounted at / would crash the
-# running system. Operator promotes manually after inspection by:
-#   1) booting from the live USB (recovery shell), or
-#   2) `zfs rename` / boot-loader update outside this script.
+# running system. The operator promotes by hand after looking at it, from
+# the live USB's recovery shell, or copies files out.
+#
+# A stream sent raw (every encrypted source; the .meta says send_raw=1)
+# arrives still encrypted: `zfs load-key` with the sender's passphrase or
+# key, then mount.
 #
 # Usage:
-#   sudo kldload-backup-restore                       # list + interactive pick
-#   sudo kldload-backup-restore --file foo.zfs.zst    # specific file
-#   sudo kldload-backup-restore --latest              # newest file on the host
-#   sudo kldload-backup-restore --host other.host     # remote override
-#   sudo kldload-backup-restore --target rpool/restore/test  # target prefix
+#   sudo kldload-backup-restore --host HOST                  list + pick one
+#   sudo kldload-backup-restore --host HOST --latest         the newest
+#   sudo kldload-backup-restore --host HOST --file NAME.zfs.zst
+#   sudo kldload-backup-restore --host HOST --src-dir /backups --latest
+#   sudo kldload-backup-restore --host HOST --latest --target rpool/restore/test
 #
-# Env overrides:
-#   BACKUP_REMOTE_HOST   default: fiend
+# Environment:
+#   BACKUP_REMOTE_HOST   the host when --host is not given (no default: it
+#                        was "fiend", one machine's name, until 2026-09-29)
 #   BACKUP_REMOTE_DIR    default: /var/lib/kldload-backups
 #   BACKUP_SSH_OPTS      default: -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+#
+# Exit: 0 received; 1 a step failed or the target exists; 2 usage, or an
+#       invalid pick. See kldload-backup-restore(8).
 
 set -Eeuo pipefail
+trap 'echo "kldload-backup-restore: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-REMOTE_HOST="${BACKUP_REMOTE_HOST:-fiend}"
+REMOTE_HOST="${BACKUP_REMOTE_HOST:-}"
 REMOTE_DIR="${BACKUP_REMOTE_DIR:-/var/lib/kldload-backups}"
 SSH_OPTS="${BACKUP_SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=accept-new}"
 FILE=""
 PICK_LATEST=0
 TARGET_PREFIX=""
 
+usage() {
+    local rc="${1:-2}"
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0" >&$((rc == 0 ? 1 : 2))
+    exit "$rc"
+}
+_bad() {
+    echo "kldload-backup-restore: $*" >&2
+    exit 2
+}
+_val() { [[ $# -ge 2 && -n "$2" ]] || _bad "$1 needs a value"; }
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --file)
+        _val "$@"
         FILE="$2"
         shift
         ;;
     --latest) PICK_LATEST=1 ;;
     --host)
+        _val "$@"
         REMOTE_HOST="$2"
         shift
         ;;
     --src-dir)
+        _val "$@"
         REMOTE_DIR="$2"
         shift
         ;;
     --target)
+        _val "$@"
         TARGET_PREFIX="$2"
         shift
         ;;
-    -h | --help)
-        sed -n '2,29p' "$0"
-        exit 0
-        ;;
-    *)
-        echo "unknown arg: $1" >&2
-        exit 2
-        ;;
+    -h | --help) usage 0 ;;
+    *) _bad "unknown argument: $1" ;;
     esac
     shift
 done
 
+# SAFETY: host, directory and file name all reach ssh -- the host its argv,
+# the other two a remote shell command quoted with ''. A leading - is an ssh
+# option; a quote ends the quoting; a / in the file name leaves the directory.
+[[ -n "$REMOTE_HOST" ]] || _bad "no source: give --host HOST (or BACKUP_REMOTE_HOST)"
+[[ "$REMOTE_HOST" =~ ^[A-Za-z0-9_][A-Za-z0-9_.@-]*$ ]] || _bad "'$REMOTE_HOST' is not a host name"
+[[ "$REMOTE_DIR" =~ ^/[A-Za-z0-9_./+-]*$ ]] || _bad "--src-dir must be an absolute path of plain characters: '$REMOTE_DIR'"
+[[ -z "$FILE" || "$FILE" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*\.zfs\.zst$ ]] || _bad "--file is a NAME.zfs.zst in the directory, not a path: '$FILE'"
+[[ -z "$TARGET_PREFIX" || "$TARGET_PREFIX" =~ ^[A-Za-z0-9_][A-Za-z0-9_.:/-]*$ ]] || _bad "'$TARGET_PREFIX' is not a dataset name"
+
+[[ "$(id -u)" -eq 0 ]] || {
+    echo "kldload-backup-restore: must run as root (zfs recv)" >&2
+    exit 1
+}
+
 LOG=/var/log/kldload/backup-restore.log
 mkdir -p /var/log/kldload
+TTY=0
+[[ -t 2 ]] && TTY=1
 exec > >(tee -a "$LOG") 2>&1
 log() { printf '[%(%F %T)T] [restore] %s\n' -1 "$*"; }
 
-[[ "$(id -u)" -eq 0 ]] || {
-    log "FATAL: must run as root (need zfs recv)"
-    exit 1
-}
 command -v zfs >/dev/null || {
     log "FATAL: zfs not installed"
     exit 1
@@ -146,6 +173,8 @@ ssh $SSH_OPTS "$REMOTE_HOST" "[ -f '$REMOTE_PATH' ]" ||
 
 META_FILE="${FILE%.zfs.zst}.meta"
 # shellcheck disable=SC2086
+# swallow: a stream copied without its .meta restores the same; only the
+# summary below is missing
 META_CONTENT="$(ssh $SSH_OPTS "$REMOTE_HOST" "cat '${REMOTE_DIR}/${META_FILE}' 2>/dev/null" || true)"
 if [[ -n "$META_CONTENT" ]]; then
     log "metadata for this backup:"
@@ -170,19 +199,24 @@ if zfs list -H -o name "$TARGET_PREFIX" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Make sure the parent ('${RPOOL}/restore') exists; recv lays out the
-# child tree under it.
-if ! zfs list -H -o name "${RPOOL}/restore" >/dev/null 2>&1; then
-    log "creating parent dataset: ${RPOOL}/restore"
-    zfs create -o canmount=off -o mountpoint=none "${RPOOL}/restore"
-fi
+# The target itself, not only its parent: `zfs recv -d` lays the tree out
+# UNDER an existing dataset, and with only the parent made every restore
+# stopped at "specified fs ... does not exist" -- this tool had never
+# received anything (onyx, 2026-09-29). -p makes rpool/restore on the way.
+# canmount=off: it is a container, and the restored tree is not mounted.
+log "creating ${TARGET_PREFIX}"
+zfs create -p -o canmount=off -o mountpoint=none "$TARGET_PREFIX"
 
 # Stream + decompress + recv. -d strips the source pool name from the
 # incoming dataset paths so they land under our chosen prefix instead of
 # trying to recreate rpool/ROOT/<node> in place.
 log "streaming + decompressing + receiving (this is the slow part)..."
-PV=cat
-command -v pv >/dev/null 2>&1 && PV="pv -prtab"
+# pv only for a person watching: its progress line is noise in the log, and
+# where SIGPIPE is ignored (systemd services, by default) a pv whose reader
+# died sleeps in a retry loop instead of exiting -- a failed receive hung the
+# restore for good (onyx, 2026-09-29). TTY is decided before the log's exec.
+PV="cat"
+if ((TTY)) && command -v pv >/dev/null 2>&1; then PV="pv -prtab"; fi
 
 # shellcheck disable=SC2086
 if ! ssh $SSH_OPTS "$REMOTE_HOST" "cat '$REMOTE_PATH'" |
@@ -190,6 +224,11 @@ if ! ssh $SSH_OPTS "$REMOTE_HOST" "cat '$REMOTE_PATH'" |
     $PV |
     zfs recv -d -u -F "$TARGET_PREFIX"; then
     log "FATAL: recv pipeline failed"
+    # This run created TARGET_PREFIX (it is refused above when it exists), so
+    # what is under it is this run's partial receive; left, it would make the
+    # retry refuse with "already exists".
+    zfs destroy -r "$TARGET_PREFIX" && log "removed the partial ${TARGET_PREFIX}" ||
+        log "WARNING: could not remove ${TARGET_PREFIX}; zfs destroy -r it before retrying"
     exit 1
 fi
 
@@ -197,9 +236,13 @@ log "DONE — restored tree rooted at: ${TARGET_PREFIX}"
 echo
 echo "Next steps (operator):"
 echo "  1) Inspect: zfs list -r ${TARGET_PREFIX}"
-echo "  2) Mount selectively (datasets came in with canmount=noauto-style"
-echo "     because -u skipped automount) — set canmount + mount manually,"
-echo "     OR copy contents out to a working dir."
+echo "  2) Nothing is mounted (-u). Pick a dataset and give it a mountpoint:"
+echo "       zfs set mountpoint=/mnt/restored <dataset>"
+if grep -qx 'send_raw=1' <<<"${META_CONTENT:-}"; then
+    echo "     It came raw, still encrypted: first"
+    echo "       zfs load-key <its encryption root>"
+    echo "     with the SENDER's passphrase or key."
+fi
 echo "  3) To PROMOTE back to live root, you must reboot into the live USB"
 echo "     recovery shell and rename/swap the datasets. This script will"
 echo "     not do that — too easy to brick a running system."
