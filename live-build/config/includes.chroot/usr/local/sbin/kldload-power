@@ -1,0 +1,522 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-power — switch a machine on, off or through a power cycle from
+# outside it: a smart plug it is plugged into, or its BMC over IPMI.
+#
+# USAGE (the usage() text below is the contract; the man page kldload-power(8)
+# carries a worked example per verb):
+#   kldload-power <machine> status|on|off|force-off|cycle|pxe-once [--self]
+#   kldload-power <mac> set --controller outlet|ipmi --address A [...]
+#   kldload-power list
+#
+# WHAT A VERB DOES, in order:
+#   1. finds the machine's record: /etc/kldload/power/<mac>.env, or the one
+#      whose POWER_NAME is <machine>;
+#   2. refuses when the machine is THIS host (any local NIC has its MAC),
+#      unless --self: cutting power to the box running the command cannot
+#      report its own outcome and takes the netboot server with it;
+#   3. drives the controller (the outlet or ipmi driver below);
+#   4. reads the state back until it matches, bounded -- a 200 from a plug
+#      or "Chassis Power Control: Up/On" from a BMC is not evidence;
+#   5. logs who, what and the read-back to /var/log/kldload/power.log.
+#
+# WHY: every reinstall on the test bench and every rack provision assumed a
+# machine that could be rebooted over ssh. On 2026-09-29 fiend's live boot
+# stalled fetching its root image (3 MB/s, cut at 300 s), sat unreachable in
+# the initrd, and the 3-kvm edition waited for a human to press the button.
+# fiend has no BMC; a smart plug it is plugged into gives the same control.
+# Design: docs/POWER-DESIGN.md (feat/power-design).
+#
+# CONTROLLERS
+#   outlet  a smart plug with a local HTTP API. POWER_OUTLET_KIND picks it:
+#             shelly1  Shelly Gen1   GET /relay/<n>?turn=on|off -> {"ison":bool},
+#                                    Basic auth when a login is set
+#             shelly2  Shelly Gen2+  GET /rpc/Switch.Set?id=<n>&on=true|false,
+#                                    /rpc/Switch.GetStatus?id=<n> -> {"output":bool},
+#                                    SHA-256 digest auth, user always "admin"
+#             tasmota  Tasmota       GET /cm?cmnd=Power<n>%20On -> {"POWER<n>":"ON"}
+#                                    (or "POWER" on a one-relay plug); the
+#                                    password rides in the URL, per Tasmota
+#           A plug cannot shut an OS down: `off` is refused (exit 3) and
+#           `force-off` cuts the power. The machine's firmware must be set to
+#           power on after AC loss, or `on` and `cycle` restore the plug and
+#           leave the machine off -- the tool says so, it cannot see it.
+#   ipmi    a BMC over IPMI 2.0 (ipmitool -I lanplus). `off` is a soft
+#           (ACPI) shutdown, `force-off` a hard one, `pxe-once` sets the next
+#           boot to PXE (UEFI) and reads the flag back.
+#
+# RECORDS: one file per machine, /etc/kldload/power/<mac>.env, root 0600,
+# written by `set` (umask 077, then mv -- never chmod after the fact). Lines
+# are KEY=VALUE, read as data, never sourced:
+#   POWER_CONTROLLER=outlet|ipmi   POWER_ADDRESS=host[:port]
+#   POWER_OUTLET_KIND=shelly1|shelly2|tasmota   POWER_OUTLET=<relay index>
+#   POWER_USER=...   POWER_PASSWORD=...   POWER_NAME=fiend
+#   POWER_CYCLE_OFF=10   (seconds a cycle holds the power off)
+#   POWER_ALLOW=status   (only these verbs, comma separated; unset = all).
+#                        For a machine nothing here may ever switch: abyss
+#                        holds the operator's main pool (FreeBSD + GELI), and
+#                        its record is status-only (2026-09-29).
+#
+# SECRETS never reach argv, a log or a temp file: curl reads its URL and user
+# from a config on a pipe (-K <(...)), ipmitool reads IPMI_PASSWORD (-E) set
+# only in that child's environment, and `set` reads the password from stdin.
+#
+# EXIT STATUS: 0 done and read back, 1 failed (or read-back never matched),
+# 2 usage, 3 not supported by this controller, 4 controller unreachable,
+# 5 authentication refused, 6 refused by the record's POWER_ALLOW.
+#
+# ENVIRONMENT (tests): KLDLOAD_POWER_DIR (records), KLDLOAD_POWER_LOG (log),
+# KLDLOAD_POWER_WAIT (read-back seconds, default 30). With KLDLOAD_POWER_DIR
+# set the tool does not re-exec under sudo, so a test runs it as a user
+# against its own records and a fake plug.
+#
+# Notes:
+#   - Phase 1 of the design is here (outlet, ipmi). wol, redfish, amt,
+#     `probe`, and the netboot-run/estate-sweep hooks are later phases.
+#   - By exact machine only: no globs, no --all on a verb that cuts power.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kldload-power: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+usage() {
+    cat <<'EOF'
+Usage: kldload-power <machine> status|on|off|force-off|cycle|pxe-once [--self]
+       kldload-power <mac> set --controller outlet|ipmi --address HOST[:PORT]
+                     [--kind shelly1|shelly2|tasmota] [--outlet N] [--user U]
+                     [--name NAME] [--cycle-off SECONDS] [--allow VERBS]
+                     [--password-stdin]
+       kldload-power list
+
+<machine> is a MAC (any case, : or -) or the NAME a record was given.
+
+Verbs:
+  status     print on|off (one word on stdout)
+  on         power on, then wait until it reads back on
+  off        graceful shutdown (ipmi soft off); a plug cannot, exit 3
+  force-off  cut the power now
+  cycle      off, wait, on (a plug holds it off --cycle-off seconds, default 10)
+  pxe-once   next boot from the network, once (ipmi); a plug cannot, exit 3
+  set        create or replace the machine's record (password from stdin)
+  list       every machine with a record: mac, name, controller, address
+
+--self       allow a verb that cuts power on the machine running this command
+--allow      set: the only verbs this machine accepts, e.g. --allow status
+
+Exit: 0 done and read back, 1 failed, 2 usage, 3 not supported by the
+controller, 4 controller unreachable, 5 authentication refused, 6 not
+allowed by the machine's record (--allow).
+Records: /etc/kldload/power/<mac>.env (root, 0600). Log: /var/log/kldload/power.log
+EOF
+    exit "${1:-2}"
+}
+
+# --help first: no root, no side effect (project rule 9).
+case "${1:-}" in -h | --help) usage 0 ;; "") usage 2 ;; esac
+
+if [[ -z "${KLDLOAD_POWER_DIR:-}" && $EUID -ne 0 ]]; then
+    exec sudo "$0" "$@"
+fi
+
+DIR="${KLDLOAD_POWER_DIR:-/etc/kldload/power}"
+LOG="${KLDLOAD_POWER_LOG:-/var/log/kldload/power.log}"
+WAIT="${KLDLOAD_POWER_WAIT:-30}"
+
+die() {
+    echo "kldload-power: $2" >&2
+    exit "$1"
+}
+say() { echo "kldload-power: $*" >&2; }
+
+# ─── records ─────────────────────────────────────────────────────────────────
+# A record is data an operator wrote, so it is parsed, not sourced: only the
+# known keys, only KEY=VALUE, the value taken literally (a password may hold
+# $, ` or spaces and must reach the controller unchanged).
+
+# norm_mac <string> — prints aa:bb:cc:dd:ee:ff, or returns 1 if it is not a MAC.
+norm_mac() {
+    local m="${1,,}"
+    m="${m//-/:}"
+    [[ "$m" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || return 1
+    printf '%s\n' "$m"
+}
+
+declare -A R=()
+# load_record <file> — fills R[] from the file's POWER_* lines.
+load_record() {
+    local line k v
+    R=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+        [[ "$line" == *=* ]] || continue
+        k="${line%%=*}"
+        v="${line#*=}"
+        case "$k" in
+        POWER_CONTROLLER | POWER_ADDRESS | POWER_OUTLET_KIND | POWER_OUTLET | POWER_USER | POWER_PASSWORD | POWER_NAME | POWER_CYCLE_OFF | POWER_MAC | POWER_ALLOW)
+            R[$k]="$v"
+            ;;
+        esac
+    done <"$1"
+}
+
+# find_record <machine> — prints the record's path; exit 1 when there is none.
+find_record() {
+    local mac f
+    if mac="$(norm_mac "$1")"; then
+        f="${DIR}/${mac}.env"
+        [[ -f "$f" ]] && {
+            printf '%s\n' "$f"
+            return 0
+        }
+        return 1
+    fi
+    for f in "$DIR"/*.env; do
+        [[ -f "$f" ]] || continue
+        load_record "$f"
+        [[ "${R[POWER_NAME]:-}" == "$1" ]] && {
+            printf '%s\n' "$f"
+            return 0
+        }
+    done
+    return 1
+}
+
+# is_self <mac> — 0 when a NIC of this host carries the MAC.
+is_self() {
+    local a
+    for a in /sys/class/net/*/address; do
+        [[ "$(cat "$a" 2>/dev/null)" == "$1" ]] && return 0
+    done
+    return 1
+}
+
+plog() {
+    local who="${SUDO_USER:-${USER:-root}}"
+    mkdir -p "$(dirname "$LOG")" 2>/dev/null || true # a log that cannot be written must not stop a power verb
+    printf '%(%F %T)T %s %s %s %s: %s\n' -1 "$who" "$MAC" "${R[POWER_NAME]:--}" "$VERB" "$*" >>"$LOG" 2>/dev/null ||
+        say "WARNING: could not write ${LOG}"
+}
+
+# ─── outlet driver ───────────────────────────────────────────────────────────
+# _http <path+query> — GET from the plug; body on stdout. Exit 4 unreachable,
+# 5 auth refused, 1 any other HTTP failure. The URL and user go to curl in a
+# config on a pipe: a Tasmota password is part of the URL and must not be
+# visible in ps.
+_http() {
+    local q="$1" url code body auth=() tmp
+    url="http://${R[POWER_ADDRESS]}${q}"
+    tmp="$(mktemp)"
+    case "${R[POWER_OUTLET_KIND]}" in
+    shelly1) [[ -n "${R[POWER_USER]:-}" ]] && auth=(--basic) ;;
+    shelly2) [[ -n "${R[POWER_PASSWORD]:-}" ]] && auth=(--digest) ;;
+    esac
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' --connect-timeout 5 --max-time 15 "${auth[@]}" \
+        -K <(
+            printf 'url = "%s"\n' "$url"
+            if ((${#auth[@]})); then
+                local u="${R[POWER_USER]:-}"
+                [[ "${R[POWER_OUTLET_KIND]}" == shelly2 ]] && u="admin"
+                printf 'user = "%s:%s"\n' "$u" "${R[POWER_PASSWORD]:-}"
+            fi
+        ) 2>/dev/null)" || code="000"
+    body="$(cat "$tmp")"
+    rm -f "$tmp"
+    case "$code" in
+    200) printf '%s\n' "$body" ;;
+    000) return 4 ;;
+    401 | 403) return 5 ;;
+    *) return 1 ;;
+    esac
+}
+
+# _tasmota_q <command> — the /cm query, with the credentials Tasmota wants in it.
+_tasmota_q() {
+    local q="/cm?"
+    if [[ -n "${R[POWER_PASSWORD]:-}" ]]; then
+        q+="user=$(jq -rn --arg v "${R[POWER_USER]:-admin}" '$v|@uri')&password=$(jq -rn --arg v "${R[POWER_PASSWORD]}" '$v|@uri')&"
+    fi
+    printf '%scmnd=%s' "$q" "$(jq -rn --arg v "$1" '$v|@uri')"
+}
+
+# _outlet_state — prints on|off from the plug itself.
+_outlet_state() {
+    local n="${R[POWER_OUTLET]:-}" body st
+    case "${R[POWER_OUTLET_KIND]}" in
+    shelly1)
+        body="$(_http "/relay/${n:-0}")" || return
+        st="$(jq -r '.ison' <<<"$body")"
+        ;;
+    shelly2)
+        body="$(_http "/rpc/Switch.GetStatus?id=${n:-0}")" || return
+        st="$(jq -r '.output' <<<"$body")"
+        ;;
+    tasmota)
+        body="$(_http "$(_tasmota_q "Power${n:-1}")")" || return
+        # POWER1 on a multi-relay plug, POWER on a one-relay plug (SetOption26)
+        st="$(jq -r --arg k "POWER${n:-1}" '.[$k] // .POWER // empty' <<<"$body")"
+        ;;
+    esac
+    case "${st,,}" in true | on) echo on ;; false | off) echo off ;; *)
+        say "the plug answered without a state: ${body:0:120}"
+        return 1
+        ;;
+    esac
+}
+
+# _outlet_set on|off
+_outlet_set() {
+    local n="${R[POWER_OUTLET]:-}" want="$1"
+    case "${R[POWER_OUTLET_KIND]}" in
+    shelly1) _http "/relay/${n:-0}?turn=${want}" >/dev/null ;;
+    shelly2) _http "/rpc/Switch.Set?id=${n:-0}&on=$([[ $want == on ]] && echo true || echo false)" >/dev/null ;;
+    tasmota) _http "$(_tasmota_q "Power${n:-1} ${want^}")" >/dev/null ;;
+    esac
+}
+
+# ─── ipmi driver ─────────────────────────────────────────────────────────────
+# _ipmi <args...> — ipmitool over lanplus; the password only in the child's
+# environment (-E). Exit 4 for "no answer", 5 for a refused login.
+_ipmi() {
+    local host="${R[POWER_ADDRESS]%%:*}" port=() out rc=0
+    [[ "${R[POWER_ADDRESS]}" == *:* ]] && port=(-p "${R[POWER_ADDRESS]##*:}")
+    command -v ipmitool >/dev/null || die 1 "ipmitool is not installed"
+    out="$(IPMI_PASSWORD="${R[POWER_PASSWORD]:-}" ipmitool -I lanplus -H "$host" "${port[@]}" \
+        -U "${R[POWER_USER]:-ADMIN}" -E -N 2 -R 2 "$@" 2>&1)" || rc=$?
+    if ((rc)); then
+        case "$out" in
+        *"RAKP 2 HMAC is invalid"* | *"Unauthorized name"* | *"invalid user name"* | *"Invalid user name"*) return 5 ;;
+        *"Unable to establish IPMI"* | *"No response"* | *"Get Session Challenge"*) return 4 ;;
+        esac
+        say "ipmitool: ${out:0:200}"
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+
+_ipmi_state() {
+    local out
+    out="$(_ipmi chassis power status)" || return
+    case "$out" in
+    *"Power is on"*) echo on ;;
+    *"Power is off"*) echo off ;;
+    *)
+        say "the BMC answered without a state: ${out:0:120}"
+        return 1
+        ;;
+    esac
+}
+
+# ─── verbs ───────────────────────────────────────────────────────────────────
+state() {
+    case "${R[POWER_CONTROLLER]}" in
+    outlet) _outlet_state ;;
+    ipmi) _ipmi_state ;;
+    esac
+}
+
+# await <on|off> — poll the controller until it reports the wanted state.
+await() {
+    local want="$1" t=0 got
+    while ((t <= WAIT)); do
+        got="$(state)" || return
+        [[ "$got" == "$want" ]] && return 0
+        sleep 2
+        t=$((t + 2))
+    done
+    say "asked for ${want}, still ${got} after ${WAIT}s"
+    return 1
+}
+
+# WARN: every verb runs as `do_x || rc=$?`, and bash turns errexit OFF inside
+# a function called that way -- a failed step would fall through to the
+# next and the verb would report success. Each step carries its own || return.
+do_on() {
+    local st
+    st="$(state)" || return
+    if [[ "$st" == on ]]; then
+        say "${LABEL} is already on"
+        return 0
+    fi
+    case "${R[POWER_CONTROLLER]}" in
+    outlet) _outlet_set on || return ;;
+    ipmi) _ipmi chassis power on >/dev/null || return ;;
+    esac
+    await on || return
+    [[ "${R[POWER_CONTROLLER]}" == outlet ]] &&
+        say "the plug is on; the machine starts only if its firmware powers on after AC loss"
+    return 0
+}
+
+do_force_off() {
+    local st
+    st="$(state)" || return
+    if [[ "$st" == off ]]; then
+        say "${LABEL} is already off"
+        return 0
+    fi
+    case "${R[POWER_CONTROLLER]}" in
+    outlet) _outlet_set off || return ;;
+    ipmi) _ipmi chassis power off >/dev/null || return ;;
+    esac
+    await off
+}
+
+do_off() {
+    [[ "${R[POWER_CONTROLLER]}" == outlet ]] &&
+        die 3 "a plug cannot shut an OS down; force-off cuts the power"
+    local st
+    st="$(state)" || return
+    if [[ "$st" == off ]]; then
+        say "${LABEL} is already off"
+        return 0
+    fi
+    _ipmi chassis power soft >/dev/null || return
+    # an OS takes longer to shut down than a relay to open
+    WAIT=$((WAIT > 180 ? WAIT : 180)) await off
+}
+
+do_cycle() {
+    local hold="${R[POWER_CYCLE_OFF]:-10}"
+    [[ "$hold" =~ ^[0-9]+$ ]] || die 1 "POWER_CYCLE_OFF='${hold}' is not a number of seconds"
+    do_force_off || return
+    say "holding ${LABEL} off for ${hold}s"
+    sleep "$hold"
+    do_on
+}
+
+do_pxe_once() {
+    [[ "${R[POWER_CONTROLLER]}" == ipmi ]] ||
+        die 3 "a ${R[POWER_CONTROLLER]} cannot choose the boot device; arm the machine and cycle it"
+    _ipmi chassis bootdev pxe options=efiboot >/dev/null || return
+    local flags
+    flags="$(_ipmi chassis bootparam get 5)" || return
+    if [[ "$flags" != *"Force PXE"* ]]; then
+        say "the BMC took the request but its boot flags do not say PXE: $(grep -m1 -i 'Boot Device Selector' <<<"$flags")"
+        return 1
+    fi
+    say "${LABEL} boots from the network next time, once"
+}
+
+do_set() {
+    local ctl="" addr="" kind="" outlet="" user="" name="" hold="" allow="" pw="" pwin=0
+    while (($#)); do
+        case "$1" in
+        --controller) ctl="${2:?}" && shift ;;
+        --address) addr="${2:?}" && shift ;;
+        --kind) kind="${2:?}" && shift ;;
+        --outlet) outlet="${2:?}" && shift ;;
+        --user) user="${2:?}" && shift ;;
+        --name) name="${2:?}" && shift ;;
+        --cycle-off) hold="${2:?}" && shift ;;
+        --allow) allow="${2:?}" && shift ;;
+        --password-stdin) pwin=1 ;;
+        *) usage 2 ;;
+        esac
+        shift
+    done
+    case "$ctl" in
+    outlet) [[ "$kind" =~ ^(shelly1|shelly2|tasmota)$ ]] || die 2 "--kind shelly1|shelly2|tasmota is required for an outlet" ;;
+    ipmi) [[ -z "$kind" ]] || die 2 "--kind is for an outlet" ;;
+    *) die 2 "--controller outlet|ipmi" ;;
+    esac
+    [[ "$addr" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die 2 "--address '${addr}' is not host[:port]"
+    [[ -z "$outlet" || "$outlet" =~ ^[0-9]+$ ]] || die 2 "--outlet is a relay number"
+    [[ -z "$hold" || "$hold" =~ ^[0-9]+$ ]] || die 2 "--cycle-off is seconds"
+    [[ -z "$allow" || "$allow" =~ ^(status|on|off|force-off|cycle|pxe-once)(,(status|on|off|force-off|cycle|pxe-once))*$ ]] ||
+        die 2 "--allow takes verbs, comma separated: status,on,off,force-off,cycle,pxe-once"
+    [[ -z "$name" || "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 2 "--name '${name}' is not a plain name"
+    for v in "$user" "$name"; do [[ "$v" != *$'\n'* ]] || die 2 "a value cannot hold a newline"; done
+    if ((pwin)); then
+        IFS= read -r pw || true # an empty stdin is an empty password, which a plug without a login has
+        [[ "$pw" != *$'\n'* ]] || die 2 "a password cannot hold a newline"
+    fi
+    install -d -m 0700 "$DIR"
+    local tmp
+    tmp="$(umask 077 && mktemp "${DIR}/.${MAC}.XXXXXX")"
+    {
+        echo "# kldload-power record for ${MAC}, written $(printf '%(%F %T)T' -1) by ${SUDO_USER:-${USER:-root}}"
+        echo "POWER_MAC=${MAC}"
+        echo "POWER_CONTROLLER=${ctl}"
+        echo "POWER_ADDRESS=${addr}"
+        [[ -n "$kind" ]] && echo "POWER_OUTLET_KIND=${kind}"
+        [[ -n "$outlet" ]] && echo "POWER_OUTLET=${outlet}"
+        [[ -n "$user" ]] && echo "POWER_USER=${user}"
+        [[ -n "$pw" ]] && echo "POWER_PASSWORD=${pw}"
+        [[ -n "$name" ]] && echo "POWER_NAME=${name}"
+        [[ -n "$hold" ]] && echo "POWER_CYCLE_OFF=${hold}"
+        [[ -n "$allow" ]] && echo "POWER_ALLOW=${allow}"
+    } >"$tmp"
+    mv -f "$tmp" "${DIR}/${MAC}.env"
+    load_record "${DIR}/${MAC}.env"
+    plog "record written (${ctl} at ${addr})"
+    say "record written: ${DIR}/${MAC}.env"
+}
+
+do_list() {
+    local f
+    printf '%-17s  %-12s  %-10s  %s\n' MAC NAME CONTROLLER ADDRESS
+    for f in "$DIR"/*.env; do
+        [[ -f "$f" ]] || continue
+        load_record "$f"
+        printf '%-17s  %-12s  %-10s  %s\n' "$(basename "$f" .env)" "${R[POWER_NAME]:--}" \
+            "${R[POWER_CONTROLLER]:-?}${R[POWER_OUTLET_KIND]:+/${R[POWER_OUTLET_KIND]}}" "${R[POWER_ADDRESS]:-?}"
+    done
+}
+
+# ─── main ────────────────────────────────────────────────────────────────────
+if [[ "$1" == list ]]; then
+    do_list
+    exit 0
+fi
+TARGET="$1"
+VERB="${2:-}"
+[[ -n "$VERB" ]] || usage 2
+shift 2
+SELF=0
+if [[ "$VERB" == set ]]; then
+    MAC="$(norm_mac "$TARGET")" || die 2 "set needs the machine's MAC, got '${TARGET}'"
+    do_set "$@"
+    exit 0
+fi
+for a in "$@"; do
+    case "$a" in --self) SELF=1 ;; *) usage 2 ;; esac
+done
+case "$VERB" in status | on | off | force-off | cycle | pxe-once) ;; *) usage 2 ;; esac
+
+REC="$(find_record "$TARGET")" || die 1 "no power record for '${TARGET}' in ${DIR} (kldload-power <mac> set ...)"
+load_record "$REC"
+MAC="$(basename "$REC" .env)"
+LABEL="${R[POWER_NAME]:-$MAC}"
+case "${R[POWER_CONTROLLER]:-}" in outlet | ipmi) ;; *) die 1 "${REC}: POWER_CONTROLLER='${R[POWER_CONTROLLER]:-}' is not outlet or ipmi" ;; esac
+[[ -n "${R[POWER_ADDRESS]:-}" ]] || die 1 "${REC}: no POWER_ADDRESS"
+if [[ "${R[POWER_CONTROLLER]}" == outlet && ! "${R[POWER_OUTLET_KIND]:-}" =~ ^(shelly1|shelly2|tasmota)$ ]]; then
+    die 1 "${REC}: POWER_OUTLET_KIND='${R[POWER_OUTLET_KIND]:-}' is not shelly1, shelly2 or tasmota"
+fi
+
+# SAFETY: the record's allow-list is checked before anything talks to the
+# controller, and nothing on the command line overrides it -- widening it
+# takes a new `set`, on purpose.
+if [[ -n "${R[POWER_ALLOW]:-}" && ",${R[POWER_ALLOW]}," != *",${VERB},"* ]]; then
+    plog "refused: record allows only ${R[POWER_ALLOW]}"
+    die 6 "${LABEL} allows only: ${R[POWER_ALLOW]} (its record says so; ${VERB} was not run)"
+fi
+
+if [[ "$VERB" =~ ^(off|force-off|cycle)$ ]] && ((!SELF)) && is_self "$MAC"; then
+    die 2 "${LABEL} is this machine; --self to cut its power anyway"
+fi
+
+rc=0
+case "$VERB" in
+status) state || rc=$? ;;
+on) do_on || rc=$? ;;
+off) do_off || rc=$? ;;
+force-off) do_force_off || rc=$? ;;
+cycle) do_cycle || rc=$? ;;
+pxe-once) do_pxe_once || rc=$? ;;
+esac
+case "$rc" in
+0) [[ "$VERB" == status ]] || plog "done" ;;
+4) plog "controller unreachable" && say "${R[POWER_CONTROLLER]} at ${R[POWER_ADDRESS]} did not answer" ;;
+5) plog "authentication refused" && say "${R[POWER_CONTROLLER]} at ${R[POWER_ADDRESS]} refused the login" ;;
+*) plog "failed (exit ${rc})" ;;
+esac
+exit "$rc"
