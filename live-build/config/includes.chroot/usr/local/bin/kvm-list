@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # kvm-list — show all VMs with ZFS zvol status
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kvm-list: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate to root (ZFS + libvirt require it)
 # --help answers before the root re-exec below: asking a tool what it does
@@ -14,33 +15,57 @@ Usage: kvm-list
 List every libvirt VM on this host with the state, memory and vCPU count
 libvirt reports, and the space its ZFS zvol actually uses.
 
-Takes no options. Needs root, because it reads both libvirt and ZFS.
+Takes no options; anything else is a usage error. Needs root, because it
+reads both libvirt and ZFS.
 
 The ZVOL USED column looks up rpool/vms/<vm-name>. A VM whose disk is not a
 zvol under that path shows n/a -- it exists, it is just not backed the way
 kvm-create makes them.
 
-See also: kvm-create, kvm-clone, kvm-snap, kvm-delete.
+If libvirt cannot be asked, it says so and exits 1 rather than print an
+empty table, which would read as "no VMs".
+
+Exit status: 0 listed, 1 libvirt could not be asked, 2 usage error.
+
+See also: kvm-create, kvm-clone, kvm-snap, kvm-delete; kvm-list(8).
 USAGE
     exit 0
+    ;;
+"") ;;
+*)
+    # Arguments were ignored: `kvm-list web01` listed everything, which reads
+    # as a filter that matched (found writing kvm-list(8), 2026-09-29).
+    echo "kvm-list: takes no arguments (got: $*); try kvm-list --help" >&2
+    exit 2
     ;;
 esac
 
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
-printf "%-20s %-12s %-10s %-10s %-10s\n" "NAME" "STATE" "RAM" "VCPUS" "ZVOL USED"
-printf "%-20s %-12s %-10s %-10s %-10s\n" "----" "-----" "---" "-----" "---------"
+# WHY the list is taken first and checked: `virsh list 2>/dev/null` fed a
+# for loop, so with libvirt down the table printed its header, no rows, and
+# exit 0 -- the same screen as a host with no machines.
+if ! _names="$(virsh list --all --name)"; then
+    echo "kvm-list: could not ask libvirt for its machines (see above)" >&2
+    exit 1
+fi
+mapfile -t _vms < <(grep -v '^$' <<<"$_names" || true) # no machines: an empty list, not an error
 
-for vm in $(virsh list --all --name 2>/dev/null | grep -v '^$'); do
-    state=$(virsh domstate "$vm" 2>/dev/null || echo "unknown")
-    ram=$(virsh dominfo "$vm" 2>/dev/null | awk '/Max memory/{printf "%.0fMB", $3/1024}')
-    vcpus=$(virsh dominfo "$vm" 2>/dev/null | awk '/CPU\(s\)/{print $2}')
-    zvol="rpool/vms/${vm}"
-    used=$(zfs list -H -o used "$zvol" 2>/dev/null || echo "n/a")
-    printf "%-20s %-12s %-10s %-10s %-10s\n" "$vm" "$state" "$ram" "$vcpus" "$used"
+# The name column fits the longest name: a fixed 20 pushed every row after
+# klab-golden-centos-stream out of line.
+_w=4
+for vm in "${_vms[@]}"; do ((${#vm} > _w)) && _w=${#vm}; done
+printf "%-${_w}s  %-12s %-10s %-6s %s\n" "NAME" "STATE" "RAM" "VCPUS" "ZVOL USED"
+
+for vm in "${_vms[@]}"; do
+    state=$(virsh domstate "$vm" 2>/dev/null || echo "unknown") # removed between the list and here
+    info=$(virsh dominfo "$vm" 2>/dev/null || true)             # same race; the row shows blanks
+    ram=$(awk '/Max memory/{printf "%.0fMB", $3/1024}' <<<"$info")
+    vcpus=$(awk '/CPU\(s\)/{print $2}' <<<"$info")
+    used=$(zfs list -H -o used "rpool/vms/${vm}" 2>/dev/null || echo "n/a") # disk not under rpool/vms
+    printf "%-${_w}s  %-12s %-10s %-6s %s\n" "$vm" "$state" "$ram" "$vcpus" "$used"
 done
 
 echo ""
 echo "ZFS pool space:"
-zfs list -o name,used,avail -r rpool/vms 2>/dev/null | head -1
-zfs list -o name,used,avail rpool/vms 2>/dev/null | tail -1
+zfs list -o name,used,avail rpool/vms
