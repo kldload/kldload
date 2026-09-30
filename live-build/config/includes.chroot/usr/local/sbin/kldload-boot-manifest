@@ -25,7 +25,7 @@
 # Inputs : --host (omit for local), --ssh-key, --pool, --esp-archive
 # Outputs: the manifest as JSON on stdout. stdout is DATA — every diagnostic
 #          goes to stderr so `kldload-boot-manifest | jq` never breaks.
-# Exit   : 0 captured · 2 the host could not be read
+# Exit   : 0 captured · 2 the host could not be read, or has no such pool
 #
 # Notes: captures facts, never secrets. No keys, no passphrases, no MOK
 #        private material — only what is needed to rebuild a boot path.
@@ -36,7 +36,8 @@
 #        empty ESP produces a pool that is perfect and a machine that does not
 #        boot. Rebuilding it from packages needs a working network and the
 #        right repo, which is exactly what you do not have during a recovery.
-#        A few megabytes of tar removes that dependency.
+#        A tar removes that dependency. It is not small: onyx's was 389 MB,
+#        mostly a 244 MB initrd and two 65 MB ZFSBootMenu images (2026-09-30).
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
@@ -65,8 +66,9 @@ while [[ $# -gt 0 ]]; do
         shift 2
         ;;
     -h | --help)
-        # asked for: stdout and 0 (it was stderr and 2, 2026-09-30)
-        sed -n '2,30p' "$0"
+        # asked for: stdout and 0 (it was stderr and 2, 2026-09-30). The whole
+        # banner: a fixed 2,30 stopped mid-sentence once the header grew.
+        sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
         exit 0
         ;;
     *)
@@ -75,6 +77,12 @@ while [[ $# -gt 0 ]]; do
         ;;
     esac
 done
+
+# SAFETY: the pool name is pasted into shell commands run here or on HOST.
+[[ "$POOL" =~ ^[A-Za-z][A-Za-z0-9_.:-]*$ ]] || {
+    echo "implausible pool name: $POOL" >&2
+    exit 2
+}
 
 if [[ -n "$HOST" ]]; then
     ssh_c=(ssh -o BatchMode=yes -o ConnectTimeout=10)
@@ -105,6 +113,14 @@ jlist() {
     printf '],\n'
 }
 
+# The pool must exist there: every fact below is read through on(), which
+# turns a failure into an empty field, so `--pool nosuch` produced a manifest
+# of empty fields and exit 0 (2026-09-30).
+if [[ -z "$(on "zpool list -H -o name '$POOL'")" ]]; then
+    echo "FATAL: no pool named $POOL on ${HOST:-this host}" >&2
+    exit 2
+fi
+
 hostname_="$(on 'cat /etc/hostname || hostname')"
 echo "capturing boot manifest for ${hostname_:-$HOST}" >&2
 
@@ -116,7 +132,13 @@ be="$(on "zfs list -H -o name -r '$POOL' | grep -m1 '/ROOT/'")"
 # The ESP. None of this is in the pool, and all of it is needed.
 esp_dev="$(on 'findmnt -no SOURCE /boot/efi')"
 esp_uuid="$(on 'findmnt -no SOURCE /boot/efi | xargs -r blkid -s UUID -o value')"
-esp_size="$(on 'findmnt -no SIZE /boot/efi')"
+# Whole MiB, rounded up. findmnt's own SIZE is " 511M" (leading space) or a
+# decimal like "1.1G", and the restore hands this to sgdisk, which truncates
+# +1.1GiB to 1024 MiB without a word -- an ESP smaller than the one archived
+# (2026-09-30). "511M" is what kldload-restore-machine expects.
+esp_bytes="$(on 'findmnt -bno SIZE /boot/efi' | tr -d '[:space:]')"
+esp_size=""
+[[ "$esp_bytes" =~ ^[0-9]+$ ]] && esp_size="$(((esp_bytes + 1048575) / 1048576))M"
 esp_files="$(on 'find /boot/efi -iname "*.efi" -printf "%P\n" 2>/dev/null | sort')"
 
 # fstab lines naming a device rather than a dataset: exactly the ones that
@@ -138,7 +160,9 @@ if [[ -n "$ESP_ARCHIVE" ]]; then
                 echo "WARNING: could not archive the ESP" >&2
         fi
         if [[ -s "$ESP_ARCHIVE" ]]; then
-            echo "ESP archived: $ESP_ARCHIVE ($(du -h "$ESP_ARCHIVE" | cut -f1))" >&2
+            # stat, not du: on ZFS du counts blocks allocated so far, and a
+            # 407 MB archive written a moment ago read "(1.0K)" (onyx, 2026-09-30).
+            echo "ESP archived: $ESP_ARCHIVE ($(numfmt --to=iec "$(stat -c %s "$ESP_ARCHIVE")"))" >&2
         else
             echo "WARNING: ESP archive came out empty" >&2
         fi
