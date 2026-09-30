@@ -24,11 +24,12 @@ virtual machine's serial console, a shell in a pod, an ssh session to a
 cluster node, a klab run's log \(em opens it through
 .Nm .
 .Cm open
-picks a free port on loopback, starts
+starts
 .Pa kldload-session@ Ns Ar id Ns Pa .service ,
 a
 .Xr ttyd 1
-running the command, adds a location
+running the command on a unix socket only the web server's group can
+open, adds a location
 .Pa /s/ Ns Ar id Ns Pa /
 to the web server on port 8443, reloads it, and prints the address.
 .Ar id
@@ -87,6 +88,8 @@ written quoted with
 .Ql printf %q .
 .It Pa /etc/nginx/conf.d/kldload-dyn/ Ns Ar id Ns Pa .conf
 Its location in the web server.
+.It Pa /run/kldload/session/ Ns Ar id Ns Pa .sock
+Its terminal, mode 0660, group the web server's.
 .It Pa /var/log/kldload-session.log
 Every open and close.
 .El
@@ -129,16 +132,18 @@ never named the pod \(em a shell quirk emptied it \(em so no pod shell
 ever opened; and the session record was written with only the command
 quoted, so a quote in a title would have run as root when the record was
 next read.
+Until the same day a session's terminal listened on a loopback port, and
+its address was all that guarded it; it now needs the console's sign-in.
 .Sh AUTHORS
 .An kldload Aq Mt anthony@kldload.com
 .Sh CAVEATS
-Nothing but the address guards a session: the web server does not ask
-who is opening
-.Pa /s/ Ns Ar id Ns Pa / ,
-and the consoles run as root.
-Anyone who has the address \(em from a browser's history, a shared screen,
-a log \(em has the console, until the session is closed or the machine
-restarts.
+The web server serves
+.Pa /s/ Ns Ar id Ns Pa /
+only to a browser signed in to the console (see
+.Xr kldload-webui 8 ) ,
+and the consoles run as root: anyone who can sign in has them.
 Sessions do not expire when idle, and
 .Cm prune
 closes only those whose service has already ended.
+A session opened before 2026-09-30 has no socket in its record and will
+not start again; close it and open a new one.

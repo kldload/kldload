@@ -670,7 +670,8 @@ if [[ "$EDITION" != "core" ]]; then
     # manage the bootstrapped cluster from the installer environment.
     # Helm publishes linux-amd64 and linux-arm64 tarballs (their naming,
     # not ours). Goldens still install their own copy via kube-setup.
-    # ttyd — browser terminal daemon, drives the k9s console iframe on :7681.
+    # ttyd — browser terminal daemon, drives the k9s console iframe (on the
+    # unix socket /run/kldload/ttyd-k9s.sock, behind nginx's sign-in).
     # Tiny static binary from upstream releases. Non-fatal if download fails
     # (console tab just won't work).
     log "Installing ttyd (browser terminal) from GitHub..."

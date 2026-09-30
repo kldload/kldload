@@ -1854,9 +1854,10 @@ RUNNING_PROCS = {}
 # non-browser client that reaches the port. Fix: a random bearer token minted at
 # first run (root-only 0600 file), required as the FIRST WS message and compared
 # constant-time; no valid token → no privileged action. The operator reads it
-# from /etc/kldload/webui-token (also surfaced by kldload-help) and enters it in
-# the UI once (stored in the tab's sessionStorage). This is the interim gate the
-# 2026-05-21 comment above promised; mTLS via the operator CA can layer on later.
+# from /etc/kldload/webui-token (also surfaced by kldload-help). The admin
+# password is the other way in; either one mints a session (below). This is the
+# interim gate the 2026-05-21 comment above promised; mTLS via the operator CA
+# can layer on later.
 WEBUI_TOKEN_FILE = "/etc/kldload/webui-token"
 WEBUI_TOKEN = ""
 # True on the live ISO → the console auth gate is exempted (see ws_handler).
@@ -1883,6 +1884,121 @@ def _load_webui_token():
     except OSError as _e:
         LOG.error("could not persist webui token (%s) — using ephemeral", _e)
     return _t
+
+
+# ── Console sessions (what "signed in" means on an installed system) ────────
+# Until 2026-09-30 an installed console let in anything nginx forwarded from
+# 127.0.0.1 without a password. nginx listens on 127.0.0.1:8443 for every
+# process on the box, so "local" meant every local user and every service,
+# including ones that are not supposed to be root. A sign-in now mints a
+# session, and the browser carries it as an HttpOnly cookie that
+# nginx's auth_request (/auth/verify) and this process both check:
+#   * sign-in is the admin password (PAM, wheel/sudo only) or the bearer
+#     token in WEBUI_TOKEN_FILE, which only root can read;
+#   * the WebSocket reply carries the session once, the page trades it for
+#     the cookie at /auth/session, and every later connection, iframe and
+#     proxied tool (k9s, /s/ terminals, Grafana, Headlamp) sends the cookie;
+#   * only a SHA-256 of each session is kept, in WEBUI_SESSION_FILE (0600),
+#     so a webui restart does not sign anyone out and the file cannot be
+#     replayed. Deleting it signs everyone out.
+# The live ISO keeps its exemption (WEBUI_LIVE_MODE): nothing is installed
+# there to protect, and the kiosk on the machine's own screen has no one to
+# ask for a password.
+WEBUI_SESSION_FILE = "/var/lib/kldload/webui-sessions.json"
+WEBUI_SESSION_COOKIE = "kld_session"
+WEBUI_SESSION_TTL = 30 * 86400  # one sign-in a month per browser
+_SESSIONS = {}  # sha256 hex -> {"user": str, "via": "password"|"token", "exp": epoch}
+
+
+def _session_digest(tok):
+    import hashlib
+    return hashlib.sha256(tok.encode("utf-8", "replace")).hexdigest()
+
+
+def _sessions_load():
+    """Read the session file into _SESSIONS, dropping expired entries.
+
+    A missing file is the first boot; an unreadable or corrupt one signs
+    everyone out, which is the safe direction, and is logged."""
+    _SESSIONS.clear()
+    try:
+        with open(WEBUI_SESSION_FILE) as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as e:
+        LOG.error("session file %s unreadable (%s): everyone must sign in again",
+                  WEBUI_SESSION_FILE, e)
+        return
+    now = time.time()
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if isinstance(v, dict) and float(v.get("exp", 0)) > now:
+                _SESSIONS[str(k)] = v
+
+
+def _sessions_save():
+    """Write _SESSIONS atomically, created 0600 (never chmod after the fact)."""
+    tmp = WEBUI_SESSION_FILE + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(WEBUI_SESSION_FILE), exist_ok=True)
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass  # no leftover from an interrupted save: the usual case
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(_SESSIONS, fh)
+        os.replace(tmp, WEBUI_SESSION_FILE)
+    except OSError as e:
+        # The session still works until the next restart; say so.
+        LOG.error("could not save sessions to %s: %s", WEBUI_SESSION_FILE, e)
+
+
+def _session_mint(user, via):
+    """Mint a session for a user who just signed in; return the raw value."""
+    tok = secrets.token_urlsafe(32)
+    now = time.time()
+    for k in [k for k, v in _SESSIONS.items() if float(v.get("exp", 0)) <= now]:
+        del _SESSIONS[k]
+    _SESSIONS[_session_digest(tok)] = {"user": user, "via": via, "exp": now + WEBUI_SESSION_TTL}
+    _sessions_save()
+    return tok
+
+
+def _session_user(tok):
+    """The user a session value belongs to, or None.
+
+    A password session is re-checked against wheel/sudo on every use, so
+    removing someone from the group ends their sessions without touching
+    the file. A token session belongs to whoever could read the root-only
+    token file, and is not re-checked."""
+    if not tok:
+        return None
+    ent = _SESSIONS.get(_session_digest(tok))
+    if not ent or float(ent.get("exp", 0)) <= time.time():
+        return None
+    user = str(ent.get("user", ""))
+    if ent.get("via") == "password" and not _user_is_console_admin(user):
+        return None
+    return user or "?"
+
+
+def _cookie_session(headers):
+    """The session value in a request's Cookie header, or "" if none."""
+    from http.cookies import CookieError, SimpleCookie
+    raw = ""
+    try:
+        raw = headers.get("Cookie", "") or ""
+    except Exception:
+        return ""
+    jar = SimpleCookie()
+    try:
+        jar.load(raw)
+    except CookieError:
+        return ""  # a malformed header is simply not signed in
+    m = jar.get(WEBUI_SESSION_COOKIE)
+    return m.value if m else ""
 
 
 async def _run_text(cmd, timeout=15, merge_stderr=True):
@@ -1960,7 +2076,8 @@ def _user_is_console_admin(user):
 
 def _pam_authenticate(user, password):
     """True iff (user, password) is a valid login AND user is a console admin.
-    Used for REMOTE console access — local connections auto-auth (loopback)."""
+    Every console sign-in on an installed system comes through here or the
+    bearer token; being local is no longer a credential (2026-09-30)."""
     if not user or not password or not _user_is_console_admin(user):
         LOG.warning("console password auth refused for user %r (unknown or not wheel/sudo)", user)
         return False
@@ -2050,16 +2167,22 @@ async def _install_secrets(websocket, msg):
 async def ws_handler(websocket):
     _ip = _ws_client_ip(websocket)
     LOG.info("WebSocket client connected: %s (X-Real-IP=%s)", websocket.remote_address, _ip or "?")
-    # AUTH MODEL:
-    #   • Live ISO           → auto-auth (installer flow, nothing to protect).
-    #   • Local (loopback)   → auto-auth. The operator is physically at the box;
-    #     requiring a credential to use your own on-box console is pointless.
-    #     Trustworthy because we listen on a proxy-ONLY unix socket, so the only
-    #     source of an X-Real-IP=127.0.0.1 is nginx forwarding a genuine local
-    #     client — a remote or a local non-proxy process cannot forge it.
-    #   • Remote             → require the operator's system PASSWORD (PAM,
-    #     wheel/sudo only); a bearer token is also accepted for scripting.
-    _authed = WEBUI_LIVE_MODE or _ws_is_local(websocket)
+    # AUTH MODEL (see "Console sessions" above):
+    #   • Live ISO        → auto-auth (installer flow, nothing to protect).
+    #   • Session cookie  → auth. The browser signed in earlier.
+    #   • Anything else   → the admin PASSWORD (PAM, wheel/sudo only) or the
+    #     root-only bearer token, then a session is minted.
+    # Being local is NOT a credential any more: every process on the box
+    # reaches nginx on 127.0.0.1, so loopback auto-auth made every local
+    # account root (onyx, 2026-09-30).
+    try:
+        _cookie = _cookie_session(websocket.request.headers)
+    except AttributeError:
+        _cookie = ""  # no request object: not a browser, so no cookie either
+    _sess_user = _session_user(_cookie)
+    _authed = WEBUI_LIVE_MODE or _sess_user is not None
+    if _sess_user is not None:
+        LOG.info("WS authenticated (session): %s user=%s", websocket.remote_address, _sess_user)
     if _authed:
         # Announce it up-front so the SPA never paints a prompt.
         await websocket.send(json.dumps({"type": "auth_ok"}))
@@ -2090,14 +2213,24 @@ async def ws_handler(websocket):
                         await websocket.send(json.dumps({"type": "auth_required"}))
                         continue
                     _ok = False
-                    if _tok:  # scripting fallback — bearer token
+                    _via = ""
+                    if _tok:  # scripting — the root-only bearer token
                         _ok = bool(WEBUI_TOKEN) and secrets.compare_digest(_tok, WEBUI_TOKEN)
-                    elif _pw:  # remote operator — system password via PAM
-                        _ok = _pam_authenticate(_user, _pw)
+                        _via, _user = "token", "root"
+                    elif _pw:  # the operator — system password via PAM
+                        # PAM runs in a thread: pam_faildelay sleeps on a
+                        # wrong password, and in the event loop every other
+                        # client would wait that sleep out too.
+                        _ok = await asyncio.to_thread(_pam_authenticate, _user, _pw)
+                        _via = "password"
                     if _ok:
                         _authed = True
-                        LOG.info("WS authenticated (remote): %s user=%s", websocket.remote_address, _user)
-                        await websocket.send(json.dumps({"type": "auth_ok"}))
+                        LOG.info("WS authenticated (%s): %s user=%s",
+                                 _via, websocket.remote_address, _user)
+                        # The session goes back once; the page trades it for
+                        # an HttpOnly cookie at /auth/session.
+                        await websocket.send(json.dumps({"type": "auth_ok",
+                                                         "session": _session_mint(_user, _via)}))
                     else:
                         LOG.warning("WS auth FAILED: %s", websocket.remote_address)
                         await websocket.send(json.dumps({"type": "auth_error", "msg": "invalid credentials"}))
@@ -12526,9 +12659,29 @@ async def main_async(args):
 
     async def process_request(connection, request):
         """Serve static HTTP requests inline; return None to allow WS upgrade."""
+        url_path = request.path.split("?")[0] or "/"
+        # ── Session endpoints, ahead of the upgrade check so an auth_request
+        # subrequest for a WebSocket (the k9s and /s/ terminals) is answered
+        # here rather than handed to ws_handler.
+        #   /auth/verify   nginx auth_request: 204 signed in, 401 not.
+        #   /auth/session  the page presents the session the WebSocket sign-in
+        #                  returned (X-Kld-Session) and gets it back as an
+        #                  HttpOnly cookie, which page script cannot read.
+        if url_path == "/auth/verify":
+            _ok = WEBUI_LIVE_MODE or _session_user(_cookie_session(request.headers)) is not None
+            return WsResponse(204 if _ok else 401, "No Content" if _ok else "Unauthorized",
+                              WsHeaders([("Cache-Control", "no-store")]), b"")
+        if url_path == "/auth/session":
+            _tok = (request.headers.get("X-Kld-Session", "") or "").strip()
+            if _session_user(_tok) is None:
+                return WsResponse(401, "Unauthorized",
+                                  WsHeaders([("Cache-Control", "no-store")]), b"")
+            _cookie = (f"{WEBUI_SESSION_COOKIE}={_tok}; Path=/; Max-Age={WEBUI_SESSION_TTL}; "
+                       "Secure; HttpOnly; SameSite=Strict")
+            return WsResponse(204, "No Content", WsHeaders([
+                ("Set-Cookie", _cookie), ("Cache-Control", "no-store")]), b"")
         if request.headers.get("Upgrade", "").lower() == "websocket":
             return None  # hand off to ws_handler
-        url_path = request.path.split("?")[0] or "/"
         if url_path == "/":
             url_path = "/index.html"
 
@@ -12816,10 +12969,11 @@ async def main_async(args):
 
     if args.unix_socket:
         # Proxy-ONLY backend. nginx is the sole thing that can open this socket
-        # (mode 0660 root:nginx), so the X-Real-IP it stamps is unforgeable —
-        # which is what makes ws_handler's loopback auto-auth genuinely secure
-        # rather than merely convenient. No TCP port = no local process can hit
-        # the backend directly to fake being local.
+        # (mode 0660 root:nginx), so the X-Real-IP it stamps is unforgeable.
+        # That makes "this came from 127.0.0.1" true, which _install_secrets
+        # relies on for the live kiosk. It does NOT make the client trusted:
+        # any local process reaches nginx on 127.0.0.1, which is why an
+        # installed console signs in with a session instead (2026-09-30).
         global _LOOPBACK_AUTH_OK
         _LOOPBACK_AUTH_OK = True
         import grp as _grp
@@ -12917,6 +13071,8 @@ def main():
     # here — after the root check — because minting writes a 0600 root-only file.
     global WEBUI_TOKEN, WEBUI_LIVE_MODE
     WEBUI_TOKEN = _load_webui_token()
+    _sessions_load()
+    LOG.info("console sessions: %d loaded from %s", len(_SESSIONS), WEBUI_SESSION_FILE)
     WEBUI_LIVE_MODE = (
         os.path.exists("/run/initramfs/live")
         or os.environ.get("KLDLOAD_WEBUI_FORCE_LIVE") == "1"

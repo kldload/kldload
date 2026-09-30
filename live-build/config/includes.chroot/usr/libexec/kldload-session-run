@@ -21,7 +21,7 @@ env_file="/var/lib/kldload/sessions/${id}.env"
 # shellcheck disable=SC1090
 source "$env_file"
 
-: "${KLDLOAD_SESSION_PORT:?port missing from env file}"
+: "${KLDLOAD_SESSION_SOCK:?socket missing from env file (opened before 2026-09-30? reopen it)}"
 : "${KLDLOAD_SESSION_CMD:?cmd missing from env file}"
 : "${KLDLOAD_SESSION_TITLE:=kldload session}"
 
@@ -29,12 +29,11 @@ source "$env_file"
 # of embedded spaces / quotes / braces.
 args=(
     --writable
-    -p "${KLDLOAD_SESSION_PORT}"
-    -i 127.0.0.1
+    -i "${KLDLOAD_SESSION_SOCK}"
     -b "/s/${id}"
     -t "titleFixed=${KLDLOAD_SESSION_TITLE}"
     -t 'fontFamily=JetBrains Mono,Menlo,Consolas,monospace'
-    sh -c "${KLDLOAD_SESSION_CMD}"
+    sh -c "umask 022; ${KLDLOAD_SESSION_CMD}"
 )
 
 exec /usr/local/bin/ttyd "${args[@]}"

@@ -49,13 +49,23 @@ Environment=TERM=xterm-256color
 # disableLeaveAlert=true so the browser doesn't prompt on page close.
 # rendererType=webgl for smoother scrolling on big live log streams.
 # scrollback=10000 lets you scroll back further in panes like hubble.
-ExecStart=/usr/local/bin/ttyd -W -i 127.0.0.1 -p 7681 -b /k9s \
+#
+# A unix socket, not 127.0.0.1:7681. This is a ROOT console, and on a TCP
+# port every local account could connect to it directly, past nginx and its
+# sign-in (onyx, 2026-09-30). UMask=0077 makes ttyd bind the socket 0600
+# root:root; kldload-web-socket then hands it to nginx's group, 0660, and a
+# failure there leaves it root-only (502, fails closed). The console itself
+# gets root's usual 022 back, or every file made in it would be 0600.
+UMask=0077
+ExecStartPre=/usr/bin/install -d -m 0755 /run/kldload
+ExecStart=/usr/local/bin/ttyd -W -i /run/kldload/ttyd-k9s.sock -b /k9s \
     -t fontSize=14 \
     -t copyOnSelect=true \
     -t disableLeaveAlert=true \
     -t 'rendererType=webgl' \
     -t scrollback=10000 \
-    /usr/local/bin/kldload-console
+    /bin/sh -c 'umask 022; exec /usr/local/bin/kldload-console'
+ExecStartPost=/usr/libexec/kldload-web-socket /run/kldload/ttyd-k9s.sock
 Restart=always
 # `Restart=always` not `on-failure` — caught 2026-05-17 on .148: the
 # wrapped kldload-console / tmux / k9s pipeline can exit *cleanly*

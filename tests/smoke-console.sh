@@ -16,7 +16,9 @@
 # rather than showing "Loading…" forever to the first operator who opens it.
 #
 # Inputs:  a running kldload-webui on :8443 (installed host); python3 with the
-#          websockets module (the webui's own dependency, so it is there).
+#          websockets module (the webui's own dependency, so it is there);
+#          root, to read the sign-in token /etc/kldload/webui-token. Being
+#          local stopped counting as signed in on 2026-09-30.
 # Output:  PASS/FAIL/WARN lines (tests/lib-test.sh), a summary, exit 0 only
 #          when nothing failed. A missing webui or module is a FAIL, not a
 #          skip: a gate that cannot run is not a gate.
@@ -48,11 +50,20 @@ if ! curl -fsk --max-time 20 -o /dev/null "${WEBUI_URL}/"; then
 fi
 _pass "webui answers ${WEBUI_URL}"
 
+# The console signs nobody in for being local any more; this gate signs in
+# with the root-only token, the way a script is meant to.
+_token_file="${KLDLOAD_WEBUI_TOKEN_FILE:-/etc/kldload/webui-token}"
+if ! _token="$(cat "$_token_file" 2>/dev/null)" || [[ -z "$_token" ]]; then
+    _fail "sign-in token" "cannot read ${_token_file} (run as root) — the gate cannot run"
+    printf '\n  console: %d passed, %d failed, %d warned\n' "$PASS" "$FAIL" "$WARN"
+    exit 1
+fi
+
 # One python process, one socket, every action; each line it prints is
 # "ok|fail <name> <detail>" and is recorded here, so a stuck action costs its
 # own bound and not the suite. The assertions name the fields the SPA reads.
 _results="$(
-    WEBUI_URL="$WEBUI_URL" python3 - <<'PY'
+    WEBUI_URL="$WEBUI_URL" WEBUI_TOKEN="$_token" python3 - <<'PY'
 import asyncio, json, os, ssl, time
 import websockets
 ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
@@ -87,6 +98,18 @@ CASES = [
 async def main():
     async with websockets.connect(url, ssl=ctx if url.startswith("wss") else None,
                                   origin=base, max_size=None) as ws:
+        # Sign in first. A console that answers anything before this is the
+        # 2026-09-30 hole back again, so that is checked too.
+        await ws.send(json.dumps({"action": "list_vms"}))
+        m = json.loads(await asyncio.wait_for(ws.recv(), 30))
+        print(("ok" if m.get("type") == "auth_required" else "fail")
+              + f" unsigned-in socket refused ({m.get('type')})")
+        await ws.send(json.dumps({"action": "auth", "token": os.environ["WEBUI_TOKEN"]}))
+        while True:
+            m = json.loads(await asyncio.wait_for(ws.recv(), 30))
+            if m.get("type") in ("auth_ok", "auth_error"):
+                break
+        print(("ok" if m.get("type") == "auth_ok" else "fail") + f" token sign-in ({m.get('type')})")
         for action, want, bound, check in CASES:
             name = action["action"]
             t0 = time.monotonic()
@@ -116,11 +139,12 @@ while IFS= read -r line; do
     *) _warn "console client" "unexpected line: $line" ;;
     esac
 done <<<"$_results"
-# Count what we were given: ten cases went in, ten lines must come out.
-if ((_n == 10)); then
-    _pass "every console action answered (10/10)"
+# Count what we were given: two sign-in checks and ten cases went in, twelve
+# lines must come out.
+if ((_n == 12)); then
+    _pass "sign-in checked and every console action answered (12/12)"
 else
-    _fail "console actions answered" "${_n} of 10 cases reported — the rest never answered"
+    _fail "console actions answered" "${_n} of 12 lines reported — the rest never answered"
 fi
 
 _section "kld, the terminal hub"

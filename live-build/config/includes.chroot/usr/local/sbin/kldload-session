@@ -7,36 +7,35 @@
 # VM graphical console via noVNC, kubectl pod exec, an ad-hoc shell on
 # a cluster node, a klab tail -f, a Bob eBPF tracing stream) spawns
 # through this one CLI. The caller doesn't write nginx config, doesn't
-# touch systemd, doesn't pick ports — this does.
+# touch systemd, doesn't pick sockets — this does.
 #
 # Flow:
-#   open  → pick a free loopback port, write a nginx drop-in at
-#           /etc/nginx/conf.d/kldload-dyn/<id>.conf scoping /s/<id>/
-#           to 127.0.0.1:<port>, start kldload-session@<id>.service
-#           (a templated ttyd wrapping the real command), reload nginx.
-#           Prints the URL on stdout.
-#   close → stop the unit, delete the drop-in, reload nginx.
-#   list  → enumerate active sessions (id, kind, target, url, pid).
+#   open  → write a nginx drop-in at /etc/nginx/conf.d/kldload-dyn/<id>.conf
+#           scoping /s/<id>/ to the unix socket /run/kldload/session/<id>.sock,
+#           start kldload-session@<id>.service (a templated ttyd wrapping the
+#           real command), reload nginx. Prints the URL on stdout.
+#   close → stop the unit, delete the drop-in and socket, reload nginx.
+#   list  → enumerate active sessions (id, kind, target, socket, state).
 #
-# Session metadata (kind, target, port, pid, opened_at, opened_by) is
+# Session metadata (kind, target, socket, opened_at, opened_by) is
 # persisted at /var/lib/kldload/sessions/<id>.env so the webui backend,
 # audit log, and `list` subcommand can reason about active sessions
 # without parsing systemd state.
 #
-# Security stance for 1.0.6: single-user appliance. No caller auth.
-# Sessions are logged for audit (/var/log/kldload-session.log) so when
-# OIDC lands, the same audit pipeline gets real user attribution.
+# Security: a session is a root terminal, so two things guard it. The
+# ttyd behind it listens on a unix socket only nginx's group can open
+# (kldload-web-socket); it was a 127.0.0.1 port in 19000-19255 until
+# 2026-09-30, which any local account could connect to directly. And
+# nginx serves /s/<id>/ only to a signed-in console session (auth_request
+# in kldload.conf). Opening one needs root. Sessions are logged for audit
+# (/var/log/kldload-session.log).
 
 set -euo pipefail
 
 SESSION_DIR="${KLDLOAD_SESSION_DIR:-/var/lib/kldload/sessions}"
 NGX_DYN_DIR="${KLDLOAD_NGX_DYN_DIR:-/etc/nginx/conf.d/kldload-dyn}"
 AUDIT_LOG="${KLDLOAD_SESSION_AUDIT:-/var/log/kldload-session.log}"
-
-# Loopback port range — far above well-known ports, below ephemeral
-# range's typical lower bound (32768). 256 slots is plenty.
-PORT_RANGE_LO=19000
-PORT_RANGE_HI=19255
+SOCK_DIR="${KLDLOAD_SESSION_SOCK_DIR:-/run/kldload/session}"
 
 log() { echo "[kldload-session] $*" >&2; }
 die() {
@@ -62,24 +61,12 @@ audit() {
 ensure_dirs() {
     install -d -m 0755 -o root -g root "${SESSION_DIR}"
     install -d -m 0755 -o root -g root "${NGX_DYN_DIR}"
+    install -d -m 0755 -o root -g root "${SOCK_DIR}"
 }
 
 # Random URL-safe id. 8 hex chars = 32 bits — plenty for a short-lived
 # session collision namespace (we check for reuse below anyway).
 new_id() { head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
-
-# Pick a port with no bind — race-free enough at the CLI's scale.
-# (Real enterprise version would use SO_REUSEPORT probe; here we
-# check ss and fall back to a second attempt.)
-pick_port() {
-    local p
-    for p in $(shuf -i "${PORT_RANGE_LO}-${PORT_RANGE_HI}" -n 32); do
-        ss -ltn "sport = :${p}" 2>/dev/null | grep -q LISTEN && continue
-        echo "$p"
-        return 0
-    done
-    die "no free port in ${PORT_RANGE_LO}-${PORT_RANGE_HI}"
-}
 
 # ──────────────────────────────────────────────────────────────────────
 # open <kind> <target> [--user NAME] [--title "..."]
@@ -115,9 +102,9 @@ cmd_open() {
     [[ -n "$kind" && -n "$target" ]] ||
         die "usage: kldload-session open <kind> <target> [--user NAME] [--title STR]"
 
-    local id port cmd
+    local id sock cmd
     id="$(new_id)"
-    port="$(pick_port)"
+    sock="${SOCK_DIR}/${id}.sock"
 
     case "$kind" in
     shell)
@@ -197,7 +184,7 @@ cmd_open() {
         printf 'KLDLOAD_SESSION_ID=%q\n' "${id}"
         printf 'KLDLOAD_SESSION_KIND=%q\n' "${kind}"
         printf 'KLDLOAD_SESSION_TARGET=%q\n' "${target}"
-        printf 'KLDLOAD_SESSION_PORT=%q\n' "${port}"
+        printf 'KLDLOAD_SESSION_SOCK=%q\n' "${sock}"
         printf 'KLDLOAD_SESSION_CMD=%q\n' "${cmd}"
         printf 'KLDLOAD_SESSION_TITLE=%q\n' "${title:-${kind}: ${target}}"
         printf 'KLDLOAD_SESSION_USER=%q\n' "${user}"
@@ -210,17 +197,18 @@ cmd_open() {
     # kldload.conf server block, which is where the /s/<id>/ location
     # here slots into at include time.
     #
-    # proxy_pass WITHOUT a URI part (bare http://host:port) forwards the
+    # proxy_pass WITHOUT a URI part (bare http://unix:<sock>) forwards the
     # incoming URI untouched. ttyd was started with `-b /s/<id>` so it
-    # expects to see the prefix in requests — stripping it via
-    # `proxy_pass http://host:port/` would send ttyd "/" and it would
-    # 404. Bare form is correct for this pattern.
+    # expects to see the prefix in requests — adding a URI part would send
+    # ttyd "/" and it would 404. Bare form is correct for this pattern.
+    # No auth_request line: the server-level gate in kldload.conf covers
+    # every location, this one included.
     cat >"${NGX_DYN_DIR}/${id}.conf" <<EOCONF
 # kldload session ${id} — kind=${kind} target=${target}
 # opened=$(ts) user=${user}
 # DO NOT EDIT MANUALLY — kldload-session manages this file.
 location /s/${id}/ {
-    proxy_pass          http://127.0.0.1:${port};
+    proxy_pass          http://unix:${sock}:;
     include             /etc/nginx/kldload/proxy-common.conf;
     include             /etc/nginx/kldload/ws-upgrade.conf;
     proxy_buffering     off;
@@ -236,9 +224,15 @@ EOCONF
         die "nginx -t failed after writing drop-in; session aborted"
     fi
 
-    # Start the templated unit (systemd reads EnvironmentFile= from
-    # /var/lib/kldload/sessions/%i.env to pick up PORT + CMD).
-    systemctl start "kldload-session@${id}.service"
+    # Start the templated unit (kldload-session-run reads
+    # /var/lib/kldload/sessions/<id>.env for the socket and command). A unit
+    # that fails to start -- including kldload-web-socket refusing to hand
+    # the socket to nginx -- used to leave its drop-in and record behind
+    # under set -e (found testing the socket move, 2026-09-30); undo both.
+    if ! systemctl start "kldload-session@${id}.service"; then
+        rm -f "${NGX_DYN_DIR}/${id}.conf" "${SESSION_DIR}/${id}.env" "${sock}"
+        die "kldload-session@${id}.service did not start; see: journalctl -u kldload-session@${id}"
+    fi
 
     # Graceful reload — no dropped WS on existing sessions.
     systemctl reload nginx
@@ -267,7 +261,8 @@ EOCONF
     #
     # Poll the local URL until it returns non-404 (the actual ttyd HTML
     # is a 200, the WS-upgrade upgrade arc is a 101 — either is fine,
-    # both prove the location block is live). 100ms × 30 = 3s ceiling.
+    # both prove the location block is live; so is the 401 the sign-in gate
+    # gives this unauthenticated probe). 100ms × 30 = 3s ceiling.
     local _i
     for _i in $(seq 1 30); do
         local _code
@@ -286,7 +281,7 @@ EOCONF
     local host
     host="$(hostname -f 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost)"
     echo "https://${host}:8443/s/${id}/"
-    log "session opened: id=${id} kind=${kind} target=${target} port=${port}"
+    log "session opened: id=${id} kind=${kind} target=${target} sock=${sock}"
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -312,7 +307,7 @@ cmd_close() {
     fi
 
     systemctl stop "kldload-session@${id}.service" 2>/dev/null || true
-    rm -f "${NGX_DYN_DIR}/${id}.conf" "${env}"
+    rm -f "${NGX_DYN_DIR}/${id}.conf" "${env}" "${SOCK_DIR}/${id}.sock"
     systemctl reload nginx 2>/dev/null || true
 
     audit close "$id" "$kind" "$target" "$user"
@@ -331,11 +326,11 @@ cmd_list() {
         (
             source "$env"
             state="$(systemctl is-active "kldload-session@${KLDLOAD_SESSION_ID}.service" 2>/dev/null || echo unknown)"
-            printf '%s  %-10s  %-30s  port=%s  state=%s  opened=%s  user=%s\n' \
+            printf '%s  %-10s  %-30s  sock=%s  state=%s  opened=%s  user=%s\n' \
                 "${KLDLOAD_SESSION_ID}" \
                 "${KLDLOAD_SESSION_KIND}" \
                 "${KLDLOAD_SESSION_TARGET}" \
-                "${KLDLOAD_SESSION_PORT}" \
+                "${KLDLOAD_SESSION_SOCK:-${KLDLOAD_SESSION_PORT:-?}}" \
                 "${state}" \
                 "${KLDLOAD_SESSION_OPENED_AT}" \
                 "${KLDLOAD_SESSION_USER}"
