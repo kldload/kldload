@@ -12,7 +12,9 @@ trap 'echo "kdir: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 #   kdir -o compression=zstd /data → set extra ZFS properties
 
 usage() {
-    cat >&2 <<'EOF'
+    # asked for: stdout; a usage error: stderr
+    local rc="${1:-2}"
+    cat >&$((rc == 0 ? 1 : 2)) <<'EOF'
 Usage: kdir [-p] [-o property=value] ... <mountpoint> [<mountpoint> ...]
 
 Creates a ZFS dataset mounted at each given path.
@@ -34,7 +36,7 @@ Examples:
   kdir -o compression=zstd -o quota=50G /srv/bigdata
 EOF
     # asked-for help is 0; a usage error is 2, like the other tools (it was 1)
-    exit "${1:-2}"
+    exit "$rc"
 }
 
 die() {
