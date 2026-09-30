@@ -1,0 +1,106 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-INSTALL-STATUS 8
+.Os
+.Sh NAME
+.Nm kldload-install-status
+.Nd one line saying whether an install is alive, and how far it has got
+.Sh SYNOPSIS
+.Nm
+.Op Fl w | -watch
+.Op Fl v | -verbose
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The installer logs when a phase starts, and its longest phases \(em the
+package passes, the ZFS module build \(em then work for minutes in
+silence, which reads as a hang.
+.Nm
+answers
+.Dq is it still going
+in one line, from what the installer already writes: the phase, out of
+six, and what it is doing; how many packages the new system has; how much
+the pool holds; and how long it has been running.
+A field that cannot be read is left out rather than guessed.
+If the log has a
+.Ql FATAL
+line, that line is printed instead and the exit status is 1.
+.Pp
+On an installed machine it says when the machine was installed, from the
+install manifest.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl w , Fl -watch
+Repaint the line every five seconds until the autoinstall unit stops.
+.It Fl v , Fl -verbose
+Add a second line naming the phases finished.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_POOL
+The pool whose size is shown; default
+.Ql rpool .
+.It Ev KLDLOAD_TARGET_MNT
+Where the new system is mounted; default
+.Pa /target .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/installer/autoinstall.log
+The unattended installer's log, on the live system.
+.It Pa /root/kldload-install-logs/
+The copy left on the installed system.
+.It Pa /etc/kldload/install-manifest.env
+What was installed, and when.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Running, finished, or installed.
+.It 1
+The install failed.
+.It 2
+A usage error.
+.It 3
+The install log cannot be read here; run as root.
+.El
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30:
+.Bd -literal -offset indent
+# kldload-install-status
+installed fedora desktop on 2026-08-30T13:48:59Z — nothing is installing now
+# (exited 0)
+$ kldload-install-status
+no install log readable as anthony — run as root
+# (exited 3)
+.Ed
+.Pp
+During an unattended install, on the machine being installed; not run for
+this page:
+.Bd -literal -offset indent
+# kldload-install-status --watch
+# one line, repainted: [phase/6] what it is doing · packages · pool size · elapsed
+.Ed
+.Sh SEE ALSO
+.Xr kldload-autoinstall 8 ,
+.Xr kldload-install-target 8
+.Sh HISTORY
+Written after 2026-09-11, when an operator watching three healthy installs
+read the silence as a hang each time, once on a machine that had already
+finished and passed every smoke test.
+.Pp
+On 2026-09-30, writing this page: on a desktop a month after its install
+it printed
+.Ql [1/6] starting  ·  2323 pkgs  ·  1.61T  ·  43952m23s ,
+reading an interactive install's log as if it were an unattended one in
+progress; and as a user it said nothing had ever run on the machine,
+because the log under
+.Pa /root
+could not be read.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The phases are read from the unattended installer's console log; an
+install made interactively leaves no such log, and has no live line to
+show.
