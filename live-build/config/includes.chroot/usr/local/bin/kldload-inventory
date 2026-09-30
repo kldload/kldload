@@ -53,13 +53,24 @@ SSH_USER  = os.environ.get("KLDLOAD_SSH_USER", "root")
 
 
 def _connect():
-    """Read-only connection. Using the sqlite3 URI with mode=ro lets non-root
-    users (like `admin` running ansible) read the inventory without needing
-    write access to the DB or its WAL journal files."""
+    """Read-only connection, so a user in the kldload group can run Ansible.
+
+    Not immutable=1, which it used to add: that tells SQLite the file never
+    changes, so it skips the WAL, and the state DB is in WAL mode -- every row
+    committed since the last checkpoint was invisible, and Ansible targeted
+    the estate as it had been (a committed VM missing while its writer was
+    open, shown on a copy of onyx's DB, 2026-09-29). immutable is kept only as
+    a fallback for a reader that cannot open the WAL at all, and says so.
+    """
     if not DB_PATH.exists():
         return None
-    uri = f"file:{DB_PATH}?mode=ro&immutable=1"
-    con = sqlite3.connect(uri, uri=True)
+    try:
+        con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        con.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+    except sqlite3.OperationalError as e:
+        sys.stderr.write(f"kldload-inventory: {DB_PATH}: {e}; reading without its "
+                         "WAL -- the newest changes may be missing\n")
+        con = sqlite3.connect(f"file:{DB_PATH}?mode=ro&immutable=1", uri=True)
     con.row_factory = sqlite3.Row
     return con
 
@@ -242,17 +253,19 @@ def main(argv):
     g.add_argument("--list", action="store_true",
                    help="emit full inventory as JSON (Ansible default)")
     g.add_argument("--host", metavar="HOST",
-                   help="per-host vars (legacy mode — we return {} since --list has _meta)")
+                   help="one host's vars as JSON ({} for a host the inventory does not have)")
     g.add_argument("--dump", action="store_true",
                    help="pretty-print inventory for humans")
     args = ap.parse_args(argv)
 
-    if args.host:
-        # All vars already in --list _meta.hostvars, so this is just a stub.
-        print(json.dumps({}))
-        return 0
-
     inv = build_inventory()
+    if args.host is not None:  # an empty name is a host that is not there, not --list
+        # The host's own vars. This printed {} for every host, while the
+        # doctor's address lookup asks --host for ansible_host -- so that
+        # source never answered (found writing kldload-inventory(8),
+        # 2026-09-29). Ansible itself does not call it: --list carries _meta.
+        print(json.dumps(inv["_meta"]["hostvars"].get(args.host, {})))
+        return 0
     if args.dump:
         print(json.dumps(inv, indent=2, sort_keys=True))
     else:
