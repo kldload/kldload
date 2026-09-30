@@ -58,7 +58,7 @@ ${B}${G}Topics${N}
   ${C}replication${N}   ZFS send/recv between datasets and between hosts
   ${C}export${N}        ship VMs as qcow2/vmdk/vhd/ova/raw to disk or AWS
   ${C}backup${N}        sanoid snapshots, boot environments, recovery
-  ${C}ai${N}            Bob (local LLM), model swap, voice, agentic mode
+  ${C}ai${N}            local models, Open WebUI, freeing the GPU
   ${C}observability${N} Grafana, Hubble, Tetragon, klab dashboards
   ${C}cockpit${N}       F-key console — what each cockpit answers and when to use it
   ${C}firstboot${N}     what runs unattended at first boot, where the logs are
@@ -361,37 +361,39 @@ EOF
 }
 
 _t_ai() {
+    # Only commands that exist. This listed bob, bob-do, bob-voice, bob-model
+    # and bob-agent, none of which ships (Bob's CLI was retired for Open
+    # WebUI, docs/bob-deprecation.md); checked against the tree and onyx on
+    # 2026-09-30.
     cat <<EOF
 
-${B}${G}── ai — Bob (local LLM), models, voice ────────────────────────────────────${N}
+${B}${G}── ai — local models, Open WebUI, the assistant ────────────────────────────${N}
 
-  Bob is a local AI assistant on Ollama + qwen3:14b by default.
-  No data leaves the box. The webui hosts a chat panel.
+  Ollama runs the models on this machine; nothing leaves it. Open WebUI is
+  the chat interface, with voice, a model picker and documents to ask about.
 
-  ${C}bob${N}                          interactive CLI session
-  ${C}bob-do "<task>"${N}              one-shot: ask Bob to do something
-  ${C}bob-voice${N}                    voice-driven Bob (whisper.cpp transcription)
-  ${C}bob-model${N}                    list / swap LLM models
-  ${C}bob-agent${N}                    agentic mode: Bob runs shell tools autonomously
-  ${C}ollama list${N}                  every model on disk
-  ${C}ollama pull <model>${N}          download another model
+  ${C}bobctl status${N}                 is the assistant's model loaded, free VRAM
+  ${C}bobctl off${N}                    free the GPU (for a game)
+  ${C}bobctl on${N}                     load the model back
+  ${C}kai-rag "<question>"${N}          ask about this machine, from the indexed docs
+  ${C}kai-index${N}                     index the documentation for kai-rag
+  ${C}ollama list${N}                   every model on disk
+  ${C}ollama pull <model>${N}           download another model
+  ${C}ollama ps${N}                     loaded models and their memory
 
 ${B}${Y}Examples${N}
-  ${D}# Ask Bob a question${N}
-  ${C}bob${N}
+  ${D}# Free the GPU before a game, and load the model after${N}
+  ${C}bobctl off${N}
+  ${C}bobctl on${N}
 
-  ${D}# One-shot${N}
-  ${C}bob-do "investigate disk usage and report"${N}
+  ${D}# Ask about this machine${N}
+  ${C}kai-rag "why is rpool nearly full?"${N}
 
-  ${D}# Switch to a smaller model on a small machine${N}
+  ${D}# A smaller model on a small machine${N}
   ${C}ollama pull qwen3:8b${N}
-  ${C}bob-model qwen3:8b${N}
 
-  ${D}# See model size + VRAM use${N}
-  ${C}ollama ps${N}
-
-${B}${Y}Bob in the webui${N}
-  Open ${C}https://<host>:8443/${N} and click the Bob panel (right side).
+${B}${Y}Open WebUI${N}
+  The desktop tile, or ${C}http://<host>:8080/${N} (kldload-ai-webui).
 
 EOF
 }
