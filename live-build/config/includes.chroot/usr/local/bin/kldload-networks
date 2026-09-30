@@ -129,6 +129,18 @@ cmd_apply() {
     ((failed == 0)) || exit 1
 }
 
+# _mask_len NETMASK -- its prefix length on stdout (255.255.255.0 -> 24)
+_mask_len() {
+    local o n=0
+    for o in ${1//./ }; do
+        case "$o" in
+        255) n=$((n + 8)) ;; 254) n=$((n + 7)) ;; 252) n=$((n + 6)) ;; 248) n=$((n + 5)) ;;
+        240) n=$((n + 4)) ;; 224) n=$((n + 3)) ;; 192) n=$((n + 2)) ;; 128) n=$((n + 1)) ;;
+        esac
+    done
+    printf '%s\n' "$n"
+}
+
 cmd_list() {
     printf '  %-14s %-8s %-12s %-18s %s\n' "NETWORK" "STATE" "AUTOSTART" "SUBNET" "PURPOSE"
     printf '  %-14s %-8s %-12s %-18s %s\n' "──────────────" "────────" "────────────" "──────────────────" "───────────────"
@@ -137,9 +149,11 @@ cmd_list() {
         [[ -z "$n" ]] && continue
         state="$(virsh net-info "$n" 2>/dev/null | awk '/^Active:/{print $2}')"
         auto="$(virsh net-info "$n" 2>/dev/null | awk '/^Autostart:/{print $2}')"
+        # address/prefix: it printed "192.168.122.1 /255.255.255.0", which
+        # also pushed PURPOSE out of its column
         subnet="$(virsh net-dumpxml "$n" 2>/dev/null |
-            grep -oE "address='[0-9.]+' netmask='[0-9.]+'" |
-            head -1 | sed "s/address='//;s/' netmask='/ \//;s/'//")"
+            sed -n "s/.*address='\([0-9.]*\)' netmask='\([0-9.]*\)'.*/\1 \2/p" | sed -n 1p)"
+        [[ -n "$subnet" ]] && subnet="${subnet% *}/$(_mask_len "${subnet#* }")"
         case "$n" in
         kld-klab) purpose="klab goldens + sites" ;;
         kld-zfslab) purpose="ZFS test lab" ;;
@@ -255,6 +269,18 @@ print(sum(1 for v in d.get("vms",[]) if v.get("ip_addr")))' 2>/dev/null || echo 
     local net name ip mac seen=0 attempted=0 stale=0 before after
     before="$(_vms_with_ip)"
 
+    # Which VMs hold an address now, so a clear below is counted only when it
+    # clears something.
+    local -A _had_ip=()
+    local _hn
+    while read -r _hn; do
+        [[ -n "$_hn" ]] && _had_ip["$_hn"]=1
+    done < <(kldload-db dump 2>/dev/null | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+for v in d.get("vms", []):
+    if v.get("ip_addr") and not v.get("deleted_at"): print(v.get("name", ""))' 2>/dev/null)
+
     # MAC -> domain, straight from libvirt. Built once: this is the fallback for
     # leases whose guest announced no hostname (see the loop below).
     local -A _mac_owner=()
@@ -350,9 +376,15 @@ print(sum(1 for v in d.get("vms",[]) if v.get("ip_addr")))' 2>/dev/null || echo 
             # than failing, DHCP reuses addresses, so a stale entry can resolve
             # to a DIFFERENT machine and the play SUCCEEDS against the wrong
             # host. onyx had kldload-cp and test-xfce both claiming .57.
-            kldload-db vm-status --name "$_dom" --ip "" --status "${_state:-shut}" >/dev/null 2>&1 || true
-            log "sync: ${_dom} is ${_state:-absent} — address cleared"
-            stale=$((stale + 1))
+            kldload-db vm-status --name "$_dom" --ip "" --status "${_state:-shut}" >/dev/null 2>&1 || true # an unregistered domain has no row to update
+            # Counted and logged only when there WAS an address to clear:
+            # every shut-off VM was counted, so onyx said "49 stale" every
+            # minute and logged 49 "address cleared" lines while nothing
+            # changed (2026-09-29).
+            if [[ -n "${_had_ip[$_dom]:-}" ]]; then
+                log "sync: ${_dom} is ${_state:-absent} — address cleared"
+                stale=$((stale + 1))
+            fi
         fi
     done < <(virsh list --all --name 2>/dev/null)
 
