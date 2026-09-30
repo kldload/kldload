@@ -65,8 +65,9 @@ log "Pruning $DELETE_COUNT oldest snapshot(s)..."
 # named for what it is rather than logged as a failure.
 #
 # Still exit 0 when one cannot go: snapshot-create.sh runs this under set -e
-# inside apt's and dnf's pre-transaction hook, and a non-zero here aborts the
-# install -- the duplicate-name incident of 2026-09-20 in another shape.
+# as its last step, inside apt's and dnf's pre-transaction hook, and a
+# non-zero there makes the hook announce "proceeding without a rollback
+# point" for a snapshot that was in fact taken.
 deleted=0 kept=0 failed=0
 for ((i = 0; i < DELETE_COUNT; i++)); do
     SNAP="${ALL_SNAPS[$i]}"

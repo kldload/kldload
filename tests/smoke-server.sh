@@ -65,6 +65,13 @@ test_succeeds "kdf executes" "kdf >/dev/null 2>&1"
 # Test kpkg detects package manager
 test_succeeds "kpkg detects pkg manager" "kpkg help >/dev/null 2>&1"
 
+# The tools' man pages reach the installed system. They were on the live ISO
+# and on no installed machine until 2026-09-30 (onyx: "No manual entry for
+# kvm-delete"). Files, not `man -w`: a minimal server may have no man-db.
+test_succeeds "man pages installed (kvm-delete.8)" "test -s /usr/local/share/man/man8/kvm-delete.8"
+test_succeeds "man pages installed (30 or more in man8)" \
+    "[[ \$(ls /usr/local/share/man/man8/*.8 2>/dev/null | wc -l) -ge 30 ]]"
+
 # ── Web UI ───────────────────────────────────────────────────────────────────
 _section "Web UI"
 

@@ -1784,7 +1784,12 @@ k_install_system_files() {
         # never reached an installed system. Note kldload-examples was in THIS
         # list already but not in build-iso.sh, so the copy below has been
         # finding an empty source: the chain was broken at the first link.
-        for _share in kldload kldload-examples kldload-networks klab-bob; do
+        #
+        # man added 2026-09-30: the tools' man pages were on the live ISO (33 of
+        # them in build 165's squashfs) and on the website, and on no installed
+        # machine -- `man kvm-delete` on onyx said "No manual entry". man finds
+        # /usr/local/share/man without an index rebuild on both families.
+        for _share in kldload kldload-examples kldload-networks klab-bob man; do
             if [[ -d "/usr/local/share/${_share}" ]]; then
                 mkdir -p "${target}/usr/local/share/${_share}"
                 cp -r "/usr/local/share/${_share}/." "${target}/usr/local/share/${_share}/"
