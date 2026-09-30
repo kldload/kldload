@@ -114,7 +114,24 @@ die() {
 # staged was then destroyed and the pool was left with bootfs UNSET. On the ZBM
 # path that is an unbootable machine.
 # The fix everywhere is an awk that reads to EOF (no exit, no head).
-_pool() { zpool list -H -o name 2>/dev/null | awk 'NR==1'; }
+# _pool — the pool this machine boots from: the running root's, when root is
+# ZFS; otherwise (a live system) the first pool that has a bootfs.
+# WHY: this was the FIRST pool `zpool list` printed, which is alphabetical. A
+# second boot pool imported beside rpool whose name sorts first -- an old
+# install's, a disk being recovered -- made every verb read and change THAT
+# pool's boot environments. Shown on onyx, 2026-09-30, with a throwaway pool
+# "aakst..." carrying a bootfs: the old lookup named aakst.../ROOT/decoy as
+# the environment to roll back; onyx's own second pool, tank, has no bootfs,
+# which is why it had never shown.
+_pool() {
+    local r
+    r="$(mount | awk '$3=="/" && $5=="zfs" && !f {print $1; f=1}')"
+    if [[ -n "$r" ]]; then
+        printf '%s\n' "${r%%/*}"
+        return 0
+    fi
+    zpool get -H -o name,value bootfs 2>/dev/null | awk '$2 != "-" && !f {print $1; f=1}'
+}
 _fsize() { stat -c %s "$1" 2>/dev/null || echo 0; }
 
 # _esp_backup <src> <dst> — copy onto the ESP and PROVE the copy is whole.
