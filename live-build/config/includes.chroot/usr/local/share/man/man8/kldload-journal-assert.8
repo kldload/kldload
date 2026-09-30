@@ -6,6 +6,7 @@
 .Nd prove at every boot that the system journal is recording, and on disk, and repair it when not
 .Sh SYNOPSIS
 .Nm
+.Op Fl -check
 .Nm
 .Fl h | -help
 .Sh DESCRIPTION
@@ -45,6 +46,12 @@ runs it at every boot, after ZFS has mounted.
 It must run as root.
 .Sh OPTIONS
 .Bl -tag -width Ds
+.It Fl -check
+Ask both questions and repair nothing: exit 0 when the journal records to
+disk, 1 otherwise, saying which.
+It creates nothing either, and needs no root.
+.Xr kldload-obs-check 8
+asks this way.
 .It Fl h , Fl -help
 Print the description at the top of the script and exit 0.
 .El
@@ -68,12 +75,19 @@ which removes the race at its source; this tool is the second failsafe.
 .It 0
 The journal records, to disk, possibly after a repair.
 .It 1
-Still not, after the repair.
+Still not, after the repair; or, with
+.Fl -check ,
+not.
+.It 2
+An unknown argument.
 .El
 .Sh EXAMPLES
 Printed on a kldload desktop on 2026-09-30:
 .Bd -literal -offset indent
 # kldload-journal-assert
+journal: recording persistently in /var/log/journal (root:systemd-journal)
+# (exited 0)
+# kldload-journal-assert --check
 journal: recording persistently in /var/log/journal (root:systemd-journal)
 # (exited 0)
 .Ed
@@ -93,6 +107,7 @@ To check any machine by hand:
 .Xr logger 1 ,
 .Xr journald.conf 5 ,
 .Xr kldload-boot-assert 8 ,
+.Xr kldload-obs-check 8 ,
 .Xr systemd-journald 8
 .Sh HISTORY
 On 2026-08-26 a machine recorded nothing across two boots while journald
