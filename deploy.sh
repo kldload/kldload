@@ -1118,6 +1118,18 @@ cmd_build() {
     "$runtime" wait "$BUILDER_CONTAINER" || true
     local _rc
     _rc="$("$runtime" inspect "$BUILDER_CONTAINER" --format '{{.State.ExitCode}}' 2>/dev/null || echo 1)"
+    # build-iso.sh's own log() and die() write to the container's stderr, not
+    # to the build log, so the ONE line that says why a build died lived only
+    # in the container -- which the rm below discards. Build 166 (2026-09-30)
+    # exited 1 with a build log that simply stopped, and the reason was gone.
+    # Keep the container's output next to the build log, and show its tail.
+    local _clog="$LOG_DIR/container-${PROFILE}-${ARCH}-$(date +%Y%m%d-%H%M%S).log"
+    "$runtime" logs "$BUILDER_CONTAINER" >"$_clog" 2>&1 ||
+        log "WARNING: could not save the build container's output"
+    if [[ "$_rc" != "0" ]]; then
+        log "build container exited ${_rc}; its last lines (${_clog}):"
+        tail -n 15 "$_clog" >&2
+    fi
     "$runtime" rm "$BUILDER_CONTAINER" 2>/dev/null || true
 
     local iso
