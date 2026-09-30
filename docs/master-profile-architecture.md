@@ -479,7 +479,9 @@ Scale-out is ZFS-first (multiple storage nodes + replication). It enrolls like
 any other node (golden image + cloud-init `role=storage` + Ansible role).
 
 **Open:** ZFS + NFS/iSCSI + democratic-csi (recommended, on-identity) vs Ceph
-for large scale-out.
+for large scale-out. Proposed answer, both at different tiers (ZFS on every
+node, Ceph on disks set aside for it from three nodes up, paired with dRAID
+and netboot rather than stacked on them): `CLUSTER-STORAGE-CEPH.md`.
 
 ---
 
