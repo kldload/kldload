@@ -1,0 +1,166 @@
+.Dd September 30, 2026
+.Dt KUBE-BLUEGREEN 8
+.Os
+.Sh NAME
+.Nm kube-bluegreen
+.Nd blue/green changes for one workload, or for a whole cluster
+.Sh SYNOPSIS
+.Nm
+.Cm status | rollback
+.Nm
+.Cm preview | cutover
+.Ar track
+.Nm
+.Cm cluster
+.Cm status
+.Nm
+.Cm cluster
+.Cm deploy
+.Ar track
+.Op Ar kube-cluster-options ...
+.Nm
+.Cm cluster
+.Cm promote | destroy
+.Ar track
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+A
+.Ar track
+is
+.Cm blue
+or
+.Cm green .
+.Nm
+works at two levels.
+.Pp
+For a workload, the demo's release has a deployment per track behind one
+Service, and which track the Service selects is the switch.
+.Cm cutover
+refuses unless every replica of the target track is Ready, tests it, moves
+the Service, and then checks that the Service's endpoints really moved \(em
+what traffic will reach, not what was asked for.
+.Pp
+For a cluster: a CNI or Kubernetes version cannot be changed in place and
+undone, so the change is made by running a second cluster beside the first
+and moving to it.
+Each track is a cluster of its own, named
+.Ql kldload- Ns Ar track ,
+cloned by
+.Xr kube-cluster 8
+from the same golden, with its own API address and MetalLB range so the
+idle one can be tested before it is promoted.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm status
+Which track is live, and whether each is healthy.
+.It Cm preview Ar track
+Send real requests to the track's private address and show what comes
+back, leaving production alone.
+.It Cm cutover Ar track
+As above.
+.It Cm rollback
+Cut over to the track that is not live.
+.It Cm cluster status
+Each track: whether it exists, whether every node is Ready, which is
+active, and its kubeconfig.
+.It Cm cluster deploy Ar track
+Build that track's cluster; further arguments go to
+.Xr kube-cluster 8 .
+.It Cm cluster promote Ar track
+Point
+.Pa /root/.kube/config
+at the track, after checking that every node is Ready, and check that it
+answers.
+The other track is left running.
+.It Cm cluster destroy Ar track
+Destroy the track, which must not be the active one.
+The host's WireGuard keys and default kubeconfig, which
+.Xr kube-cluster 8
+removes with a cluster, are put back when another cluster is still here,
+and the survivors are put on the mesh again.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev RELEASE , Ev NS , Ev CHART
+The workload: default
+.Ql javaapi-fullstack
+in namespace
+.Ql demo .
+.It Ev KUBECONFIG
+Default
+.Pa /root/.kube/config .
+.It Ev KLDLOAD_BG_BLUE_VIP , Ev KLDLOAD_BG_GREEN_VIP
+Each track's API address.
+Blue takes
+.Xr kube-cluster 8 Ns 's
+own, .240; green .241.
+.It Ev KLDLOAD_BG_BLUE_POOL , Ev KLDLOAD_BG_GREEN_POOL
+Each track's MetalLB range: blue .200\(en.220, green .221\(en.239, on
+whatever subnet
+.Ql virbr0
+is on.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/cluster-track
+The active track.
+.It Pa /root/.kube/config- Ns Ar track
+Each track's kubeconfig;
+.Pa /root/.kube/config
+links to the active one.
+.El
+.Sh EXIT STATUS
+0 when what was asked for was verified to have happened; 1 when it was
+refused or could not be verified.
+.Sh EXAMPLES
+On a kldload desktop with no cluster, on 2026-09-30, with this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+# kube-bluegreen cluster status
+
+  TRACK    EXISTS     READY     ACTIVE  KUBECONFIG
+  blue     no         no                /root/.kube/config-blue
+  green    no         no                /root/.kube/config-green
+
+no track is active yet — promote one to point /root/.kube/config at it
+# (exited 0)
+# kube-bluegreen cluster destroy purple
+FATAL: unknown track 'purple'
+# (exited 1)
+# kube-bluegreen cluster promote green
+FATAL: green has no VMs — deploy it first
+# (exited 1)
+# kube-bluegreen status
+FATAL: release javaapi-fullstack not found in namespace demo — deploy it first
+# (exited 1)
+.Ed
+.Pp
+A cluster change; not run for this page:
+.Bd -literal -offset indent
+# kube-bluegreen cluster deploy green --workers 3
+# kube-bluegreen cluster promote green
+# kube-bluegreen cluster destroy blue
+.Ed
+.Sh SEE ALSO
+.Xr kldload-enroll 8 ,
+.Xr kube-cluster 8 ,
+.Xr kube-demo 8
+.Sh HISTORY
+On 2026-09-21, the first time
+.Cm cluster destroy
+ran, it removed the host's kubeconfig and took the host off its own mesh
+while another cluster on it was still running.
+On 2026-09-30, writing this page, in a container:
+.Cm cluster destroy
+copied the host's WireGuard private keys to
+.Pa /tmp
+and left them there whenever the destroy failed, or the re-peer left any
+machine incomplete \(em which also ended the destroy part-way.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Service addresses differ between tracks: a client that uses blue's
+address is not moved by promoting green.
+Handing blue's range to green at promotion is not built.
