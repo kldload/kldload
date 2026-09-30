@@ -10,9 +10,11 @@
 # provides the substrate (ZFS, Cilium eBPF, observability, klab, Bob).
 #
 # Pipeline:
-#   1. kldload-seal <disk>                        — sysprep identity bits
-#   2. qemu-img convert -O raw -p <disk> raw.img  — flatten to raw (AWS
+#   1. qemu-img convert -O raw -p <disk> raw.img  — copy to raw, whatever
+#                                                    the source format (AWS
 #                                                    won't accept qcow2)
+#   2. kldload-seal raw.img                       — sysprep the COPY; the
+#                                                    source is never touched
 #   3. aws s3 cp raw.img s3://<bucket>/…          — stage in S3
 #   4. aws ec2 import-snapshot                    — convert S3 object
 #                                                    to an EBS snapshot
@@ -236,33 +238,44 @@ if [[ -z "$AMI_NAME" ]]; then
 fi
 [[ -n "$DESCRIPTION" ]] || DESCRIPTION="kldload ${KLDLOAD_PROFILE} profile, sealed $(date -Iseconds), source: $(hostname)"
 
-# ── Stage 1: seal ─────────────────────────────────────────────────────
-if ((SEAL)); then
-    say "stage 1/5 — sealing source disk"
-    say_event step "seal"
-    if ((DRY_RUN)); then
-        say "  (dry-run) would run: kldload-seal $DISK"
-    else
-        /usr/local/bin/kldload-seal "$DISK" || die "kldload-seal failed; refusing to ship an unsealed AMI. If you really want a 1:1 clone, re-run with --no-seal."
-    fi
-else
-    say "stage 1/5 — sealing SKIPPED (--no-seal)"
-    say_event step "seal-skipped"
-fi
-
-# ── Stage 2: convert to raw ──────────────────────────────────────────
+# ── Stage 1: copy the source to raw ─────────────────────────────────
+# The COPY is what gets sealed, never the source. This sealed "$DISK" in place
+# first -- the defect kexport had: publishing a stopped VM's disk stripped
+# that VM's machine-id, host keys and hostid (read against the code,
+# 2026-09-30). The raw copy has to be made anyway, so it is made first and
+# sealed instead; kldload-seal takes an image file.
+# The format is read, not assumed: `-f raw` on a qcow2 source uploads the
+# qcow2 container as if it were a disk. Same as kexport.
 RAW_TMP=$(mktemp -p /var/tmp kldload-aws-XXXXXX.raw)
 trap 'rm -f "$RAW_TMP"' EXIT
 RAW_NAME="${AMI_NAME}.raw"
 
-say "stage 2/5 — converting source to raw at $RAW_TMP"
+SRC_FMT="$(qemu-img info -U --output=json "$DISK" | python3 -c 'import json,sys; print(json.load(sys.stdin)["format"])')"
+[[ "$SRC_FMT" =~ ^[a-z0-9]+$ ]] || die "qemu-img could not say what format $DISK is"
+
+say "stage 1/5 — copying ${DISK} (${SRC_FMT}) to raw at $RAW_TMP"
 say_event step "convert-raw"
 if ((DRY_RUN)); then
-    say "  (dry-run) would run: qemu-img convert -p -f raw -O raw $DISK $RAW_TMP"
+    say "  (dry-run) would run: qemu-img convert -U -p -f $SRC_FMT -O raw $DISK $RAW_TMP"
 else
-    qemu-img convert -p -f raw -O raw "$DISK" "$RAW_TMP" ||
+    qemu-img convert -U -p -f "$SRC_FMT" -O raw "$DISK" "$RAW_TMP" ||
         die "qemu-img convert failed"
-    say "  raw image: $(du -h "$RAW_TMP" | cut -f1)"
+    # stat, not du: the copy is sparse, and on ZFS du also lags a fresh write.
+    say "  raw image: $(numfmt --to=iec "$(stat -c %s "$RAW_TMP")") (apparent)"
+fi
+
+# ── Stage 2: seal the copy ───────────────────────────────────────────
+if ((SEAL)); then
+    say "stage 2/5 — sealing the copy (the source is not touched)"
+    say_event step "seal"
+    if ((DRY_RUN)); then
+        say "  (dry-run) would run: kldload-seal $RAW_TMP"
+    else
+        /usr/local/bin/kldload-seal "$RAW_TMP" || die "kldload-seal failed; refusing to ship an unsealed AMI. If you really want a 1:1 clone, re-run with --no-seal."
+    fi
+else
+    say "stage 2/5 — sealing SKIPPED (--no-seal)"
+    say_event step "seal-skipped"
 fi
 
 # ── Stage 3: S3 upload ────────────────────────────────────────────────
