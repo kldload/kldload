@@ -121,6 +121,20 @@ iface_for() {
     printf '%s' "$m"
 }
 
+# _mesh_ok NAME -- a mesh name is an interface name AND a file name under
+# MESH_DIR: "../x" left the directory and odd characters failed only at
+# `ip link add`, halfway through (found writing kvm-mesh(8), 2026-09-29).
+_mesh_ok() {
+    [[ "$1" =~ ^[a-z0-9][a-z0-9_-]{0,14}$ ]] || {
+        echo "kvm-mesh: '$1' is not a mesh name (a-z 0-9 _ -, up to 15, starting with a letter or digit)" >&2
+        exit 2
+    }
+}
+_usage_err() {
+    echo "kvm-mesh: $*" >&2
+    exit 2
+}
+
 # Port is derived from the mesh name, so two meshes on one host never collide
 # and the same mesh always lands on the same port across rebuilds.
 port_for() {
@@ -191,7 +205,11 @@ join_vm() {
     # is active — the first enrollment of a microVM was refused here with
     # "is not running" because there was no domain to ask (onyx 2026-09-05).
     if virsh dominfo "$vm" >/dev/null 2>&1; then
-        virsh domstate "$vm" 2>/dev/null | grep -q running ||
+        # the state read whole: `virsh | grep -q` under pipefail can be 141
+        # for a running domain (see smoke-build's grep -q ratchet)
+        local _st
+        _st="$(virsh domstate "$vm" 2>/dev/null)" || _st=""
+        [[ "$_st" == running* ]] ||
             {
                 warn "$vm is not running — skipped"
                 return 1
@@ -244,10 +262,16 @@ join_vm() {
     # leaving an interface with no key and a random port. The address is
     # applied with `ip addr` instead, which is what wg-quick does anyway.
     # (fiend 2026-09-02: every klab peer had zero handshakes for this reason.)
+    #
+    # First join on this guest: the iface does not exist yet, and that is the
+    # expected case -- `ip link del` on a missing iface is the only error
+    # swallowed here. A real failure surfaces on `ip link add` below.
+    # WARN: nothing with $( ) or backticks may sit inside the string below,
+    # comments included: it is double-quoted, so the HOST expands it, as root,
+    # before ssh runs. The comment above lived there until 2026-09-29 with
+    # "$(ip link del)" and "$(link add)" in it, and every join ran both on the
+    # host (harmless only because they had no arguments).
     guest "$ip" "
-        # first join on this guest: the iface does not exist yet, and that is
-        # the expected case -- $(ip link del) on a missing iface is the only
-        # error swallowed here. A real failure surfaces on the $(link add) below.
         ip link del ${iface} 2>/dev/null || true
         ip link add dev ${iface} type wireguard
         wg setconf ${iface} /etc/wireguard/${iface}.setconf
@@ -396,11 +420,13 @@ cmd="${1:-}"
 shift || true
 case "$cmd" in
 up)
-    mesh="${1:?usage: kvm-mesh up <mesh> <subnet> <vm>...}"
-    subnet="${2:?subnet required, e.g. 10.254.0}"
+    [[ $# -ge 2 ]] || _usage_err "usage: kvm-mesh up <mesh> <subnet> <vm>..."
+    mesh="$1"
+    subnet="$2"
+    _mesh_ok "$mesh"
     shift 2
     [[ $# -gt 0 ]] || die "name at least one VM"
-    [[ "$subnet" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "subnet must be three octets, e.g. 10.254.0"
+    [[ "$subnet" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || _usage_err "subnet must be three octets, e.g. 10.254.0"
     mkdir -p "$MESH_DIR"
     : >"$(mesh_file "$mesh")"
     joined=0
@@ -418,7 +444,9 @@ up)
     verify "$mesh"
     ;;
 add)
-    mesh="${1:?usage: kvm-mesh add <mesh> <vm>...}"
+    [[ $# -ge 2 ]] || _usage_err "usage: kvm-mesh add <mesh> <vm>..."
+    mesh="$1"
+    _mesh_ok "$mesh"
     shift
     f="$(mesh_file "$mesh")"
     [[ -s "$f" ]] || die "mesh '$mesh' does not exist — use 'up' first"
@@ -435,7 +463,9 @@ add)
     verify "$mesh"
     ;;
 status)
-    mesh="${1:?usage: kvm-mesh status <mesh>}"
+    [[ $# -ge 1 ]] || _usage_err "usage: kvm-mesh status <mesh>"
+    mesh="$1"
+    _mesh_ok "$mesh"
     iface="$(iface_for "$mesh")"
     f="$(mesh_file "$mesh")"
     printf '  members recorded : %s\n' "$(count_lines "$f")"
@@ -462,7 +492,9 @@ status)
     fi
     ;;
 down)
-    mesh="${1:?usage: kvm-mesh down <mesh>}"
+    [[ $# -ge 1 ]] || _usage_err "usage: kvm-mesh down <mesh>"
+    mesh="$1"
+    _mesh_ok "$mesh"
     iface="$(iface_for "$mesh")"
     f="$(mesh_file "$mesh")"
     # Teardown is best-effort BY DESIGN and this is the one place that is
@@ -474,8 +506,12 @@ down)
     while read -r vm id pub ip; do
         [[ -n "$vm" ]] || continue
         # unreachable guest == its iface is not coming back either
-        guest "$ip" "ip link del ${iface} 2>/dev/null || true" >/dev/null 2>&1 || true
-        log "removed ${iface} from ${vm}"
+        # said as it happened: it logged "removed" for a guest it never reached
+        if guest "$ip" "ip link del ${iface} 2>/dev/null || true" >/dev/null 2>&1; then
+            log "removed ${iface} from ${vm}"
+        else
+            warn "${vm} (${ip}) did not answer; its ${iface} goes when it next boots (it is not persistent)"
+        fi
         # no member file: nothing was ever joined, so nothing to walk
     done <"$f" 2>/dev/null || true
     # already absent on this host, e.g. a second `down`
