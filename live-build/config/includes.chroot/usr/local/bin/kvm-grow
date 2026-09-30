@@ -4,8 +4,10 @@
 #
 # What it does, in order:
 #   1. grows the block device: `zfs set volsize=NG` on the zvol behind the
-#      first disk (or `qemu-img resize` for a file-backed disk)
-#   2. tells the running guest the disk changed: `virsh blockresize`
+#      first disk; a file-backed disk is grown by step 2 itself
+#   2. tells the running guest the disk changed: `virsh blockresize`, which
+#      for a file-backed disk also resizes the file (through qemu, which
+#      holds the image locked against qemu-img while the guest runs)
 #   3. inside the guest, over ssh as root: grows the root partition to the end
 #      of the disk (growpart) and the filesystem to fill it (resize2fs,
 #      xfs_growfs, btrfs filesystem resize, resize.f2fs) — the script it runs
@@ -17,15 +19,20 @@
 # what it did and the last one checks the outcome, not exit codes.
 #
 # Usage: kvm-grow <vm> <GiB>     (the VM must be running and have an address)
-# Exit:  0 grown or already full   1 a layer failed   2 usage / refused
-#        (shrinking, an unknown size, a stopped guest, no address)
+# Exit:  0 grown or already full   1 a layer failed, or the guest could not
+#        be reached   2 usage / refused (shrinking, an unknown size, a stopped
+#        guest), or a root layout the guest step does not grow (LVM, ZFS, no
+#        partition) -- the block device is grown by then, and it says so
+# See kvm-grow(8).
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 trap 'echo "kvm-grow: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 usage() {
-    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"
-    exit "${1:-2}"
+    # asked for: stdout, 0; a usage error: stderr, 2
+    local rc="${1:-2}"
+    sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0" >&$((rc == 0 ? 1 : 2))
+    exit "$rc"
 }
 [[ "${1:-}" == -h || "${1:-}" == --help ]] && usage 0
 [[ $# -eq 2 ]] || usage
@@ -77,13 +84,16 @@ case "$_src" in
     fi
     ;;
 *)
-    _cur="$(qemu-img info --output=json "$_src" | python3 -c 'import json,sys; print(json.load(sys.stdin)["virtual-size"])')"
+    # WHY -U and no qemu-img resize: the guest is running, so qemu holds the
+    # image's write lock and qemu-img without -U refuses even to read it
+    # ("Failed to get shared \"write\" lock"). blockresize below grows the
+    # file through qemu itself. (Found writing kvm-grow(8), 2026-09-29.)
+    _cur="$(qemu-img info -U --output=json "$_src" | python3 -c 'import json,sys; print(json.load(sys.stdin)["virtual-size"])')"
     if ((_bytes < _cur)); then
         echo "kvm-grow: refusing to shrink $_src" >&2
         exit 2
     fi
-    qemu-img resize "$_src" "${GIB}G" >/dev/null
-    echo "block:      $_src -> ${GIB}G"
+    echo "block:      $_src $((_cur / 1073741824))G -> ${GIB}G (by blockresize)"
     ;;
 esac
 
@@ -99,8 +109,13 @@ _ip="$(kldload-vm-ip "$VM" 2>/dev/null || true)"
 }
 # The guest changes identity on every rebuild, so its host key is not pinned
 # (the same policy as kldload-enroll's ssh to a fresh clone).
+# The guest step's own exit is 0, 1 or 2; ssh adds 255 for "could not get
+# in". Under set -e any of them ended the run through the ERR trap with its
+# raw code, so an unsupported layout printed a FAIL line and an unreachable
+# guest exited 255. Captured, then mapped onto this tool's codes.
+_rc=0
 ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-    -o ConnectTimeout=10 "root@${_ip}" 'sh -s' <<'GROW'
+    -o ConnectTimeout=10 "root@${_ip}" 'sh -s' <<'GROW' || _rc=$?
 #!/bin/sh
 # growroot — grow the root partition and filesystem to fill its disk. Runs
 # INSIDE the guest. Idempotent: "already at full size" exits 0, so a re-run
@@ -117,8 +132,11 @@ FST="$(findmnt -no FSTYPE / 2>/dev/null)"
 [ -n "$SRC" ] && [ -n "$FST" ] || die "cannot determine the root device or filesystem" 2
 case "$SRC" in
     /dev/*) ;;
-    *) die "root is $SRC, not a block device" 2 ;;
+    *) die "root is $SRC ($FST), not a partition: grow its pool or volume by hand" 2 ;;
 esac
+if [ "$(lsblk -no TYPE "$SRC" 2>/dev/null | head -1)" = lvm ]; then
+    die "root is the LVM volume $SRC: growpart the physical volume's partition, then pvresize it and lvextend -r -l +100%FREE $SRC" 2
+fi
 DISK="$(lsblk -no PKNAME "$SRC" 2>/dev/null | head -1)"
 [ -n "$DISK" ] && DISK="/dev/$DISK"
 if [ -z "$DISK" ]; then
@@ -175,3 +193,18 @@ if [ "${after_fs:-0}" -gt "${before_fs:-0}" ]; then say "RESULT: grown"; exit 0;
 if [ "$PART_FULL" -eq 1 ]; then say "RESULT: already at full size"; exit 0; fi
 die "NOT grown -- the filesystem did not change size; see the lines above"
 GROW
+case "$_rc" in
+0) ;;
+2)
+    echo "kvm-grow: the block device is ${GIB}G, but the guest's root layout is not one this grows (above)" >&2
+    exit 2
+    ;;
+255)
+    echo "kvm-grow: could not ssh to root@${_ip} -- the block device is ${GIB}G; run again for the filesystem" >&2
+    exit 1
+    ;;
+*)
+    echo "kvm-grow: the guest step failed (exit ${_rc}); the block device is ${GIB}G" >&2
+    exit 1
+    ;;
+esac
