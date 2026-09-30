@@ -722,12 +722,30 @@ cmd_destroy() {
     # else in the file is reported and left alone.
     local n z s failed=0
     local name_re="^${PREFIX}-${cluster}-[0-9]+$"
+    # WHY kvm-delete: it is the shipped way to remove a VM, and it undoes what
+    # kldload-enroll did at spawn -- the mesh peer -- which this loop never
+    # did, so every destroyed node left a WireGuard peer on the host
+    # (2026-09-30, writing kspawn(8)). It only knows rpool/vms, so another
+    # POOL keeps the path below, without the mesh step.
+    local -a rest=()
+    local use_kvm_delete=0
+    [[ "$POOL" == rpool ]] && command -v kvm-delete >/dev/null 2>&1 && use_kvm_delete=1
     for n in "${names[@]}"; do
         if [[ ! "$n" =~ $name_re ]]; then
             warn "  manifest names '$n', which is not a node of ${cluster}; left alone"
             failed=$((failed + 1))
             continue
         fi
+        if ((use_kvm_delete)); then
+            log "  kvm-delete $n --force"
+            kvm-delete "$n" --force </dev/null >&2 ||
+                {
+                    warn "  kvm-delete $n failed"
+                    failed=$((failed + 1))
+                }
+            continue
+        fi
+        rest+=("$n")
         log "  destroying VM $n..."
         # WHY || true: destroy fails on a VM that is already off, which is fine;
         # undefine below is the step that has to succeed.
@@ -767,7 +785,8 @@ cmd_destroy() {
     fi
     # Drop the inventory rows too, or Ansible keeps targeting nodes whose zvols
     # were destroyed seconds ago and every play opens with unreachable hosts.
-    deregister_cluster_db "$cluster" "${names[@]}"
+    # kvm-delete has already taken its nodes out of the DB.
+    deregister_cluster_db "$cluster" "${rest[@]}"
     rm -rf "$dir"
     log "Cluster '${cluster}' destroyed."
 }
