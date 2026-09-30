@@ -1,0 +1,155 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-TPM-SEAL 8
+.Os
+.Sh NAME
+.Nm kldload-tpm-seal
+.Nd let the TPM unlock the encrypted ZFS root, but only while Secure Boot is as it was
+.Sh SYNOPSIS
+.Nm
+.Op Cm seal
+.Op Fl -passphrase-file Ar file
+.Op Fl -pool Ar pool
+.Nm
+.Cm status | remove
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+Secure Boot on its own is not enforced: turn it off in the firmware and
+the machine boots anyway.
+.Nm
+seals the passphrase of the ZFS root's encryption root to the machine's
+TPM, bound to PCR 7, which measures the Secure Boot state.
+While that state is unchanged the machine unlocks itself at boot, with no
+passphrase; turn Secure Boot off, change its keys, or update firmware in a
+way that changes them, and the TPM refuses, and the boot asks for the
+passphrase as before, with a warning.
+.Pp
+The passphrase itself is sealed, not a key derived from it, so the pool
+keeps its passphrase: the TPM stands in front of it, never instead of it.
+.Pp
+At boot, the dracut module
+.Pa 91kldload-tpm-unlock
+runs before ZFS's own passphrase prompt: if the root's key is not loaded
+yet, it has the TPM unseal the credential straight into
+.Ql zfs load-key .
+If that fails it says why on the console and the prompt appears as usual;
+it never stops a boot.
+.Pp
+It must run as root.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm seal
+The default.
+In order: finds the encryption root of the pool's boot environment; takes
+the passphrase from
+.Fl -passphrase-file ,
+or asks for it twice on the terminal; checks that it opens the pool with a
+dry
+.Ql zfs load-key -n ,
+so a wrong one is refused now rather than at the next boot; seals it with
+.Xr systemd-creds 1 ,
+TPM2 only, PCR 7, to
+.Pa /etc/kldload/tpm/zfs.cred ,
+and unseals it once to prove it can; rebuilds every initramfs, so it
+carries the credential, and checks that the newest one does.
+It refuses a root that is not encrypted, or not by passphrase, a machine
+without a usable TPM2, and a system without the dracut module.
+With Secure Boot off it seals anyway, and warns that turning it on later
+will ask once.
+.It Cm status
+Whether the root is encrypted, the Secure Boot state, whether a
+credential is sealed, whether the TPM would release it now, and whether
+the initramfs carries it.
+.It Cm remove
+Delete the credential and rebuild the initramfs without it; every boot
+asks for the passphrase again.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -passphrase-file Ar file
+Read the passphrase from
+.Ar file
+instead of the terminal.
+Nothing in kldload passes one yet; see
+.Sx CAVEATS .
+.It Fl -pool Ar pool
+The pool whose boot environment's key to seal; default the pool the
+running root is on.
+.It Fl h , Fl -help
+Print the description and usage and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/tpm/zfs.cred
+The sealed passphrase, mode 0600, on the encrypted root itself, and
+copied into the initramfs.
+.It Pa /usr/lib/dracut/modules.d/91kldload-tpm-unlock/
+The boot side.
+It is included in an initramfs only when the credential exists.
+.It Pa /boot/efi/EFI/BOOT/initrd.img
+The initramfs that boots, on the EFI partition, rebuilt with the others.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done.
+.It 1
+It failed, or was refused; the message says why.
+.It 2
+A usage error.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, whose root is encrypted and
+not sealed:
+.Bd -literal -offset indent
+# kldload-tpm-seal status
+encryption root: rpool
+secure boot:     SecureBoot enabled
+sealed:          no
+# (exited 0)
+$ kldload-tpm-seal status
+kldload-tpm-seal: run as root (it reads the pool and writes the initramfs)
+# (exited 1)
+.Ed
+.Pp
+Sealing, not run for this page; it asks for the passphrase twice:
+.Bd -literal -offset indent
+# kldload-tpm-seal
+# then: kldload-tpm-seal status  -> sealed: yes, tpm releases it: yes,
+# in initramfs: yes
+.Ed
+.Pp
+After a firmware update changes the Secure Boot keys, the next boot asks
+for the passphrase once; then seal again:
+.Bd -literal -offset indent
+# kldload-tpm-seal
+.Ed
+.Sh SEE ALSO
+.Xr systemd-creds 1 ,
+.Xr dracut 8 ,
+.Xr kldload-secure-boot 8 ,
+.Xr zfs-load-key 8
+.Sh HISTORY
+Written after it was shown on 2026-09-18 that a machine with Secure Boot
+turned off in the firmware booted anyway.
+.Pp
+On 2026-09-30, writing this page: with more than one pool imported, it
+took the first pool in alphabetical order as the boot pool, whose key it
+would then have sealed; it takes the running root's pool since.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It is installed on Fedora and Enterprise Linux machines and does nothing
+until someone runs it: first boot does not seal automatically.
+.Pp
+It had not been run on real hardware when this was written; the
+.Cm status
+above is the only output shown here that a machine printed.
+.Pp
+Only Fedora and the Enterprise Linux family, whose initramfs is built by
+.Xr dracut 8 ;
+Debian's initramfs-tools has no hook for it yet.
+.Pp
+PCR 7 does not change when the kernel, the initramfs or ZFSBootMenu
+change, only when Secure Boot's own state does; with Secure Boot on,
+those are held to their signatures instead.
