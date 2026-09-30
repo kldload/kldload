@@ -1,0 +1,94 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-WEBUI 8
+.Os
+.Sh NAME
+.Nm kldload-webui
+.Nd the kldload web console: install, virtual machines, clusters, storage and more, from a browser
+.Sh SYNOPSIS
+.Nm
+.Op Fl -unix-socket Ar path
+.Op Fl -port Ar port
+.Op Fl -bind Ar address
+.Op Fl -no-tls
+.Op Fl -no-browser
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+serves the web console's pages and the WebSocket its pages use to act on
+the machine, as root: installing, making and deleting virtual machines,
+building clusters, opening terminals.
+On an installed machine
+.Pa kldload-webui.service
+runs it on a unix socket that only
+.Xr nginx 8
+reaches, and nginx serves it on port 8443 with the machine's certificate.
+.Pp
+Who may act:
+.Bl -tag -width "on the live image"
+.It on the live image
+anyone at the console, for the install;
+.It from this machine
+anyone, without a password: the request came through nginx from
+loopback, which only nginx can claim on that socket;
+.It from elsewhere
+a member of the administrators' group
+.Pq Ql wheel No or Ql sudo
+with their system password, checked by PAM, or the bearer token in
+.Pa /etc/kldload/webui-token
+for scripts.
+.El
+.Pp
+If PAM cannot be used the password is refused.
+Served over TCP instead of the socket, nothing is let in without a
+password or the token.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -unix-socket Ar path
+Serve on this socket, for nginx; loopback clients are then let in
+without a password.
+.It Fl -port Ar port , Fl -bind Ar address
+Serve on TCP instead; default port 8080 on every address.
+.It Fl -no-tls
+Plain HTTP, when something in front terminates TLS.
+.It Fl -no-browser
+Do not open a browser.
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/kldload/webui-token
+The bearer token, mode 0600, made on first run.
+.It Pa /run/kldload/webui.sock
+The socket.
+.It Pa /usr/local/share/kldload-webui/
+The pages.
+.El
+.Sh EXIT STATUS
+It serves until stopped.
+.Sh EXAMPLES
+Reading the token for a script; not run for this page:
+.Bd -literal -offset indent
+# cat /etc/kldload/webui-token
+.Ed
+.Sh SEE ALSO
+.Xr kldload-proxy 8 ,
+.Xr kldload-session 8 ,
+.Xr kldload-tls-cert 8 ,
+.Xr nginx 8
+.Sh HISTORY
+On 2026-05-21 the WebSocket was found to accept any client that reached
+the port, as root; the token was added.
+On 2026-09-23 letting loopback in without a password was confined to the
+unix socket.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Every process on the machine, whoever runs it, counts as local, and is
+let in without a password.
+On a machine with other users, or with services that could be broken
+into, treat every account as able to act as root through the console.
+Terminals it opens are reached at addresses that are themselves the only
+credential; see
+.Xr kldload-session 8 .
