@@ -1,0 +1,246 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-ESTATE 8
+.Os
+.Sh NAME
+.Nm kldload-estate
+.Nd compare what every subsystem believes about each machine, and report where they disagree
+.Sh SYNOPSIS
+.Nm
+.Op Fl -table
+.Op Fl -drift
+.Op Fl -probe
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+Every layer of a kldload host tells the truth about itself: libvirt knows
+which machines run, the state database which were made and what they are,
+DHCP which addresses were handed out, WireGuard which peers handshake,
+Kubernetes which nodes are Ready.
+Nothing else compares them, and a machine can be wrong only in the gap:
+Ready in Kubernetes and absent from the mesh, running and invisible to
+Ansible.
+.Nm
+asks each, puts the answers side by side per machine, and reports the
+disagreements \(em the drift.
+.Pp
+The sources, each asked with a time limit, and skipped when absent:
+.Bl -tag -width "state database"
+.It libvirt
+The system instance: every domain and its power state, and the DHCP
+leases of its networks.
+.It state database
+Through
+.Xr kldload-db 8 :
+each machine's class, cluster, recorded address and mesh identity.
+.It addresses
+.Xr kldload-vm-ip 8 ,
+the resolver the kldload tools share.
+.It WireGuard
+Every peer on every interface, by key, mesh address and endpoint.
+.It mesh members
+The members files the per-appliance and lab meshes write, so a machine
+that is off still counts as on its mesh.
+.It Kubernetes
+Node readiness and the address each kubelet advertises, when the
+kubeconfig's apiserver answers within 1.5 seconds.
+.El
+.Pp
+A machine's address is, in order, what its kubelet advertises, what the
+resolver finds, what the database recorded, and its lease.
+It is
+.Em targetable
+when it runs and has an address.
+.Pp
+The findings:
+.Bl -tag -width "stale-address"
+.It Li mesh-missing
+A Kubernetes node that runs with an address no WireGuard peer covers.
+.It Li no-address
+A running machine with no known address: Ansible cannot reach it.
+.It Li stale-address
+A machine that is not running but still has an address recorded, which
+DHCP may have given to another.
+.It Li unregistered
+A domain libvirt knows and neither the database nor Kubernetes does.
+.El
+Each comes with the command that repairs it.
+.Pp
+Run it as root: a user cannot read WireGuard, and the table says so.
+.Xr kld 1
+and the web console run it as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -table
+A table and the findings, for reading.
+Without it the output is JSON:
+.Li machines ,
+.Li drift
+and
+.Li sources ,
+which says which sources answered.
+.It Fl -drift
+Only the findings; exit 1 when there is one.
+.It Fl -probe
+Also log in to each running machine with an address over
+.Xr ssh 1 ,
+as root, which is what Ansible's success depends on; slow on a large
+estate.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Reported; with
+.Fl -drift ,
+no finding.
+.It 1
+With
+.Fl -drift :
+at least one finding.
+.It 2
+A usage error.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop with 51 machines known to one source or
+another, none running, and no cluster or mesh up, on 2026-09-29.
+.Ss The table (--table)
+.Bd -literal -offset indent
+# kldload-estate --table
+  MACHINE                 CLASS           POWER      ADDRESS          MESH   K8S       TARGET
+  --------------------------------------------------------------------------------------------
+  app-adguard-ho          vm              shut off   -                --     -         no
+  app-icecast-st          vm              shut off   -                --     -         no
+\&...
+  klab-golden-rocky       klab-golden     shut off   -                --     -         no
+\&...
+  sshfix-debian-probe     vm              absent     -                --     -         no
+  sshfix-k8s-probe        clone           absent     -                --     -         no
+  vdi                     clone           shut off   -                --     -         no
+  vdi-1                   vm              shut off   -                --     -         no
+  web-golden              vm              shut off   -                --     -         no
+
+  51 machine(s), 0 targetable by Ansible.
+
+  DRIFT — 2 finding(s):
+
+    [unregistered] debian-desktop-ud30
+      libvirt knows this domain; the state DB does not
+      fix: kldload-db vm-register --name debian-desktop-ud30 --role <class>
+
+    [unregistered] klab-green-fedora
+      libvirt knows this domain; the state DB does not
+      fix: kldload-db vm-register --name klab-green-fedora --role <class>
+
+  (no answer from: wireguard, kubernetes -- absent here, or unreadable)
+# (exited 0)
+.Ed
+.Pp
+.Ql absent
+is a machine the database lists and libvirt does not have.
+.Ss Only the findings (--drift)
+.Bd -literal -offset indent
+# kldload-estate --drift --table
+[unregistered] debian-desktop-ud30: libvirt knows this domain; the state DB does not
+  fix: kldload-db vm-register --name debian-desktop-ud30 --role <class>
+[unregistered] klab-green-fedora: libvirt knows this domain; the state DB does not
+  fix: kldload-db vm-register --name klab-green-fedora --role <class>
+# (exited 1)
+# kldload-estate --drift
+[
+  {
+    "machine": "debian-desktop-ud30",
+    "kind": "unregistered",
+    "detail": "libvirt knows this domain; the state DB does not",
+    "repair": "kldload-db vm-register --name debian-desktop-ud30 --role <class>"
+  },
+\&...
+]
+# (exited 1)
+.Ed
+.Ss JSON (the default)
+One machine of the
+.Li machines
+list, and
+.Li sources :
+.Bd -literal -offset indent
+# kldload-estate | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d["machines"][0], indent=2)); print(d["sources"])'
+{
+  "name": "app-adguard-ho",
+  "class": "vm",
+  "power": "shut off",
+  "db_status": "shut off",
+  "ip": "",
+  "network": "",
+  "in_mesh": false,
+  "mesh_ifaces": "",
+  "mesh_id": "150",
+  "k8s": "",
+  "golden_src": "",
+  "targetable": false
+}
+{'libvirt': True, 'state_db': True, 'leases': True, 'wireguard': False, 'kubernetes': False}
+.Ed
+.Ss As a user
+.Bd -literal -offset indent
+$ kldload-estate --table
+\&...
+  (no answer from: wireguard, kubernetes -- absent here, or unreadable)
+  (run as root: a user cannot read WireGuard, and may not see every lease)
+.Ed
+.Ss Reachability (--probe)
+With a throwaway clone started for the purpose; it is not on a mesh, so
+.Li MESH
+says
+.Ql NO :
+.Bd -literal -offset indent
+# kldload-estate --probe --table
+  MACHINE                 CLASS           POWER      ADDRESS          MESH   K8S       TARGET
+\&...
+  es-3386487              clone           running    192.168.122.189  NO     -         yes  ssh ok
+\&...
+  52 machine(s), 1 targetable by Ansible.
+\&...
+# (exited 0)
+.Ed
+.Sh DIAGNOSTICS
+The findings above are the diagnostics.
+A source that did not answer is listed at the end of the table, and in
+.Li sources ;
+a finding cannot come from a source that did not answer.
+.Sh SEE ALSO
+.Xr kld 1 ,
+.Xr kldload-db 8 ,
+.Xr kldload-doctor 8 ,
+.Xr kldload-inventory 8 ,
+.Xr kldload-networks 8 ,
+.Xr kube-cluster 8 ,
+.Xr wg 8
+.Sh HISTORY
+.Nm
+was written after 2026-08-17, when six Kubernetes nodes were Ready while
+WireGuard had four peers: two control planes had joined the cluster and
+never the mesh, and the host could not reach them on the addresses their
+kubelets advertised.
+It was found by eye.
+.Pp
+On 2026-09-29, writing this page: run as a user it asked the user's own,
+empty, libvirt, so every machine read as absent, and it then reported
+.Dq No drift: every subsystem agrees
+over three sources that had not answered; and
+.Fl -probe
+with
+.Fl -table
+logged in to every machine and showed none of the answers.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A row the database has and libvirt does not \(em
+.Ql absent
+in the table \(em is not a finding: Firecracker machines from
+.Xr kfire 8
+are recorded and live outside libvirt.
+Check such rows by hand, and remove a dead one with
+.Ql kldload-db vm-delete .
+.Pp
+It reports; it repairs nothing.
