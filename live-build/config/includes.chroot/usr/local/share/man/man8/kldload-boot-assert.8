@@ -1,0 +1,138 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-BOOT-ASSERT 8
+.Os
+.Sh NAME
+.Nm kldload-boot-assert
+.Nd check at every boot that the machine can boot again, and repair the boot path when it cannot
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+How a kldload machine boots is decided once, when it is installed, and
+then changed by things that do not announce it: a firmware update or a
+cleared CMOS wipes the boot entries, a distribution's boot-loader package
+rewrites the fallback path, a network boot entry is put first.
+The machine then fails at some later reboot, with nothing connecting the
+failure to its cause.
+.Nm
+runs at every boot and re-establishes, in order:
+.Bl -enum
+.It
+ZFSBootMenu,
+.Pa \eEFI\ezbm\eBOOTX64.EFI ,
+is on the EFI partition.
+If not, nothing is guessed: it says so and exits 1.
+.It
+The fallback,
+.Pa \eEFI\eBOOT\eBOOTX64.EFI
+\(em the one path firmware boots with no boot entries at all \(em boots on
+its own: it is ZFSBootMenu, or it is shim with the
+.Pa grubx64.efi
+shim loads beside it.
+A missing fallback becomes ZFSBootMenu; a shim without its
+.Pa grubx64.efi
+gets one copied from the distribution's directory, or, with none to copy,
+is replaced by ZFSBootMenu.
+.It
+There is a boot entry named
+.Ql kldload ;
+if not, one is made, pointing at the fallback when that is shim and at
+ZFSBootMenu otherwise.
+.It
+That entry is ahead of every other on-disk loader in the boot order.
+Network and removable entries in front are left in front: booting from the
+network first is a choice this does not fight.
+.El
+.Pp
+When nothing is wrong it writes one line.
+Each repair is a line starting
+.Ql REPAIRED ,
+anything it cannot fix a line starting
+.Ql FATAL
+or
+.Ql WARN .
+Without a mounted EFI partition, or without UEFI, it has nothing to check
+and exits 0.
+.Pp
+.Pa kldload-boot-assert.service
+runs it at every boot.
+It must run as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the description at the top of the script and exit 0.
+.El
+.Sh ENVIRONMENT
+For testing:
+.Bl -tag -width Ds
+.It Ev KLDLOAD_ESP
+Check this directory instead of
+.Pa /boot/efi .
+The boot entries are still the real ones.
+.It Ev KLDLOAD_BOOT_ASSERT_LOG
+Log here instead of
+.Pa /var/log/kldload/boot-assert.log .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/kldload/boot-assert.log
+One line per run, one per repair.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Everything holds, repaired or already so.
+.It 1
+Something could not be repaired; the machine may not boot.
+.El
+.Sh EXAMPLES
+Printed on 2026-09-30 by running it as root against a scratch EFI
+partition in
+.Pa /var/tmp/boot-assert-demo , with
+.Xr efibootmgr 8
+replaced by a script that prints a fixed boot list, so that no boot entry
+could be changed.
+Each case starts from a fresh partition holding only ZFSBootMenu, set up
+as its heading says; after the exit status is the log.
+.Bd -literal -offset indent
+== fallback missing
+exit 0
+[2026-09-30 02:02:07] REPAIRED: /var/tmp/boot-assert-demo/esp/EFI/BOOT/BOOTX64.EFI was missing — installed ZFSBootMenu there
+== all good
+exit 0
+[2026-09-30 02:02:07] boot invariants OK
+== fallback is shim without grubx64.efi
+exit 0
+[2026-09-30 02:02:07] REPAIRED: fallback was shim with no grubx64.efi — restored from /boot/efi/EFI/fedora/grubx64.efi
+== ZFSBootMenu missing
+exit 1
+[2026-09-30 02:02:07] FATAL: /var/tmp/boot-assert-demo/esp/EFI/zbm/BOOTX64.EFI is missing — cannot assert or repair the boot path
+.Ed
+.Sh SEE ALSO
+.Xr efibootmgr 8 ,
+.Xr kldload-journal-assert 8 ,
+.Xr kldload-secure-boot 8
+.Sh HISTORY
+On 2026-08-25 an install shipped shim at the fallback path with the
+.Pa grubx64.efi
+it loads deleted; it went unnoticed because the boot entry still worked,
+until a machine whose firmware preferred its own entry.
+The boot-order step was described in this tool from the start and written
+after 2026-09-07, when a network entry pushed ZFSBootMenu to last and a
+server booted through grub instead, without its boot environments.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+With Secure Boot on, replacing a shim that has no
+.Pa grubx64.efi
+with ZFSBootMenu gives a fallback the firmware will not start; it could
+not start the shim either.
+.Pp
+The distribution directories it copies
+.Pa grubx64.efi
+from are always read under
+.Pa /boot/efi ,
+whatever
+.Ev KLDLOAD_ESP
+says.
