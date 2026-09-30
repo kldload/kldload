@@ -11,14 +11,14 @@
 #   kinspect --pod ns/pod1 ns/pod2            # k8s pods
 #   kinspect --ip 192.168.122.10 192.168.122.11  # raw IPs (bypass lookup)
 #
-# Layout:
-#   ┌─────────────┬─────────────┐
-#   │ vm1: watch  │ vm2: watch  │
-#   │ ss -tn + io │ ss -tn + io │
-#   ├─────────────┴─────────────┤
+# Layout (the flows pane is the big one; the watches run ON each endpoint):
+#   ┌───────────────────────────┐
 #   │ flows between them        │
 #   │ (hubble or tcpdump)       │
-#   └───────────────────────────┘
+#   ├─────────────┬─────────────┤
+#   │ vm1: watch  │ vm2: watch  │
+#   │ ss -tn + io │ ss -tn + io │
+#   └─────────────┴─────────────┘
 
 set -Eeuo pipefail
 # The system libvirt when a user runs this: plain virsh as a user asks that
@@ -61,7 +61,10 @@ case "${1:-}" in
     exit 0
     ;;
 esac
-[[ $# -eq 2 ]] || die "need two ${mode}s (got $#)"
+[[ $# -eq 2 ]] || {
+    echo "kinspect: need two ${mode}s (got $#)" >&2
+    exit 2 # usage error; nothing was started
+}
 t1="$1"
 t2="$2"
 
@@ -102,20 +105,38 @@ ip)
 esac
 [[ -n "$ip1" ]] || die "could not resolve $t1 to an IP"
 [[ -n "$ip2" ]] || die "could not resolve $t2 to an IP"
+# SAFETY: both addresses are typed into a shell below. An address is digits,
+# dots, colons and hex; anything else is refused rather than quoted around.
+for _ip in "$ip1" "$ip2"; do
+    [[ "$_ip" =~ ^[0-9A-Fa-f.:]+$ ]] || die "not an IP address: $_ip"
+done
 
 echo "kinspect: $t1 ($ip1)  ↔  $t2 ($ip2)"
 
 # ── Build watch + flows commands ───────────────────────────────────────
-# Top panes — SSH into each endpoint and run a rotating watch that shows
-# established TCP connections, link counters, and top 5 processes. 'watch
-# -t' keeps the header hidden; -n 1 refreshes every second.
+# Top panes — each runs ON its endpoint: ssh as root for a VM or an address,
+# kubectl exec for a pod. A rotating view of established TCP sessions, link
+# counters and the top processes, refreshed every second.
+# HISTORY: until 2026-09-30 this ran `watch` in the pane itself, on the HOST:
+# both panes were labelled with a VM's name and address and showed the
+# hypervisor's own sessions and processes. SSH_KEY and SSH_OPTS were defined
+# for the ssh the header promised and never used.
+# Every value typed into a pane goes through printf %q: a pane is a shell.
+_WATCH_REMOTE='echo "=== TCP sessions ==="; ss -tnp 2>/dev/null | head -30; echo ""; echo "=== Link counters ==="; ip -s link show 2>/dev/null | head -12; echo ""; echo "=== Load / Top ==="; uptime; echo ""; ps -eo pid,%cpu,%mem,comm --sort=-%cpu | head -6'
+_POD_LOOP='while true; do clear; echo "=== TCP sessions ==="; (ss -tn 2>/dev/null || netstat -tn 2>/dev/null || cat /proc/net/tcp) | head -30; sleep 1; done'
 _watch_cmd() {
-    local ip="$1" label="$2"
-    cat <<WATCH
-clear
-echo "─── ${label} (${ip}) ─────────────────────────────────────"
-watch -t -n 1 'echo "=== TCP sessions ==="; ss -tnp 2>/dev/null | head -30; echo ""; echo "=== Link counters ==="; ip -s link show 2>/dev/null | grep -A 1 eth0 | head -8; echo ""; echo "=== Load / Top ==="; uptime; echo ""; ps -eo pid,%cpu,%mem,comm --sort=-%cpu | head -6'
-WATCH
+    local ip="$1" label="$2" banner
+    banner="─── ${label} (${ip}) ─────────────────────────────────────"
+    printf 'clear; echo %q\n' "$banner"
+    if [[ "$mode" == pod ]]; then
+        local ns="${label%%/*}" pod="${label##*/}"
+        printf 'kubectl -n %q exec -it %q -- sh -c %q || echo %q\n' \
+            "$ns" "$pod" "$_POD_LOOP" "kinspect: could not exec into ${label}"
+    else
+        printf 'ssh -t -i %q' "$SSH_KEY"
+        printf ' %q' "${SSH_OPTS[@]}" "root@${ip}" "watch -t -n 1 $(printf '%q' "$_WATCH_REMOTE")"
+        printf ' || echo %q\n' "kinspect: could not ssh to root@${ip} with ${SSH_KEY}"
+    fi
 }
 
 # Bottom pane — prefer hubble (cilium clusters) since it's pod-aware and
@@ -140,32 +161,33 @@ FLOWS
 # Start (or attach to) the kldload session, blow away any previous
 # inspect window, create fresh, split into the 3-pane layout, and send
 # the commands to each pane.
+#
+# Panes are addressed by their ids (%N), never by index. kldload's own
+# .tmux.conf sets pane-base-index 1, so ".0" named no pane: the flows split
+# and the flows command both failed with "can't find pane: 0" and the window
+# had two panes, not three (onyx, 2026-09-30; kst-dashboard met the same).
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux new-session -d -s "$SESSION" -n shell
 fi
+# absent on the first run: nothing to kill
 tmux kill-window -t "${SESSION}:${WINDOW}" 2>/dev/null || true
-tmux new-window -t "$SESSION" -n "$WINDOW"
-
-# Pane layout:
-#   0 (top-left) → pane 0 at start
-#   split-window -h from pane 0 → pane 1 (top-right)
-#   split-window -v from pane 0 → pane 2 (bottom, full-width-ish)
-# Then resize pane 2 to take ~55% vertical so flows are the focal point.
-tmux split-window -h -t "${SESSION}:${WINDOW}"   # pane 1 (top-right)
-tmux split-window -v -t "${SESSION}:${WINDOW}.0" # pane 2 (bottom-left)
-tmux select-layout -t "${SESSION}:${WINDOW}" main-horizontal
-# The main-horizontal layout: one big pane on top, smaller panes below.
-# We want flows BIG and watches small, so swap: promote pane 2 to main.
-tmux swap-pane -s "${SESSION}:${WINDOW}.2" -t "${SESSION}:${WINDOW}.0"
-tmux select-layout -t "${SESSION}:${WINDOW}" main-horizontal
+# The first pane is the flows pane; main-horizontal makes the first pane the
+# big one across the top, with the two watches side by side below it.
+p_flows="$(tmux new-window -P -F '#{pane_id}' -t "${SESSION}:" -n "$WINDOW")"
+p_one="$(tmux split-window -P -F '#{pane_id}' -v -t "$p_flows")"
+p_two="$(tmux split-window -P -F '#{pane_id}' -h -t "$p_one")"
+# 55%: the flows are the point, but a watch needs more than the one line
+# main-horizontal's default left it in an 80x24 window.
+tmux set-window-option -t "$p_flows" main-pane-height 55% >/dev/null
+tmux select-layout -t "$p_flows" main-horizontal
 
 # Send commands. IP1/IP2 must be exported for the flows heredoc's expansion.
-tmux send-keys -t "${SESSION}:${WINDOW}.1" "$(_watch_cmd "$ip1" "$t1")" Enter
-tmux send-keys -t "${SESSION}:${WINDOW}.2" "$(_watch_cmd "$ip2" "$t2")" Enter
-tmux send-keys -t "${SESSION}:${WINDOW}.0" \
+tmux send-keys -t "$p_one" "$(_watch_cmd "$ip1" "$t1")" Enter
+tmux send-keys -t "$p_two" "$(_watch_cmd "$ip2" "$t2")" Enter
+tmux send-keys -t "$p_flows" \
     "export IP1='$ip1'; export IP2='$ip2'; $(_flows_cmd)" Enter
 
-tmux select-pane -t "${SESSION}:${WINDOW}.0"
+tmux select-pane -t "$p_flows"
 tmux select-window -t "${SESSION}:${WINDOW}"
 
 echo "kinspect: tmux window '${WINDOW}' ready."
