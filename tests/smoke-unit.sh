@@ -605,6 +605,10 @@ _ar 'kldload.seed=http://a/x.env kldload.hostname=x kldload.seed=http://b/y.env'
 [[ "$_arc" == 1 ]] && grep -q 'REFUSING: 2 kldload.seed=' "${_at}/out" || _abad+=" two-seeds-accepted"
 _ar 'kldload.kvm=yes' KLDLOAD_AUTOINSTALL_DRYRUN=1
 [[ "$_arc" == 1 ]] || _abad+=" bad-value-accepted"
+# A seed that is not http(s) is a refusal, exit 1 -- it exited 0 like an
+# unarmed machine until 2026-09-30.
+_ar 'kldload.seed=ftp://a/x.env' KLDLOAD_AUTOINSTALL_DRYRUN=1
+[[ "$_arc" == 1 ]] && grep -q 'REFUSING: kldload.seed must be http' "${_at}/out" || _abad+=" non-http-seed-exit-${_arc}"
 # The handshake: encryption asked for, no password or passphrase anywhere.
 rm -rf "${_at}/run" && mkdir -p "${_at}/run"
 (

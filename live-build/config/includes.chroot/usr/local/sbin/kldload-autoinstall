@@ -12,7 +12,9 @@
 # longer form in its candidate list anyway, so nothing breaks either way.
 #   ./deploy.sh seed-disk --answers /etc/kldload/answers/zfs-single-disk.env
 #
-# Exits 0 silently if no seed disk is found (safe to enable unconditionally).
+# Exits 0 if no answers are found anywhere, or the armed URL answers 404 --
+# the normal state of a machine nobody has armed (safe to enable
+# unconditionally). A refusal is exit 1.
 #
 # Test hooks (tests/smoke-unit.sh), all unset in real use:
 #   KLDLOAD_AUTOINSTALL_CMDLINE  a file to read instead of /proc/cmdline
@@ -97,8 +99,10 @@ if [[ -n "$SEED_URL" ]]; then
     case "$SEED_URL" in
     http://* | https://*) ;;
     *)
+        # Exit 1, not 0: this is a machine told to install from somewhere it
+        # cannot, not one that is simply not armed (that is the 404 below).
         log "REFUSING: kldload.seed must be http(s) — got: ${SEED_URL}"
-        exit 0
+        exit 1
         ;;
     esac
     log "Seed URL on cmdline: ${SEED_URL}"
@@ -136,8 +140,14 @@ done
 
 # Fallback: blkid scan
 if [[ -z "$SEED_DEV" ]]; then
-    SEED_DEV="$(blkid -o device -t LABEL=KLDLOADSEED 2>/dev/null | head -1 ||
-        blkid -o device -t LABEL=KLDLOAD-SEED 2>/dev/null | head -1 || true)"
+    # One label at a time: `blkid ... | head -1 || blkid ...` took head's
+    # status, always 0, so the second label was never looked for (2026-09-30).
+    # WHY || true: blkid exits 2 when no device has the label, the usual case.
+    for _lbl in KLDLOADSEED KLDLOAD-SEED; do
+        SEED_DEV="$(blkid -o device -t "LABEL=${_lbl}" 2>/dev/null || true)"
+        SEED_DEV="${SEED_DEV%%$'\n'*}"
+        [[ -z "$SEED_DEV" ]] || break
+    done
 fi
 
 if [[ -z "$ANSWERS_TMP" && -n "$SEED_DEV" ]]; then
