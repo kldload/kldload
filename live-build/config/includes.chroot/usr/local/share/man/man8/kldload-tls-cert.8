@@ -1,0 +1,254 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-TLS-CERT 8
+.Os
+.Sh NAME
+.Nm kldload-tls-cert
+.Nd keep the web console's TLS certificate valid for every name and address the machine answers on
+.Sh SYNOPSIS
+.Nm
+.Op Fl -emit
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The web console on port 8443, its terminal on 7681 and Grafana on 3000
+serve one certificate and key,
+.Pa /var/lib/kldload/tls/webui.crt
+and
+.Pa webui.key .
+A browser refuses to load one of them inside another when the address in
+its bar is not in the certificate, and says nothing about why; so the
+certificate has to name every address the machine has, and a new one is
+needed whenever an address arrives.
+.Pp
+.Nm
+checks the certificate and writes a new one when:
+.Bl -bullet -compact
+.It
+the certificate or the key is missing;
+.It
+the certificate expires within a day;
+.It
+an IPv4 address on a real interface, or a global IPv6 address, is not in
+it;
+.It
+the host name is not in it;
+.It
+it was not issued by the machine's current authority \(em after
+.Ql kldload-ca init --force ,
+or a self-signed certificate once the authority exists;
+.It
+a name or address in
+.Pa /etc/kldload/tls-extra-sans.txt
+is not in it.
+.El
+.Pp
+Otherwise it does nothing, in a few milliseconds.
+.Pp
+A new certificate names the full and the short host name,
+.Ql localhost ,
+.Ql kldload.local ,
+127.0.0.1, ::1, 192.168.122.1 (libvirt's network, which may not be up
+yet), every address on the machine except the Kubernetes mesh's
+.Ql wg-mgmt
+and
+.Ql wg-k8s ,
+and the extra names.
+It is issued by the machine's own authority,
+.Xr kldload-ca 8 ,
+for a year when that authority exists, and is otherwise self-signed for
+ten years.
+The key is written with mode 0600 in a directory of mode 0700, and the
+pair is replaced by renaming, so a reader sees the old pair or the new
+one, never half of each; a lock lets only one run work at a time.
+After writing, it restarts the services that hold the old certificate
+and adds the certificate to the system's trust store.
+.Pp
+It prints nothing unless
+.Fl -emit
+is given.
+It needs root.
+.Pp
+It runs from
+.Pa kldload-tls-cert.service
+at boot once an address is bound, and again on every address change of a
+real interface, DHCP renewals included, through NetworkManager's
+dispatcher;
+.Pa kldload-tls-cert.timer
+runs it an hour after its last run if nothing has sooner, which on a DHCP
+network is never \(em on a desktop on 2026-09-30 it ran every 30 minutes,
+at each lease renewal, and the timer had not fired since boot.
+It also runs before
+.Xr nginx 8
+and the console's proxy start, and whenever the web console starts.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -emit
+After the check, print the certificate and then the private key.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_TLS_CERT_DIR
+Where the pair is kept, instead of
+.Pa /var/lib/kldload/tls .
+.It Ev KLDLOAD_TLS_EXTRA_SANS
+The extra-names file, instead of
+.Pa /etc/kldload/tls-extra-sans.txt .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/kldload/tls/webui.crt , Pa webui.key
+The certificate and key.
+.It Pa /etc/kldload/tls-extra-sans.txt
+Names and addresses to add, one per line:
+.Ql DNS: Ns Ar name ,
+.Ql IP: Ns Ar address ,
+or either one bare, told apart by its form.
+Blank lines and
+.Ql #
+comments are ignored.
+For a name in DNS or an address that is not on any interface of this
+machine, such as a floating address in front of it.
+.It Pa /etc/kldload/ca/
+The authority that issues the certificate.
+.It Pa /etc/pki/ca-trust/source/anchors/kldload-webui.crt
+The copy in the system trust store, where
+.Xr update-ca-trust 8
+exists.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+The certificate is current.
+.It 2
+A usage error.
+.El
+.Pp
+Any other status is that of the step that failed, which is named on
+standard error.
+.Sh EXAMPLES
+.Ss On a kldload desktop
+Printed on 2026-09-30.
+The certificate was issued by the machine's authority:
+.Bd -literal -offset indent
+# openssl x509 -in /var/lib/kldload/tls/webui.crt -noout -subject -issuer -enddate
+subject=CN=webui, O=kldload, OU=kldload services
+issuer=CN=kldload-ca kldload-20260830133807-9d6d682dda61b0f5, O=kldload, OU=kldload PKI
+notAfter=Sep  8 23:50:19 2027 GMT
+.Ed
+.Ss From nothing, then adding a name and an address
+Printed on 2026-09-30 in a Fedora 44 container named
+.Ql demo.example.net ,
+with no network and no
+.Xr kldload-ca 8 ,
+so the certificate is self-signed.
+.Xr openssl 1 Ns 's
+progress line of dots is left out.
+.Bd -literal -offset indent
+# kldload-tls-cert
+-----
+# (exited 0)
+# ls -l /var/lib/kldload/tls
+total 10
+-rw------- 1 root root 1314 Sep 30 07:46 webui.crt
+-rw------- 1 root root 1704 Sep 30 07:46 webui.key
+# openssl x509 -in /var/lib/kldload/tls/webui.crt -noout -subject -issuer -ext subjectAltName
+subject=CN=demo.example.net, O=kldload
+issuer=CN=demo.example.net, O=kldload
+X509v3 Subject Alternative Name:
+    DNS:demo.example.net, DNS:demo, DNS:localhost, DNS:kldload.local, IP Address:127.0.0.1, IP Address:0:0:0:0:0:0:0:1, IP Address:192.168.122.1
+# kldload-tls-cert
+# (exited 0)
+# cat /etc/kldload/tls-extra-sans.txt
+DNS:kvm.example.net
+# the VIP
+IP:203.0.113.42
+# kldload-tls-cert
+-----
+# (exited 0)
+# openssl x509 -in /var/lib/kldload/tls/webui.crt -noout -ext subjectAltName
+X509v3 Subject Alternative Name:
+    DNS:demo.example.net, DNS:demo, DNS:localhost, DNS:kldload.local, DNS:kvm.example.net, IP Address:127.0.0.1, IP Address:0:0:0:0:0:0:0:1, IP Address:192.168.122.1, IP Address:203.0.113.42
+.Ed
+.Pp
+The second run found nothing to do and printed nothing.
+.Ss Printing the pair (--emit)
+The same container; only the armour lines are shown here:
+.Bd -literal -offset indent
+# kldload-tls-cert --emit | grep -- -----
+-----BEGIN CERTIFICATE-----
+-----END CERTIFICATE-----
+-----BEGIN PRIVATE KEY-----
+-----END PRIVATE KEY-----
+.Ed
+.Ss A wrong argument
+.Bd -literal -offset indent
+# kldload-tls-cert --frob
+kldload-tls-cert: unknown argument: --frob (try --help)
+# (exited 2)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kldload-tls-cert: FAIL at line N: command"
+A step failed; the command is the one that did.
+In a container without
+.Xr openssl 1 :
+.Bd -literal
+/usr/local/sbin/kldload-tls-cert: line 335: openssl: command not found
+kldload-tls-cert: FAIL at line 335: openssl req -x509 -nodes -newkey rsa:2048 -keyout "${KEY}.tmp" -out "${CRT}.tmp" -days 3650 -config "${CERT_DIR}/webui.cnf" 1>&2
+.Ed
+.Pp
+It exited 127, the shell's status for a command not found.
+.El
+.Sh SEE ALSO
+.Xr openssl-x509 1 ,
+.Xr kldload-ca 8 ,
+.Xr kldload-webui 8 ,
+.Xr NetworkManager-dispatcher 8 ,
+.Xr update-ca-trust 8
+.Sh HISTORY
+It printed the certificate and the private key on every run, for a
+caller that would save them.
+No caller did, and
+.Xr nginx 8 Ns 's
+unit, which meant to discard them with
+.Ql >/dev/null ,
+had systemd pass that as an argument instead, so the key went into the
+journal each time
+.Xr nginx 8
+started: found on a desktop and on a fresh install on 2026-09-30.
+It prints only when asked since, and accepts the literal argument
+.Ql >/dev/null ,
+doing nothing with it, for units written before.
+.Pp
+The same day: a new authority from
+.Ql kldload-ca init --force
+left the console on a certificate signed by the old one, since only names
+and expiry were checked; and on a machine without the
+.Xr hostname 1
+program, every certificate was issued to
+.Ql kldload-node ;
+it asks the kernel for the name now.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A key that reached a journal before the change above is still there, and
+is the key in use until the certificate is next written.
+To replace it now, remove the pair and run
+.Nm
+again.
+.Pp
+The trust-store copy is made only where
+.Xr update-ca-trust 8
+exists, which is the Fedora and Enterprise Linux family.
+.Pp
+The key is made 0600, but
+.Pa kldload-bounce-tls-services ,
+which the unit runs next, sets it to 0640, group root, every time; only
+the directory's 0700 keeps other users out.
+.Pp
+Addresses on WireGuard interfaces are not watched: a VPN's address is
+added when something else makes a new certificate.
+To be sure of it, name it in
+.Pa tls-extra-sans.txt .
