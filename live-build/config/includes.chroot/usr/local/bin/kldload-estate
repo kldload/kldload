@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import socket
@@ -47,6 +48,12 @@ from pathlib import Path
 from typing import Any
 
 TIMEOUT = 8  # seconds; every external call is bounded
+
+# The system libvirt, named: plain `virsh` run by a user asks that user's own
+# session, which has no machines, and every VM read as absent -- the table
+# then said "No drift: every subsystem agrees" over nothing (onyx, as a user,
+# 2026-09-29). A member of the libvirt group may read qemu:///system.
+VIRSH = ["virsh", "-c", "qemu:///system"]
 
 
 def _run(cmd: list[str], timeout: int = TIMEOUT) -> str:
@@ -76,7 +83,7 @@ def _run(cmd: list[str], timeout: int = TIMEOUT) -> str:
 
 def src_libvirt() -> dict[str, str]:
     """Domain power state from libvirt. The authority on 'is it running'."""
-    out = _run(["virsh", "list", "--all"])
+    out = _run(VIRSH + ["list", "--all"])
     state: dict[str, str] = {}
     for line in out.splitlines()[2:]:
         parts = line.split(None, 2)
@@ -126,8 +133,8 @@ def src_leases() -> dict[str, dict[str, str]]:
     never evidence that a machine is up. Cross-checked against libvirt state.
     """
     leases: dict[str, dict[str, str]] = {}
-    for net in _run(["virsh", "net-list", "--name"]).split():
-        for line in _run(["virsh", "net-dhcp-leases", net]).splitlines()[2:]:
+    for net in _run(VIRSH + ["net-list", "--name"]).split():
+        for line in _run(VIRSH + ["net-dhcp-leases", net]).splitlines()[2:]:
             f = line.split()
             # date time MAC proto IP/prefix hostname client-id
             if len(f) >= 6 and f[5] != "-":
@@ -279,6 +286,9 @@ def probe_ssh(host: str, ip: str) -> bool:
         p = subprocess.run(
             [
                 "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                # the churning keys stay out of known_hosts, as for every
+                # other kldload probe of a clone
+                "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
                 "-o", "ConnectTimeout=3", f"root@{ip}", "true",
             ],
             capture_output=True, text=True, timeout=6,
@@ -420,18 +430,24 @@ def render_table(est: dict[str, Any]) -> None:
     tgt = sum(1 for m in ms if m["targetable"])
     print(f"\n  {len(ms)} machine(s), {tgt} targetable by Ansible.")
 
+    missing = [k for k, v in est["sources"].items() if not v]
     if est["drift"]:
         print(f"\n  DRIFT — {len(est['drift'])} finding(s):\n")
         for d in est["drift"]:
             print(f"    [{d['kind']}] {d['machine']}")
             print(f"      {d['detail']}")
             print(f"      fix: {d['repair']}\n")
+    elif missing:
+        # "every subsystem agrees" is a claim about all of them; with any
+        # silent it is a claim about fewer, and says so
+        print("\n  No drift among the sources that answered.")
     else:
         print("\n  No drift: every subsystem agrees.")
 
-    missing = [k for k, v in est["sources"].items() if not v]
     if missing:
-        print(f"  (not consulted: {', '.join(missing)})")
+        print(f"  (no answer from: {', '.join(missing)} -- absent here, or unreadable)")
+    if os.geteuid() != 0:
+        print("  (run as root: a user cannot read WireGuard, and may not see every lease)")
 
 
 def main() -> int:
