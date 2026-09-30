@@ -1,0 +1,87 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-OLLAMA-INSTALL 8
+.Os
+.Sh NAME
+.Nm kldload-ollama-install
+.Nd install the Ollama runtime from the image, and the network only when asked
+.Sh SYNOPSIS
+.Nm
+.Op Fl -allow-network
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The one way kldload installs Ollama; first boot and the automatic
+deployment both call it.
+.Nm :
+.Bl -enum -compact
+.It
+does nothing more when a working
+.Pa /usr/local/bin/ollama
+is already there;
+.It
+otherwise unpacks the runtime the image carries into a staging
+directory, checks the binary runs, and only then moves it into
+.Pa /usr/local ;
+a copy that is there but broken is a failure, and nothing is installed;
+.It
+only when the image carries no runtime and
+.Fl -allow-network
+is given, downloads Ollama's own
+.Pa install.sh
+and runs it;
+.It
+makes the
+.Ql ollama
+user and
+.Pa ollama.service
+if they are missing, without enabling or starting it: its callers add
+their drop-ins first.
+.El
+.Pp
+Running it again changes nothing.
+It needs root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -allow-network
+When the image has no runtime, fetch Ollama's installer from
+.Lk https://ollama.com/install.sh .
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_OLLAMA_RUNTIME , Ev KLDLOAD_OLLAMA_PREFIX , Ev KLDLOAD_OLLAMA_UNIT_DIR
+The runtime archive, the install prefix and the unit directory, for
+tests.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/darksite/ollama/runtime/ollama-linux- Ns Ar arch Ns Pa .tar.zst
+The runtime the image carries.
+.It Pa /usr/local/bin/ollama , Pa /usr/local/lib/ollama/ , Pa /etc/systemd/system/ollama.service
+What it installs.
+.El
+.Sh EXIT STATUS
+0 when the runtime is installed and runs; 1 when it failed; 2 on a usage
+error.
+.Sh EXAMPLES
+In a Fedora 44 container, which carries no runtime:
+.Bd -literal -offset indent
+# kldload-ollama-install
+kldload-ollama-install: FATAL: no Ollama runtime in the image (/root/darksite/ollama/runtime/ollama-linux-amd64.tar.zst) and --allow-network not given
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr kldload-ai-webui 8 ,
+.Xr kldload-firstboot 8
+.Sh HISTORY
+On 2026-09-13 an install meant to be offline piped
+.Pa ollama.com/install.sh
+into
+.Xr sh 1 ,
+which failed adding NVIDIA's repository; and first boot's own copy from
+the image had no service to enable.
+.Nm
+replaced both.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
