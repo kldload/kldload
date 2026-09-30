@@ -1,0 +1,117 @@
+.Dd September 30, 2026
+.Dt KZFS-LAB 8
+.Os
+.Sh NAME
+.Nm kzfs-lab
+.Nd a ZFS development lab of six distributions: goldens, blue and green sites, tests and eBPF views
+.Sh SYNOPSIS
+.Nm
+.Cm build | test
+.Op Ar distro | Cm all
+.Nm
+.Cm deploy
+.Cm blue | green
+.Nm
+.Cm promote green | rollback | status | ssh | demo
+.Nm
+.Cm destroy
+.Cm blue | green | all
+.Nm
+.Cm snapshot
+.Op Ar tag
+.Nm
+.Cm test-full | health | ebpf-latency | ebpf-arc
+.Op Ar argument
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+builds a golden image of each of CentOS, Rocky, Fedora, Debian, Ubuntu
+and Arch with ZFS and its development tools, clones them into a blue or a
+green site, and runs ZFS tests, health checks and eBPF views across a
+site's machines.
+.Xr klab 8
+grew out of it and this tool, and does most of the same with more
+lineages.
+It runs itself under
+.Xr sudo 8 .
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm build Op Ar distro | Cm all
+Build the goldens.
+.It Cm deploy Cm blue | green
+Clone them into that site.
+.It Cm promote green
+Green becomes blue, after a snapshot of blue.
+.It Cm rollback
+Blue back to that snapshot.
+.It Cm test Oo Ar distro | Cm all Oc , Cm test-full Op Ar distro
+ZFS tests in the machines; the full suite is slow.
+.It Cm status
+Every machine, site and snapshot.
+.It Cm destroy Cm blue | green | all
+Remove a site or both; the goldens stay.
+.It Cm snapshot Op Ar tag
+Snapshot every machine.
+.It Cm ssh
+Pick a machine and log in.
+.It Cm health Op Ar site
+A health view of the site.
+.It Cm ebpf-latency , Cm ebpf-arc Op Ar site
+I/O latency, or the ARC's hits and misses, across a site, by eBPF.
+.It Cm demo
+A menu.
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh EXIT STATUS
+0 when done; 1 on a failure, named.
+.Sh EXAMPLES
+On a kldload desktop with no goldens built, on 2026-09-30, with this
+release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+# kzfs-lab status
+======================================================================
+  kzfs-lab Status
+======================================================================
+
+Golden Images:
+  Distro          Status     Size         Snapshots
+  --------------- ---------- ------------ ---------
+  centos          not built
+  rocky           not built
+  fedora          not built
+  debian          not built
+  ubuntu          not built
+  arch            not built
+
+Blue Site:
+  VM                        IP               State      SSH        ZFS
+  ------------------------- ---------------- ---------- ---------- ---
+  (not deployed)
+
+Green Site:
+  VM                        IP               State      SSH        ZFS
+  ------------------------- ---------------- ---------- ---------- ---
+  (not deployed)
+
+ZFS Summary:
+NAME                            USED  REFER  VOLSIZE
+
+======================================================================
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr klab 8 ,
+.Xr kzfs-test 8
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Goldens and sites are removed with
+.Ql zfs destroy -R ,
+which takes every clone of them, whoever made them.
