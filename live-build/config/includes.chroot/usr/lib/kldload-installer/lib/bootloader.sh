@@ -494,8 +494,22 @@ HOOK
     return 0
 }
 
+# k_efi_image_ok FILE — 0 when FILE looks like a real EFI application: the PE
+# "MZ" signature and at least 1 MiB. An HTTP error page is neither.
+k_efi_image_ok() {
+    [[ -f "$1" ]] || return 1
+    [[ "$(head -c 2 "$1")" == "MZ" ]] || return 1
+    (($(stat -c %s "$1") >= 1048576))
+}
+
 # k_zbm_find_efi — locate the ZFSBootMenu EFI binary.
-# Checks the baked-in darksite first, then falls back to downloading.
+# Checks the baked-in darksite first, then falls back to downloading. Every
+# candidate must pass k_efi_image_ok, the darksite copy included.
+# HISTORY: build 166 (2026-09-30) baked a 107-byte "502 Bad Gateway" page in
+# as the darksite copy; this returned it unchecked, the installer wrote it to
+# the ESP as the bootloader, and fiend came back from two installs with
+# "cannot load image" on every entry. The download below had the same hole
+# (curl without -f exits 0 on an HTTP error).
 k_zbm_find_efi() {
     local candidates=(
         "/root/darksite/boot/zfsbootmenu.EFI"
@@ -503,19 +517,26 @@ k_zbm_find_efi() {
     )
 
     for p in "${candidates[@]}"; do
-        [[ -f "$p" ]] && {
+        [[ -f "$p" ]] || continue
+        if k_efi_image_ok "$p"; then
             echo "$p"
             return 0
-        }
+        fi
+        k_log "WARNING: ${p} is not an EFI image ($(stat -c %s "$p") bytes) — ignoring it"
     done
 
-    # Not in darksite — download on demand
+    # Not in darksite (or the copy there is bad) — download on demand
     local zbm_tmp="/tmp/zfsbootmenu.EFI"
-    if [[ ! -f "$zbm_tmp" ]]; then
+    if ! k_efi_image_ok "$zbm_tmp"; then
+        rm -f "$zbm_tmp"
         k_log "ZFSBootMenu EFI not in darksite — downloading..."
-        curl -sL --connect-timeout 30 --max-time 300 \
+        curl -fsSL --retry 3 --retry-delay 10 --connect-timeout 30 --max-time 300 \
             -o "$zbm_tmp" "https://get.zfsbootmenu.org/efi" || {
             k_log "ERROR: Failed to download ZFSBootMenu EFI binary"
+            return 1
+        }
+        k_efi_image_ok "$zbm_tmp" || {
+            k_log "ERROR: the ZFSBootMenu download is not an EFI image ($(stat -c %s "$zbm_tmp") bytes)"
             return 1
         }
     fi

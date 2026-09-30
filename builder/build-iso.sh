@@ -145,6 +145,16 @@ die() {
     exit 1
 }
 
+# k_efi_image_ok FILE — 0 when FILE looks like a real EFI application: it
+# starts with the PE "MZ" signature and is at least 1 MiB (ZFSBootMenu is tens
+# of MiB; an HTTP error page is a few hundred bytes). Checks shape, not a
+# signature, which is the whole of what a firmware checks with Secure Boot off.
+k_efi_image_ok() {
+    [[ -f "$1" ]] || return 1
+    [[ "$(head -c 2 "$1")" == "MZ" ]] || return 1
+    (($(stat -c %s "$1") >= 1048576))
+}
+
 # enable_live_unit UNIT... — `systemctl enable` inside the rootfs, then the
 # outcome: the wants symlink must exist. Six live units used to be enabled with
 # `2>/dev/null || true` and nothing looked afterwards; an enable that failed
@@ -3653,16 +3663,23 @@ fi
 # EFI application that understands ZFS boot environments natively. Downloaded
 # at build time and baked in so installs work offline. If the download fails,
 # the installer will attempt to download it at install time as a fallback.
+#
+# HISTORY: build 166 (2026-09-30 11:25). The download was `curl -sL` with no
+# -f, so when get.zfsbootmenu.org answered 502 curl exited 0 and saved the
+# 107-byte error page as zfsbootmenu.EFI. It was baked into the ISO, every
+# install copied it to the ESP as the bootloader, and fiend installed twice
+# into "cannot load image" on every GRUB entry. A build with no bootloader
+# is a failed build, so this now dies unless the file is an EFI image.
 mkdir -p "${ROOTFS}/root/darksite/boot"
 log "Downloading ZFSBootMenu EFI binary..."
-curl -sL --connect-timeout 30 --max-time 300 \
-    -o "${ROOTFS}/root/darksite/boot/zfsbootmenu.EFI" \
-    "https://get.zfsbootmenu.org/efi" || log "WARNING: ZFSBootMenu download failed"
-if [[ -f "${ROOTFS}/root/darksite/boot/zfsbootmenu.EFI" ]]; then
-    log "ZFSBootMenu EFI: $(du -sh "${ROOTFS}/root/darksite/boot/zfsbootmenu.EFI" | cut -f1)"
-else
-    log "WARNING: ZFSBootMenu EFI not available — installer will try to download at install time"
-fi
+_zbm_efi="${ROOTFS}/root/darksite/boot/zfsbootmenu.EFI"
+rm -f "$_zbm_efi"
+curl -fsSL --retry 3 --retry-delay 10 --connect-timeout 30 --max-time 300 \
+    -o "$_zbm_efi" "https://get.zfsbootmenu.org/efi" ||
+    die "FATAL: ZFSBootMenu download failed (HTTP error or no network) — the ISO would have no bootloader"
+k_efi_image_ok "$_zbm_efi" ||
+    die "FATAL: the ZFSBootMenu download is not an EFI image ($(stat -c %s "$_zbm_efi") bytes, starts '$(head -c 16 "$_zbm_efi" | tr -cd '[:print:]')')"
+log "ZFSBootMenu EFI: $(numfmt --to=iec "$(stat -c %s "$_zbm_efi")"), verified PE/EFI"
 
 # ── Standalone binaries the installed system used to curl at first boot ──────
 #
