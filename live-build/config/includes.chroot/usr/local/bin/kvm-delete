@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # kvm-delete — cleanly remove a VM and its ZFS zvol
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kvm-delete: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate to root (ZFS + libvirt require it)
 # Rule 9: -h/--help answers before this re-exec. These tools already had
@@ -8,27 +9,38 @@ set -euo pipefail
 if [[ $EUID -ne 0 && "${1:-}" != -h && "${1:-}" != --help ]]; then exec sudo "$0" "$@"; fi
 
 usage() {
-    cat <<EOF
+    # asked-for help goes to stdout and is 0; a usage error goes to stderr and
+    # is 2, distinct from a delete that ran and left something behind (1).
+    local rc="${1:-2}"
+    {
+        cat <<EOF
 Usage: kvm-delete <vm-name> [--force]
 
-Removes a VM and its ZFS zvol. The VM must be shut down first
-unless --force is specified.
+Removes a VM: its libvirt definition and UEFI variables, its zvol
+rpool/vms/<vm-name>, its <vm-name>-data disk and <vm-name>-seed.iso if
+it has them, its state-DB row and its WireGuard mesh peer. The VM must
+be shut off first unless --force is given.
+
+  --force    power the VM off first if it is running or paused
 
 Examples:
   kvm-delete myvm
-  kvm-delete myvm --force    # force-stop if running
+  kvm-delete myvm --force    # power it off first
 
 Exit status:
-  0  the VM, its zvol and its mesh peer are gone
-  1  refused before changing anything (clones depend on it, or it is
-     running without --force), OR the domain was removed but the zvol is
-     still on disk or the VM is still a WireGuard peer — the warnings say
-     which, and the state-DB row is cleared either way
-  2  usage error: no name, or a second argument other than --force
+  0  the VM, its disks and its mesh peer are gone
+  1  refused before changing anything (clones depend on it, it is not
+     shut off and --force was not given, the power-off or the undefine
+     failed, or there is no VM of that name), OR the domain was removed
+     but a zvol is still on disk or the VM is still a WireGuard peer --
+     the warnings say which, and the state-DB row is cleared either way
+  2  usage error: no name, a name that is not a plain name, or a second
+     argument other than --force
+
+See kvm-delete(8).
 EOF
-    # asked-for help is 0; a usage error is 2, distinct from a delete that
-    # ran and left something behind (1).
-    exit "${1:-2}"
+    } >&$((rc == 0 ? 1 : 2))
+    exit "$rc"
 }
 
 [[ "${1:-}" == -h || "${1:-}" == --help ]] && usage 0
@@ -47,7 +59,23 @@ case "$#:${2:-}" in
 esac
 FORCE="${2:-}"
 
+# SAFETY: NAME is spliced into `zfs destroy -r rpool/vms/NAME`; "web/data"
+# would name a child dataset and "-x" an option. The same plain-name rule
+# kvm-create and kvm-clone make names with.
+if [[ ! "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]]; then
+    echo "kvm-delete: '${NAME}' is not a plain name (letters, digits, . _ -)" >&2
+    exit 2
+fi
+
 ZVOL="rpool/vms/${NAME}"
+
+# A name that is neither a domain nor a volume used to print two warnings,
+# then "Deleted 'x'", and exit 0 -- a typo reported as a delete (found
+# writing kvm-delete(8), 2026-09-29).
+if ! virsh dominfo "${NAME}" >/dev/null 2>&1 && ! zfs list "${ZVOL}" >/dev/null 2>&1; then
+    echo "kvm-delete: no VM named ${NAME} (no libvirt domain, no ${ZVOL})" >&2
+    exit 1
+fi
 
 # ─── Refuse before mutating, not after ──────────────────────────────────────
 #
@@ -123,15 +151,24 @@ done
 
 # Check VM exists
 if ! virsh dominfo "${NAME}" >/dev/null 2>&1; then
-    echo "Warning: VM '${NAME}' not found in libvirt (removing zvol only)"
+    echo "Warning: VM '${NAME}' not found in libvirt (removing zvol only)" >&2
 else
+    # WHY anything but "shut off": a paused or crashed-but-held domain still
+    # has qemu holding the zvol open. Only "running" was tested, so a paused
+    # VM was undefined (libvirt keeps it alive as a transient domain) and its
+    # zvol destroy then failed busy five times over.
     STATE=$(virsh domstate "${NAME}" 2>/dev/null || echo "unknown")
-    if [[ "$STATE" == "running" ]]; then
+    if [[ "$STATE" != "shut off" ]]; then
         if [[ "$FORCE" == "--force" ]]; then
-            echo "Force-stopping VM..."
-            virsh destroy "${NAME}" 2>/dev/null || true
+            echo "Force-stopping VM (${STATE})..."
+            # Refuse rather than carry on: undefining a domain that is still
+            # up leaves it running, transient, on a zvol about to be destroyed.
+            if ! virsh destroy "${NAME}" >/dev/null; then
+                echo "kvm-delete: could not power ${NAME} off; nothing has been removed" >&2
+                exit 1
+            fi
         else
-            echo "ERROR: VM '${NAME}' is running. Stop it first or use --force"
+            echo "kvm-delete: ${NAME} is ${STATE}; shut it down first or use --force" >&2
             exit 1
         fi
     fi
@@ -153,13 +190,20 @@ else
             fi
         done < <(virsh list --all --name 2>/dev/null)
     fi
+    # The second form covers what the first cannot: older libvirt without
+    # --keep-nvram, and a BIOS domain with no NVRAM to remove. If both fail
+    # the domain still exists, and destroying its disk under it would leave
+    # a definition pointing at nothing: stop here, nothing is removed yet.
     if [[ -n "$_nv_keep" ]]; then
         echo "  keeping ${_nv}: ${_nv_keep} uses it too"
-        virsh undefine "${NAME}" --keep-nvram 2>/dev/null ||
-            virsh undefine "${NAME}" 2>/dev/null || true # older libvirt: no --keep-nvram
+        _undef=(--keep-nvram)
     else
-        virsh undefine "${NAME}" --nvram 2>/dev/null ||
-            virsh undefine "${NAME}" 2>/dev/null || true # a BIOS domain has no NVRAM to remove
+        _undef=(--nvram)
+    fi
+    if ! virsh undefine "${NAME}" "${_undef[@]}" >/dev/null 2>&1 &&
+        ! virsh undefine "${NAME}" >/dev/null; then
+        echo "kvm-delete: libvirt would not undefine ${NAME}; its disks are untouched" >&2
+        exit 1
     fi
 fi
 
@@ -223,7 +267,7 @@ if zfs list "${ZVOL}" >/dev/null 2>&1; then
         done < <(zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' || true)
     fi
 else
-    echo "Warning: ZFS zvol '${ZVOL}' not found"
+    echo "Warning: ZFS zvol '${ZVOL}' not found" >&2
 fi
 
 # The data disks found above, after the root, with the same bounded retry.
@@ -269,6 +313,7 @@ fi
 
 # Soft-delete from the state DB — history survives, dynamic inventory drops it.
 if command -v kldload-db >/dev/null 2>&1; then
+    # swallow: a VM made outside the kldload tools has no row or node to delete
     kldload-db vm-delete --name "${NAME}" 2>/dev/null || true
     kldload-db node-delete --hostname "${NAME}" 2>/dev/null || true
     kldload-db event --type "vm" --subject "${NAME}" \
