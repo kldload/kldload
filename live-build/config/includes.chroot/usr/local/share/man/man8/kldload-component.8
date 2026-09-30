@@ -1,0 +1,271 @@
+.Dd September 29, 2026
+.Dt KLDLOAD-COMPONENT 8
+.Os
+.Sh NAME
+.Nm kldload-component
+.Nd add, remove and inspect kldload's optional components after installation
+.Sh SYNOPSIS
+.Nm
+.Op Cm list
+.Nm
+.Cm status
+.Ar name
+.Nm
+.Cm install | remove
+.Op Fl -now
+.Ar name ...
+.Nm
+.Cm log
+.Ar name
+.Op Fl f
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+A component is a capability that can be added to an installed kldload
+machine, or taken away, after the fact:
+.Bl -tag -width "zfslab"
+.It Li kvm
+KVM and libvirt: run virtual machines here.
+.It Li k8s
+A Kubernetes cluster in virtual machines, with Cilium, Hubble and
+MetalLB.
+.It Li klab
+The multi-distribution test bay: cloud-image goldens and blue/green
+clones.
+.It Li zfslab
+The OpenZFS development lab: goldens with the source and its test suite.
+.It Li ai
+A local language model and its chat, offline.
+.El
+.Pp
+The installer, first boot, the automatic deployment and the consoles all
+add components through this one command, so adding Kubernetes later is
+the same as having chosen it at install time.
+.Pp
+.Cm install
+and
+.Cm remove
+run the work as a system unit,
+.Pa kldload-comp- Ns Ar name ,
+and return at once: closing the terminal, the console tab or the ssh
+session does not stop it.
+.Cm log
+.Fl f
+follows it.
+With
+.Fl -now
+the work runs in the foreground instead, and the exit status says how it
+went.
+A component that needs another installs that first.
+Installing an installed component asserts it again, which is how a
+failed or interrupted one is finished.
+.Pp
+Each component has a state:
+.Bl -tag -width "interrupted"
+.It Li absent
+Not installed.
+.It Li installed
+Installed through this command, and its own check agrees.
+.It Li missing
+Recorded as installed, and its check no longer finds it.
+.It Li unmanaged
+Present, put there by its own tool rather than through this command
+\(em a cluster made with
+.Xr kube-cluster 8 ,
+goldens made with
+.Xr klab 8 .
+.It Li running
+Being installed or removed now.
+.It Li interrupted
+Its work stopped part-way: a reboot or a power cut.
+Install it again.
+.It Li failed
+Its install or remove returned an error; the log says what.
+.El
+.Pp
+.Cm list ,
+.Cm status
+and
+.Cm log
+need no root; the checks use the system libvirt whoever asks.
+.Cm install
+and
+.Cm remove
+need root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Cm list
+Every component with its state, roughly how many minutes it takes, and
+what it is; the default.
+.It Cm status Ar name
+The component's state, one word, for scripts.
+.It Cm install Ar name ...
+.It Cm remove Ar name ...
+Add or take away each component, detached.
+.It Fl -now
+Run the work here and wait for it.
+.It Cm log Ar name Op Fl f
+Print the component's work log, or follow it.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev KLDLOAD_COMPONENT_REG , KLDLOAD_COMPONENT_STATE , KLDLOAD_LOG_DIR
+The registry, state and log directories instead of the ones below.
+.It Ev LIBVIRT_DEFAULT_URI
+The libvirt the checks ask; default
+.Ql qemu:///system .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /usr/lib/kldload/components/ Ns Ar name Ns Pa .component
+Each component: a summary, an estimate, what it requires, and its install,
+remove and status verbs.
+.It Pa /var/lib/kldload/components/ Ns Ar name
+Its recorded state.
+.It Pa /var/log/kldload/component- Ns Ar name Ns Pa .log
+Everything its work printed, every run.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done; for a detached
+.Cm install
+or
+.Cm remove ,
+started.
+.It 1
+A usage error, an unknown component, no log yet, or
+.Cm install
+or
+.Cm remove
+run without root.
+.It 2
+With
+.Fl -now :
+a component's work failed.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-29.
+.Ss What there is (list, status)
+.Bd -literal -offset indent
+# kldload-component list
+NAME         STATE        APPROX   SUMMARY
+ai           absent       ~15m     Local LLM: ollama + chat model, fully offline
+k8s          absent       ~25m     Kubernetes cluster in VMs (Cilium eBPF, Hubble, MetalLB)
+klab         unmanaged    ~25m     Multi-distro test bay: stock cloud-image goldens + blue/green clones
+kvm          unmanaged    ~5m      KVM/libvirt host: run VMs on this machine
+zfslab       absent       ~40m     OpenZFS dev lab: golden VMs with the source + upstream test suite
+# (exited 0)
+$ kldload-component status klab
+unmanaged
+# (exited 0)
+.Ed
+.Pp
+This machine's klab goldens were built with
+.Xr klab 8
+directly, so klab is
+.Ql unmanaged .
+.Ss Installing and removing (install, remove, log, --now)
+Against a registry made for the purpose, with one component,
+.Ql quick ,
+whose verbs do nothing:
+.Bd -literal -offset indent
+# export KLDLOAD_COMPONENT_REG=/var/tmp/comptest-3443758/reg KLDLOAD_COMPONENT_STATE=/var/tmp/comptest-3443758/state KLDLOAD_LOG_DIR=/var/tmp/comptest-3443758/log
+# kldload-component install quick
+Running as unit: kldload-comp-quick.service; invocation ID: 28e3ef312c6243919b2005b20c26bec6
+install quick: started (detached) — kldload-component log quick -f
+# (exited 0)
+# kldload-component status quick
+installed
+# (exited 0)
+# kldload-component log quick
+\&...
+═══ install quick — 2026-09-29T23:55:54-07:00 ═══
+installing nothing
+OK: install quick
+# (exited 0)
+# kldload-component remove --now quick
+═══ remove quick — 2026-09-29T23:55:57-07:00 ═══
+removing nothing
+OK: remove quick
+# (exited 0)
+# kldload-component status quick
+absent
+# (exited 0)
+.Ed
+.Pp
+A component whose install fails:
+.Bd -literal -offset indent
+# kldload-component install --now broken
+═══ install broken — 2026-09-29T23:56:59-07:00 ═══
+fetching nothing
+FATAL: install broken failed (rc=3) — see /var/tmp/comptest-f3450047/log/component-broken.log
+# (exited 2)
+# kldload-component status broken
+failed
+# (exited 0)
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+$ kldload-component install ai
+kldload-component: install must run as root (list, status and log do not)
+# (exited 1)
+# kldload-component install nosuch
+kldload-component: unknown component 'nosuch'
+  known: quick
+# (exited 1)
+# kldload-component status
+usage: kldload-component status <name>
+# (exited 1)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "FATAL: VERB NAME failed (rc=N) \(em see LOG"
+The component's work returned
+.Ar N ;
+its log has the rest.
+.It "kldload-component: NAME is already running \(em 'log NAME -f' to watch"
+An install or remove of it is still going; nothing new was started.
+.It "kldload-component: 'NAME' has no VERB verb"
+The component cannot be removed, or installed, this way.
+.El
+.Sh SEE ALSO
+.Xr kld 1 ,
+.Xr systemd-run 1 ,
+.Xr klab 8 ,
+.Xr kldload-doctor 8 ,
+.Xr kube-cluster 8
+.Sh HISTORY
+Components replaced seven environment variables that asked for the same
+work in different words, and tick boxes that could be chosen only at
+install time.
+The work was detached after a 40-minute golden build died with the
+console tab that started it (2026-08-14).
+.Ql unmanaged
+dates from 2026-09-01, when the table said
+.Ql absent
+for Kubernetes, klab and KVM on a machine running all three, installed by
+their own tools.
+.Pp
+On 2026-09-29, writing this page:
+run as a user, the checks asked the user's own, empty, libvirt, and
+.Cm install
+waited 25 seconds on an authentication prompt nobody could see before it
+failed; and
+.Cm status
+printed the recorded state while
+.Cm list
+printed the reconciled one, so a script and the table disagreed.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The exit statuses are this tool's own: a usage error is 1, not 2, and 2 is
+a failed component.
+.Pp
+A detached
+.Cm install
+exits 0 when the work has started, not when it has finished; watch
+.Cm status
+or the log.
