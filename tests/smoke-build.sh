@@ -2461,17 +2461,26 @@ fi
 # shadowed-inode bug from .132 2026-08-26. The race is that systemd-journal-flush
 # is ordered on local-fs.target, which on a ZFS root does not guarantee
 # rpool/var/log is mounted. So the assert has to notice and repair after the mount.
+#
+# 2026-09-30: the persistence test was `journalctl --header | grep -q` for a
+# file under /var/log/journal. --header lists archives too, so onyx passed it
+# for three weeks with journald writing only to /run; and the pipe returned
+# 141 on every run. It is a probe read back through `journalctl -D
+# /var/log/journal` now, and both questions are asked again after a repair --
+# which is what this gate requires (it used to require the header check).
 _ja="$ROOT/live-build/config/includes.chroot/usr/local/sbin/kldload-journal-assert"
 _ja_ok=0
 grep -qF 'journal_is_persistent()' "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
-grep -qF "grep -q '^File path: /var/log/journal/'" "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
-grep -qF 'if journal_records && journal_is_persistent; then' "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
+grep -qF 'journalctl -D /var/log/journal' "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
+# both conditions on the success path, and again after the repair
+_ja_both="$(grep -cF 'if journal_records && journal_is_persistent; then' "$_ja" 2>/dev/null || true)"
+((${_ja_both:-0} >= 2)) && _ja_ok=$((_ja_ok + 1))
 grep -qF 'Storage=auto' "$ROOT/live-build/config/includes.chroot/etc/systemd/journald.conf.d/persistent.conf" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
 if ((_ja_ok == 4)); then
     _pass "journal assert proves persistence, not just that journald records"
 else
     _fail "journal assert proves persistence, not just that journald records" \
-        "need journal_is_persistent(), the /var/log/journal header check, both conditions gating the success path, and Storage=auto retained — have $_ja_ok/4"
+        "need journal_is_persistent(), a probe read back with journalctl -D /var/log/journal, both conditions on the success path AND after the repair, and Storage=auto retained — have $_ja_ok/4"
 fi
 
 # A desktop must ship GPU firmware for the card it might actually meet.
