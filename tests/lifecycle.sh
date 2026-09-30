@@ -416,6 +416,29 @@ log "uploading tests/ to installed target"
 sshpass -p admin scp "${SSH_OPTS[@]}" -r "$ROOT/tests" "admin@${VM_IP_NEW}:/tmp/" >>"$LOG" 2>&1 ||
     fail "couldn't upload tests/ to installed target"
 
+# Wait for first boot to finish before judging the install. Smoke checks
+# things first boot does (enables the web console, reclaims the darksite and
+# its repo file), and run mid-first-boot they fail for the clock, not the
+# code: three of four runs on 2026-09-30 failed exactly those three checks,
+# all of which were correct once first boot ended. The signal is the unit's
+# own marker, /var/lib/kldload/firstboot-done (its ExecStartPost, written on
+# success): the unit state is "active (exited)" only in the session it ran in
+# and "dead" on every boot after, so it cannot be the test. Bounded; a first
+# boot that never finishes is reported, not waited on forever.
+FIRSTBOOT_MARKER="${FIRSTBOOT_MARKER:-/var/lib/kldload/firstboot-done}"
+_fb_done=0
+for _i in $(seq 1 90); do
+    if ssh_admin "test -f ${FIRSTBOOT_MARKER}" 2>/dev/null; then
+        _fb_done=1
+        break
+    fi
+    sleep 20
+done
+if ((_fb_done)); then
+    ok "first boot finished (${FIRSTBOOT_MARKER} present)"
+else
+    log "WARNING: first boot not finished after 30 min (no ${FIRSTBOOT_MARKER}) — smoke results below may be early"
+fi
 log "running smoke-auto.sh on the installed target"
 if ssh_admin 'sudo bash /tmp/tests/smoke-auto.sh' 2>&1 | tee -a "$LOG"; then
     ok "smoke-auto passed"
