@@ -1,0 +1,239 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-RESTORE-MACHINE 8
+.Os
+.Sh NAME
+.Nm kldload-restore-machine
+.Nd rebuild a machine on an empty disk from its replicated ZFS archive, and leave it bootable
+.Sh SYNOPSIS
+.Nm
+.Fl -archive-host Ar host
+.Fl -archive Ar dataset
+.Fl -disk Ar device
+.Fl -yes | -dry-run
+.Op Ar options
+.Nm
+.Fl -archive-url Ar url
+.Fl -disk Ar device
+.Fl -yes | -dry-run
+.Op Ar options
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+Replication copies a machine's pool to another host.
+.Nm
+is the way back: run from the netbooted live environment on the machine
+that is to become the old one, it repartitions a disk, receives the
+archive onto it, and repairs what a receive alone leaves broken, so the
+machine boots.
+.Pp
+In order, it:
+.Bl -enum
+.It
+Checks the disk.
+It must be a whole disk, or a loop device, that this host is not using:
+not mounted, not swap, not a device of an imported pool, not attached to a
+running virtual machine \(em compared after resolving links, so a by-id
+name cannot slip past.
+It checks that the archive answers and holds datasets.
+.It
+Partitions the disk: an EFI system partition first, then the rest for ZFS.
+.It
+Creates the pool, with its root under
+.Pa /mnt/restore ,
+and receives the archive into it with
+.Xr syncoid 8 ,
+one dataset at a time, each sent decrypted by the archive host and
+encrypted again, if at all, by the new pool's own policy.
+From a URL it receives one
+.Ql zfs send -R
+stream.
+.It
+Marks the first
+.Pa */ROOT/*
+dataset as the boot environment and the pool's
+.Cm bootfs .
+.It
+Repairs what the old machine's files get wrong on new hardware:
+.Bl -bullet -compact
+.It
+pool import by scanning instead of by cache file, whose device paths are
+the old machine's, and a new initramfs for the newest kernel on the pool;
+.It
+the original host id, from the manifest;
+.It
+.Pa /etc/fstab ,
+repointed at the new EFI partition;
+.It
+NetworkManager connections pinned to the old machine's MAC addresses, which
+are unpinned.
+.El
+.It
+Puts a bootloader in the EFI partition: the old one, from an archive made
+by
+.Xr kldload-boot-manifest 8 ,
+or else
+.Xr grub2-install 8 .
+.It
+Checks the outcome \(em kernel, initramfs,
+.Cm bootfs ,
+.Pa fstab ,
+an EFI binary, scan import, the host id \(em and exits 1 if any is missing.
+.El
+.Pp
+With
+.Fl -dry-run
+it runs the checks in step 1 and prints what it would do after them,
+changing nothing.
+It needs root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -archive-host Ar host
+The host holding the archive; it does the sending, over
+.Xr ssh 1 .
+.Ql local
+when this is that host.
+.It Fl -archive Ar dataset
+The archived tree on that host, such as
+.Ql rpool/backup/fiend .
+.It Fl -archive-url Ar url
+Instead of the two above: a
+.Ql zfs send
+stream over HTTP, as
+.Xr kldload-netboot-server 8
+serves a golden.
+.It Fl -disk Ar device
+The disk to repartition.
+.It Fl -pool Ar name
+The pool to create; default
+.Ql rpool ,
+or the manifest's.
+There must be no pool of that name imported here.
+.It Fl -hostname Ar name
+Written to the restored
+.Pa /etc/hostname .
+.It Fl -esp-size Ar size
+The EFI partition's size; default 1GiB, or the manifest's.
+.It Fl -ssh-key Ar path
+The key for reaching the archive host.
+.It Fl -manifest Ar file
+The boot manifest from
+.Xr kldload-boot-manifest 8 :
+pool name, EFI partition size, host name, host id and the EFI archive, so
+the rebuild matches the machine instead of guessing.
+.It Fl -esp-archive Ar file
+A tar of the old EFI partition, unpacked into the new one.
+.It Fl -yes
+Required to change the disk.
+.It Fl -dry-run
+Check, then print the plan; change nothing.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /mnt/restore
+Where the new pool is mounted while it is repaired.
+.It Pa etc/fstab.pre-restore , Pa *.nmconnection.pre-restore
+The restored machine's originals, kept beside the edited copies.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Restored and verified, or the dry run finished.
+.It 1
+A step failed, or the verification did.
+.It 2
+A usage error, or the disk or archive was refused.
+.El
+.Sh EXAMPLES
+Printed on a kldload desktop on 2026-09-30, whose root pool is on
+.Pa nvme0n1p2
+and a second pool on
+.Pa nvme1n1p1 ,
+and which holds another machine's archive in
+.Ql rpool/backup/fiend .
+.Ss The plan, on a disk nothing uses
+A 64 MB throwaway volume, destroyed afterwards:
+.Bd -literal -offset indent
+# kldload-restore-machine --archive-host local --archive rpool/backup/fiend --disk /dev/zvol/rpool/rmtest-3916166 --pool rtest --dry-run
+archive: local:rpool/backup/fiend — 82 datasets
+partitioning /dev/zvol/rpool/rmtest-3916166 (ESP 1GiB, remainder ZFS)
+  would run: sgdisk --zap-all /dev/zvol/rpool/rmtest-3916166
+  would run: sgdisk -n1:0:+1GiB -t1:EF00 -c1:EFI System /dev/zvol/rpool/rmtest-3916166
+  would run: sgdisk -n2:0:0 -t2:BF00 -c2:rtest /dev/zvol/rpool/rmtest-3916166
+  would run: mkfs.vfat -F32 -n EFI /dev/zvol/rpool/rmtest-3916166-part1
+\&...
+# (exited 0)
+.Ed
+.Pp
+The dry run does not know the volume is too small for the partition it
+plans.
+.Ss What it refuses
+.Bd -literal -offset indent
+# kldload-restore-machine --archive-host local --archive rpool/backup/fiend --disk /dev/nvme0n1 --pool rtest --dry-run
+FATAL: /dev/nvme0n1 (/dev/nvme0n1) or a partition of it is mounted or is swap on this host — refusing
+# (exited 2)
+# kldload-restore-machine --archive-host local --archive rpool/backup/fiend --disk /dev/disk/by-id/nvme-eui.002538b71150e07b --pool rtest --dry-run
+FATAL: /dev/disk/by-id/nvme-eui.002538b71150e07b (/dev/nvme0n1) or a partition of it is mounted or is swap on this host — refusing
+# (exited 2)
+# kldload-restore-machine --archive-host local --archive rpool/backup/fiend --disk /dev/nvme0n1p2 --pool rtest --dry-run
+FATAL: /dev/nvme0n1p2 (/dev/nvme0n1p2) is a part, not a whole disk
+# (exited 2)
+# kldload-restore-machine --archive-host local --archive rpool/backup/fiend --disk /dev/nvme1n1 --dry-run
+FATAL: /dev/nvme1n1 (/dev/nvme1n1p1) is a device of a pool imported on this host — refusing
+# (exited 2)
+# kldload-restore-machine --archive-host local --archive rpool/backup/fiend --disk /dev/nvme1n1
+FATAL: --yes is required: /dev/nvme1n1 will be repartitioned
+# (exited 2)
+# kldload-restore-machine --archive-host local --archive rpool/backup/fiend --disk '' --dry-run
+FATAL: --disk needs a value
+# (exited 2)
+.Ed
+.Ss A full restore
+Not run for this page.
+From the live environment on the replacement machine, with the archive on
+the backup host and the manifest and EFI archive copied from it:
+.Bd -literal -offset indent
+# kldload-restore-machine --archive-host backup --archive rpool/backup/fiend \e
+      --disk /dev/nvme0n1 --manifest fiend.manifest.json --yes
+# ends "OK: rpool restored from backup:rpool/backup/fiend and verified.
+# Reboot into it." or with the checks that failed.
+.Ed
+.Sh SEE ALSO
+.Xr ssh 1 ,
+.Xr kldload-autoinstall 8 ,
+.Xr kldload-backup-restore 8 ,
+.Xr kldload-boot-manifest 8 ,
+.Xr kldload-netboot-server 8 ,
+.Xr syncoid 8 ,
+.Xr zfs-receive 8
+.Sh HISTORY
+Written after fiend was restored by hand on 2026-09-09: the pool came back
+perfect and the machine still did not boot, first because the initramfs
+imported by the old machine's device paths, then because
+.Pa /etc/fstab
+named an EFI partition that no longer existed.
+Each repair in step 5 is one of those.
+.Pp
+On 2026-09-30, writing this page: the check that the disk was not in use,
+which the tool's own header described, did not exist \(em pointed at the
+disk holding the running root pool, it planned to wipe it, and with
+.Fl -yes
+would have.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+A running virtual machine's disk is refused, but that check has not been
+seen to fire: no machine was running where it was tested.
+.Pp
+Secure Boot keys are not restored; a machine that had Secure Boot on needs
+someone at its console to enrol the key again, and the manifest says so.
+.Pp
+The initramfs is built with
+.Xr dracut 8 ,
+so the archive must be of a system that has it.
+.Pp
+.Xr kldload-autoinstall 8
+runs this with
+.Fl -yes
+on the disk named on the kernel command line.
