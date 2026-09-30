@@ -6,6 +6,47 @@ the tree (with paths, checked on the day), the gaps, and the open decisions.
 Occasion: kldload has a slot at the OpenZFS summit for kldload and the ZFS
 test suite.
 
+## 0. Delivery model (operator, 2026-09-30, supersedes where it conflicts)
+
+One engine, two deliveries, one plan format:
+
+1. **The fifth ISO is a self-driving test appliance.** Boot it on the
+   machine under test. It asks the basics (which disks it may wipe, which
+   plan: a preset such as "same kernel and ZFS across every distro" or your
+   own lines, where results go), then runs the plan unattended, using the
+   reinstall as the loop:
+   1. the live system takes the next plan item and installs it (distro,
+      kernel, ZFS version, extra modules such as NVIDIA, tools such as the
+      LSI/Broadcom utilities);
+   2. it sets `BootNext` to the installed disk and reboots;
+   3. the build's first boot runs the suite, writes results off the disk
+      under test, sets `BootNext` back to the stick, reboots;
+   4. the live system records the result and takes the next item;
+   5. at the end, a report and power-off.
+   The plan and results live on a writable partition of the USB stick
+   (`kldload burn` creates it), so no second machine is needed. A build
+   that does not boot comes back to the stick through the firmware's
+   fallback and is recorded as "did not boot": a result, not a dead box
+   (build 166's bootloader, 2026-09-30, is exactly that case).
+2. **Fleet mode:** a lab host serves the same plan over netboot to any
+   number of benches with power control, and collects the results
+   centrally (sections 10 and 12).
+
+Plan lines, for example:
+```
+fedora 44  kernel=7.2  zfs=2.4.4  modules=nvidia  tools=lsi  suite=full
+*          kernel=7.2  zfs=2.4.4                             suite=quick
+```
+Impossible pairs are refused at the question stage: ZFS 2.4.4 declares a
+kernel maximum of 7.2 (read from its package's Conflicts on 2026-09-30), so
+"2.4.4 on 7.3" is offered as 2.4.4 on 7.2 or master on 7.3, never started.
+
+Adds to the build list: `BootNext` handoff with fallback; the results
+partition on the stick; hardware extras as plan fields; the kernel axis
+(phase 4) and the refusal logic move onto the question screen. The
+single-machine appliance is the headline of the download and the easier
+summit demo (one stick, one machine, a report); fleet mode is the scale-out.
+
 ## 1. What it is
 
 *Checked 2026-09-30 against openzfs/zfs `.github/workflows`:* upstream CI
