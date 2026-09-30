@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "kexport: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # kexport — export a disk to qcow2, raw, VHD, VMDK, or OVA
 # Usage: kexport /dev/sda qcow2
@@ -7,12 +8,14 @@ set -euo pipefail
 #        kexport /dev/sda all
 #        kexport /dev/sda qcow2 /home/live/out  --no-seal
 #
-# By default kexport runs kldload-seal against the source disk BEFORE
-# converting, so the output is a portable golden (no machine-id /
-# ssh host keys / hostid / cloud-init seed carry-over). Pass --no-seal
-# to skip and produce a raw clone of the source (the historical
-# behavior — fine for 1:1 VM migration, wrong for golden deployment).
-# See /usr/local/bin/kldload-seal for what sealing actually does.
+# By default the output is sealed (kldload-seal: no machine-id / ssh host
+# keys / hostid / cloud-init seed carry-over), so it is a portable golden.
+# The seal is applied to a COPY -- a ZFS clone for a zvol, a sparse raw
+# file in the output directory for anything else -- and the source is
+# never written. (Until 2026-09-29 the SOURCE was sealed: exporting a
+# shut-off VM stripped that VM's identity and mesh keys for good.) Pass
+# --no-seal for a 1:1 image of the source (VM migration).
+# See kexport(8) and kldload-seal(8).
 
 # Parse positional args (DISK, FMT, OUTDIR) and a --no-seal flag in any
 # order. Defaults: OUTDIR=/root/exports, sealing ON.
@@ -57,11 +60,16 @@ usage() {
     echo "  all      Export all VM formats (qcow2+raw+vhd+vmdk+ova)"
     echo ""
     echo "Sealing:"
-    echo "  By default kexport runs kldload-seal on the source disk before"
-    echo "  conversion so the output is a portable golden — no machine-id,"
-    echo "  no ssh host keys, no hostid, no cloud-init seed state carry-over."
-    echo "  Pass --no-seal to skip (raw 1:1 clone of the source, suitable"
-    echo "  for VM migration but NOT for fleet deployment)."
+    echo "  By default the output is sealed with kldload-seal so it is a"
+    echo "  portable golden: no machine-id, ssh host keys, hostid or"
+    echo "  cloud-init state. The seal is applied to a copy (a ZFS clone of a"
+    echo "  zvol, else a sparse raw file in the output directory); the source"
+    echo "  is never written. --no-seal exports the source 1:1 (migration)."
+    echo ""
+    echo "The source may be a block device, a zvol, or an image file in any"
+    echo "format qemu-img reads (qcow2, raw, vmdk, ...). Needs root."
+    echo ""
+    echo "Exit: 0 exported, 1 failed, 2 usage. See kexport(8)."
     echo ""
     echo "Examples:"
     echo "  kexport /dev/sda qcow2                # sealed by default"
@@ -92,9 +100,39 @@ log() { echo "[kexport] $*"; }
     exit 2
 }
 [[ -b "$DISK" || -f "$DISK" ]] || die "$DISK is not a block device or file"
+[[ $EUID -eq 0 ]] || die "must run as root (it reads disks, and seals and mounts copies)"
 command -v qemu-img >/dev/null || die "qemu-img not found — install qemu-img"
 
 mkdir -p "$OUTDIR"
+
+# ── What is converted: the source, or a sealed copy of it ─────────────
+# SRC is what every format below reads; SRC_FMT is its format for qemu-img.
+# Asked of qemu-img, not assumed: every conversion said `-f raw`, so a
+# qcow2 file given as the source was copied as if its container bytes were
+# a disk, and `raw` used dd, which did the same (found 2026-09-29).
+SRC="$DISK"
+_CLONE="" _SNAP="" _TMPRAW=""
+_cleanup_copy() {
+    # each one is this run's own, named with its PID; say it if it stays
+    if [[ -n "$_CLONE" ]]; then zfs destroy "$_CLONE" || echo "[kexport][warn] could not remove the clone $_CLONE" >&2; fi
+    if [[ -n "$_SNAP" ]]; then zfs destroy "$_SNAP" || echo "[kexport][warn] could not remove the snapshot $_SNAP" >&2; fi
+    if [[ -n "$_TMPRAW" ]]; then rm -f -- "$_TMPRAW"; fi
+}
+trap _cleanup_copy EXIT
+
+# _zvol_of PATH -- the zvol dataset behind a device path, or nothing.
+_zvol_of() {
+    local real v
+    real="$(readlink -f "$1")"
+    [[ -b "$real" ]] || return 0
+    while read -r v; do
+        [[ "$(readlink -f "/dev/zvol/$v" 2>/dev/null)" == "$real" ]] && {
+            printf '%s\n' "$v"
+            return 0
+        }
+    done < <(zfs list -H -o name -t volume 2>/dev/null)
+    return 0
+}
 
 # ── Seal the source first (default behaviour) ─────────────────────────
 # Sealing strips per-VM identity (machine-id / ssh host keys / hostid /
@@ -103,55 +141,84 @@ mkdir -p "$OUTDIR"
 # --no-seal for the case where you genuinely want a 1:1 clone (VM
 # migration, forensic capture). See /usr/local/bin/kldload-seal for
 # what gets stripped.
+# A copy is made when the source would otherwise be written or mounted:
+# to seal it, and for the container formats, which mount a filesystem --
+# mounting a disk a running VM has mounted (even read-only: ext4 and XFS
+# replay their journals) corrupts it. A zvol is cloned, which costs nothing;
+# anything else is copied to a sparse raw file when it is to be sealed.
+_container=0
+case "$FMT" in oci | lxc | firecracker) _container=1 ;; esac
+_ds="$(_zvol_of "$DISK")"
+if ((SEAL || _container)) && [[ -n "$_ds" ]]; then
+    _SNAP="${_ds}@kexport-$$"
+    _CLONE="${_ds}-kexport-$$"
+    log "Working from a clone of ${_ds}, not the source: ${_CLONE}"
+    zfs snapshot "$_SNAP"
+    zfs clone "$_SNAP" "$_CLONE"
+    udevadm settle
+    SRC="/dev/zvol/${_CLONE}"
+    [[ -b "$SRC" ]] || die "the clone's device ${SRC} did not appear"
+elif ((SEAL)); then
+    # kldload-seal reads a file as raw, so the copy is raw whatever the source
+    _TMPRAW="${OUTDIR}/.${NAME}.sealing.raw"
+    log "Copying ${DISK} to ${_TMPRAW} to seal the copy, not the source"
+    qemu-img convert -U -O raw "$DISK" "$_TMPRAW"
+    SRC="$_TMPRAW"
+fi
+
 if ((SEAL)); then
     if [[ ! -x /usr/local/bin/kldload-seal ]]; then
         die "sealing requested but /usr/local/bin/kldload-seal not found — install kldload >= 1.1.0 or pass --no-seal"
     fi
-    log "Sealing source disk before conversion (use --no-seal to skip)"
-    /usr/local/bin/kldload-seal "$DISK" || die "kldload-seal failed against $DISK — refusing to ship an unsealed image. Investigate the seal error above; if you truly want an unsealed clone (e.g. for VM migration), re-run with --no-seal."
+    log "Sealing ${SRC}"
+    /usr/local/bin/kldload-seal "$SRC" || die "kldload-seal failed on the copy of $DISK — refusing to ship an unsealed image. The error is above; --no-seal exports the source unsealed."
     log "Seal complete; proceeding to format conversion"
 else
-    warn() { echo "[kexport][warn] $*"; }
-    warn "--no-seal: skipping sysprep. Output will carry the source's machine-id, ssh host keys, hostid, and cloud-init seed — DO NOT deploy this image multiple times."
+    echo "[kexport][warn] --no-seal: skipping sysprep. Output will carry the source's machine-id, ssh host keys, hostid, and cloud-init seed — DO NOT deploy this image multiple times."
 fi
+SRC_FMT="$(qemu-img info -U --output=json "$SRC" | python3 -c 'import json,sys; print(json.load(sys.stdin)["format"])')"
+[[ "$SRC_FMT" =~ ^[a-z0-9]+$ ]] || die "qemu-img could not say what format $SRC is"
+log "Source: ${SRC} (${SRC_FMT})"
 
 do_export() {
     local fmt="$1"
     case "$fmt" in
     qcow2)
         log "Exporting ${DISK} → ${OUTDIR}/${NAME}.qcow2 (compressed)"
-        qemu-img convert -f raw -O qcow2 -c -p "$DISK" "${OUTDIR}/${NAME}.qcow2"
+        qemu-img convert -U -f "$SRC_FMT" -O qcow2 -c -p "$SRC" "${OUTDIR}/${NAME}.qcow2"
         log "Done: ${OUTDIR}/${NAME}.qcow2 ($(du -sh "${OUTDIR}/${NAME}.qcow2" | cut -f1))"
         ;;
     raw)
         log "Exporting ${DISK} → ${OUTDIR}/${NAME}.raw (sparse)"
-        dd if="$DISK" of="${OUTDIR}/${NAME}.raw" bs=4M status=progress conv=sparse
+        qemu-img convert -U -f "$SRC_FMT" -O raw -p "$SRC" "${OUTDIR}/${NAME}.raw"
         log "Done: ${OUTDIR}/${NAME}.raw ($(du -sh "${OUTDIR}/${NAME}.raw" | cut -f1))"
         ;;
     vhd)
         log "Exporting ${DISK} → ${OUTDIR}/${NAME}.vhd"
-        qemu-img convert -f raw -O vpc -o subformat=fixed,force_size "$DISK" "${OUTDIR}/${NAME}.vhd"
+        qemu-img convert -U -f "$SRC_FMT" -O vpc -o subformat=fixed,force_size "$SRC" "${OUTDIR}/${NAME}.vhd"
         log "Done: ${OUTDIR}/${NAME}.vhd ($(du -sh "${OUTDIR}/${NAME}.vhd" | cut -f1))"
         ;;
     vmdk)
         log "Exporting ${DISK} → ${OUTDIR}/${NAME}.vmdk"
-        qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "$DISK" "${OUTDIR}/${NAME}.vmdk"
+        qemu-img convert -U -f "$SRC_FMT" -O vmdk -o subformat=streamOptimized "$SRC" "${OUTDIR}/${NAME}.vmdk"
         log "Done: ${OUTDIR}/${NAME}.vmdk ($(du -sh "${OUTDIR}/${NAME}.vmdk" | cut -f1))"
         ;;
     ova)
         log "Exporting ${DISK} → ${OUTDIR}/${NAME}.ova"
-        qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "$DISK" "${OUTDIR}/${NAME}.vmdk"
+        qemu-img convert -U -f "$SRC_FMT" -O vmdk -o subformat=streamOptimized "$SRC" "${OUTDIR}/${NAME}.vmdk"
         local vmdk_size
         vmdk_size=$(stat -c%s "${OUTDIR}/${NAME}.vmdk" 2>/dev/null || echo 0)
         local disk_bytes
-        if [[ -b "$DISK" ]]; then
-            disk_bytes=$(blockdev --getsize64 "$DISK" 2>/dev/null || echo 42949672960)
-        else
-            disk_bytes=$(stat -c%s "$DISK" 2>/dev/null || echo 42949672960)
-        fi
+        # the disk's virtual size, from qemu-img for any source format (a
+        # file's own size is not it for qcow2); no guessed fallback
+        disk_bytes="$(qemu-img info -U --output=json "$SRC" | python3 -c 'import json,sys; print(json.load(sys.stdin)["virtual-size"])')"
+        # HISTORY: the ovf: prefix was used and never declared, so no importer
+        # could parse this file (xmllint: "Namespace prefix ovf ... is not
+        # defined", 2026-09-29). Checked by xmllint below when it is present.
         cat >"${OUTDIR}/${NAME}.ovf" <<OVFEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
+          xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
           xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
           xmlns:vssd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_VirtualSystemSettingData">
   <References><File ovf:href="${NAME}.vmdk" ovf:id="file1" ovf:size="${vmdk_size}"/></References>
@@ -161,13 +228,16 @@ do_export() {
     <OperatingSystemSection ovf:id="101"><Description>Linux</Description></OperatingSystemSection>
     <VirtualHardwareSection>
       <System><vssd:VirtualSystemType>vmx-14</vssd:VirtualSystemType></System>
-      <Item><rasd:ResourceType>3</rasd:ResourceType><rasd:VirtualQuantity>4</rasd:VirtualQuantity></Item>
-      <Item><rasd:ResourceType>4</rasd:ResourceType><rasd:VirtualQuantity>4096</rasd:VirtualQuantity></Item>
-      <Item><rasd:ResourceType>17</rasd:ResourceType><rasd:HostResource>ovf:/disk/vmdisk1</rasd:HostResource></Item>
+      <Item><rasd:ElementName>4 virtual CPUs</rasd:ElementName><rasd:InstanceID>1</rasd:InstanceID><rasd:ResourceType>3</rasd:ResourceType><rasd:VirtualQuantity>4</rasd:VirtualQuantity></Item>
+      <Item><rasd:AllocationUnits>byte * 2^20</rasd:AllocationUnits><rasd:ElementName>4096 MB of memory</rasd:ElementName><rasd:InstanceID>2</rasd:InstanceID><rasd:ResourceType>4</rasd:ResourceType><rasd:VirtualQuantity>4096</rasd:VirtualQuantity></Item>
+      <Item><rasd:ElementName>disk1</rasd:ElementName><rasd:HostResource>ovf:/disk/vmdisk1</rasd:HostResource><rasd:InstanceID>3</rasd:InstanceID><rasd:ResourceType>17</rasd:ResourceType></Item>
     </VirtualHardwareSection>
   </VirtualSystem>
 </Envelope>
 OVFEOF
+        if command -v xmllint >/dev/null 2>&1; then
+            xmllint --noout "${OUTDIR}/${NAME}.ovf" || die "the OVF written is not valid XML"
+        fi
         (cd "${OUTDIR}" && tar cf "${NAME}.ova" "${NAME}.ovf" "${NAME}.vmdk")
         rm -f "${OUTDIR}/${NAME}.vmdk" "${OUTDIR}/${NAME}.ovf"
         log "Done: ${OUTDIR}/${NAME}.ova ($(du -sh "${OUTDIR}/${NAME}.ova" | cut -f1))"
@@ -185,46 +255,61 @@ OVFEOF
     esac
 }
 
-# Mount the source's root partition to a scratch dir and return its path.
-# Caller is responsible for umount + cleanup. Returns path on stdout.
+# _mount_source_rootfs -- mount SRC's largest partition on a scratch dir and
+# print the dir (the ONLY thing on stdout: log lines here go to stderr, since
+# the caller captures this with $( ). They went to stdout, so the "path" was
+# a log line and a path, and no container export could work -- 2026-09-29.)
+# A clone this run made is mounted read-write, which lets a journal replay
+# into the clone; the real source is mounted read-only, and refused while
+# any of it is mounted on this host. A loop device it attaches is found again
+# by _umount_source_rootfs with losetup -j (this runs in a subshell, so a
+# variable set here would not reach the caller).
 _mount_source_rootfs() {
-    local mp
-    mp="$(mktemp -d /tmp/kexport-root.XXXXXX)"
-    # For a block device we need to find the root partition. Cloud images are
-    # usually partition 1; multi-partition systems may use 2 or 3. Pick the
-    # largest partition as a reasonable default heuristic.
-    local src="$DISK"
-    if [[ -b "$DISK" ]]; then
-        local parts
-        parts=$(lsblk -nrpo NAME,SIZE,TYPE "$DISK" | awk '$3=="part"{print $1" "$2}' |
-            sort -k2 -h | tail -1 | awk '{print $1}')
-        [[ -n "$parts" ]] && src="$parts"
+    local mp dev="$SRC" part opts=ro
+    [[ -n "$_CLONE$_TMPRAW" ]] && opts=rw
+    if [[ -f "$SRC" ]]; then
+        # a raw file (a sealed copy, or a raw source); anything else cannot be
+        # loop-mounted, and qemu-img's formats are for the VM exports
+        [[ "$SRC_FMT" == raw ]] || die "a ${SRC_FMT} file cannot be mounted for ${FMT}; export it as qcow2/raw, or give the zvol"
+        local lo=(-fP --show)
+        [[ $opts == ro ]] && lo+=(-r)
+        dev="$(losetup "${lo[@]}" "$SRC")"
+        udevadm settle
+    elif [[ -z "$_CLONE" ]] && lsblk -nro MOUNTPOINTS "$SRC" | grep -q .; then
+        die "$SRC or a partition of it is mounted on this host — refusing to mount it again"
     fi
-    log "Mounting ${src} to ${mp} (read-only)..."
-    mount -o ro "$src" "$mp" 2>/dev/null || {
-        # Try with guestmount for qcow2 files — needs libguestfs-tools
-        if command -v guestmount >/dev/null 2>&1 && [[ -f "$DISK" ]]; then
-            guestmount -a "$DISK" -i --ro "$mp"
-        else
-            rmdir "$mp"
-            die "Could not mount ${src} (try installing libguestfs-tools for qcow2 files)"
-        fi
-    }
+    part="$(lsblk -nrpbo NAME,SIZE,TYPE "$dev" | awk '$3=="part"{print $2, $1}' | sort -n | tail -1 | awk '{print $2}')"
+    [[ -n "$part" ]] || part="$dev"
+    mp="$(mktemp -d /var/tmp/kexport-root.XXXXXX)"
+    echo "[kexport] Mounting ${part} on ${mp} (${opts})" >&2
+    if ! mount -o "$opts" "$part" "$mp" >&2; then
+        rmdir "$mp"
+        die "could not mount ${part}"
+    fi
     echo "$mp"
 }
 
 _umount_source_rootfs() {
     local mp="$1"
     [[ -n "$mp" && -d "$mp" ]] || return 0
-    umount "$mp" 2>/dev/null || guestunmount "$mp" 2>/dev/null || true
-    rmdir "$mp" 2>/dev/null || true
+    umount "$mp" || echo "[kexport][warn] could not unmount $mp" >&2
+    rmdir "$mp" || true # still mounted: said just above
+    local l
+    if [[ -f "$SRC" ]]; then
+        for l in $(losetup -nO NAME -j "$SRC"); do
+            losetup -d "$l" || echo "[kexport][warn] could not detach $l" >&2
+        done
+    fi
 }
 
 _export_container() {
     local fmt="$1"
     local mp
     mp="$(_mount_source_rootfs)"
-    trap "_umount_source_rootfs $mp" RETURN
+    # expanded now on purpose (mp is local); the trap clears itself, or it
+    # would fire again on every later function return
+    # shellcheck disable=SC2064
+    trap "_umount_source_rootfs '$mp'; trap - RETURN" RETURN
 
     case "$fmt" in
     oci)
@@ -287,17 +372,21 @@ MSG
         mkdir -p "$bundle"
         log "Building Firecracker bundle → ${bundle}/"
 
-        # 1. Kernel — Firecracker needs uncompressed vmlinux (not bzImage).
-        # Most distros ship bzImage; extract vmlinux via extract-vmlinux or
-        # manually strip the gzip wrapper. We try the extract-vmlinux script
-        # first (bundled with kernel-devel) and fall back to the bzImage if
-        # Firecracker supports it on the target version (v1.1+ does).
+        # 1. Kernel -- the distribution's bzImage, copied as it is. WARN: this
+        # comment used to say Firecracker boots a bzImage from v1.1; it does
+        # from 1.17.0 (kfire reads the version for exactly this), and nothing
+        # here extracted a vmlinux. Nor is there an initrd, which most
+        # distribution kernels need to find a virtio root. kfire(8) builds
+        # Firecracker machines that boot; this bundle is the raw material,
+        # and says so below (corrected 2026-09-29, not boot-tested).
         local src_kern
         src_kern=$(find "$mp/boot" -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -1)
         if [[ -n "$src_kern" ]]; then
             cp "$src_kern" "${bundle}/vmlinuz"
             log "  kernel: $(basename "$src_kern") → vmlinuz"
         else
+            # A /boot on its own partition (Rocky's cloud images) is not read:
+            # only the largest partition, the root, is mounted.
             log "WARNING: no kernel found in /boot — you'll need to supply one"
         fi
 
@@ -350,6 +439,10 @@ LAUNCH
 
         log "Done: ${bundle}/ ($(du -sh "$bundle" | cut -f1))"
         log "  On target (firecracker installed): ${bundle}/launch.sh"
+        if [[ -f "${bundle}/vmlinuz" ]]; then
+            log "  NOTE: vmlinuz is a bzImage (Firecracker boots one from 1.17.0) and there"
+            log "  is no initrd; for a machine that boots, use kfire. See kexport(8)."
+        fi
         ;;
     esac
 }
