@@ -3091,6 +3091,37 @@ else
     fi
 fi
 
+# ── grep -q pipeline ratchet ─────────────────────────────────────────────────
+# `producer | grep -q PATTERN` under pipefail: grep -q exits at its first
+# match, the producer's next write takes SIGPIPE, and the pipeline is 141 --
+# "not found" for something that was found. kldload-networks asked
+# `virsh net-info NAME | grep -q Active:.*yes` and got 141 on EVERY run on
+# fiend (2026-09-29): every running network read as stopped. The fix is to
+# read the output first and test it: grep -q ... <<<"$out". Existing lines are
+# counted, not failed; the count may fall and never rise. Comment lines are
+# not counted. tests/grep-q-pipe-baseline.txt holds the number.
+_section "grep -q pipeline ratchet"
+_gq_baseline_file="$ROOT/tests/grep-q-pipe-baseline.txt"
+if [[ ${#SHELL_SCRIPTS[@]} -eq 0 || ! -f "$_gq_baseline_file" ]]; then
+    _warn "grep -q pipeline ratchet" "no baseline or no scripts — gate did not run"
+else
+    _gq_baseline="$(tr -cd '0-9' <"$_gq_baseline_file")"
+    _gq_now=0
+    for f in "${SHELL_SCRIPTS[@]}"; do
+        _gq_c="$(grep -E '\|[[:space:]]*grep[[:space:]]+(-[a-zA-Z]*q|--quiet)' "$ROOT/$f" 2>/dev/null |
+            grep -cvE '^[[:space:]]*#')" || _gq_c=0 # grep -c prints 0 and exits 1 when nothing matched
+        _gq_now=$((_gq_now + _gq_c))
+    done
+    if [[ "$_gq_now" -gt "$_gq_baseline" ]]; then
+        _fail "grep -q pipeline ratchet" \
+            "${_gq_now} 'cmd | grep -q' pipelines, baseline ${_gq_baseline} — read the output first: grep -q ... <<<\"\$out\""
+    elif [[ "$_gq_now" -lt "$_gq_baseline" ]]; then
+        _pass "grep -q pipeline ratchet: ${_gq_now} (was ${_gq_baseline} — lower the baseline)"
+    else
+        _pass "grep -q pipeline ratchet: ${_gq_now} (at baseline, not rising)"
+    fi
+fi
+
 # ── Strict-mode ratchet ──────────────────────────────────────────────────────
 # Every script is supposed to open with `set -Eeuo pipefail`. On 2026-09-06
 # 84 of 234 did not, and the same day the installer's whole storage phase
