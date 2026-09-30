@@ -29,7 +29,7 @@ installer is actually doing to your machine.
 | | |
 |---|---|
 | A 64-bit x86 machine | **UEFI required. Legacy BIOS boot is not supported and never has been.** |
-| A USB stick, **32 GB or larger** | The full image is 15.6 GiB (16.7 GB, measured on the 1.5.0 build). A 16 GB stick cannot hold it. The 2.0 GB net installer fits a 4 GB stick. |
+| A USB stick, **32 GB or larger** | The full image is 15.8 GiB (16.9 GB: 16,922,658,816 bytes, as published for 1.5.0 and hashed from the download server on 2026-09-29). A 16 GB stick cannot hold it. The 2.0 GB net installer fits a 4 GB stick. |
 | A target disk | **It will be erased.** |
 | Network | Optional for Fedora and Debian — see below. |
 
