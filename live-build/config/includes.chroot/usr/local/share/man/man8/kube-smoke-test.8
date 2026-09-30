@@ -1,0 +1,96 @@
+.Dd September 30, 2026
+.Dt KUBE-SMOKE-TEST 8
+.Os
+.Sh NAME
+.Nm kube-smoke-test
+.Nd check every layer a kldload Kubernetes node depends on, and the cluster when there is one
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+checks, in order: the package manager; the kernel modules Kubernetes
+needs, loading any that are not; forwarding and bridge sysctls; swap;
+containerd and its cgroup driver; kubeadm, kubelet, kubectl, helm and the
+Cilium CLI; the CNI plugins; ZFS and the datasets for etcd, containerd and
+the kubelet; WireGuard; the firewall; images loaded for offline use; and,
+when a cluster answers, its nodes, system pods, cluster DNS \(em by
+starting a pod that resolves
+.Ql kubernetes.default
+\(em and the web console's tools.
+Each check prints PASS, FAIL, WARN or SKIP, and a count ends the run.
+.Pp
+Each run appends its counts to
+.Pa /root/kube-smoke-test.log .
+It runs itself under
+.Xr sudo 8 .
+.Xr kube-cluster 8
+runs it on the control plane at the end of a bootstrap.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the description and exit 0, without root.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/kube-smoke-test.log
+One line a run:
+.Ql # Ar time Ns Li "  pass=" Ns Ar n Li fail= Ns Ar n Li warn= Ns Ar n ,
+moved to
+.Pa .old
+past 2 MB.
+.El
+.Sh EXIT STATUS
+0 when nothing failed; 1 when anything did.
+Warnings do not count.
+.Sh EXAMPLES
+In a Fedora 44 container with none of Kubernetes installed, whose
+complaints that it has no
+.Xr lsmod 8
+are left out:
+.Bd -literal -offset indent
+# kube-smoke-test
+══════════════════════════════════════════════════════════════
+  kldload Kubernetes Smoke Test
+══════════════════════════════════════════════════════════════
+
+=== Package Manager ===
+  PASS  dnf available
+
+=== Kernel Modules ===
+  PASS  overlay loaded
+  PASS  br_netfilter loaded
+  PASS  ip_vs loaded
+\&...
+══════════════════════════════════════════════════════════════
+  Smoke Test Results
+──────────────────────────────────────────────────────────────
+  PASS: 9
+  FAIL: 6
+  WARN: 11
+
+  6 critical failures — fix before proceeding.
+══════════════════════════════════════════════════════════════
+# (exited 1)
+.Ed
+.Pp
+The modules pass because a container shares the host's kernel.
+.Sh SEE ALSO
+.Xr kube-cluster 8 ,
+.Xr kube-network 8 ,
+.Xr kube-status 8
+.Sh HISTORY
+On 2026-09-30, writing this page: the firewall checks read a large
+ruleset as
+.Dq No nftables rules loaded
+\(em a 160 KB one, 200 times in 200 \(em and it exited with the number of
+failures rather than 1.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It is not read-only: it loads missing kernel modules, among them
+.Ql br_netfilter ,
+which sends bridged traffic through the firewall; and with a cluster up
+it starts and deletes test pods.
+Run it on a Kubernetes node, not on the host its virtual machines run on.
