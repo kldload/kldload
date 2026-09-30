@@ -1,0 +1,257 @@
+.Dd September 29, 2026
+.Dt KSNAP 8
+.Os
+.Sh NAME
+.Nm ksnap
+.Nd take, list, roll back and destroy ZFS snapshots by path
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Ar path
+.Nm
+.Cm list
+.Nm
+.Cm rollback
+.Ar path
+.Nm
+.Cm destroy
+.Ar dataset Ns @ Ns Ar name
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+is a short way to the ZFS snapshots of a kldload machine's own
+filesystems, named by the directory they hold rather than by dataset.
+A snapshot takes no time and no space when taken, and holds exactly what
+the filesystem held at that moment.
+.Pp
+A
+.Ar path
+is resolved to the ZFS dataset mounted there or above it:
+.Pa /home/admin
+is
+.Ql rpool/home/admin
+if that is a dataset of its own, and
+.Ql rpool/home
+if not.
+A path on anything but ZFS is refused.
+.Pp
+Snapshots taken by
+.Nm
+are named
+.Ql manual- Ns Ar YYYYMMDD-HHMMSS ,
+which sets them apart from the ones taken on a schedule.
+.Pp
+.Nm
+calls
+.Xr zfs 8
+through
+.Xr sudo 8 ;
+run as a user it may ask for a password.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It (no argument)
+Snapshot the datasets that hold the machine's own state: the boot
+environments under
+.Pa rpool/ROOT ,
+the home directories under
+.Pa rpool/home ,
+.Pa rpool/srv
+and
+.Pa rpool/var/lib ,
+those that exist, all with the same name.
+Each is reported; any that fails is named, and the exit status is 1.
+.It Ar path
+Snapshot the dataset holding
+.Ar path .
+.It Cm list
+Every snapshot on the machine, newest first, with its creation time and
+the space it holds on its own, and the total.
+.It Cm rollback Ar path
+Return the dataset holding
+.Ar path
+to its newest snapshot, whoever took it.
+Everything written since is gone.
+The running root filesystem is refused: going back there is done by
+booting an earlier boot environment, with
+.Xr kldload-rollback 8 .
+.It Cm destroy Ar dataset Ns @ Ns Ar name
+Destroy one snapshot.
+A name without
+.Ql @
+is refused, since it would name the dataset itself.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done.
+.It 1
+A snapshot, rollback or destroy failed, a path is not on ZFS, or the
+dataset has no snapshot to roll back to.
+.It 2
+A usage error: an unknown command, a missing operand, or a dataset given
+to
+.Cm destroy .
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on a kldload desktop on 2026-09-29.
+.Ql rpool/ksnaptest-3296323 ,
+mounted at
+.Pa /var/tmp/ksnaptest-3296323 ,
+was made for the purpose and destroyed afterwards, as were the snapshots
+the first example took.
+.Ss The machine's own datasets (no argument)
+.Bd -literal -offset indent
+$ ksnap
+[ksnap] Snapshotting key datasets (manual-20260929-230556)
+[ksnap]   rpool/ROOT@manual-20260929-230556
+[ksnap]   rpool/ROOT/onyx@manual-20260929-230556
+[ksnap]   rpool/home@manual-20260929-230556
+[ksnap]   rpool/home/anthony@manual-20260929-230556
+[ksnap]   rpool/srv@manual-20260929-230556
+[ksnap]   rpool/var/lib@manual-20260929-230556
+[ksnap] Done: 6 snapshot(s).
+# (exited 0)
+.Ed
+.Ss One directory, and back again (path, rollback)
+.Bd -literal -offset indent
+$ ksnap /var/tmp/ksnaptest-3296323
+[ksnap] Snapshotting rpool/ksnaptest-3296323
+[ksnap] Done: rpool/ksnaptest-3296323@manual-20260929-230548
+# (exited 0)
+$ cat /var/tmp/ksnaptest-3296323/notes.txt
+second
+# (exited 0)
+$ ksnap rollback /var/tmp/ksnaptest-3296323
+[ksnap] Rolling back rpool/ksnaptest-3296323 to rpool/ksnaptest-3296323@manual-20260929-230548
+[ksnap] Done. /var/tmp/ksnaptest-3296323 is now at: rpool/ksnaptest-3296323@manual-20260929-230548
+# (exited 0)
+$ cat /var/tmp/ksnaptest-3296323/notes.txt
+first
+# (exited 0)
+.Ed
+.Pp
+The file had read
+.Ql first
+when the snapshot was taken and was changed to
+.Ql second
+after.
+.Ss Everything there is (list)
+.Bd -literal -offset indent
+$ ksnap list
+
+  SNAPSHOT                                           CREATED                USED
+  --------                                           -------                ----
+  rpool/ROOT@manual-20260929-230556                  Tue Sep 29 23:05 2026  0B
+  rpool/ROOT/onyx@manual-20260929-230556             Tue Sep 29 23:05 2026  148K
+\&...
+
+  2130 snapshots total
+
+# (exited 0)
+.Ed
+.Ss Removing one (destroy)
+.Bd -literal -offset indent
+$ ksnap destroy rpool/ROOT@manual-20260929-230556
+[ksnap] Destroying snapshot: rpool/ROOT@manual-20260929-230556
+[ksnap] Done.
+# (exited 0)
+$ ksnap destroy rpool/home@nosuch-snapshot
+[ksnap] Destroying snapshot: rpool/home@nosuch-snapshot
+could not find any snapshots to destroy; check snapshot names.
+[ksnap] could not destroy rpool/home@nosuch-snapshot (above)
+# (exited 1)
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+$ ksnap rollback /
+[ksnap] rpool/ROOT/onyx is the running root filesystem; roll it back with kldload-rollback (boot environments), not here
+# (exited 1)
+$ ksnap rollback /dev/shm
+[ksnap] /dev/shm is not on a ZFS dataset
+# (exited 1)
+$ ksnap rollback
+[ksnap] rollback needs a path: ksnap rollback /path
+# (exited 2)
+$ ksnap frob
+[ksnap] unknown command: frob
+Usage: ksnap [list|rollback <path>|destroy <snap>|<path>]
+\&...
+# (exited 2)
+.Ed
+.Ss Usage (-h, --help)
+.Bd -literal -offset indent
+$ ksnap --help
+Usage: ksnap [list|rollback <path>|destroy <snap>|<path>]
+
+  ksnap              Snapshot all key datasets
+  ksnap /home/admin  Snapshot a specific path
+  ksnap list         Show all snapshots
+  ksnap rollback /x  Roll back to last snapshot
+  ksnap destroy NAME Destroy a snapshot
+
+A path is resolved to the ZFS dataset holding it; a path that is not on
+ZFS is refused. The root filesystem is never rolled back here: use
+kldload-rollback, which boots an earlier boot environment instead.
+
+Exit: 0 done, 1 a snapshot or rollback failed, 2 usage error.
+See ksnap(8).
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "[ksnap] PATH is not on a ZFS dataset"
+The path is on another filesystem, or does not exist.
+.It "[ksnap] No snapshots found for DATASET"
+Nothing to roll back to.
+.It "[ksnap] DATASET is the running root filesystem; roll it back with kldload-rollback (boot environments), not here"
+See
+.Xr kldload-rollback 8 .
+.It "[ksnap] zfs refused the rollback (above); PATH is unchanged"
+.It "[ksnap] could not destroy SNAPSHOT (above)"
+.It "[ksnap] could not snapshot DATASET (above)"
+ZFS's own reason is the line before.
+.It "[ksnap] N taken, M failed"
+Some of the machine's datasets were not snapshotted; each is named above.
+.El
+.Sh SEE ALSO
+.Xr kldload-rollback 8 ,
+.Xr kldload-vm-snapshot 8 ,
+.Xr kvm-snap 8 ,
+.Xr sanoid 8 ,
+.Xr zfs-rollback 8 ,
+.Xr zfs-snapshot 8
+.Sh HISTORY
+On 2026-09-29, writing this page: a run with no argument ignored every
+snapshot that failed and reported success;
+.Ql ksnap rollback /
+would have rolled back the running system under itself; and a path that
+was not on ZFS was taken for a dataset named after its filesystem, such as
+.Ql tmpfs .
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+.Cm rollback
+goes to the newest snapshot of the dataset, which is often one taken on a
+schedule by
+.Xr sanoid 8
+rather than one taken by
+.Nm ;
+check with
+.Cm list
+first.
+To go further back, use
+.Ql zfs rollback -r ,
+which destroys every snapshot newer than the one named.
+.Pp
+Rolling back a mounted filesystem changes its files under any program that
+has them open.
+.Pp
+Snapshots are not recursive: a dataset below one of those named, such as
+a machine's disk under
+.Pa rpool/vms ,
+is not included; that is
+.Xr kvm-snap 8 .
