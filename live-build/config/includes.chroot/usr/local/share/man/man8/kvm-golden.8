@@ -1,0 +1,341 @@
+.Dd September 29, 2026
+.Dt KVM-GOLDEN 8
+.Os
+.Sh NAME
+.Nm kvm-golden
+.Nd build a golden image, or a machine, from a base golden and a script of your own
+.Sh SYNOPSIS
+.Nm
+.Ar name
+.Fl -from Ar base
+.Op Fl -post Ar file
+.Op Fl -run Ar command
+.Op Fl -keep
+.Op Fl -ram Ar MiB
+.Op Fl -cpus Ar n
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+makes a new golden image \(em a sealed disk that
+.Xr kvm-clone 8
+stamps machines from \(em out of an existing one plus whatever you run
+inside it.
+With
+.Fl -keep
+it stops short of sealing and leaves the machine running instead, which is
+how to build a single machine the same way.
+.Pp
+In order,
+.Nm :
+.Bl -enum
+.It
+clones
+.Ar base
+as
+.Ar name
+with
+.Xr kvm-clone 8 ,
+so it boots with its own hostname and machine-id and with this host's root
+key.
+A base that has an
+.Ql @golden
+snapshot is cloned from that snapshot, not from whatever its disk holds
+now;
+.It
+applies
+.Fl -ram
+and
+.Fl -cpus ,
+if given;
+.It
+starts it, waits up to four minutes for an address and three more for
+root to be able to log in over
+.Xr ssh 1 ,
+and lets
+.Xr cloud-init 1
+finish if the guest has it;
+.It
+runs
+.Fl -post Ar file ,
+then
+.Fl -run Ar command ,
+in the guest as root, each fed to
+.Ql bash -s
+on its standard input;
+.It
+with
+.Fl -keep ,
+stops here and prints the machine's address.
+Otherwise it shuts the machine down, waits up to three minutes for it to
+stop, seals its disk with
+.Xr kldload-seal 8
+\(em removing its machine-id, host keys, logs and cloud-init state, so
+every machine made from it is new \(em and takes
+.Pa rpool/vms/ Ns Ar name Ns Pa @golden .
+.El
+.Pp
+If a step fails the run stops there, says which, and leaves the machine as
+it is, so what went wrong can be looked at; delete it with
+.Xr kvm-delete 8 .
+.Pp
+.Nm
+must run as root; run as a user it re-executes itself with
+.Xr sudo 8
+.Pq without a password prompt .
+.Fl -help
+needs neither.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Ar name
+The new machine's name: letters, digits,
+.Ql \&. ,
+.Ql _
+and
+.Ql - ,
+up to 63 characters, starting with a letter or a digit.
+Nothing may have it yet.
+.It Fl -from Ar base
+Required.
+One of
+.Ql centos , rocky , fedora , debian
+or
+.Ql ubuntu
+names that distribution's lab golden,
+.Ql klab-golden- Ns Ar distro ,
+which
+.Ql klab golden Ar distro
+builds; anything else is the name of a machine on this host, another
+golden made by
+.Nm
+included.
+.It Fl -post Ar file
+A script on this host, run in the guest as root.
+Its exit status decides: anything but 0 stops the build.
+.It Fl -run Ar command
+A command line run in the guest as root, after
+.Fl -post .
+It goes to the guest on standard input, never on a command line, so it is
+not re-parsed by a shell on the way.
+.It Fl -keep
+Leave the machine running when the scripts are done: no shutdown, no seal,
+no
+.Ql @golden .
+.It Fl -ram Ar MiB
+Memory for the new machine, at least 256.
+.It Fl -cpus Ar n
+Virtual processors for the new machine.
+.It Fl h , Fl -help
+Print the usage and exit 0.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa rpool/vms/ Ns Ar name Ns Pa @golden
+The golden, what
+.Ql kvm-clone Ar name new --snap golden
+clones.
+.It Pa /root/.ssh/id_ed25519
+The key root logs in to the guest with.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Built: sealed with its
+.Ql @golden
+snapshot or, with
+.Fl -keep ,
+running.
+.It 1
+A step failed, or
+.Ar base
+or
+.Ar name
+is wrong; the message says which, and anything made is left in place.
+.It 2
+A usage error.
+.El
+.Sh EXAMPLES
+Every output below was printed by
+.Nm
+on a kldload host on 2026-09-29.
+The machines were throwaway ones, deleted afterwards with
+.Xr kvm-delete 8 .
+.Ss A golden with one change (--from, --run)
+Run as a user; it re-executed itself as root.
+.Xr kldload-seal 8
+colours its output, left out here:
+.Bd -literal -offset indent
+$ kvm-golden kg-3253849 --from rocky --run 'echo built by kvm-golden > /etc/kg-proof'
+== clone klab-golden-rocky@golden -> kg-3253849
+Cloning rpool/vms/klab-golden-rocky@golden -> rpool/vms/kg-3253849...
+Cloning VM definition...
+  Seed:   /var/lib/libvirt/images/kg-3253849-seed.iso (hostname, ssh key, guest agent)
+
+Cloned 'klab-golden-rocky' -> 'kg-3253849' (instant, zero bytes copied)
+  Source: /dev/zvol/rpool/vms/klab-golden-rocky
+  Clone:  /dev/zvol/rpool/vms/kg-3253849
+  Start:  virsh start kg-3253849
+  Snap:   kvm-snap kg-3253849
+== boot kg-3253849
+   address 192.168.122.166
+== run: echo built by kvm-golden > /etc/kg-proof
+== shut kg-3253849 down
+== seal /dev/zvol/rpool/vms/kg-3253849
+[seal] detected shape: fs on /dev/zvol/rpool/vms/kg-3253849
+[seal] resolved /dev/zvol/rpool/vms/kg-3253849 → /dev/zd192
+[seal] mounting root partition /dev/zd192p4 (39856 MB) at /var/tmp/kldload-seal.mGf6ZK
+[seal] sealing /var/tmp/kldload-seal.mGf6ZK
+[seal]   cleared /etc/machine-id
+[seal]   removed /etc/ssh/ssh_host_* keys
+[seal]   removed /etc/hostid
+[seal]   cloud-init: cleared seed + wrote portable datasource_list
+[seal]   cleared journald + wtmp/btmp/lastlog
+[seal]   stamped /etc/kldload/seal.info
+[seal] seal complete
+== snapshot rpool/vms/kg-3253849@golden
+== kg-3253849@golden is a golden: kvm-clone kg-3253849 <new> (kld: c on its row)
+# (exited 0)
+.Ed
+.Pp
+A machine cloned from it carries the change and its own name:
+.Bd -literal -offset indent
+# kvm-clone kg-3253849 kg-3253849-c2 --snap golden
+\&...
+# (then, inside kg-3253849-c2)
+# hostname; cat /etc/kg-proof
+kg-3253849-c2
+built by kvm-golden
+.Ed
+.Ss A machine from a golden, with a script (--post, --keep, --ram, --cpus)
+The script:
+.Bd -literal -offset indent
+#!/bin/bash
+set -e
+dnf -q -y install tree >/dev/null 2>&1 || apt-get -qq install -y tree
+tree --version
+.Ed
+.Pp
+The base is the golden made above:
+.Bd -literal -offset indent
+$ kvm-golden kg-3253849-k2 --from kg-3253849 --post post-tools.sh --keep --ram 2048 --cpus 2
+== clone kg-3253849@golden -> kg-3253849-k2
+Cloning rpool/vms/kg-3253849@golden -> rpool/vms/kg-3253849-k2...
+Cloning VM definition...
+  Seed:   /var/lib/libvirt/images/kg-3253849-k2-seed.iso (hostname, ssh key, guest agent)
+
+Cloned 'kg-3253849' -> 'kg-3253849-k2' (instant, zero bytes copied)
+  Source: /dev/zvol/rpool/vms/kg-3253849
+  Clone:  /dev/zvol/rpool/vms/kg-3253849-k2
+  Start:  virsh start kg-3253849-k2
+  Snap:   kvm-snap kg-3253849-k2
+== boot kg-3253849-k2
+   address 192.168.122.126
+== post-install: post-tools.sh (as root in kg-3253849-k2)
+tree v1.8.0 (c) 1996 - 2018 by Steve Baker, Thomas Moore, Francesc Rocher, Florian Sesser, Kyosuke Tokoro
+== kg-3253849-k2 is running at 192.168.122.126 (--keep: not sealed)
+# (exited 0)
+# virsh dominfo kg-3253849-k2 | grep -E "Max memory|CPU\e(s\e)"
+CPU(s):         2
+Max memory:     2097152 KiB
+.Ed
+.Ss When the script fails
+.Bd -literal -offset indent
+$ kvm-golden kg-3253849-f --from kg-3253849 --run 'dnf -y install no-such-package-kg'
+== clone kg-3253849@golden -> kg-3253849-f
+\&...
+== boot kg-3253849-f
+   address 192.168.122.187
+== run: dnf -y install no-such-package-kg
+\&...
+No match for argument: no-such-package-kg
+Error: Unable to find a match: no-such-package-kg
+kvm-golden: the --run command failed; kg-3253849-f is left running at 192.168.122.187 to look at
+# (exited 1)
+.Ed
+.Ss What it refuses
+.Bd -literal -offset indent
+$ kvm-golden web01 --from nosuch-vm
+kvm-golden: no VM named 'nosuch-vm' to build from
+# (exited 1)
+$ kvm-golden web01
+kvm-golden: --from <distro|vm> is required
+# (exited 2)
+$ kvm-golden --from rocky
+kvm-golden: the first argument is the new machine's name, not --from
+# (exited 2)
+$ kvm-golden web01 --ram
+kvm-golden: --ram needs a value
+# (exited 2)
+$ kvm-golden web01 --from rocky --ram 12
+kvm-golden: --ram is MiB, a whole number of at least 256: '12'
+# (exited 2)
+$ kvm-golden web01 --from ubuntu --frm x
+kvm-golden: unknown option --frm
+\&...
+# (exited 2)
+.Ed
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "kvm-golden: no base VM 'klab-golden-DISTRO' (klab golden DISTRO builds it)"
+The lab golden for that distribution has not been built on this host.
+.It "kvm-golden: 'NAME' already exists"
+A machine or a volume has that name.
+.It "kvm-golden: NAME got no address in 4 minutes"
+The guest did not come up on the network.
+Its console,
+.Ql virsh console NAME ,
+shows why.
+.It "kvm-golden: root ssh to ADDRESS never answered"
+The guest has an address but root cannot log in with the key; usually a
+base that was not made to accept it.
+.It "kvm-golden: the post-install failed; NAME is left running at ADDRESS to look at"
+.It "kvm-golden: the --run command failed; NAME is left running at ADDRESS to look at"
+The script's own output is above.
+.It "kvm-golden: NAME did not shut down in 3 minutes"
+The guest ignored the shutdown request; it has not been sealed.
+.It "kvm-golden: the seal failed; NAME is shut off and NOT a golden"
+.Xr kldload-seal 8
+says why above; a disk with no partition cannot be sealed.
+.It "kvm-golden: kvm-clone failed; it removed what it had made"
+.El
+.Sh SEE ALSO
+.Xr kld 1 ,
+.Xr klab 8 ,
+.Xr kldload-seal 8 ,
+.Xr kldload-vm-ip 8 ,
+.Xr kvm-clone 8 ,
+.Xr kvm-delete 8 ,
+.Xr kvm-snap 8
+.Sh HISTORY
+.Nm
+was written on 2026-09-26: the platform built thirty goldens of its own and
+had no way to make one like them plus a script.
+.Pp
+On 2026-09-29, writing this page: run as a user,
+.Nm
+re-executed itself with the name alone, having already consumed its
+options, so every such run failed with
+.Dq --from is required ;
+it cloned a base's current disk rather than its sealed snapshot; a failed
+script exited with the script's code; and a failed
+.Fl -ram
+was ignored.
+Building from a golden made by
+.Nm
+also found that
+.Xr kvm-clone 8
+gave a clone of a clone its source's identity.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The guest has network access while the scripts run, as the base gives it;
+a script that downloads is only as offline as its sources.
+.Pp
+The guest's host key is not checked: every clone has a new one.
+.Pp
+.Fl -ram
+and
+.Fl -cpus
+are set on the machine being built; machines cloned from the golden copy
+them, and can be changed each with
+.Xr virsh 1 .
