@@ -1,0 +1,147 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-POOF 8
+.Os
+.Sh NAME
+.Nm kldload-poof
+.Nd clear keys and temporary secrets from a live session before walking away from it
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+A live session of the kldload image holds what was made or typed in it
+\(em the certificate authority's key made for an install, WireGuard keys,
+answers files with passwords in them \(em in memory, until it is powered
+off.
+.Nm
+removes them, for when the machine is left running:
+.Bl -enum
+.It
+blanks the private key of every WireGuard interface that is up;
+.It
+stops the SSH daemon;
+.It
+removes
+.Pa /tmp/kldload-* ,
+among them fetched answers files, and
+.Pa /run/kldload ,
+where secrets typed at the install screen are passed;
+.It
+shreds the certificate authority's root key,
+.Pa /etc/kldload/ca/root/ca.key ;
+.It
+syncs, and drops the page cache.
+.El
+.Pp
+It runs only in a live session, and must see one: the kernel command
+line has
+.Ql rd.live.image
+or
+.Ql root=live\&:
+\(em every boot of the image, from a disk or the netboot server, has both
+\(em or the live medium is at
+.Pa /run/initramfs/live ;
+and the install manifest does not mark the machine installed.
+On an installed machine everything it does would be damage: the key it
+shreds signs the machine's TLS certificates and its kernel modules.
+.Pp
+The web console's live mode runs it from a button.
+It must run as root.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print the description at the top of the script and exit 0.
+.El
+.Sh ENVIRONMENT
+For testing:
+.Bl -tag -width Ds
+.It Ev KLDLOAD_POOF_CMDLINE
+Read this file instead of
+.Pa /proc/cmdline .
+.It Ev KLDLOAD_POOF_LIVEDIR
+Look for the live medium here instead of
+.Pa /run/initramfs/live .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/log/kldload/poof.log
+What it did.
+.It Pa /etc/kldload/install-manifest.env
+Marks an installed machine
+.Pq Ql KLDLOAD_INSTALLED=1 .
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 1n -compact
+.It 0
+Done; anything it could not do is in the log above the summary.
+.It 1
+Not a live session, or a step failed.
+.El
+.Sh EXAMPLES
+Printed on 2026-09-30 in a container with a planted key, an answers file
+and
+.Pa /run/kldload ,
+and a file standing in for a live kernel command line.
+Its
+.Pa /proc/sys
+is read-only, hence the warning.
+.Bd -literal -offset indent
+# kldload-poof
+[2026-09-30T08:53:25] [poof] Starting live session scrub
+[2026-09-30T08:53:25] [poof] Scrubbing WireGuard private keys from memory...
+[2026-09-30T08:53:25] [poof]   wg not found — skipping WireGuard scrub
+[2026-09-30T08:53:25] [poof] Stopping SSH (the live image's host keys are not removed)...
+[2026-09-30T08:53:25] [poof]   SSH daemon was not running (OK)
+[2026-09-30T08:53:25] [poof] Removing /tmp/kldload-* files...
+[2026-09-30T08:53:25] [poof]   Removed: /tmp/kldload-answers.abc.env
+[2026-09-30T08:53:25] [poof] Removing /run/kldload/ contents...
+[2026-09-30T08:53:25] [poof]   Removed: /run/kldload
+[2026-09-30T08:53:25] [poof] Checking for CA private key...
+[2026-09-30T08:53:25] [poof]   Shredded and removed: /etc/kldload/ca/root/ca.key
+[2026-09-30T08:53:25] [poof] Syncing filesystem...
+[2026-09-30T08:53:25] [poof] Dropping page cache...
+[2026-09-30T08:53:25] [poof]   WARNING: could not drop the page cache (read-only /proc/sys?)
+[2026-09-30T08:53:25] [poof] ────────────────────────────────────────────────
+[2026-09-30T08:53:25] [poof] Scrub summary (4 items):
+[2026-09-30T08:53:25] [poof]   ✓ tmp:/tmp/kldload-answers.abc.env
+[2026-09-30T08:53:25] [poof]   ✓ run:kldload
+[2026-09-30T08:53:25] [poof]   ✓ ca:ca.key
+[2026-09-30T08:53:25] [poof]   ✓ fs:sync
+[2026-09-30T08:53:25] [poof] ────────────────────────────────────────────────
+
+Live session scrubbed: 4 item(s), listed above and in /var/log/kldload/poof.log.
+# (exited 0)
+.Ed
+.Ss Where it refuses
+The same container, standing in for an installed machine whose manifest
+is missing, and then with the manifest:
+.Bd -literal -offset indent
+# kldload-poof
+kldload-poof: this is not a live boot (no rd.live.image or root=live: on the kernel command line); refusing
+# (exited 1)
+# kldload-poof
+kldload-poof only runs in live mode. Installed systems use ZFS encryption and boot environments.
+# (exited 1)
+.Ed
+.Sh SEE ALSO
+.Xr shred 1 ,
+.Xr kldload-ca 8 ,
+.Xr wg 8
+.Sh HISTORY
+Until 2026-09-23 it looked for the authority's key in the wrong place,
+reported that there was none, and left it.
+.Pp
+On 2026-09-30, writing this page: its only guard was the absence of the
+installed marker, so an installed machine whose manifest was missing \(em
+shown in a container \(em had its authority's key shredded; the step
+named for SSH host keys removed none; and its last line said everything
+had been cleared whatever had happened.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It does not overwrite memory that held a secret; it removes what holds
+them now and drops the page cache.
+Powering off is the complete scrub.
+.Pp
+The SSH host keys stay: they are the live image's, the same on every boot
+of it.
