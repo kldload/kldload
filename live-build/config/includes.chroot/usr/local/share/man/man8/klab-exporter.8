@@ -1,0 +1,182 @@
+.Dd September 30, 2026
+.Dt KLAB-EXPORTER 8
+.Os
+.Sh NAME
+.Nm klab-exporter
+.Nd serve the lab's goldens, test runs, microVMs and pool health to Prometheus
+.Sh SYNOPSIS
+.Nm
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+serves Prometheus metrics on port 9101 of every address, at
+.Pa /metrics
+and
+.Pa / ;
+any other path is 404.
+Every scrape reads the state afresh from ZFS, libvirt, kfire and the lab's
+results directory; nothing runs in the guests.
+It serves:
+.Bl -tag -width Ds
+.It Goldens
+.Ql klab_golden_ready ,
+.Ql klab_golden_size_bytes
+and
+.Ql klab_golden_info
+for each of centos, rocky, fedora, debian, ubuntu and rhel: ready when
+.Ar pool Ns Pa /vms/klab-golden- Ns Ar distro Ns Pa @golden
+exists, with the kernel and ZFS versions read from that golden's build
+log; and
+.Ql klab_goldens_ready_total .
+.It Lab machines
+.Ql klab_site_vm_running
+for the blue and green sites and
+.Ql klab_test_vm_running ,
+from
+.Xr virsh 1 .
+.It Test runs
+.Ql klab_test_pass_total ,
+.Ql klab_test_fail_total
+and
+.Ql klab_test_skip_total
+for the latest run: from each distribution's summary once the run has
+written one, and counted from its log while it runs; with
+.Ql klab_test_status
+and the test last seen.
+.It Firecracker microVMs
+The libvirt exporter's own series \(em
+.Ql libvirt_domain_info_state ,
+CPU time, memory, block and network counters \(em for every
+.Xr kfire 8
+instance, with the same label values, so that a microVM appears as one
+more domain on the estate dashboards.
+.It The pool
+.Ql klab_zfs_pool_*
+for size, use, health, compression, fragmentation and a one-second
+.Ql zpool iostat
+sample;
+.Ql klab_zfs_arc_*
+from the ARC kstat; used and referenced space for the pool's root, boot
+and virtual-machine datasets; and snapshot counts under
+.Ar pool Ns Pa /vms .
+.It The host
+Processor count, memory, and whether an NVIDIA device is present.
+.El
+.Pp
+A command that fails leaves its series out and logs one line to standard
+error, which the unit sends to the journal; an absent golden or virtual
+machine is the normal case and is not logged.
+Every label value read from a file is escaped, since one bad line fails
+the whole scrape.
+.Pp
+.Pa klab-exporter.service
+runs it as root on a KVM host, restarting it if it exits.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Print its description and exit 0, serving nothing.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev POOL
+The pool to report on; default
+.Ql rpool .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /root/kzfs-test/
+The lab's results, or
+.Pa /root/klab/
+when only the old one exists:
+.Pa goldens/ Ns Ar distro Ns Pa -latest.log ,
+and
+.Pa latest ,
+a link to the current run's directory holding
+.Ar distro Ns Pa .summary ,
+.Pa .status
+and
+.Pa .log .
+.It Pa /var/lib/kfire/instances/ Ns Ar name Ns Pa /instance.json
+Each microVM; a directory without one is not counted.
+.It Pa /proc/spl/kstat/zfs/arcstats , Pa /proc/spl/kstat/zfs/dmu_tx
+The ARC and transaction counters.
+.El
+.Sh EXIT STATUS
+It serves until stopped.
+It exits 1, with a Python traceback ending
+.Dq Address already in use ,
+if the port is taken.
+.Sh EXAMPLES
+On a kldload desktop on 2026-09-30, with five lab goldens built:
+.Bd -literal -offset indent
+$ curl -s http://127.0.0.1:9101/metrics | grep -E '^klab_golden'
+klab_golden_ready{distro="centos",kernel="5.14.0-741.el9.x86_64",zfs="zfs-2.2.11-1"} 1
+klab_golden_size_bytes{distro="centos"} 2585702400
+klab_golden_info{distro="centos",kernel="5.14.0-741.el9.x86_64",zfs="zfs-2.2.11-1",size="2585702400"} 1
+\&...
+klab_golden_ready{distro="ubuntu",kernel="6.8.0-138-generic",zfs="zfs-2.2.2-0ubuntu9.5"} 1
+klab_golden_size_bytes{distro="ubuntu"} 1338851328
+klab_golden_info{distro="ubuntu",kernel="6.8.0-138-generic",zfs="zfs-2.2.2-0ubuntu9.5",size="1338851328"} 1
+klab_golden_ready{distro="rhel",kernel="",zfs=""} 0
+klab_goldens_ready_total 5
+# (exited 0)
+.Ed
+.Pp
+The pool and the ARC:
+.Bd -literal -offset indent
+$ curl -s http://127.0.0.1:9101/metrics | grep -E '^klab_zfs_(pool_healthy|pool_free_bytes|arc_hit_ratio)'
+klab_zfs_pool_free_bytes{pool="rpool"} 160092041216
+klab_zfs_pool_healthy{pool="rpool"} 1
+klab_zfs_arc_hit_ratio 0.9981
+# (exited 0)
+.Ed
+.Pp
+Any other path:
+.Bd -literal -offset indent
+$ curl -s -o /dev/null -w '%{http_code}\en' http://127.0.0.1:9101/nothing
+404
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr kfire 8 ,
+.Xr kfire-exporter 8 ,
+.Xr klab 8 ,
+.Xr kzfs-test 8 ,
+.Xr zpool-scrub-exporter 8
+.Sh HISTORY
+On 2026-08-16 the lab moved its results from
+.Pa /root/klab
+to
+.Pa /root/kzfs-test ,
+and every per-distribution test count went blank until
+.Nm
+looked there too.
+.Pp
+On 2026-09-30, writing this page: a quote in a run's status file made
+.Xr promtool 1
+reject the whole page, since the labels were not escaped; and the length
+it sent counted characters, not bytes, so a test name with an accented
+letter cut the end off every scrape.
+Both were shown against a copy serving invented results.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+It listens on every address with no authentication; what it serves is
+state, not secrets, but the lab's layout is visible to anyone who can
+reach port 9101.
+.Pp
+Two names do not say what they hold:
+.Ql klab_zfs_arc_evict_total
+is the ARC's
+.Ql evict_l2_eligible ,
+bytes, and
+.Ql klab_zfs_txg_synced_total
+is
+.Ql dmu_tx_assigned ,
+transactions assigned rather than groups synced.
+They keep their names because dashboards query them.
+.Pp
+Each scrape takes at least a second, for the
+.Ql zpool iostat
+sample, and scrapes are answered one at a time.
