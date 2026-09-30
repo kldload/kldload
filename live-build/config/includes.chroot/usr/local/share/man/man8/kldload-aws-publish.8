@@ -1,0 +1,118 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-AWS-PUBLISH 8
+.Os
+.Sh NAME
+.Nm kldload-aws-publish
+.Nd make an EC2 image from a kldload disk, for running kldload as a hypervisor on AWS bare metal
+.Sh SYNOPSIS
+.Nm
+.Ar disk
+.Op Fl -region Ar region
+.Op Fl -bucket Ar name
+.Op Fl -name Ar ami-name
+.Op Fl -profile Ar profile
+.Op Fl -description Ar text
+.Op Fl -copy-regions Ar region , Ns Ar ...
+.Op Fl -keep-s3
+.Op Fl -no-seal
+.Op Fl -dry-run
+.Op Fl -json
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+.Nm
+turns a kldload disk \(em a file or a volume, in any format
+.Xr qemu-img 1
+reads \(em into an AMI that boots on EC2's bare-metal instance types, so
+that kldload runs there as the host for virtual machines of its own.
+In order it:
+.Bl -enum -compact
+.It
+copies the disk to a raw image, since AWS does not import qcow2;
+.It
+seals the copy with
+.Xr kldload-seal 8 ,
+clearing the machine's identity; the source is never changed;
+.It
+uploads it to an S3 bucket, created if missing;
+.It
+imports it as an EBS snapshot, waiting 10 to 30 minutes;
+.It
+registers an AMI on that snapshot with ENA, SR-IOV and UEFI;
+.It
+optionally copies the AMI to other regions;
+.El
+.Pp
+and removes the staged object from S3.
+AWS credentials are whatever the
+.Xr aws 1
+command finds: environment, its credentials file, or an instance role.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -region Ar region
+Default: the CLI's.
+.It Fl -bucket Ar name
+Default
+.Ql kldload-export- Ns Ar account .
+.It Fl -name Ar ami-name
+Default
+.Ql kldload- Ns Ar profile Ns - Ns Ar version Ns - Ns Ar timestamp .
+.It Fl -profile Ar profile
+The kldload profile to tag it with; default
+.Ql kvm .
+.It Fl -description Ar text
+The AMI's description.
+.It Fl -copy-regions Ar list
+Copy the AMI to these regions too, separated by commas.
+.It Fl -keep-s3
+Leave the raw image in the bucket.
+.It Fl -no-seal
+Do not seal: a true copy of the machine, rarely what an AMI should be.
+.It Fl -dry-run
+Say each step without calling AWS or converting anything.
+.It Fl -json
+Progress as one JSON object a line on standard error, for the web
+console.
+.It Fl h , Fl -help
+Print usage and exit 0.
+.El
+.Sh EXIT STATUS
+0 with each AMI's id on standard output, the first region's first; 1 on
+a failure, named on standard error.
+.Sh EXAMPLES
+On a kldload desktop with no AWS command-line tool, on 2026-09-30, with
+this release's
+.Nm
+first on the path:
+.Bd -literal -offset indent
+$ kldload-aws-publish demo.qcow2 --dry-run --region us-east-1 --no-seal
+[aws-publish] aws not found on PATH -- a real run needs AWS CLI v2
+[aws-publish] checking AWS credentials
+[aws-publish]   (dry-run) skipping credential check
+[aws-publish]   region: us-east-1 (explicit)
+[aws-publish]   bucket: kldload-export-DRYRUN0000 (default)
+[aws-publish] stage 1/5 — copying demo.qcow2 (qcow2) to raw at /var/tmp/kldload-aws-M95hPQ.raw
+[aws-publish]   (dry-run) would run: qemu-img convert -U -p -f qcow2 -O raw demo.qcow2 /var/tmp/kldload-aws-M95hPQ.raw
+[aws-publish] stage 2/5 — sealing SKIPPED (--no-seal)
+[aws-publish] stage 3/5 — uploading raw to s3://kldload-export-DRYRUN0000/kldload-kvm-20260930-105908.raw
+[aws-publish]   (dry-run) would create bucket if missing + aws s3 cp
+[aws-publish] stage 4/5 — importing as EBS snapshot (this takes 10-30 min)
+[aws-publish]   (dry-run) would call aws ec2 import-snapshot + poll until completed
+[aws-publish] stage 5/5 — registering AMI
+[aws-publish]   (dry-run) would register AMI kldload-kvm-20260930-105908 backed by snap-DRYRUN
+ami-DRYRUN
+[aws-publish] done — AMI ami-DRYRUN in us-east-1
+# (exited 0)
+.Ed
+.Sh SEE ALSO
+.Xr aws 1 ,
+.Xr qemu-img 1 ,
+.Xr kldload-seal 8
+.Sh HISTORY
+On 2026-09-30, writing this page: it sealed the source disk in place
+before copying it, and took every source for raw; and a dry run would
+not start without the AWS command-line tool.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+The import is billed by AWS; a dry run first costs nothing.
