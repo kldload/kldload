@@ -65,13 +65,16 @@ PROBE_TIMEOUT="${KLDLOAD_JOURNAL_PROBE_TIMEOUT:-10}"
 # for this one's.
 journal_records() {
     local tag="kldload-journal-probe"
-    local token="probe-$$-${SRANDOM:-$RANDOM}-$(date +%s)"
+    local token
+    token="probe-$$-${SRANDOM:-$RANDOM}-$(date +%s)"
     logger -p daemon.err -t "$tag" "$token" 2>/dev/null || return 1
 
-    local waited=0
+    local waited=0 out
     while ((waited < PROBE_TIMEOUT)); do
-        if journalctl -t "$tag" --since "-2 min" --no-pager 2>/dev/null |
-            grep -qF "$token"; then
+        # Read, then search: `journalctl | grep -q` under pipefail can take a
+        # SIGPIPE when grep stops early, and a 141 reads as "not recorded".
+        out="$(journalctl -t "$tag" --since "-2 min" --no-pager 2>/dev/null || true)"
+        if [[ "$out" == *"$token"* ]]; then
             return 0
         fi
         sleep 1
@@ -101,8 +104,26 @@ systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 ||
 # could not be diagnosed afterwards: the evidence had already been erased. A
 # check that cannot distinguish "recording" from "recording persistently" is
 # not a check on persistence.
+#
+# It asks by round trip, like journal_records, reading ONLY /var/log/journal
+# (journalctl -D). It used to grep `journalctl --header` for a file under
+# /var/log/journal, which was wrong twice over, both on onyx 2026-09-30:
+#   - --header lists every file journalctl can READ, archives included, not
+#     the ones journald is writing. onyx had 53 archives there from before
+#     09-08 while journald had written only to /run since that day -- every
+#     boot from 09-08 to 09-28 is gone, and this boot lost its first nine
+#     hours to /run's size cap. The test would have passed.
+#   - piped into grep -q under pipefail, the 2,189 lines of header took a
+#     SIGPIPE and the test returned 141 on every run: "not persistent" on a
+#     healthy machine, and a journald restart on every boot.
+# `journalctl --flush` then moved onyx's journal to /var at once.
 journal_is_persistent() {
-    journalctl --header 2>/dev/null | grep -q '^File path: /var/log/journal/'
+    local token out
+    token="persist-$$-${SRANDOM:-$RANDOM}-$(date +%s)"
+    logger -p daemon.err -t kldload-journal-probe "$token" 2>/dev/null || return 1
+    sleep 1
+    out="$(journalctl -D /var/log/journal -t kldload-journal-probe --since "-2 min" --no-pager 2>/dev/null || true)"
+    [[ "$out" == *"$token"* ]]
 }
 
 # ── 2. Does it record, AND will the record survive a reboot? ────────────────
@@ -143,9 +164,17 @@ systemctl restart systemd-journald ||
 sleep 2
 
 # ── 4. Prove the repair, or say so loudly ───────────────────────────────────
-if journal_records; then
-    echo "journal: recording after repair (journald had to be restarted)"
+# Both questions again. Only "does it record" was re-asked, so a journal still
+# on /run after the repair was reported repaired.
+if journal_records && journal_is_persistent; then
+    echo "journal: recording persistently after repair (journald had to be restarted)"
     exit 0
+fi
+if journal_records; then
+    echo "kldload-journal-assert: WARNING — the journal records, but still only in /run after" >&2
+    echo "  rotate+flush+restart: this boot's log will be erased at shutdown. Check that" >&2
+    echo "  /var/log/journal/$(cat /etc/machine-id 2>/dev/null) exists on the mounted rpool/var/log." >&2
+    exit 1
 fi
 
 echo "kldload-journal-assert: WARNING — the system journal is STILL not" >&2
