@@ -1,0 +1,43 @@
+# kldload network plan -- shipped defaults. Every kldload-internal network,
+# in one place. Read by /usr/lib/kldload/netplan.sh (parsed, never sourced);
+# /etc/kldload/network-plan.env overrides any key, and `kldload-netplan show`
+# prints the result. Missing, every tool falls back to the literal it used to
+# carry, and `kldload-netplan check` says so.
+#
+# PHASE 1 (docs/NETWORK-PLAN.md): these are TODAY'S values, deliberately. The
+# plan file is where the ranges come from; moving them into 10.240.0.0/12 is
+# phase 2 and 3, one line each here. Two of today's values overlap (the
+# master cluster CIDR sits inside wg1) and `check` reports it.
+
+# the block every kldload network is meant to live in (phase 2 on)
+NET_BLOCK=10.240.0.0/12
+
+# Kubernetes. Services took 10.96.0.0/12 until 2026-09-29 -- a range that
+# holds the bench LAN 10.100.10.0/24; /16 is the interim, 10.241.0.0/16 the plan.
+K8S_POD_CIDR=10.244.0.0/16
+K8S_SVC_CIDR=10.96.0.0/16
+# the network the cluster VMs sit on (libvirt's default today), its VIP and
+# the MetalLB pool carved out of it
+K8S_NODE_NET=192.168.122.0/24
+K8S_VIP=192.168.122.240
+K8S_LB_POOL=192.168.122.200-192.168.122.220
+
+# WireGuard meshes kldload itself runs
+WG_MGMT_NET=10.250.0.0/24
+WG_K8S_NET=10.251.0.0/24
+KLAB_BLUE_NET=10.252.0.0/24
+KLAB_GREEN_NET=10.253.0.0/24
+# kvm-mesh / appliance meshes: one /24 each out of this
+KVM_MESH_BLOCK=10.254.0.0/16
+
+# the installer's infrastructure planes (master profile) and its cluster CIDR
+PLANE_WG0_NET=10.77.0.0/16
+PLANE_WG1_NET=10.78.0.0/16
+PLANE_WG2_NET=10.79.0.0/16
+PLANE_WG3_NET=10.80.0.0/16
+MASTER_CLUSTER_CIDR=10.78.0.0/20
+
+# libvirt networks kldload defines (kldload-networks)
+VMNET_KLAB=192.168.150.0/24
+VMNET_ZFSLAB=192.168.151.0/24
+VMNET_VMS=192.168.152.0/24

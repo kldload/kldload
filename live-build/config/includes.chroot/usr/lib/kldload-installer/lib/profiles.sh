@@ -2395,6 +2395,19 @@ DASHSTART
         else
             k_log "WARNING: /usr/lib/kldload/components missing from the live env — kldload-component will list nothing"
         fi
+        # The network plan (docs/NETWORK-PLAN.md): the library every tool reads
+        # a range through, and the shipped defaults. Only components/ was ever
+        # copied from /usr/lib/kldload, so without this the plan would reach the
+        # USB and no installed machine -- kldload-netplan would print "no plan
+        # file" and every tool would silently keep its own literal.
+        for _np in netplan.sh network-plan.defaults; do
+            if [[ -f "/usr/lib/kldload/${_np}" ]]; then
+                install -D -m 0644 "/usr/lib/kldload/${_np}" "${target}/usr/lib/kldload/${_np}" &&
+                    k_log "installed /usr/lib/kldload/${_np}"
+            else
+                k_log "WARNING: /usr/lib/kldload/${_np} missing from the live env -- the network plan does not reach this install"
+            fi
+        done
 
         # ── Install ansible-core NOW, at install time, not first boot. ──
         # Autodeploy + kube-cluster + klab all call ansible-playbook for
