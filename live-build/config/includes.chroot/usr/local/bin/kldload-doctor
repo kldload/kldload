@@ -221,15 +221,29 @@ def check_wg_interfaces():
                    "mesh interfaces present", f"{len(ifaces)} ifaces: {','.join(ifaces)}")
 
 def check_virbr0():
+    """libvirt's default bridge is administratively up.
+
+    `ip -br` prints the operational state, then the flags:
+    `virbr0 DOWN <NO-CARRIER,BROADCAST,MULTICAST,UP>`. A bridge with no guest
+    attached has no carrier and reads DOWN while being perfectly healthy, so
+    the admin flag is the test. HISTORY: the first version tested for "UP"
+    anywhere in the line, which the flag list always satisfies; it reported
+    ok with actual "DOWN" on onyx (2026-09-29) and could not have failed.
+    """
     rc, out, _ = _run(["ip", "-br", "link", "show", "virbr0"])
-    if rc == 0 and "UP" in out:
-        return _result("network", "virbr0 up", "ok", "UP", out.split()[1])
     if rc != 0:
         return _result("network", "virbr0 up", "skip",
                        "libvirt default bridge",
                        "not configured (OK if no libvirt yet)")
-    return _result("network", "virbr0 up", "warn", "UP",
-                   out.split()[1] if len(out.split()) > 1 else "unknown",
+    f = out.split()
+    state = f[1] if len(f) > 1 else "unknown"
+    flags = f[-1].strip("<>").split(",") if f and f[-1].startswith("<") else []
+    if "UP" in flags:
+        if "NO-CARRIER" in flags:
+            state = "up, no carrier (no guest attached)"
+        return _result("network", "virbr0 up", "ok", "administratively UP", state)
+    return _result("network", "virbr0 up", "warn", "administratively UP",
+                   f"{state} (flags {','.join(flags) or 'none'})",
                    severity="medium",
                    remediation="virsh net-start default; virsh net-autostart default")
 
@@ -291,6 +305,39 @@ def _node_expectation(total):
         return total, ""
     return total, " (%d powered off: %s — start with: virsh start <name>)" % (
         len(off_nodes), ", ".join(sorted(off_nodes)))
+
+def check_apiserver():
+    """Does the apiserver this host's kubeconfig names answer?
+
+    Every Kubernetes check skips when it does not (see _apiserver_reachable),
+    which is right for a kubeconfig left behind by a cluster that is gone and
+    wrong for a cluster whose apiserver is down: both read as a column of
+    "not deployed". This is the one place the difference is reported. On a
+    control plane (the static apiserver manifest is here) a dead apiserver
+    fails; anywhere else it warns, because a stale kubeconfig is common (onyx
+    keeps one from an earlier lab) and is not an outage.
+    """
+    if not _has("kubectl"):
+        return _result("kubernetes", "apiserver", "skip", "", "kubectl not installed")
+    rc, server, _ = _run(["kubectl", "config", "view", "--minify", "-o",
+                          "jsonpath={.clusters[0].cluster.server}"])
+    if rc != 0 or not server:
+        return _result("kubernetes", "apiserver", "skip", "",
+                       "no kubeconfig names a cluster")
+    if _apiserver_reachable():
+        return _result("kubernetes", "apiserver", "ok",
+                       "the kubeconfig's apiserver answers", server,
+                       severity="critical")
+    cp = os.path.exists("/etc/kubernetes/manifests/kube-apiserver.yaml")
+    return _result("kubernetes", "apiserver", "fail" if cp else "warn",
+                   "the kubeconfig's apiserver answers",
+                   f"{server} does not answer; every Kubernetes check is skipped",
+                   severity="critical" if cp else "low",
+                   remediation=("crictl ps -a --name kube-apiserver; "
+                                "journalctl -u kubelet -n 50" if cp else
+                                "kube-status; if that cluster is gone, move "
+                                "/root/.kube/config aside"))
+
 
 def check_k8s_nodes():
     if not _has("kubectl"):
@@ -557,13 +604,19 @@ def check_helm_releases():
 def check_metrics_server():
     if not _has("kubectl"):
         return _result("observability", "metrics-server", "skip", "", "no kubectl")
+    # WHY: with no cluster _pods_ready returns (0, 0), which read as "not
+    # installed" and failed every host without Kubernetes -- onyx exited 1 on
+    # this check alone (2026-09-29).
+    if not _apiserver_reachable():
+        return _result("observability", "metrics-server", "skip", "",
+                       "no reachable Kubernetes apiserver")
     ready, total = _pods_ready("kube-system", "k8s-app=metrics-server")
     if total == 0:
         return _result("observability", "metrics-server", "fail",
                        "metrics-server deploy Ready — powers kubectl top + web UI CPU%/Mem% overlay",
                        "not installed",
                        severity="medium",
-                       remediation="kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml")
+                       remediation="kubectl apply -f /root/darksite/k8s-manifests/metrics-server.yaml")
     if ready < total:
         return _result("observability", "metrics-server", "fail",
                        f"{total}/{total} Ready", f"{ready}/{total} Ready",
@@ -674,7 +727,7 @@ def check_prometheus_targets():
             broken.append(label)
     if missing:
         return _result("observability", "prometheus scrape", "fail",
-                       "cilium-agent, hubble-metrics, tetragon, node_exporter all present",
+                       ", ".join(required_groups) + " all present",
                        f"missing jobs: {', '.join(missing)}",
                        severity="high",
                        remediation="add missing scrape jobs to /etc/prometheus/prometheus.yml and restart prometheus")
@@ -685,7 +738,7 @@ def check_prometheus_targets():
                        severity="high",
                        remediation="curl http://<node>:<port>/metrics from the host — likely a firewall drop (see kube-network nft)")
     return _result("observability", "prometheus scrape", "ok",
-                   "cilium/hubble/tetragon/node_exporter all scraping",
+                   ", ".join(required_groups) + " scraping",
                    f"{len(jobs_up)} jobs, all have ≥1 up target")
 
 def check_cilium_scrape_labels():
@@ -731,7 +784,7 @@ def check_cilium_scrape_labels():
         # missing from the scrape config and that is worth failing on.
         if not _prom_query('up{job="cilium-agent"} == 1'):
             return _result("observability", "cilium scrape labels", "skip", "",
-                           "cilium-agent not scraped yet — cluster still converging")
+                           "cilium-agent not scraped — no cluster, or still converging")
         if not _prom_query('cilium_version'):
             return _result("observability", "cilium scrape labels", "skip", "",
                            "cilium_version not present yet — scraped but metrics not landed")
@@ -747,9 +800,12 @@ def check_cilium_scrape_labels():
 def check_tetragon_scrape():
     # Same convergence split as the cilium check above: an unscraped job is
     # "not yet", not "broken".
-    if not _prom_query('up{job="tetragon"}'):
+    up = _prom_query('up{job="tetragon"}')
+    if up is None:
+        return _result("observability", "tetragon scrape", "skip", "", "prometheus unreachable")
+    if not up:
         return _result("observability", "tetragon scrape", "skip", "",
-                       "tetragon not scraped yet — cluster still converging")
+                       "tetragon not scraped — no cluster, or still converging")
     r = _prom_query("tetragon_events_total")
     if r is None:
         return _result("observability", "tetragon scrape", "skip", "", "prometheus unreachable")
@@ -772,7 +828,10 @@ def check_hubble_scrape():
     # severity and was told to reapply a Kubernetes firewall it does not have.
     # fiend, 2026-09-21: found by running the patched doctor on deb-1-core and
     # seeing "fail": 1 still left after gating the prometheus-scrape check.
-    if not _prom_query('up{job="hubble-metrics"}'):
+    up = _prom_query('up{job="hubble-metrics"}')
+    if up is None:
+        return _result("observability", "hubble scrape", "skip", "", "prometheus unreachable")
+    if not up:
         return _result("observability", "hubble scrape", "skip", "",
                        "hubble not scraped — no cluster, or still converging")
     r = _prom_query("hubble_flows_processed_total")
@@ -882,33 +941,36 @@ def check_cluster_firewall():
                    "firewall permits metrics + kubelet + hubble-peer")
 
 
-# ── Bob / webui tooling ──────────────────────────────────────────────────────
-# Bob can only diagnose the cluster if Ollama is reachable AND the webui
-# exposes the observability tools. These catch "Bob says I can't see
-# anything" regressions.
+# ── AI assistant / webui tooling ─────────────────────────────────────────────
+# The web console's assistant can only diagnose the cluster if Ollama is
+# reachable AND the webui exposes the observability tools. These catch "the
+# assistant says it can't see anything" regressions.
 
 def check_ollama():
     import urllib.request
     if not _installed("ollama.service", "ollama"):
-        return _result("bob", "ollama", "skip", "",
+        return _result("ai", "ollama", "skip", "",
                        "the AI stack was not installed on this machine")
     try:
         with urllib.request.urlopen("http://localhost:11434/api/ps", timeout=3) as r:
             data = json.loads(r.read().decode())
     except Exception as e:
-        return _result("bob", "ollama", "fail",
+        return _result("ai", "ollama", "fail",
                        "http://localhost:11434/api/ps responds",
                        f"unreachable: {e}",
                        severity="medium",
                        remediation="systemctl start ollama")
     models = data.get("models", [])
     if not models:
-        return _result("bob", "ollama model loaded", "warn",
+        return _result("ai", "ollama model loaded", "warn",
                        "at least one model in memory",
-                       "no models loaded — Bob will be slow on first prompt",
+                       "no models loaded -- the first prompt will wait for one to load",
                        severity="low",
-                       remediation="ollama run llama3.1:8b 'hi' to warm")
-    return _result("bob", "ollama", "ok",
+                       # The model is picked per GPU at install time; naming
+                       # one here would pull it over the network on a host
+                       # that was given another.
+                       remediation="ollama list; then: ollama run <model> hi")
+    return _result("ai", "ollama", "ok",
                    "reachable + model in VRAM",
                    ", ".join(m.get("name", "?") for m in models))
 
@@ -961,27 +1023,27 @@ def check_install_artifacts():
                    f"{len(want)} artifacts checked", "all present")
 
 
-def check_bob_tools_present():
+def check_ai_tools_present():
     # Simply greps the webui for the new tool names. If any are missing,
     # the build regressed.
     p = "/usr/local/bin/kldload-webui"
     if not os.path.isfile(p):
-        return _result("bob", "webui tools", "skip", "", "webui not installed")
+        return _result("ai", "webui tools", "skip", "", "webui not installed")
     try:
         with open(p) as f:
             src = f.read()
     except Exception:
-        return _result("bob", "webui tools", "skip", "", "unreadable")
+        return _result("ai", "webui tools", "skip", "", "unreadable")
     expected = ["k8s_get_pods", "k8s_describe", "k8s_logs", "k8s_events",
                 "prom_query", "zfs_status", "host_vitals", "doctor_check"]
     missing = [t for t in expected if t not in src]
     if missing:
-        return _result("bob", "webui tools", "fail",
+        return _result("ai", "webui tools", "fail",
                        "all observability tools present",
                        f"missing from kldload-webui: {', '.join(missing)}",
                        severity="high",
                        remediation="reinstall kldload-webui from the fresh ISO")
-    return _result("bob", "webui tools", "ok",
+    return _result("ai", "webui tools", "ok",
                    "8 observability tools registered",
                    "k8s_*, prom_query, zfs_status, host_vitals, doctor_check")
 
@@ -1352,6 +1414,14 @@ def check_audio_stack():
                                "systemctl --user restart pipewire.socket")
 
 
+def _kldload_pins(favorites: str) -> list[str]:
+    """kldload's own entries in a gsettings favorite-apps list: the
+    kldload-* launchers and the *xplore consoles."""
+    names = [x.strip(" '\"") for x in favorites.strip("[]@as ").split(",")]
+    return [n for n in names
+            if n.startswith("kldload-") or n.endswith("xplore.desktop")]
+
+
 def check_dock_pins():
     """Dock pins are the visible half of firstboot having actually run.
 
@@ -1359,17 +1429,32 @@ def check_dock_pins():
     at line 55, everything after it silently did not happen, and an empty dock
     was the first symptom anybody noticed (2026-08-19).
     """
+    # WHY only kldload's own entries count: GNOME's schema default already
+    # pins Nautilus and a browser, so counting every ".desktop" passed on a
+    # machine firstboot never touched -- a probe that could not fail
+    # (onyx, 2026-09-29). Asked as the person at the screen when there is
+    # one, as audio is below; as root with nobody seated it reads the
+    # system default firstboot writes to /etc/dconf/db/local.d.
     if not _has("gsettings"):
         return _result("desktop", "dock pins", "skip", "", "gsettings absent")
-    rc, out, _ = _run(["gsettings", "get", "org.gnome.shell", "favorite-apps"])
+    argv = ["gsettings", "get", "org.gnome.shell", "favorite-apps"]
+    who = "system default"
+    if os.geteuid() == 0:
+        seat = _seat_session()
+        if seat:
+            user, uid = seat
+            who = user
+            argv = ["env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                    "runuser", "-u", user, "--"] + argv
+    rc, out, _ = _run(argv)
     if rc != 0:
         return _result("desktop", "dock pins", "skip", "", "no GNOME schema")
-    n = out.count(".desktop")
+    n = len(_kldload_pins(out))
     if n > 0:
         return _result("desktop", "dock pins", "ok", "kldload tools pinned",
-                       f"{n} pinned")
+                       f"{n} kldload tool(s) pinned ({who})")
     return _result("desktop", "dock pins", "fail",
-                   "kldload tools pinned", "dock is empty",
+                   "kldload tools pinned", f"no kldload tool in the dock ({who})",
                    severity="medium",
                    remediation="check kldload-firstboot ran to completion: "
                                "systemctl status kldload-firstboot")
@@ -1406,7 +1491,7 @@ CHECKS = [
     check_zfs_pool, check_zfs_errors, check_zfs_arc_target, check_sanoid_timer,
     check_kldload_datasets, check_secrets_encryption,
     check_wireguard_module, check_wg_interfaces, check_virbr0,
-    check_k8s_nodes, check_cilium,
+    check_apiserver, check_k8s_nodes, check_cilium,
     check_cilium_pods, check_cilium_operator,
     check_hubble_relay, check_hubble_ui,
     check_metallb, check_zfs_csi, check_gateway_api,
@@ -1418,7 +1503,7 @@ CHECKS = [
     check_cluster_firewall,
     check_wg_mesh_coherence,
     check_darksite_charts, check_darksite_images,
-    check_ollama, check_bob_tools_present,
+    check_ollama, check_ai_tools_present,
     check_install_artifacts,
     check_webui_running, check_libvirtd, check_kldload_tools,
 ]
@@ -1426,8 +1511,13 @@ CHECKS = [
 
 def _log_run(payload):
     """Append each Doctor run to /root/kldload-doctor.log for auditability.
-    Keeps the last ~50 runs rolling so humans (and Bob) can grep history:
-        grep -A5 "ts=" /root/kldload-doctor.log | tail -100"""
+    One summary line per run, then a line per fail and warn; rotated to
+    .old past 2 MB, so the history can be grepped:
+        grep -A5 "ts=" /root/kldload-doctor.log | tail -100
+
+    The log is a convenience, never a reason to fail: the JSON has already
+    been printed, and a run as a user (no /root) or on a read-only root must
+    still exit with the verdict. A write failure is said on stderr."""
     from datetime import datetime
     try:
         line = (f"# ts={datetime.now().isoformat()} "
@@ -1442,8 +1532,8 @@ def _log_run(payload):
         if os.path.exists("/root/kldload-doctor.log") and \
            os.path.getsize("/root/kldload-doctor.log") > 2_000_000:
             os.rename("/root/kldload-doctor.log", "/root/kldload-doctor.log.old")
-    except Exception:
-        pass
+    except OSError as e:
+        print(f"kldload-doctor: run not logged: {e}", file=sys.stderr)
 
 
 USAGE = """\
@@ -1457,6 +1547,11 @@ There are no options. Read it with jq, for example the checks that are not ok:
 
   kldload-doctor | jq -r '.results[] | select(.status!="ok")
       | "\\(.status)\\t\\(.name)\\t\\(.remediation)"'
+
+Each run is also appended to /root/kldload-doctor.log (fails and warns).
+
+Exit status: 0 no check failed, 1 at least one failed, 2 a check crashed.
+See kldload-doctor(8).
 """
 
 
@@ -1478,7 +1573,7 @@ def main():
                 "runner", fn.__name__, "fail",
                 "check runs cleanly", f"crashed: {e}",
                 severity="low",
-                remediation=f"Fix {fn.__name__} in kldload-profile"))
+                remediation=f"Fix {fn.__name__} in /usr/local/bin/kldload-doctor"))
     # Summary + grouped output
     by_subsystem = {}
     for r in results:
