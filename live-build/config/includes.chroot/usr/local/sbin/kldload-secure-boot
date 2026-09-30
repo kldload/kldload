@@ -31,6 +31,13 @@ CA_KEY="/etc/kldload/ca/root/ca.key"
 CA_DER="/etc/kldload/ca/root/ca.der"
 MOK_DIR="/var/lib/dkms"
 MOK_PW="${KLDLOAD_MOK_PASSWORD:-kldload}"
+# What the log says the password is: the default is published (README), but
+# one the operator chose stays out of the journal (2026-09-30).
+if [[ -n "${KLDLOAD_MOK_PASSWORD:-}" ]]; then
+    MOK_PW_SHOWN="the one in KLDLOAD_MOK_PASSWORD"
+else
+    MOK_PW_SHOWN="${MOK_PW}"
+fi
 
 log() { echo "[kldload-secure-boot] $*" >&2; }
 die() {
@@ -182,14 +189,14 @@ _queue_mok_enrollment() {
 
     # Already queued and waiting for MokManager? Surface that.
     if mokutil --list-new 2>/dev/null | grep -q "$(openssl x509 -in "${CA}" -noout -subject_hash 2>/dev/null)"; then
-        log "enrollment already pending — reboot to complete in MokManager (password: ${MOK_PW})"
+        log "enrollment already pending — reboot to complete in MokManager (password: ${MOK_PW_SHOWN})"
         return 0
     fi
 
     if printf '%s\n%s\n' "${MOK_PW}" "${MOK_PW}" |
         mokutil --ignore-keyring --import "${CA_DER}" >/dev/null 2>&1; then
         log "MOK enrollment queued"
-        log "Password for MokManager on next reboot: ${MOK_PW}"
+        log "Password for MokManager on next reboot: ${MOK_PW_SHOWN}"
         log "Reboot. At the blue MokManager screen: Enroll MOK → Continue → password → Yes → reboot"
     else
         log "ERROR: mokutil --import failed"

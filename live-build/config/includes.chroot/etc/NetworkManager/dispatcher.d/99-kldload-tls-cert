@@ -39,9 +39,12 @@ ACTION="${2:-}"
 # NOT operator VPNs. They come up mid-`kube-cluster bootstrap`, and each event
 # used to try-restart kldload-tls-cert; 5 in 10s tripped the unit's
 # StartLimitBurst → `failed` (start-limit-hit) on .129 2026-07-27. Skip them
-# here (belt) — the SAN generator also excludes them by name (source fix). A
-# generic operator VPN (other wg-*) is still in scope, so remote-access tunnel
-# IPs still land in the cert.
+# here (belt) — the SAN generator also excludes them by name (source fix).
+# WARN: the case below skips EVERY wg*, and kldload-tls-cert's drift check
+# ignores wg* too, so an operator VPN's address lands in the certificate only
+# when something else causes a regeneration. Name it in
+# /etc/kldload/tls-extra-sans.txt to have it there for certain (read against
+# the code, 2026-09-30; this comment used to say the opposite).
 case "$IFACE" in
 # Virtual interfaces are not the host's address. Without ap-* (kvm-mesh, one
 # per appliance) and fc-* (kfire, one tap per microVM) in this list, every
