@@ -8,6 +8,17 @@ test suite.
 
 ## 1. What it is
 
+*Checked 2026-09-30 against openzfs/zfs `.github/workflows`:* upstream CI
+(`zfs-qemu.yml`) runs on GitHub-hosted Ubuntu runners, each booting a QEMU
+VM from a vendor cloud image (AlmaLinux 8/9/10, CentOS Stream 9/10, Debian
+11-13, Fedora 43/44, Ubuntu 22/24/26, FreeBSD 14/15/16; Arch and Tumbleweed
+available), building the PR and running ZTS, with a manual Fedora kernel
+version input and per-step time limits; plus `zloop` (ztest), package
+builds, ARM, unit tests and static analysis. So distro breadth and real
+distro kernels are already covered. kldload's distinct ground is: ZFS as
+the root and the boot path, real hardware, the failing machine kept, a
+pinned package set, and multi-boot life cycles. Do not claim more.
+
 A fifth download, dedicated to testing OpenZFS. The operator picks a
 distribution (and its release), a kernel and a ZFS version; kldload **builds**
 that exact combination as a real installed system with root on ZFS, seals it
@@ -351,9 +362,10 @@ first kind as running.
 
 ### Two paragraphs
 
-Every one of you tests OpenZFS on a filesystem that is not ZFS. CI boots a
-kernel it did not choose, on an ext4 root, and runs the suite against files.
-That covers ZFS the code. It never touches ZFS the system: the module that
+OpenZFS's CI is serious: every pull request is built and run through the
+suite in QEMU VMs on about fourteen systems, FreeBSD included, from the
+vendors' cloud images. But every one of those VMs boots from ext4 or xfs and
+tests ZFS on pools made of files. That covers ZFS the code. It never touches ZFS the system: the module that
 has to build and load before the root exists, the initramfs that has to
 import and unlock it, the kernel update that has to rebuild it, the rollback
 that has to boot. Those are the paths that break for users, and no runner
