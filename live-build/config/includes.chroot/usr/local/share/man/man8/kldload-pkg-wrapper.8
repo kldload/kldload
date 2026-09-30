@@ -1,0 +1,175 @@
+.Dd September 30, 2026
+.Dt KLDLOAD-PKG-WRAPPER 8
+.Os
+.Sh NAME
+.Nm kldload-pkg-wrapper
+.Nd take a snapshot before apt or dnf changes the system, and give both a rollback command
+.Sh SYNOPSIS
+.Nm apt | apt-get | dnf | dnf5 | yum
+.Op Ar arguments ...
+.Nm apt | dnf
+.Cm rollback
+.Op Ar rollback-arguments ...
+.Nm
+.Fl h | -help
+.Sh DESCRIPTION
+The installer links
+.Pa /usr/local/bin/apt ,
+.Pa apt-get ,
+.Pa dnf ,
+.Pa dnf5
+and
+.Pa yum
+to
+.Nm ,
+for each of them the system has.
+.Pa /usr/local/bin
+comes before
+.Pa /usr/bin
+in the login path and in
+.Xr sudo 8 Ns 's ,
+so the usual commands reach it.
+It looks at the name it was called by and the command's verb \(em the
+first word that is not an option, skipping the value of an option that
+takes one \(em and:
+.Bl -bullet
+.It
+for
+.Cm rollback ,
+runs
+.Xr kldload-rollback 8
+with the rest of the arguments; with none it runs
+.Ql kldload-rollback last --no-reboot ,
+which stages the rollback and does not restart;
+.It
+for a verb that changes the system, run as root, takes a
+.Ql apt-pre
+or
+.Ql dnf-pre
+snapshot of the boot environment first;
+.It
+for
+.Ql apt upgrade ,
+.Ql full-upgrade
+or
+.Ql dist-upgrade
+with packages held, first explains on standard error why apt will say
+they were
+.Dq kept back ;
+.El
+.Pp
+and then runs the real command from
+.Pa /usr/bin
+with the arguments untouched, so its output and exit status are the real
+command's.
+.Pp
+The verbs that change the system differ: for apt
+.Ql update
+only refreshes the package lists, while for dnf it upgrades.
+apt:
+.Cm install , remove , purge , upgrade , full-upgrade , dist-upgrade ,
+.Cm autoremove , reinstall , satisfy , build-dep .
+dnf:
+.Cm install , upgrade , update , remove , erase , downgrade , reinstall ,
+.Cm distro-sync , distrosync , autoremove , swap , upgrade-minimal .
+Any other verb, and a run that changes nothing
+.Pq Fl -simulate , Fl -dry-run , Fl -assumeno , Fl -downloadonly ,
+takes no snapshot.
+.Pp
+A snapshot that fails is warned about and the command runs anyway: a busy
+pool is no reason to refuse an install.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl h , Fl -help
+Under its own name, print the header comment and exit 0.
+Under
+.Nm apt
+or
+.Nm dnf ,
+.Fl -help
+goes to the real command.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /usr/local/sbin/snapshot-create.sh
+Takes the snapshot.
+.It Pa /var/log/kldload/snapshots.log
+Its log, named in the warning when it fails.
+.El
+.Sh EXIT STATUS
+The real command's.
+1 when the real command is missing, or
+.Nm
+is called by a name it does not know.
+.Sh EXAMPLES
+In a Fedora 44 container, with the snapshot script replaced by one that
+records each call; the count is of snapshots taken:
+.Bd -literal -offset indent
+dnf -y install no-such-package-xyz --assumeno      rc=1   snapshots=0
+dnf install --downloadonly no-such-package-xyz -y  rc=1   snapshots=0
+dnf -y --repo fedora install no-such-package-xyz   rc=1   snapshots=1 snapshot dnf-pre
+dnf -q list installed bash                         rc=0   snapshots=0
+.Ed
+.Pp
+In a Debian 13 container with
+.Ql mokutil
+held; apt's own CLI warning is left out:
+.Bd -literal -offset indent
+# apt upgrade --simulate
+
+kldload: 1 packages are HELD — the kernel, ZFS and NVIDIA are pinned
+kldload: as one matched set, because the ZFS and NVIDIA modules are built
+kldload: against this exact kernel. apt will list them as "kept back".
+kldload: That is deliberate. It is not a fault, and unholding them is how
+kldload: this machine stops booting.
+kldload:
+kldload:   see what is pinned   apt-mark showhold
+kldload:   undo this upgrade    apt rollback
+kldload:   move the kernel      documented in kldload-apply-platform-holds(8)
+
+\&...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Calculating upgrade...
+\&...
+.Ed
+.Pp
+And what
+.Cm rollback
+hands on, with
+.Xr kldload-rollback 8
+replaced by a script that prints its arguments:
+.Bd -literal -offset indent
+# dnf rollback
+kldload-rollback last --no-reboot
+# dnf rollback list
+kldload-rollback list
+.Ed
+.Sh SEE ALSO
+.Xr kldload-snapshots 7 ,
+.Xr kldload-apply-platform-holds 8 ,
+.Xr kldload-rollback 8 ,
+.Xr kpkg 8
+.Sh HISTORY
+Until 2026-09-18 the verb was the first argument, so
+.Ql dnf -y install
+took no snapshot.
+Until 2026-09-23 a bare
+.Ql apt rollback
+restarted the machine two seconds after staging.
+On 2026-09-30, writing this page:
+.Fl -assumeno
+and
+.Fl -downloadonly
+runs took snapshots of nothing.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+Only commands that go through the path are seen: anything that runs
+.Pa /usr/bin/dnf
+directly is not.
+On Debian and Ubuntu apt's own hooks take the snapshot for those as well;
+dnf has no such hook here.
+.Pp
+Snapshots are taken only when it runs as root.
