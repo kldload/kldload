@@ -273,7 +273,11 @@ def main() -> int:
 .release-toc a { color: var(--accent2); text-decoration: none; }
 .release-toc a:hover { text-decoration: underline; }
 """
-    new = new.replace("  </style>", extra_css + "  </style>", 1)
+    # Only when the template lacks them: a release page used as its own
+    # template already carries them, and adding again stacked copies -- the
+    # live 1.5.0 page had two (found 2026-09-29).
+    if ".release-table {" not in new:
+        new = new.replace("  </style>", extra_css + "  </style>", 1)
     new = re.sub(r"<title>[^<]*</title>", "<title>%s</title>" % html.escape(title), new, count=1)
     new = re.sub(
         r'<meta property="og:title" content="[^"]*"/>',

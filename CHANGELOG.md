@@ -709,6 +709,52 @@ were fixed before 1.5.0 was tagged:
   joined the mesh, so every later check failed against a VM that no longer
   existed. The test was wrong, not the estate
 
+### Since the 1.5.0 build
+
+**None of this is in the 1.5.0 download.** The image on dl.kldload.com is the
+1.5.0 build of 26 September (sha256 `fba66ddd…c897`, re-verified byte for
+byte on 29 September). What follows was found or built after it, on the
+next branch, and ships in the next release.
+
+Fixed, and checked by reinstalling the test machine with the fix:
+
+- A **core** install came up with no login prompt on the screen: the live
+  USB's install-menu setting for the console was copied onto every install,
+  and on core it pointed at a tool core does not carry
+- On **Debian core**, the web proxy failed to start every three seconds for
+  the same reason: settings that run kldload tools were copied onto a
+  profile that has none. Core no longer receives them
+- On Fedora and EL hosts, a VM being created or changed **could be cut off**
+  in the middle of the operation: three kldload services started the old all-in-one
+  libvirt daemon, which shuts the per-driver daemons down. They no longer
+  ask for it
+- **Deleting a VM** left its data disk and its cloud-init seed file behind;
+  both are removed now, and the lifecycle test checks the seed is gone
+- A storage self-test warned about an ACL setting that was correct
+
+New:
+
+- `kldload-power`: switch a machine on, off or through a power cycle from
+  outside it, through a smart plug (Shelly, Tasmota), a server's BMC over
+  IPMI, or Redfish, with `selftest` to prove a new rack's controllers
+  before trusting them. A record can be made read-only, for a machine that
+  must never be switched. Man page `kldload-power(8)`
+- The netboot server keeps a **never-arm list**: a machine on it is never
+  installed from the server, not even in open mode
+- `kvm-snap` names snapshots, and `kld` offers a ready clone name and asks
+  for a snapshot name; `kld` refuses to roll back a running VM
+- The estate test sweep recovers a stalled test machine by power when it
+  has a controller
+- A **Manual** on the website: this install guide, a reference of every
+  command with its own `--help`, and the man pages
+
+In testing:
+
+- Kubernetes gave Services the range 10.96.0.0/12, which contains common
+  LANs such as 10.100.10.0/24. It now takes 10.96.0.0/16, and nodes keep
+  cluster traffic from leaving by the default route before the network is
+  up. Being proven on the test machine now
+
 ### Known issues
 
 - `builder/build-iso.sh` is the last script not running under strict mode, held
