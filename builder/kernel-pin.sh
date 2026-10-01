@@ -220,9 +220,52 @@ main() {
     local cap_line="${cap%.*}"
     _warn "zfs-dkms caps at kernel-uname-r > ${cap} → searching at or below the ${cap_line} line"
 
+    # ── KPIN_CANDIDATES: pin to a kernel the darksite actually carries ──────
+    # The installer installs whatever kernel the darksite holds (under the
+    # excludes), so a pin chosen from the mirrors can name a kernel the
+    # target never gets. Build 168: pin and live ISO 7.2.8, darksite and
+    # target 7.2.7; akmod-nvidia built for the live kernel, no nvidia.ko for
+    # the target, black screen on fiend's desktop (2026-10-01). Given the
+    # darksite's kernel NVRs (one per line), take the newest one under the cap
+    # that koji can serve, and nothing else: live, pin and target agree by
+    # construction. No candidate qualifies -> FATAL, never a fallback.
+    if [[ -n "${KPIN_CANDIDATES:-}" ]]; then
+        local cand cline
+        nvr=""
+        while IFS= read -r cand; do
+            [[ "$cand" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9][0-9.]*\.fc${RELEASEVER}$ ]] || {
+                [[ -z "$cand" ]] || _warn "ignoring candidate '${cand}' (not a plain .fc${RELEASEVER} kernel NVR)"
+                continue
+            }
+            cline="$(cut -d. -f1-2 <<<"$cand")"
+            if [[ "$(printf '%s\n%s\n' "$cline" "$cap_line" | sort -V | tail -1)" != "$cap_line" ]]; then
+                _warn "darksite kernel ${cand} is above the zfs cap (${cap}) -- skipped"
+                continue
+            fi
+            if kpin_urls_ok "$cand" "${KOJI_ROOT}/${cand%%-*}/${cand#*-}/${ARCH}"; then
+                nvr="$cand"
+                line="$cline"
+                break
+            fi
+            _warn "darksite kernel ${cand} is not fully fetchable from koji -- trying the next"
+        done < <(sort -rV <<<"$KPIN_CANDIDATES")
+        if [[ -z "$nvr" ]]; then
+            _warn "FATAL: none of the darksite's kernels is under the zfs cap and fetchable:"
+            _warn "       $(tr '\n' ' ' <<<"$KPIN_CANDIDATES")"
+            return 2
+        fi
+        # mirrors still serving this exact NVR decides URLs vs by-name (see below)
+        if dnf repoquery --releasever="$RELEASEVER" --qf '%{version}-%{release}\n' kernel 2>/dev/null | grep -qx "$nvr"; then
+            source="mirrors"
+        else
+            source="koji"
+        fi
+        _warn "pinned to the darksite's kernel ${nvr} (${source}, under zfs cap ${cap})"
+    fi
+
     local -a _lines=()
-    mapfile -t _lines < <(kpin_lines_at_or_below "$cap_line")
-    if [[ "${#_lines[@]}" -eq 0 ]]; then
+    [[ -z "${KPIN_CANDIDATES:-}" ]] && mapfile -t _lines < <(kpin_lines_at_or_below "$cap_line")
+    if [[ -z "${KPIN_CANDIDATES:-}" && "${#_lines[@]}" -eq 0 ]]; then
         _warn "FATAL: the archive offers no kernel line at or below ${cap_line}"
         return 2
     fi

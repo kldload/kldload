@@ -537,6 +537,32 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
             else
                 _pass "ISO ships a self-consistent kernel pin (${_kp_nvr})"
             fi
+            # The live kernel IS the pin: the installer and akmod-nvidia's
+            # posttrans build for `uname -r`, so a live kernel that is not the
+            # target's left the target with no nvidia.ko and a black desktop
+            # (build 168: live 7.2.8, pin/target 7.2.7, 2026-10-01).
+            if [[ -n "$_kp_nvr" ]]; then
+                # stderr dropped: a listing error leaves _kp_live empty, which
+                # is reported as a FAIL just below
+                _kp_list="$(unsquashfs -l "$MOUNTPOINT/LiveOS/squashfs.img" 2>/dev/null)"
+                _kp_live="$(sed -n 's|^squashfs-root/usr/lib/modules/\([^/]*\)$|\1|p' <<<"$_kp_list" | sort -u | tr '\n' ' ')"
+                # what an offline install will actually put on the target
+                _kp_ds="$(sed -n 's|^squashfs-root/root/darksite/fedora/.*/kernel-core-\([0-9][^/]*\)\.x86_64\.rpm$|\1|p' <<<"$_kp_list" | sort -u | tr '\n' ' ')"
+                if [[ "${_kp_live% }" == "${_kp_nvr}.x86_64" ]]; then
+                    _pass "live kernel is the pin (${_kp_nvr})"
+                else
+                    _fail "live kernel is the pin" \
+                        "live image has kernel(s) '${_kp_live% }', the pin is ${_kp_nvr} -- the target gets the pin, and modules built at install for the live kernel will not load on it"
+                fi
+                if [[ -z "$_kp_ds" ]]; then
+                    _pass "pin vs darksite: no Fedora darksite in this image (a net install takes the pin from the mirrors)"
+                elif grep -qw -- "$_kp_nvr" <<<"$_kp_ds"; then
+                    _pass "the darksite carries the pinned kernel (${_kp_nvr}; darksite has: ${_kp_ds% })"
+                else
+                    _fail "the darksite carries the pinned kernel" \
+                        "pin ${_kp_nvr}, darksite has '${_kp_ds% }' -- an offline install puts a different kernel on the target than the live ISO runs"
+                fi
+            fi
         fi
         _rm_extract "$KPEXTRACT"
 

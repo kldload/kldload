@@ -480,10 +480,26 @@ set +o pipefail
 # guessed kernel is an ISO whose ZFS may not build, which is not a thing to
 # discover after install.
 log "Resolving the Fedora kernel pin against the zfs repo's cap…"
+# The live kernel follows the TARGET's kernel, which is whatever the darksite
+# carries. Pinning from the mirrors put the live ISO on 7.2.8 while the
+# darksite (so the target) held 7.2.7: akmod-nvidia built for the live kernel,
+# the target had no nvidia.ko, and fiend's desktop came up black (build 168,
+# 2026-10-01). So with a Fedora darksite in the image, its kernel-core NVRs
+# (read by rpm, not parsed from file names) are the pin's only candidates.
+_kpin_cands=""
+if [[ "$PAYLOAD" != "net" ]] && has_darksite fedora && [[ -d /build/live-build/darksite-fedora-cache/rpm ]]; then
+    # rpm -qp warns on stderr about unimported signing keys (NOKEY); the NVR
+    # on stdout is unaffected, and an empty result dies just below
+    _kpin_cands="$(find /build/live-build/darksite-fedora-cache/rpm -name 'kernel-core-*.rpm' -print0 |
+        xargs -0 -r rpm -qp --qf '%{VERSION}-%{RELEASE}\n' 2>/dev/null | sort -u)"
+    [[ -n "$_kpin_cands" ]] ||
+        die "the Fedora darksite carries no kernel-core -- an offline install would have no kernel, and the pin nothing to match"
+    log "Darksite kernels (the pin's candidates): $(tr '\n' ' ' <<<"$_kpin_cands")"
+fi
 # CAPTURE, CHECK, THEN eval. `eval "$(cmd)"` returns EVAL's status,
 # not cmd's, so a resolver exiting 2 read as success and execution
 # fell through to an unbound KPIN_NVR (2026-08-22).
-if ! _kpin_out="$(ARCH="$ARCH" RELEASEVER=44 bash /build/builder/kernel-pin.sh)"; then
+if ! _kpin_out="$(KPIN_CANDIDATES="$_kpin_cands" ARCH="$ARCH" RELEASEVER=44 bash /build/builder/kernel-pin.sh)"; then
     die "kernel-pin.sh could not resolve a fetchable kernel NVR — refusing to guess"
 fi
 # Evaluate only AFTER the status check above has passed. Splitting capture
@@ -585,9 +601,15 @@ else
     # tracks the ZFS ceiling the two routinely coincide. The excludes apply
     # either way — they are what keeps a newer line out.
     if [[ "${KPIN_SOURCE:-koji}" == "mirrors" ]]; then
-        DNF_KERNEL_ARGS=("${KOJI_KERNEL_EXCLUDES[@]}" kernel kernel-core kernel-modules
-            kernel-modules-core kernel-modules-extra kernel-devel kernel-devel-matched)
-        log "Kernel on the mirrors — resolving by name under the excludes, not by URL"
+        # By name WITH the NVR: a bare name takes the newest on the line, and
+        # the pin may be older than the mirrors' newest (it follows the
+        # darksite). Named exactly, it is one NVR from one repo, no conflict.
+        DNF_KERNEL_ARGS=("${KOJI_KERNEL_EXCLUDES[@]}")
+        for _ks in kernel kernel-core kernel-modules kernel-modules-core \
+            kernel-modules-extra kernel-devel kernel-devel-matched; do
+            DNF_KERNEL_ARGS+=("${_ks}-${KOJI_KERNEL_NVR}")
+        done
+        log "Kernel on the mirrors — installing ${KOJI_KERNEL_NVR} by exact name, not by URL"
     else
         DNF_KERNEL_ARGS=("${KOJI_KERNEL_EXCLUDES[@]}" "${KOJI_KERNEL_URLS[@]}")
         log "Kernel pruned from the mirrors — installing ${#KOJI_KERNEL_URLS[@]} RPMs from koji by URL"
@@ -603,6 +625,17 @@ if ! chroot "$ROOTFS" rpm -q zfs zfs-dkms kernel-core >/dev/null 2>&1; then
     die "dnf --installroot failed — core packages missing"
 fi
 log "dnf completed (exit $DNF_RC — DKMS scriptlet failures are expected and handled below)"
+# Outcome: the live kernel IS the pin (and so the darksite's, and the
+# target's). A second or different kernel here is the build 168 split.
+if ! ((${#ZFS_GIT_RPMS[@]})); then
+    _live_k="$(chroot "$ROOTFS" rpm -q --qf '%{VERSION}-%{RELEASE}\n' kernel-core | sort -u)"
+    [[ "$_live_k" == "$KOJI_KERNEL_NVR" ]] ||
+        die "live kernel-core is '$(tr '\n' ' ' <<<"$_live_k")', the pin is ${KOJI_KERNEL_NVR} -- installer and target would disagree"
+    if [[ -n "$_kpin_cands" ]] && ! grep -qx "$KOJI_KERNEL_NVR" <<<"$_kpin_cands"; then
+        die "pinned ${KOJI_KERNEL_NVR} is not among the darksite's kernels"
+    fi
+    log "Live kernel = pin = ${KOJI_KERNEL_NVR}${_kpin_cands:+ (carried by the darksite)}"
+fi
 
 log "Root filesystem bootstrapped: $(du -sh "$ROOTFS" | cut -f1)"
 

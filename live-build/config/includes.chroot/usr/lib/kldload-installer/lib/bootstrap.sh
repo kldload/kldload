@@ -3357,6 +3357,26 @@ CUSTOMREPO
         return 1
     fi
 
+    # The target's kernel must be the ISO's pin, which is also the live ISO's
+    # kernel (builder/kernel-pin.sh, KPIN_CANDIDATES). Build 168 split them,
+    # live 7.2.8 vs target 7.2.7, and anything that builds for `uname -r`
+    # during the install (akmod-nvidia) built for the wrong kernel: fiend's
+    # desktop came up black (2026-10-01). Not fatal -- the machine boots, and
+    # step 3c builds nvidia.ko by target kernel -- but loud, because a split
+    # here means the build's pin and the darksite no longer agree.
+    if [[ "${distro}" == "fedora" && -r /etc/kldload-kernel-pin ]]; then
+        local _kp_want _kp_have
+        _kp_want="$(sed -n "s/^KPIN_NVR='\(.*\)'\$/\1/p" /etc/kldload-kernel-pin)"
+        # stderr dropped: "package kernel-core is not installed" is reported as
+        # an empty value below
+        _kp_have="$(chroot "${target}" rpm -q --qf '%{VERSION}-%{RELEASE}\n' kernel-core 2>/dev/null | grep -v 'not installed' | sort -u | tr '\n' ' ')"
+        if [[ "${_kp_have% }" == "$_kp_want" ]]; then
+            k_log_to "$log" "  target kernel = the ISO's pin = live kernel: ${_kp_want}"
+        else
+            k_log_to "$log" "WARNING: target kernel-core '${_kp_have% }' is not the ISO's pin '${_kp_want}' (the live kernel) -- modules built at install for the live kernel will not load on the target"
+        fi
+    fi
+
     # Verify zfs.ko + spl.ko + the dracut zfs-mount hook all made it into
     # the new initramfs. dracut returns rc=0 even when it silently omits
     # modules it can't find (caught 2026-05-12 on F44 zfslab install:
