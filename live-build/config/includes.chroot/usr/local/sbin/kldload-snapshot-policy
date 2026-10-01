@@ -294,7 +294,8 @@ cmd_apply() {
         if ((DRY)); then
             log "would disable ${t}"
         elif systemctl cat "$t" >/dev/null 2>&1; then
-            systemctl disable --now "$t" >/dev/null 2>&1 || true # checked just below
+            # swallow: a unit that is already off fails disable; is-enabled below is the check
+            systemctl disable --now "$t" >/dev/null 2>&1 || true
             if systemctl is-enabled "$t" >/dev/null 2>&1; then
                 log "could not disable ${t}: it still snapshots beside sanoid"
                 rc=1
@@ -308,7 +309,8 @@ cmd_apply() {
             log "would enable ${t}"
             continue
         }
-        systemctl enable --now "$t" >/dev/null 2>&1 || true # checked just below
+        # swallow: the enable outcome is read from is-enabled just below, not from this exit code
+        systemctl enable --now "$t" >/dev/null 2>&1 || true
         if systemctl is-enabled "$t" >/dev/null 2>&1; then
             log "${t}: enabled"
         else
@@ -373,7 +375,8 @@ cmd_status() {
     printf 'pool %s: %s%% full (guard %s%% -> %s%%)\n' "$pool" "$(pool_cap "$pool")" "$GUARD_HIGH" "$GUARD_LOW"
     for t in sanoid.timer kldload-snapshot-guard.timer "${LEGACY_TIMERS[@]}"; do
         local st
-        st="$(systemctl is-enabled "$t" 2>/dev/null)" || true # not-found / disabled exit non-zero
+        # swallow: is-enabled exits non-zero for disabled and not-found, which are answers here
+        st="$(systemctl is-enabled "$t" 2>/dev/null)" || true
         printf '  %-30s %s\n' "$t" "${st:-absent}"
     done
     printf '%-44s %6s %10s\n' "managed dataset" "snaps" "held"
