@@ -19,8 +19,8 @@
 #   sudo tests/lifecycle.sh debian desktop
 #
 # Env knobs:
-#   EXTRA_ANSWERS  a file of KEY=VALUE answers appended after the defaults
-#                  (the ZFS Lab's KLDLOAD_ZFS_SOURCE and hooks); default none
+#   EXTRA_ANSWERS  a file of KEY=VALUE answers appended after the defaults;
+#                  default none
 #   LIVE_PATCH_DIR a tree rooted like /; its files replace the live env's
 #                  before the install (test an installer change without a
 #                  build); default none
@@ -247,10 +247,10 @@ KLDLOAD_ENABLE_EBPF=1
 KLDLOAD_ENABLE_SECURE_BOOT=$([[ "$SB_ENABLED" == "yes" ]] && echo 1 || echo 0)
 KLDLOAD_TIMEZONE=UTC
 EOF
-# Extra answers for a build that is not a plain smoke install: the ZFS Lab
-# (docs/ZFS-LAB-EDITION.md) passes KLDLOAD_ZFS_SOURCE and its hooks this way.
-# A file of KEY=VALUE lines, appended after the defaults so it wins. Empty by
-# default, so every smoke run is exactly what it was.
+# Extra answers for a build that is not a plain smoke install (a different
+# profile option, a feature under test). A file of KEY=VALUE lines, appended
+# after the defaults so it wins. Empty by default, so every smoke run is
+# exactly what it was.
 if [[ -n "${EXTRA_ANSWERS:-}" ]]; then
     [[ -r "$EXTRA_ANSWERS" ]] || fail "EXTRA_ANSWERS=${EXTRA_ANSWERS} is not readable"
     cat "$EXTRA_ANSWERS" >>"$ANSWERS"
