@@ -3526,6 +3526,41 @@ NCTREPO
                 fi
             fi
 
+            # 3c. Build nvidia.ko for the TARGET's kernel now, inside the install.
+            #
+            # akmod-nvidia's own %posttrans builds for `uname -r`, which here is
+            # the LIVE ISO's kernel. While the two matched (7.2.7 on both, the
+            # 09-28 battery) the module was built during the install and udev
+            # loaded it seconds into first boot. Build 168 booted the installer
+            # on 7.2.8 while the target holds 7.2.7, so nothing was built for
+            # the target: akmods compiled it 40 s into first boot, nvidia.ko
+            # loaded after simpledrm already had the display, the driver hit
+            # "NVRM: nvAssertFailedNoLog: GPPut < WATCHDOG_GPFIFO_ENTRIES", and
+            # GDM gave up on a gnome-shell that took 34 s to get an EGL context:
+            # a black screen (fiend, 5-desktop, 2026-10-01). 5 of 6 Fedora
+            # editions logged the assertion; 0 of 8 on 09-28. So the build is
+            # named by the target's kernel(s), never inferred. firstboot's
+            # akmods.service stays the healing net if this fails.
+            local _tk _nv_built=0 _nv_want=0
+            # the rpm query below: stderr dropped because "package kernel-core is
+            # not installed" (an install with no Fedora kernel) is an answer,
+            # filtered out by the grep, and then 0 of 0 is logged
+            while IFS= read -r _tk; do
+                [[ -n "$_tk" ]] || continue
+                _nv_want=$((_nv_want + 1))
+                k_log_to "$log" "  building nvidia.ko for target kernel ${_tk} (akmods --kernels)..."
+                chroot "${target}" /usr/sbin/akmods --kernels "${_tk}" --akmod nvidia >>"$log" 2>&1 ||
+                    k_log_to "$log" "  akmods exited non-zero for ${_tk} -- checking the module itself"
+                # outcome, not exit code: the module file for that kernel
+                if compgen -G "${target}/lib/modules/${_tk}/extra/nvidia/nvidia.ko*" >/dev/null; then
+                    _nv_built=$((_nv_built + 1))
+                    k_log_to "$log" "  nvidia.ko present for ${_tk}"
+                else
+                    k_log_to "$log" "WARNING: no nvidia.ko for ${_tk} after the install-time build -- akmods.service will build it on first boot, late (see 3c)"
+                fi
+            done < <(chroot "${target}" rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core 2>/dev/null | grep -v 'not installed')
+            k_log_to "$log" "  install-time nvidia.ko: ${_nv_built} of ${_nv_want} target kernel(s)"
+
             # 4. Blacklist nouveau so it doesn't grab the GPU on first boot
             #    before akmods has built nvidia.ko. akmods runs early in the
             #    boot sequence (akmods.service, multi-user.target.wants) and
