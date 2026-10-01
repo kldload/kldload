@@ -3409,8 +3409,7 @@ ALPEOF
     # installer's profiles.sh tries to symlink needs to live here first
     # (otherwise the `[[ -f ... ]] && cp` in profiles.sh silently skips).
     for _svc in kldload-firstboot.service kldload-autodeploy.service kldload-webui.service \
-        kldload-srv-snapshot.service kldload-srv-snapshot.timer \
-        kldload-snapshot.service kldload-snapshot.timer \
+        kldload-snapshot-guard.service kldload-snapshot-guard.timer \
         ttyd-k9s.service zexplore-api.service \
         klab-prom-targets.service klab-prom-targets.timer \
         kldload-netboot.service kldload-netboot-live.service; do

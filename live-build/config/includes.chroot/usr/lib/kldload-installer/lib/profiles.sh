@@ -1110,8 +1110,17 @@ k_install_system_files() {
         #     is too old (missing features), so build-iso.sh installs sanoid from
         #     GitHub into /usr/local/sbin/ on the live ISO. We copy those binaries
         #     to the target and ship defaults.conf in /etc/sanoid/.
-        if [[ -f /etc/sanoid/sanoid.conf ]]; then
-            mkdir -p "${target}/etc/sanoid"
+        # sanoid.conf is GENERATED from kldload-snapshot-policy's class table
+        # (one owner; see its banner for the 2026-09-30 onyx pool at 95%), so
+        # the target's file names the target's pool. The shipped static file is
+        # only the fallback when the tool is missing from the live ISO.
+        mkdir -p "${target}/etc/sanoid"
+        if [[ -x /usr/local/sbin/kldload-snapshot-policy ]] &&
+            SANOID_CONF="${target}/etc/sanoid/sanoid.conf" \
+                /usr/local/sbin/kldload-snapshot-policy conf --pool rpool >/dev/null; then
+            k_log "sanoid.conf written by kldload-snapshot-policy ($(grep -c '^\[' "${target}/etc/sanoid/sanoid.conf") sections)"
+        elif [[ -f /etc/sanoid/sanoid.conf ]]; then
+            k_log "WARNING: kldload-snapshot-policy conf failed — copying the static sanoid.conf"
             cp /etc/sanoid/sanoid.conf "${target}/etc/sanoid/sanoid.conf"
         fi
         # Sanoid binaries — Debian/Ubuntu install via apt; RPM targets need live copies
@@ -1203,9 +1212,11 @@ k_install_system_files() {
 
         # ── Snapshot management scripts ────────────────────────────────────────────
         mkdir -p "${target}/usr/local/sbin"
-        for f in /usr/local/sbin/snapshot-*.sh; do
+        for f in /usr/local/sbin/snapshot-*.sh /usr/local/sbin/kldload-snapshot-policy; do
             [[ -f "$f" ]] && cp "$f" "${target}/usr/local/sbin/" && chmod +x "${target}/usr/local/sbin/$(basename "$f")"
         done
+        [[ -x "${target}/usr/local/sbin/kldload-snapshot-policy" ]] ||
+            k_log "WARNING: kldload-snapshot-policy not on the target — first boot cannot set the snapshot policy"
 
         # ── Systemd units ──────────────────────────────────────────────────────────
         # Explicit list so adding a unit is a conscious decision — and the one
@@ -1226,7 +1237,7 @@ k_install_system_files() {
         # klab-hubble-relay.service is listed so the klab block further down
         # finds it the day it ships; as of 2026-09-23 no such unit is in the
         # tree, and that block says so rather than skipping in silence.
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-autodeploy.service kldload-firstboot-show.service kldload-firstboot-kiosk.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer klab-hubble-relay.service kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer kldload-io-scheduler.service; do
+        for f in kldload-snapshot-guard.service kldload-snapshot-guard.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-autodeploy.service kldload-firstboot-show.service kldload-firstboot-kiosk.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer klab-prom-targets.service klab-prom-targets.timer klab-hubble-relay.service kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer kldload-io-scheduler.service; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -1450,10 +1461,12 @@ k_install_system_files() {
         # "systemctl enable" because systemd is not running inside the chroot.
         # Creating the symlinks manually achieves the same effect.
         mkdir -p "${target}/etc/systemd/system/timers.target.wants"
-        ln -sf "/usr/lib/systemd/system/kldload-srv-snapshot.timer" \
-            "${target}/etc/systemd/system/timers.target.wants/kldload-srv-snapshot.timer" ||
-            k_log "WARNING: could not enable kldload-srv-snapshot.timer on the target — it will not start at boot"
-        # Sanoid scheduled snapshots (daily/weekly/monthly/yearly)
+        # The snapshot space guard: kldload-snapshot-policy(8). sanoid below
+        # is the only scheduler; the guard keeps it from filling a small disk.
+        ln -sf "/usr/lib/systemd/system/kldload-snapshot-guard.timer" \
+            "${target}/etc/systemd/system/timers.target.wants/kldload-snapshot-guard.timer" ||
+            k_log "WARNING: could not enable kldload-snapshot-guard.timer on the target — nothing stops snapshots filling the pool"
+        # sanoid: every scheduled snapshot, policy written by kldload-snapshot-policy
         ln -sf "/lib/systemd/system/sanoid.timer" \
             "${target}/etc/systemd/system/timers.target.wants/sanoid.timer" ||
             k_log "WARNING: could not enable sanoid.timer on the target — it will not start at boot"
@@ -4030,70 +4043,11 @@ REPL
     fi
     # ── back to the KVM host specifics ───────────────────────────────────────
     if k_kvm_wanted; then
-        # Hourly VM snapshot timer
-        mkdir -p "${target}/etc/systemd/system"
-        cat >"${target}/etc/systemd/system/kvm-snapshot.service" <<'SNAPSVC'
-[Unit]
-Description=ZFS snapshot all VM datasets
-[Service]
-Type=oneshot
-# The logic lives in a script, not here. systemd expands ${VAR} in an
-# Exec line itself, so the previous one-liner's ${ds} and ${TS} reached bash
-# already emptied and it ran `zfs snapshot @auto-` every hour, exiting 0.
-ExecStart=/usr/local/sbin/kldload-vm-snapshot --root rpool/vms --keep 48
-SNAPSVC
-        cat >"${target}/etc/systemd/system/kvm-snapshot.timer" <<'SNAPTMR'
-[Unit]
-Description=Hourly ZFS snapshots for VM datasets
-[Timer]
-OnCalendar=hourly
-Persistent=true
-[Install]
-WantedBy=timers.target
-SNAPTMR
-        ln -sf /etc/systemd/system/kvm-snapshot.timer \
-            "${target}/etc/systemd/system/timers.target.wants/kvm-snapshot.timer" 2>/dev/null ||
-            k_log "WARNING: could not enable kvm-snapshot.timer on the target — VM snapshots will not be taken"
-
-        # Add VM datasets to sanoid for snapshot management
-        if [[ -f "${target}/etc/sanoid/sanoid.conf" ]]; then
-            cat >>"${target}/etc/sanoid/sanoid.conf" <<'KVMSANOID'
-
-# KVM VM datasets.
-#
-# DELIBERATELY THIN, and thinner than the policy for /home or rpool/ROOT,
-# because a kldload guest is cattle. It was cloned from a golden in about two
-# tenths of a second and it can be replaced the same way; nothing here holds
-# state worth 69 retained snapshots per dataset.
-#
-# The old policy was hourly=48, daily=14, weekly=4, monthly=3 — 69 per dataset,
-# applied recursively across every VM dataset. On a lab host that is ~31
-# datasets, so roughly 2,100 retained snapshots and 744 creations a day, of
-# golden images that never change and clones that are disposable by design.
-#
-# It also duplicated work. kvm-snapshot.timer (installed directly above) already
-# snapshots this exact tree with an `auto-` prefix and prunes to 48, so VM
-# datasets had TWO independent snapshot systems competing over them. This keeps
-# sanoid's coverage as a thin safety net and leaves kvm-snapshot as the owner.
-#
-# What still protects a VM: kvm-snapshot's 48 `auto-` snapshots, the named
-# `@golden` snapshots klab creates (which sanoid never touches — it only prunes
-# its own autosnap_ prefix), and the snapshot kvm-clone takes at clone time.
-[rpool/vms]
-use_template = kvm
-recursive = yes
-
-[template_kvm]
-frequently = 0
-hourly     = 6
-daily      = 3
-weekly     = 1
-monthly    = 0
-yearly     = 0
-autosnap   = yes
-autoprune  = yes
-KVMSANOID
-        fi
+        # VM snapshots: sanoid's [rpool/vms] class in kldload-snapshot-policy
+        # (hourly 12, daily 3). The kvm-snapshot timer (hourly, keep 48) and
+        # a second sanoid section appended here used to snapshot the same tree
+        # twice; first boot's `kldload-snapshot-policy apply` turns off a
+        # kvm-snapshot timer left by an older install.
 
         # Configure Podman to use ZFS storage driver
         mkdir -p "${target}/etc/containers"

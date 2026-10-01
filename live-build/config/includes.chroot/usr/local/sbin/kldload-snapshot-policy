@@ -1,0 +1,445 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-snapshot-policy — the one owner of scheduled ZFS snapshots on a
+# kldload machine: what is snapshotted, how often, how long it is kept, and
+# what is never snapshotted at all.
+#
+# What it does, by verb:
+#   apply   1. writes /etc/sanoid/sanoid.conf, whole, from the CLASSES table
+#              below (sanoid takes and prunes every scheduled snapshot);
+#           2. creates the never-snapshotted datasets for regenerable data
+#              (libvirt images, netboot staging) where they are still plain
+#              directories on the root, copying their contents over first;
+#           3. disables the legacy timers that also took scheduled snapshots
+#              (kldload-snapshot, kldload-srv-snapshot, kvm-snapshot);
+#           4. enables sanoid.timer and kldload-snapshot-guard.timer, and
+#              checks both are enabled.
+#           Safe to run again: it converges, it never duplicates.
+#   guard   if the pool is at or above GUARD_HIGH % full, destroys the oldest
+#           SCHEDULED snapshots (sanoid's autosnap_*, the legacy auto-*) on
+#           the datasets this policy manages until it is at or below
+#           GUARD_LOW %, logging each one. Never touches anything else.
+#   conf    writes only the sanoid.conf, to SANOID_CONF; touches no pool or
+#           unit. The installer runs it from the live ISO for the target.
+#   status  the policy, the timers, and per managed dataset its snapshot
+#           count and the space its snapshots hold.
+#
+# Why: on 2026-09-30 onyx's 1.8 TB pool was 95% full, and 851 GB of it was
+# snapshots. Two schedulers covered the same datasets (sanoid's daily /
+# weekly / monthly, and kldload-snapshot's hourly @auto- on the root, keep
+# 48), /srv had two as well, VMs had kvm-snapshot beside sanoid, retention
+# was counted in snapshots and never in space, and regenerable data that is
+# rewritten in bulk (netboot staging, 20 GB per build; libvirt images) sat on
+# the snapshotted root, so every snapshot pinned another copy: 20-31 GB per
+# 3-hour snapshot. The policy had been patched in five places over time, and
+# each patch fixed its own corner. It is now one table in one tool, and the
+# installer, first boot and any existing machine all get it by `apply`.
+#
+# Usage:   kldload-snapshot-policy apply [--pool P] [--dry-run]
+#          kldload-snapshot-policy guard [--pool P] [--dry-run]
+#          kldload-snapshot-policy status [--pool P]
+#          kldload-snapshot-policy conf --pool P
+#          kldload-snapshot-policy -h | --help
+# Env:     GUARD_HIGH (default 80), GUARD_LOW (default 70): percent full.
+#          SANOID_CONF (default /etc/sanoid/sanoid.conf), for tests.
+#          POLICY_UNITS=0 makes apply leave systemd units alone, for tests.
+# Exit:    0 done; 1 a step failed (each is named on stderr); 2 usage.
+# Notes:   the pool defaults to the one the root filesystem is on. Datasets
+#          not in CLASSES (a backup replica under <pool>/backup, a received
+#          stream, anything an operator made) are not in sanoid.conf, so
+#          sanoid never snapshots or prunes them, and guard never touches
+#          them. Package-transaction snapshots (dnf-pre, apt, kpkg) and named
+#          ones (@golden, @install, pre-*) are not scheduled snapshots; their
+#          own tools manage them and guard leaves them alone.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kldload-snapshot-policy: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p}' "$0"; }
+
+# ─── The policy ──────────────────────────────────────────────────────────────
+# CLASSES: dataset (relative to the pool) | template | recursive.
+# A child listed here overrides its recursive parent (sanoid takes the most
+# specific section). "none" means never snapshotted: everything in those is
+# regenerable (container layers, kubelet and containerd state, VM installer
+# images, netboot staging, caches) and was what filled pools.
+CLASSES=(
+    "ROOT|bootenv|yes"
+    "home|data|yes"
+    "srv|data|yes"
+    "root|data|no"
+    "opt|data|no"
+    "usr/local|data|no"
+    "kldload|data|yes"
+    "var/spool|data|no"
+    "var/lib|data|yes"
+    "var/log|short|no"
+    "var/lib/etcd|short|no"
+    "var/lib/containers|none|yes"
+    "var/lib/docker|none|yes"
+    "var/lib/containerd|none|yes"
+    "var/lib/kubelet|none|yes"
+    "var/lib/libvirt/images|none|no"
+    "var/lib/kldload-netboot|none|yes"
+    "var/cache|none|yes"
+    "var/tmp|none|yes"
+    "tmp|none|yes"
+    "vms|vms|yes"
+)
+
+# TEMPLATES: name | hourly daily weekly monthly. Sized so a fresh install on
+# a small disk cannot fill it with snapshots in its first days: the root keeps
+# half a day of hourlies, a week of dailies, two weeklies; data a week of
+# dailies, a month of weeklies, one monthly; VMs (cattle, cloned from goldens
+# in a fraction of a second) half a day and three days.
+TEMPLATES=(
+    "bootenv|12 7 2 0"
+    "data|0 7 4 1"
+    "short|0 3 0 0"
+    "vms|12 3 0 0"
+)
+
+# Regenerable data that lives under a "none" dataset: if the path is still a
+# plain directory on the root (machines installed before this policy), apply
+# turns it into its own dataset so the root's snapshots stop pinning it.
+REGENERABLE_DIRS=(
+    "var/lib/libvirt/images"
+    "var/lib/kldload-netboot"
+)
+
+LEGACY_TIMERS=(kldload-snapshot.timer kldload-srv-snapshot.timer kvm-snapshot.timer)
+GUARD_HIGH="${GUARD_HIGH:-80}"
+GUARD_LOW="${GUARD_LOW:-70}"
+SANOID_CONF="${SANOID_CONF:-/etc/sanoid/sanoid.conf}"
+
+log() { printf 'kldload-snapshot-policy: %s\n' "$*" >&2; }
+
+# root_pool — the pool the root filesystem is on, on stdout; empty if root is
+# not on ZFS.
+root_pool() {
+    local src
+    src="$(findmnt -no SOURCE / 2>/dev/null)" || return 0
+    [[ "$(findmnt -no FSTYPE / 2>/dev/null)" == zfs ]] || return 0
+    printf '%s\n' "${src%%/*}"
+}
+
+# write_conf POOL FILE — the whole sanoid.conf for POOL, to FILE.
+write_conf() {
+    local pool="$1" out="$2" c ds tpl rec t name vals h d w m have=""
+    # Only datasets that exist: sanoid errors on a section naming a missing
+    # dataset, every 15 minutes. Datasets made later (rpool/vms by the kvm
+    # component, etcd by k8s) are added by the next apply, which first boot and
+    # the kvm component both run. No pool to look at (a test): every class.
+    if zpool list -H -o name "$pool" >/dev/null 2>&1; then
+        have="$(zfs list -H -o name -t filesystem,volume -r "$pool")"
+    fi
+    {
+        echo "# /etc/sanoid/sanoid.conf — WRITTEN BY kldload-snapshot-policy apply."
+        echo "# Do not edit: the next apply rewrites it. Change the CLASSES and"
+        echo "# TEMPLATES in /usr/local/sbin/kldload-snapshot-policy instead."
+        echo "# Read by sanoid.timer (every 15 min). Datasets not listed are never"
+        echo "# snapshotted or pruned by sanoid: backup replicas, received streams."
+        for c in "${CLASSES[@]}"; do
+            IFS='|' read -r ds tpl rec <<<"$c"
+            if [[ -n "$have" ]] && ! grep -qxF "${pool}/${ds}" <<<"$have"; then
+                continue
+            fi
+            printf '\n[%s/%s]\n\tuse_template = %s\n\trecursive = %s\n' "$pool" "$ds" "$tpl" "$rec"
+        done
+        for t in "${TEMPLATES[@]}"; do
+            IFS='|' read -r name vals <<<"$t"
+            read -r h d w m <<<"$vals"
+            printf '\n[template_%s]\n\tfrequently = 0\n\thourly = %s\n\tdaily = %s\n\tweekly = %s\n\tmonthly = %s\n\tyearly = 0\n\tautosnap = yes\n\tautoprune = yes\n' \
+                "$name" "$h" "$d" "$w" "$m"
+        done
+        printf '\n[template_none]\n\tfrequently = 0\n\thourly = 0\n\tdaily = 0\n\tweekly = 0\n\tmonthly = 0\n\tyearly = 0\n\tautosnap = no\n\tautoprune = no\n'
+    } >"$out"
+}
+
+# managed_datasets POOL — every existing dataset whose class takes scheduled
+# snapshots, one per line: what guard and status work over. A "none" class
+# or an unlisted dataset is never in it.
+managed_datasets() {
+    local pool="$1" c ds tpl rec best bestlen name
+    while IFS= read -r name; do
+        best="" bestlen=-1
+        for c in "${CLASSES[@]}"; do
+            IFS='|' read -r ds tpl rec <<<"$c"
+            local full="${pool}/${ds}"
+            if [[ "$name" == "$full" || ("$rec" == yes && "$name" == "$full"/*) ]]; then
+                if ((${#full} > bestlen)); then
+                    best="$tpl" bestlen=${#full}
+                fi
+            fi
+        done
+        [[ -n "$best" && "$best" != none ]] && printf '%s\n' "$name"
+    done < <(zfs list -H -o name -t filesystem,volume -r "$pool")
+    return 0
+}
+
+pool_cap() { zpool list -H -p -o capacity "$1"; }
+
+# path_in_use DIR — 0 if any process has a file open under DIR. /proc is read
+# directly: lsof and fuser are not on every profile, and fuser -m would match
+# the whole root filesystem.
+path_in_use() {
+    local dir="$1" fd t
+    for fd in /proc/[0-9]*/fd/*; do
+        t="$(readlink "$fd" 2>/dev/null)" || continue # the process exited mid-scan
+        [[ "$t" == "$dir"/* ]] && return 0
+    done
+    return 1
+}
+
+# ─── apply ──────────────────────────────────────────────────────────────────
+# make_regenerable POOL DIR — DIR (relative to /) becomes the dataset
+# POOL/DIR with its own mountpoint, its contents copied across first. A
+# directory that is already a dataset, or absent with no parent dataset to
+# hold it, is left alone. The old contents are kept beside it as
+# DIR.pre-snapshot-policy until the copy is verified; then removed.
+make_regenerable() {
+    # mnt is the mountpoint PROPERTY; path is where it is on this machine,
+    # which differs under an altroot (the installer's import of the target)
+    local pool="$1" mnt="/$2" ds="$1/$2" tmp alt path
+    alt="$(zpool get -H -o value altroot "$pool")"
+    [[ "$alt" == - ]] && alt=""
+    path="${alt}${mnt}"
+    if zfs list -H -o name "$ds" >/dev/null 2>&1; then
+        return 0
+    fi
+    local parent="${ds%/*}"
+    # every missing parent becomes a non-mounting container, so the path is
+    # mounted where it was and nothing above it moves
+    local missing=() p="$parent"
+    while ! zfs list -H -o name "$p" >/dev/null 2>&1; do
+        missing=("$p" "${missing[@]}")
+        p="${p%/*}"
+    done
+    if ((DRY)); then
+        log "would create ${ds} (mountpoint ${mnt})${missing:+ and container(s) ${missing[*]}}"
+        return 0
+    fi
+    for p in "${missing[@]}"; do
+        zfs create -o canmount=off "$p"
+    done
+    if [[ -d "$path" ]] && [[ -n "$(ls -A "$path" 2>/dev/null)" ]]; then
+        # SAFETY: a running VM holds its disk open here. Moving the directory
+        # and removing the old copy would leave it writing to a deleted inode:
+        # its data gone at shutdown. Anything open under the path: not now.
+        if path_in_use "$path"; then
+            log "${path}: files are open (a running VM, a netboot server); left on the root — run apply again when they are stopped"
+            return 0
+        fi
+        # The copy needs the space before the old one is freed: a full pool is
+        # exactly when this runs on an old machine.
+        local need avail
+        need="$(du -sxb "$path" | cut -f1)"
+        avail="$(zfs get -H -p -o value available "$pool")"
+        if ((need * 10 > avail * 9)); then
+            log "${path}: $((need >> 30)) GiB to move, $((avail >> 30)) GiB free on ${pool}; left on the root — free space and run apply again"
+            return 0
+        fi
+        zfs create -o mountpoint="${mnt}.snapshot-policy-new" "$ds"
+        tmp="${path}.snapshot-policy-new"
+        cp -a --reflink=auto "$path/." "$tmp/"
+        # outcome, not exit code: the same file count on both sides
+        local a b
+        a="$(find "$path" -xdev | wc -l)"
+        b="$(find "$tmp" -xdev | wc -l)"
+        if [[ "$a" != "$b" ]]; then
+            zfs destroy "$ds"
+            log "${path}: copy incomplete (${a} vs ${b} entries); left as it was"
+            return 1
+        fi
+        mv "$path" "${path}.pre-snapshot-policy"
+        # outcome: the dataset is mounted at the old path; if not, the old
+        # directory goes back where it was before anything is removed
+        if ! zfs set mountpoint="$mnt" "$ds" ||
+            [[ "$(findmnt -no SOURCE "$path" 2>/dev/null)" != "$ds" ]]; then
+            zfs destroy "$ds" || log "WARN: ${ds} left behind; destroy it by hand"
+            mv "${path}.pre-snapshot-policy" "$path"
+            log "${path}: ${ds} did not mount there; the directory is back as it was"
+            return 1
+        fi
+        rm -rf "${path}.pre-snapshot-policy"
+        # the copy's temporary mountpoint stays behind as an empty directory
+        rmdir "$tmp" || log "WARN: ${tmp} is not empty; left for a look"
+        log "${path} is now dataset ${ds} (${b} entries moved; never snapshotted)"
+    else
+        zfs create -o mountpoint="$mnt" "$ds"
+        log "created ${ds} at ${path} (never snapshotted)"
+    fi
+}
+
+cmd_apply() {
+    local pool="$1" rc=0 t tmp
+    # datasets first, so the conf below sees the ones just made
+    for t in "${REGENERABLE_DIRS[@]}"; do
+        make_regenerable "$pool" "$t" || rc=1
+    done
+    tmp="$(mktemp)"
+    write_conf "$pool" "$tmp"
+    if ((DRY)); then
+        log "would write ${SANOID_CONF}:"
+        cat "$tmp"
+    else
+        install -d -m 0755 "$(dirname "$SANOID_CONF")"
+        install -m 0644 "$tmp" "${SANOID_CONF}.new"
+        mv -f "${SANOID_CONF}.new" "$SANOID_CONF"
+        log "wrote ${SANOID_CONF} ($(grep -c '^\[' "$SANOID_CONF") sections)"
+    fi
+    rm -f "$tmp"
+    [[ "${POLICY_UNITS:-1}" == 0 ]] && return "$rc"
+    for t in "${LEGACY_TIMERS[@]}"; do
+        if ((DRY)); then
+            log "would disable ${t}"
+        elif systemctl cat "$t" >/dev/null 2>&1; then
+            systemctl disable --now "$t" >/dev/null 2>&1 || true # checked just below
+            if systemctl is-enabled "$t" >/dev/null 2>&1; then
+                log "could not disable ${t}: it still snapshots beside sanoid"
+                rc=1
+            else
+                log "${t}: disabled (sanoid owns scheduled snapshots now)"
+            fi
+        fi
+    done
+    for t in sanoid.timer kldload-snapshot-guard.timer; do
+        ((DRY)) && {
+            log "would enable ${t}"
+            continue
+        }
+        systemctl enable --now "$t" >/dev/null 2>&1 || true # checked just below
+        if systemctl is-enabled "$t" >/dev/null 2>&1; then
+            log "${t}: enabled"
+        else
+            log "${t} is NOT enabled: scheduled snapshots will not be taken or pruned"
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# ─── guard ──────────────────────────────────────────────────────────────────
+cmd_guard() {
+    local pool="$1" cap n=0 snap
+    cap="$(pool_cap "$pool")"
+    if ((cap < GUARD_HIGH)); then
+        return 0
+    fi
+    log "${pool} is ${cap}% full (guard at ${GUARD_HIGH}%): removing the oldest scheduled snapshots to ${GUARD_LOW}%"
+    logger -t kldload-snapshot-policy -p user.warning "${pool} ${cap}% full; pruning scheduled snapshots" 2>/dev/null ||
+        true # no syslog in a container; stderr above says it
+    local managed
+    managed="$(managed_datasets "$pool")"
+    # Every scheduled snapshot on a managed dataset, oldest first, except the
+    # newest of each dataset: a pool filled by real data must not cost every
+    # rollback point it has. Freed space shows only after the txg syncs, so
+    # capacity is read after `zpool sync`, or one destroy reads as none.
+    while IFS=$'\t' read -r snap _; do
+        [[ -n "$snap" ]] || continue
+        if ((DRY)); then
+            log "would destroy ${snap}"
+            n=$((n + 1))
+            continue
+        fi
+        if zfs destroy "$snap" 2>/dev/null; then
+            log "destroyed ${snap}"
+            n=$((n + 1))
+        else
+            log "could not destroy ${snap} (held, or cloned); skipped"
+        fi
+        zpool sync "$pool"
+        cap="$(pool_cap "$pool")"
+        ((cap > GUARD_LOW)) || break
+    done < <(zfs list -H -p -t snapshot -o name,creation -s creation -r "$pool" |
+        awk -F'\t' -v managed="$managed" '
+            BEGIN { n = split(managed, m, "\n"); for (i = 1; i <= n; i++) ok[m[i]] = 1 }
+            $1 ~ /@(autosnap_|auto-)/ {
+                ds = $1; sub(/@.*/, "", ds)
+                if (!(ds in ok)) next
+                line[++k] = $0; dsof[k] = ds; last[ds] = k
+            }
+            END { for (i = 1; i <= k; i++) if (last[dsof[i]] != i) print line[i] }')
+    log "removed ${n} scheduled snapshot(s); ${pool} is now $(pool_cap "$pool")% full"
+    (($(pool_cap "$pool") <= GUARD_LOW)) || {
+        log "still above ${GUARD_LOW}%: what fills ${pool} is not scheduled snapshots"
+        return 1
+    }
+}
+
+# ─── status ─────────────────────────────────────────────────────────────────
+cmd_status() {
+    local pool="$1" ds t
+    printf 'pool %s: %s%% full (guard %s%% -> %s%%)\n' "$pool" "$(pool_cap "$pool")" "$GUARD_HIGH" "$GUARD_LOW"
+    for t in sanoid.timer kldload-snapshot-guard.timer "${LEGACY_TIMERS[@]}"; do
+        local st
+        st="$(systemctl is-enabled "$t" 2>/dev/null)" || true # not-found / disabled exit non-zero
+        printf '  %-30s %s\n' "$t" "${st:-absent}"
+    done
+    printf '%-44s %6s %10s\n' "managed dataset" "snaps" "held"
+    while IFS= read -r ds; do
+        printf '%-44s %6s %10s\n' "$ds" \
+            "$(zfs list -H -t snapshot -o name -d 1 "$ds" | wc -l)" \
+            "$(zfs get -H -o value usedbysnapshots "$ds")"
+    done < <(managed_datasets "$pool")
+}
+
+# ─── main ───────────────────────────────────────────────────────────────────
+VERB="" POOL="" DRY=0
+while (($#)); do
+    case "$1" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    apply | guard | status | conf) VERB="$1" ;;
+    --pool)
+        [[ $# -ge 2 ]] || {
+            usage >&2
+            exit 2
+        }
+        POOL="$2"
+        shift
+        ;;
+    --dry-run) DRY=1 ;;
+    *)
+        echo "kldload-snapshot-policy: unknown argument: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+    shift
+done
+[[ -n "$VERB" ]] || {
+    usage >&2
+    exit 2
+}
+if [[ "$VERB" == conf ]]; then
+    [[ -n "$POOL" ]] || {
+        echo "kldload-snapshot-policy: conf needs --pool" >&2
+        exit 2
+    }
+    install -d -m 0755 "$(dirname "$SANOID_CONF")"
+    write_conf "$POOL" "${SANOID_CONF}.new"
+    chmod 0644 "${SANOID_CONF}.new"
+    mv -f "${SANOID_CONF}.new" "$SANOID_CONF"
+    exit 0
+fi
+[[ $EUID -eq 0 || "$VERB" == status || $DRY -eq 1 ]] || {
+    echo "kldload-snapshot-policy: ${VERB} needs root" >&2
+    exit 1
+}
+[[ -n "$POOL" ]] || POOL="$(root_pool)"
+if [[ -z "$POOL" ]]; then
+    log "the root filesystem is not on ZFS: nothing to do"
+    exit 0
+fi
+zpool list -H -o name "$POOL" >/dev/null 2>&1 || {
+    log "no pool named ${POOL}"
+    exit 1
+}
+case "$VERB" in
+apply) cmd_apply "$POOL" || exit 1 ;; # each failed step is already named
+guard) cmd_guard "$POOL" || exit 1 ;; # unit fails: the pool is full of data
+status) cmd_status "$POOL" ;;
+esac

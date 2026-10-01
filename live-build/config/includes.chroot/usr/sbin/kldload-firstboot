@@ -456,9 +456,6 @@ DNS
     # together when the feature is real.
     log "UNIMPLEMENTED: cluster autobootstrap / WireGuard reflector — kldload-autobootstrap is not shipped"
 
-    # 11. Snapshot timer (inherited from base)
-    systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
-
     ok "=== MASTER ready ==="
 }
 # libvirt_enable_now — bring up libvirt the way THIS host expects it.
@@ -730,8 +727,6 @@ VNETDEF
     systemctl enable --now containerd 2>/dev/null ||
         log "WARNING: containerd not enabled — containers will not run after a reboot"
 
-    systemctl enable --now kldload-snapshot.timer 2>/dev/null ||
-        log "WARNING: kldload-snapshot.timer not enabled — nothing will prune or take snapshots"
     ok "=== KVM ready (bridge: br0, Firecracker microVM runtime installed) ==="
 }
 
@@ -759,8 +754,6 @@ TGT
     systemctl enable --now tgt
     ok "iSCSI target configured"
 
-    systemctl enable --now kldload-snapshot.timer 2>/dev/null ||
-        log "WARNING: kldload-snapshot.timer not enabled — nothing will prune or take snapshots"
     ok "=== STORAGE ready ==="
 }
 
@@ -859,8 +852,6 @@ NGINX
     systemctl enable --now nginx
     ok "nginx VDI proxy active"
 
-    systemctl enable --now kldload-snapshot.timer 2>/dev/null ||
-        log "WARNING: kldload-snapshot.timer not enabled — nothing will prune or take snapshots"
     ok "=== VDI ready ==="
 }
 
@@ -2031,8 +2022,23 @@ main() {
         fi
     fi
 
-    # Always enable snapshot timer
-    systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
+    # ── Snapshot policy ───────────────────────────────────────────────────────
+    # One owner for scheduled snapshots: kldload-snapshot-policy writes the
+    # whole sanoid.conf, moves regenerable data off the snapshotted root, turns
+    # off the older timers and enables sanoid + the space guard. Before it, three
+    # schedulers covered the same datasets and onyx's pool was 95% full with
+    # 851 GB held by snapshots (2026-09-30). Every profile gets the same call;
+    # the installer already ran it, this is the healing pass.
+    if ! command -v sanoid >/dev/null 2>&1; then
+        # core ships no sanoid and no kldload tools: no scheduled snapshots,
+        # by design (smoke-core asserts sanoid.timer is NOT active)
+        log "no sanoid on this profile: no scheduled snapshots (package snapshots still bracket every dnf/apt run)"
+    elif [[ -x /usr/local/sbin/kldload-snapshot-policy ]]; then
+        /usr/local/sbin/kldload-snapshot-policy apply >>"$LOG" 2>&1 ||
+            log "WARNING: kldload-snapshot-policy apply failed (see above) — snapshots may be untaken, unpruned or unguarded"
+    else
+        log "WARNING: kldload-snapshot-policy missing — no scheduled snapshots and no space guard on this machine"
+    fi
 
     # ── ZFS dbgmsg drain ──────────────────────────────────────────────────────
     # /proc/spl/kstat/zfs/dbgmsg is 0600 root:root and is a kstat dump rather

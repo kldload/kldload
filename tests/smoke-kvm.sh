@@ -406,8 +406,19 @@ if zfs list rpool/vms >/dev/null 2>&1; then
     else
         _fail "VM snapshots" "kldload-vm-snapshot could not take a snapshot"
     fi
-    # The timer is what makes it hourly, so it still has to be enabled.
-    test_service_enabled "kvm-snapshot.timer" "kvm-snapshot.timer"
+    # Scheduled VM snapshots are sanoid's, from kldload-snapshot-policy: the
+    # VM tree must be a class in sanoid.conf, and the old kvm-snapshot timer
+    # (a second scheduler on the same tree) must be off.
+    if grep -qx '\[rpool/vms\]' /etc/sanoid/sanoid.conf 2>/dev/null; then
+        _pass "VM snapshots: rpool/vms is a sanoid class"
+    else
+        _fail "VM snapshots" "rpool/vms is not in /etc/sanoid/sanoid.conf — VMs are never snapshotted on schedule"
+    fi
+    if systemctl is-enabled kvm-snapshot.timer >/dev/null 2>&1; then
+        _fail "VM snapshots" "kvm-snapshot.timer is enabled — two schedulers on rpool/vms"
+    else
+        _pass "VM snapshots: no second scheduler (kvm-snapshot.timer off)"
+    fi
 else
     _pass "No rpool/vms on this machine (expected — not a VM host)"
 fi
