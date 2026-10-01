@@ -97,6 +97,21 @@ _section "Automatic Snapshots"
 test_cmd "sanoid installed" "sanoid"
 test_file "sanoid config" "/etc/sanoid/sanoid.conf"
 test_service_enabled "sanoid.timer enabled" "sanoid.timer"
+# One scheduler: kldload-snapshot-policy owns sanoid.conf, the space guard is
+# on, and none of the older timers that snapshotted the same datasets again.
+test_service_enabled "snapshot space guard enabled" "kldload-snapshot-guard.timer"
+if grep -q 'WRITTEN BY kldload-snapshot-policy' /etc/sanoid/sanoid.conf 2>/dev/null; then
+    _pass "sanoid.conf written by kldload-snapshot-policy"
+else
+    _fail "sanoid.conf" "not written by kldload-snapshot-policy — the policy was never applied"
+fi
+for _lt in kldload-snapshot.timer kldload-srv-snapshot.timer kvm-snapshot.timer; do
+    if systemctl is-enabled "$_lt" >/dev/null 2>&1; then
+        _fail "one snapshot scheduler" "$_lt is enabled beside sanoid"
+    else
+        _pass "one snapshot scheduler: $_lt off"
+    fi
+done
 
 if systemctl is-active sanoid.timer >/dev/null 2>&1; then
     _pass "sanoid.timer running"

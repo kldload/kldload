@@ -210,59 +210,21 @@ STORAGE
     fi
 }
 
-# _kvm_snapshots — hourly VM snapshots, the same pair profiles.sh drops in.
+# _kvm_snapshots — VM snapshots come from the machine's one snapshot policy.
 #
-# WHY: rollback of a guest is the reason the VMs live on ZFS at all. Without the
-# timer nothing has ever snapshotted them, and that is only discovered the day
-# someone needs a snapshot (the "why is this empty" shape, core rules 2c).
+# WHY: rollback of a guest is the reason the VMs live on ZFS at all. The VM
+# tree is a class in kldload-snapshot-policy ([rpool/vms], hourly 12, daily 3,
+# taken and pruned by sanoid). This used to write its own hourly kvm-snapshot
+# timer (keep 48) AND append a second sanoid section, so the same datasets had
+# two schedulers (onyx 2026-09-30: 851 GB of snapshots). `apply` is idempotent:
+# it rewrites sanoid.conf whole and turns the old timer off if it is there.
 _kvm_snapshots() {
-    [[ -x /usr/local/sbin/kldload-vm-snapshot ]] || {
-        echo "note: kldload-vm-snapshot not installed — no VM snapshot timer"
+    [[ -x /usr/local/sbin/kldload-snapshot-policy ]] || {
+        echo "WARNING: kldload-snapshot-policy not installed — VMs will not be snapshotted" >&2
         return 0
     }
-    local root="${KLDLOAD_VM_ROOT:-rpool/vms}"
-    cat >/etc/systemd/system/kvm-snapshot.service <<SNAPSVC
-[Unit]
-Description=ZFS snapshot all VM datasets
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/kldload-vm-snapshot --root ${root} --keep 48
-SNAPSVC
-    cat >/etc/systemd/system/kvm-snapshot.timer <<'SNAPTMR'
-[Unit]
-Description=Hourly ZFS snapshots for VM datasets
-[Timer]
-OnCalendar=hourly
-Persistent=true
-[Install]
-WantedBy=timers.target
-SNAPTMR
-    systemctl daemon-reload
-    systemctl enable --now kvm-snapshot.timer >/dev/null 2>&1 ||
-        echo "WARNING: kvm-snapshot.timer did not enable — VM snapshots will not be taken" >&2
-    # Outcome, not exit code (core rules 2c: installed is not enabled).
-    systemctl is-enabled kvm-snapshot.timer >/dev/null 2>&1 &&
-        echo "snapshots: kvm-snapshot.timer enabled (hourly, keep 48)"
-    # sanoid keeps its own policy for the VM tree; append only once.
-    if [[ -f /etc/sanoid/sanoid.conf ]] && ! grep -q "^\[${root//\//\\/}\]" /etc/sanoid/sanoid.conf; then
-        cat >>/etc/sanoid/sanoid.conf <<SANOID
-
-[${root}]
-use_template = kvm
-recursive = yes
-
-[template_kvm]
-frequently = 0
-hourly     = 6
-daily      = 3
-weekly     = 1
-monthly    = 0
-yearly     = 0
-autosnap   = yes
-autoprune  = yes
-SANOID
-        echo "snapshots: sanoid policy added for ${root}"
-    fi
+    /usr/local/sbin/kldload-snapshot-policy apply ||
+        echo "WARNING: kldload-snapshot-policy apply failed — see above; VM snapshots may not be taken" >&2
 }
 
 # _kvm_group — the operator must be in the libvirt group or every GUI verb

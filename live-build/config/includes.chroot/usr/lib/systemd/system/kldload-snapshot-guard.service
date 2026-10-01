@@ -1,0 +1,20 @@
+# kldload-snapshot-guard.service — keeps scheduled snapshots from filling the
+# pool. Run by kldload-snapshot-guard.timer; installed and enabled by
+# `kldload-snapshot-policy apply` (installer + first boot).
+#
+# If the root pool is 80% full or more, it destroys the oldest scheduled
+# snapshots (sanoid autosnap_*, the older auto-*) on the datasets the policy
+# manages until the pool is at 70%. Package, golden, install and manual
+# snapshots and backup replicas are never touched. Each destroy is logged.
+# Missing: retention still bounds snapshots by count, but nothing stops a
+# small disk from filling between prunes.
+[Unit]
+Description=kldload: prune scheduled ZFS snapshots when the pool is nearly full
+After=zfs-mount.service
+ConditionPathExists=/usr/local/sbin/kldload-snapshot-policy
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kldload-snapshot-policy guard
+Nice=10
+IOSchedulingClass=idle
