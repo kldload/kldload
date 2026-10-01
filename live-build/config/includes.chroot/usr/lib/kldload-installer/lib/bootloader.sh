@@ -543,6 +543,64 @@ k_zbm_find_efi() {
     echo "$zbm_tmp"
 }
 
+# k_register_fallback_entry DISK PART KLDLOAD_BOOTNUM — a second firmware boot
+# entry, "kldload-fallback", pointing at the distro's GRUB (through its shim),
+# ordered straight after the kldload entry.
+#
+# WHY: with Secure Boot off the kldload entry boots ZFSBootMenu directly, and
+# the firmware's removable-media path \EFI\BOOT\BOOTX64.EFI is ZFSBootMenu too,
+# and the entry cleanup above deletes every distro entry. So nothing reached
+# GRUB, and GRUB's direct/rescue entries (a staged kernel, no ZBM) could never
+# be used. Build 166 (2026-09-30) shipped a ZBM that was a 502 error page:
+# fiend fell to the network; a VM fell to its DVD. With this entry the
+# firmware skips a ZBM that will not load, GRUB tries ZBM, falls back to
+# "direct", and the machine boots. Proven on a VM with ZBM broken the same
+# way: BOOT_IMAGE=/EFI/BOOT/vmlinuz, root on rpool.
+#
+# Only when Secure Boot is off (with it on, "kldload" is already shim → GRUB)
+# and a kernel is staged on the ESP (otherwise GRUB has nothing to fall back
+# to). Returns 0 always: a missing fallback is logged, it is not a failed
+# install, because the primary path is intact.
+k_register_fallback_entry() {
+    local disk="$1" part="$2" first="$3" d loader="" num order
+    [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]] || return 0
+    local esp="${KLDLOAD_TARGET_MNT:-/target}/boot/efi"
+    if [[ ! -s "${esp}/EFI/BOOT/vmlinuz" ]]; then
+        k_log "No fallback firmware entry: no kernel staged on the ESP (encrypted root), ZBM is the only path"
+        return 0
+    fi
+    for d in fedora centos rocky redhat debian ubuntu; do
+        if [[ -f "${esp}/EFI/${d}/shimx64.efi" ]]; then
+            loader="\\EFI\\${d}\\shimx64.efi"
+            break
+        elif [[ -f "${esp}/EFI/${d}/grubx64.efi" ]]; then
+            loader="\\EFI\\${d}\\grubx64.efi"
+            break
+        fi
+    done
+    if [[ -z "$loader" ]]; then
+        k_log "WARNING: no distro GRUB on the ESP — no fallback firmware entry; ZBM is the only path"
+        return 0
+    fi
+    if ! efibootmgr -c -d "$disk" -p "$part" -L "kldload-fallback" -l "$loader" >&7 2>&1; then
+        k_log "WARNING: could not create the fallback firmware entry (${loader})"
+        return 0
+    fi
+    # swallow: an empty answer is handled below, and the entry was just created
+    num="$(efibootmgr 2>/dev/null | awk '/\* kldload-fallback([[:space:]]|$)/ {print substr($1, 5, 4); exit}' || true)"
+    if [[ -z "$num" || -z "$first" ]]; then
+        k_log "WARNING: fallback entry created but its number was not found; boot order left as it was"
+        return 0
+    fi
+    order="${first},${num}"
+    if efibootmgr -o "$order" >&7 2>&1; then
+        k_log "Fallback firmware entry Boot${num} → ${loader} (GRUB: ZBM, then direct kernel); boot order ${order}"
+    else
+        k_log "WARNING: could not put the fallback entry after kldload (${order})"
+    fi
+    return 0
+}
+
 k_finalize_zfs_pools() {
     local target="${1:?}"
     local log_fd="${2:?}"
@@ -906,7 +964,7 @@ EOFSTAB
     # encrypted dataset. Not staging it when it cannot be used keeps those two
     # changes from colliding.
     if [[ -n "${_kver:-}" ]] && [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
-        k_log "Secure Boot off — not staging kernel/initramfs on the ESP (nothing boots them, and the ESP is unencrypted)"
+        k_log "Secure Boot off — ZBM is the boot target; the kernel is staged below only as a fallback, and only for an unencrypted root"
 
         # Make the FALLBACK path agree with the decision we just made.
         #
@@ -933,6 +991,24 @@ EOFSTAB
             else
                 k_log "WARNING: could not place ZBM at the fallback path — the firmware entry still boots shim"
             fi
+        fi
+        # A SECOND boot path, when it is safe to have one. With the root
+        # unencrypted the initramfs holds no secret, so the SECURITY note
+        # above does not apply, and staging the kernel makes GRUB's "direct"
+        # and "rescue" entries real: they boot without ZBM. HISTORY: build 166
+        # (2026-09-30) shipped a ZBM that was a 502 error page; fiend's GRUB
+        # fell back to "direct", found no kernel on the ESP, and every entry
+        # said "cannot load image". With this, that machine boots.
+        if [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" != "1" ]]; then
+            mkdir -p "${zbm_fallback_dir}"
+            if cp "$_kpath" "${zbm_fallback_dir}/vmlinuz" && cp "$_ipath" "${zbm_fallback_dir}/initrd.img"; then
+                k_log "Kernel + initramfs staged on the ESP as the fallback boot path (unencrypted root; kver=${_kver})"
+            else
+                rm -f "${zbm_fallback_dir}/vmlinuz" "${zbm_fallback_dir}/initrd.img"
+                k_log "WARNING: could not stage the fallback kernel — ZBM is the only boot path"
+            fi
+        else
+            k_log "Encrypted root — no fallback kernel on the unencrypted ESP; ZBM is the only boot path"
         fi
     elif [[ -n "${_kver:-}" ]]; then
         mkdir -p "${zbm_fallback_dir}"
@@ -1393,6 +1469,24 @@ EOFSTAB
     # It LOOKED correct only because arc_max happens to equal the default
     # (half of RAM), which is exactly the coincidence that hid this.
     _direct_bootargs+=" zfs.zfs_txg_timeout=10 zfs.l2arc_noprefetch=0"
+    # The direct and rescue entries boot /EFI/BOOT/vmlinuz; they are written
+    # only when it is there. Until 2026-09-30 they were written always, and on
+    # a Secure-Boot-off install (nothing staged) they were two entries that
+    # could never boot, and "fallback=direct" fell through to one of them.
+    local _staged=0
+    [[ -s "${zbm_fallback_dir}/vmlinuz" && -s "${zbm_fallback_dir}/initrd.img" ]] && _staged=1
+    # With Secure Boot off these entries are only ever a RESCUE path (ZBM is
+    # the boot), and they must import the pool whatever host ID last stamped
+    # it: the first-boot session of a fresh install runs with ZBM's default
+    # host ID 0x00bab10c despite the spl_hostid pin on the ZBM command line,
+    # so the initramfs (the machine's real ID) refused the import -- "pool was
+    # previously in use from another system", emergency shell. Proven on a VM
+    # 2026-09-30: that exact state dropped to the shell without zfs_force=1
+    # and booted with it, nothing else changed. With Secure Boot on, "direct"
+    # is the everyday boot and keeps ZFS's multi-import protection, so no
+    # force there.
+    local _fb_force=""
+    [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]] && _fb_force=" zfs_force=1"
     local _grub_cfg=""
     # swallow: read with -d '' always exits 1 at EOF; the heredoc is fully in _grub_cfg
     read -r -d '' _grub_cfg <<GRUBCFG || true
@@ -1417,14 +1511,22 @@ EOFSTAB
 set timeout=5
 set timeout_style=menu
 set default=${_grub_default}
-set fallback=direct
+GRUBCFG
+    ((_staged)) && _grub_cfg+=$'\nset fallback=direct'
+    local _grub_zbm _grub_direct
+    # swallow: read with -d '' always exits 1 at EOF
+    read -r -d '' _grub_zbm <<GRUBCFG || true
 
 menuentry "kldload — ZFS Boot Menu (boot environments + snapshot rollback)" --id=zbm {
     chainloader /EFI/zbm/BOOTX64.EFI
 }
+GRUBCFG
+    _grub_cfg+=$'\n'"${_grub_zbm}"
+    # swallow: read with -d '' always exits 1 at EOF
+    read -r -d '' _grub_direct <<GRUBCFG || true
 
 menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro ${_direct_bootargs}${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} psi=1 selinux=0
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro ${_direct_bootargs}${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} psi=1 selinux=0${_fb_force}
     initrd /EFI/BOOT/initrd.img
 }
 
@@ -1434,10 +1536,15 @@ menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct 
 # entry that also cannot import the pool leaves them with nothing but the
 # initramfs prompt they were trying to escape.
 menuentry "kldload — rescue (single-user)" --id=rescue {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro single${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} selinux=0
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro single${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} selinux=0${_fb_force}
     initrd /EFI/BOOT/initrd.img
 }
 GRUBCFG
+    if ((_staged)); then
+        _grub_cfg+=$'\n'"${_grub_direct}"
+    else
+        k_log "grub.cfg: no direct/rescue entries (no kernel staged on the ESP)"
+    fi
 
     for _gcfg_dir in "${target}/boot/efi/EFI/centos" \
         "${target}/boot/efi/EFI/rocky" \
@@ -1484,6 +1591,11 @@ COMMAND="${1:-}"
 KVER="${2:-}"
 ESP=/boot/efi/EFI/BOOT
 [[ -d "$ESP" ]] || exit 0
+# Refresh only a kernel the installer chose to stage. It never creates one:
+# an encrypted root keeps its initramfs off the unencrypted ESP, and this
+# directory also exists on every Secure-Boot-off install (ZBM's fallback copy
+# lives here), so "the directory exists" was not that decision (2026-09-30).
+[[ -f "$ESP/vmlinuz" ]] || exit 0
 case "$COMMAND" in
     add)
         if [[ -f /boot/vmlinuz-"$KVER" ]]; then
@@ -2035,6 +2147,7 @@ DRACUT
                 k_log "WARNING: Could not set boot order"
             k_log "Boot order set: ${_uefi_bootnum} (shim → signed GRUB → ZFSBootMenu)"
         fi
+        k_register_fallback_entry "$disk" "$part_num" "$_uefi_bootnum"
 
         # A one-shot BootNext outranks BootOrder. A netboot reinstall is started
         # with `efibootmgr -n <PXE>`, and not every firmware consumes it.
