@@ -193,36 +193,6 @@ deb https://deb.debian.org/debian ${_bpo} main contrib non-free non-free-firmwar
 EOS
         fi
     fi
-    k_write_zfs_lab_source
-}
-
-# k_write_zfs_lab_source — point apt at the ZFS Lab's package build, when
-# KLDLOAD_ZFS_SOURCE is set (docs/ZFS-LAB-EDITION.md). A flat repository
-# ("./", a Packages file beside the debs, made by the lab's factory), trusted
-# because it is the lab host's own build over its own LAN. Pinned at 1001 by
-# origin host so its zfs packages win over backports (100) and the mirror
-# (500) whatever their versions: a lab that asked for 2.4.3 must not get the
-# mirror's 2.4.4. No-op without the variable, so every other install is as
-# before.
-k_write_zfs_lab_source() {
-    local target="${KLDLOAD_TARGET:?}"
-    local src="${KLDLOAD_ZFS_SOURCE:-}"
-    [[ -n "$src" ]] || return 0
-    local host="${src#*://}"
-    host="${host%%/*}"
-    host="${host%%:*}"
-    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "ZFS comes from the lab source: ${src} (apt origin ${host}, pin 1001)"
-    install -d -m 0755 "${target}/etc/apt/sources.list.d" "${target}/etc/apt/preferences.d"
-    cat >"${target}/etc/apt/sources.list.d/kldload-zfs-lab.list" <<EOS
-# OpenZFS build under test (kldload ZFS Lab); see preferences.d/kldload-zfs-lab
-deb [trusted=yes] ${src%/}/ ./
-EOS
-    cat >"${target}/etc/apt/preferences.d/kldload-zfs-lab" <<EOS
-# The ZFS Lab's build wins over backports and the mirror, older or newer.
-Package: *
-Pin: origin "${host}"
-Pin-Priority: 1001
-EOS
 }
 
 k_bind_chroot_mounts() {
@@ -970,30 +940,16 @@ k_install_target_packages() {
     #     sudo dpkg --add-architecture i386 && sudo apt-get update
     #     sudo apt-get install steam-installer
     if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
-        if [[ -n "${KLDLOAD_ZFS_SOURCE:-}" ]]; then
-            # The ZFS Lab's build: OpenZFS's own native Debian packaging names
-            # them openzfs-*, and they Conflict with the distro names rather
-            # than Provide them (checked on the 2.4.4 debs, 2026-09-30), so the
-            # distro names cannot be asked for here. Always DKMS: the lab's
-            # kernel is an axis of its own.
-            pkgs+=(
-                openzfs-zfsutils
-                openzfs-zfs-initramfs
-                openzfs-zfs-zed
-                openzfs-zfs-dkms
-            )
-        else
-            # zfs-dkms must be explicit so DKMS builds (and signs) the kernel module;
-            # zfsutils-linux alone may pull a pre-built binary that bypasses DKMS.
-            pkgs+=(
-                zfsutils-linux
-                zfs-initramfs
-                zfs-zed
-            )
-            # Debian needs zfs-dkms for DKMS build; Ubuntu ships ZFS in the kernel image
-            if [[ "$distro" != "ubuntu" ]]; then
-                pkgs+=(zfs-dkms)
-            fi
+        # zfs-dkms must be explicit so DKMS builds (and signs) the kernel module;
+        # zfsutils-linux alone may pull a pre-built binary that bypasses DKMS.
+        pkgs+=(
+            zfsutils-linux
+            zfs-initramfs
+            zfs-zed
+        )
+        # Debian needs zfs-dkms for DKMS build; Ubuntu ships ZFS in the kernel image
+        if [[ "$distro" != "ubuntu" ]]; then
+            pkgs+=(zfs-dkms)
         fi
     fi
 
@@ -1922,19 +1878,6 @@ enabled=1
 gpgcheck=0
 cost=1
 DSREPO
-            # With a ZFS Lab source, the mirror must not be able to supply ZFS
-            # at all. dnf takes a lower-priority package when the preferred one
-            # cannot be installed, so a lab version the kernel cannot build
-            # against was silently replaced by the mirror's: asked for 2.4.3 on
-            # kernel 7.2.7 (2.4.3's ceiling is 7.0), got zfs and zfs-dkms 2.4.4
-            # beside zfs-dracut 2.4.3, and the install reported success (the
-            # first lab proof VM, 2026-09-30). Excluded here, an impossible pair
-            # fails pass 3 instead of substituting.
-            if [[ -n "${KLDLOAD_ZFS_SOURCE:-}" ]]; then
-                printf 'excludepkgs=zfs zfs-* libzfs* libzpool* libnvpair* libuutil* python3-pyzfs\n' \
-                    >>"${target}/etc/yum.repos.d/kldload-darksite.repo"
-                k_log_to "$log" "  ZFS packages excluded from the mirror: the lab source is the only ZFS source"
-            fi
 
             # CentOS Stream / Rocky (the FREE EL rebuilds) have no local EL
             # darksite — only Fedora/Debian/Ubuntu are mirrored — so strict
@@ -1977,22 +1920,6 @@ baseurl=${_custom_repo}
 enabled=1
 gpgcheck=0
 CUSTOMREPO
-    fi
-    # ZFS from a chosen build (the ZFS Lab, docs/ZFS-LAB-EDITION.md): a
-    # repository of OpenZFS packages made from one tag or ref, served by the
-    # lab host. priority=1 so this repo wins even when its version is OLDER
-    # than the mirror's -- dnf otherwise takes the newest version across every
-    # enabled repo, and a lab that asked for 2.4.3 would silently get 2.4.4.
-    if [[ -n "${KLDLOAD_ZFS_SOURCE:-}" ]]; then
-        k_log_to "$log" "ZFS comes from the lab source: ${KLDLOAD_ZFS_SOURCE}"
-        cat >"${target}/etc/yum.repos.d/kldload-zfs-lab.repo" <<LABREPO
-[kldload-zfs-lab]
-name=OpenZFS build under test (kldload ZFS Lab)
-baseurl=${KLDLOAD_ZFS_SOURCE}
-enabled=1
-gpgcheck=0
-priority=1
-LABREPO
     fi
 
     # Build the package list — base + profile-specific
@@ -2498,22 +2425,12 @@ LABREPO
         # or "404 (not yet published)" otherwise, then only invoke dnf on the
         # URL we've confirmed serves a real RPM. Operator gets a single clear
         # line per attempt instead of having to grep dnf transcripts.
+        k_log_to "$log" "Resolving OpenZFS Fedora repo (target=fc${_fedora_rel}, fallback=fc43)..."
         local _zfsrel_ok=0
         local _zfsrel_actual=""
         local _zfsrel_url=""
         local _attempted_urls=()
-        # With a lab source there is nothing to resolve upstream: the repo
-        # written above is the only ZFS source wanted, and probing zfsonlinux
-        # from an offline bench would only cost ten timeouts.
-        local _probe_rels=("${_fedora_rel}" 43)
-        if [[ -n "${KLDLOAD_ZFS_SOURCE:-}" ]]; then
-            _probe_rels=()
-            _zfsrel_ok=lab
-            k_log_to "$log" "OpenZFS Fedora repo: not probed, the lab source supplies ZFS"
-        else
-            k_log_to "$log" "Resolving OpenZFS Fedora repo (target=fc${_fedora_rel}, fallback=fc43)..."
-        fi
-        for _rel in "${_probe_rels[@]}"; do
+        for _rel in "${_fedora_rel}" 43; do
             for _rev in 3-0 2-10 2-9 2-8 2-7; do
                 local _url="https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm"
                 local _code
@@ -2554,11 +2471,11 @@ LABREPO
         # This makes the F44 install air-gapped (wifi-independent) and fixes the
         # "wifi not up yet -> FATAL" break: the darksite ships zfs + zfs-dkms +
         # zfs-dracut + kernel(-devel), so pass-3 installs ZFS offline from it.
-        if [[ "$_zfsrel_ok" == "0" ]] && ls /run/kldload-darksite/fedora/rpm/zfs-dkms-*.rpm >/dev/null 2>&1; then
+        if [[ "$_zfsrel_ok" != "1" ]] && ls /run/kldload-darksite/fedora/rpm/zfs-dkms-*.rpm >/dev/null 2>&1; then
             k_log_to "$log" "zfs-release unreachable — darksite carries ZFS; continuing OFFLINE via kldload-darksite.repo"
             _zfsrel_ok="skip_darksite"
         fi
-        if [[ "$_zfsrel_ok" == "0" ]]; then
+        if [[ "$_zfsrel_ok" != "1" && "$_zfsrel_ok" != "skip_darksite" ]]; then
             # All HEAD probes failed. This is the "OpenZFS upstream has not
             # published a Fedora N repo yet AND the fc43 bridge URL is also
             # unreachable" case. Surface exactly what we tried so the operator
@@ -2997,21 +2914,6 @@ LABREPO
         fi
     done
     k_log_to "$log" "Pass 3 verified: zfs + zfs-dkms + zfs-dracut all present in target"
-    # ZFS Lab: the build under test must be the version that was asked for,
-    # in every package. Present is not enough: see the excludepkgs note on the
-    # darksite repo for the machine that had two ZFS versions and passed.
-    if [[ -n "${KLDLOAD_ZFS_SOURCE:-}" ]]; then
-        local _zv _zvers=()
-        for _zp in zfs zfs-dkms zfs-dracut; do
-            _zv="$(rpm --root="${target}" -q --qf '%{VERSION}-%{RELEASE} %{NAME}\n' "$_zp" 2>/dev/null)" || _zv="? ${_zp}"
-            _zvers+=("$_zv")
-        done
-        if [[ "$(printf '%s\n' "${_zvers[@]}" | awk '{print $1}' | sort -u | wc -l)" != "1" ]]; then
-            k_log_to "$log" "FATAL: the ZFS packages are not one version: $(printf '%s; ' "${_zvers[@]}")"
-            return 1
-        fi
-        k_log_to "$log" "ZFS Lab build verified: every ZFS package is ${_zvers[0]%% *}, from ${KLDLOAD_ZFS_SOURCE}"
-    fi
 
     # ── Critical-package verify gate ─────────────────────────────────────────
     # WHY: pass 1 uses --skip-broken, so any name that won't resolve is dropped
