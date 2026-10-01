@@ -636,6 +636,27 @@ and the form come after.
 
 ## 14. Open decisions
 
+00. **Debian needs Debian's packaging, not OpenZFS's (found 2026-09-30).**
+   Phase 0 on Fedora is proven: a VM install took zfs, zfs-dkms and
+   zfs-dracut 2.4.4 from the lab's own build (build host = the factory
+   container), module 2.4.4 loaded, root on rpool, smoke 61/0. On Debian,
+   OpenZFS's native `make native-deb-utils` packages (`openzfs-*`) installed,
+   then the profile's `sanoid` (Depends: zfsutils-linux | zfs-fuse) was
+   satisfied with zfs-fuse, which Conflicts with openzfs-zfsutils, so apt
+   REMOVED the real ZFS userland and zed and never installed the initramfs
+   package; the rebuilt initramfs had no ZFS and the machine dropped to
+   BusyBox ("bad address 'zfs'"). The openzfs-* names do not Provide the
+   distro names. Factory decision: on Debian/Ubuntu rebuild Debian's own
+   source package (zfs-linux) at the chosen upstream version, so the
+   packages are zfsutils-linux, zfs-dkms, zfs-initramfs, zfs-zed and every
+   dependent keeps working; keep openzfs-* only as an explicit variant.
+   Also: in lab mode pin zfs-fuse to -1 so a substitution can never be
+   silent again.
+   Side finding, same evening: the kernel command line after ZBM ends with
+   `spl.spl_hostid=0x00bab10c`, appended by ZFSBootMenu, while the
+   installer's spl_hostid pin is absent from it: the reason a fresh
+   install's first-boot session stamps the pool 0x00bab10c.
+
 0. **The suite beside a live root pool (verify first).** On bare metal the
    machine's root is itself a ZFS pool, and ZTS creates, imports and exports
    pools on the spare disks. Check the suite's source for anything that acts
