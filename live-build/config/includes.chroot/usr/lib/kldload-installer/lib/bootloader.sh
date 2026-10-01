@@ -543,6 +543,34 @@ k_zbm_find_efi() {
     echo "$zbm_tmp"
 }
 
+# k_efi_order_front ENTRY... — BootOrder with ENTRY... first, in that order,
+# and every entry already in BootOrder after them, in its old order, once.
+# Prints the order on stdout; the caller passes it to `efibootmgr -o`.
+#
+# WHY: the installer used to set BootOrder to the kldload entry ALONE (and the
+# fallback entry, 2026-09-30, to kldload,fallback). Everything else left the
+# order, the network boot entry included, and fiend's firmware then re-created
+# its PXE entry under a new number and left the old one orphaned, outside the
+# order. The estate sweep's one-time network boot picked the orphan
+# (`efibootmgr -n 0002`), the firmware ignored it, and fiend booted the
+# installed system instead: three editions of build 167 never reinstalled
+# (fiend, 2026-09-30 21:10-21:55). A boot order is a list to put kldload at the
+# front of, not a list to replace.
+k_efi_order_front() {
+    local cur e out=() seen=" "
+    # swallow: no BootOrder line (an empty NVRAM) is a valid state; out is just the front entries
+    cur="$(efibootmgr 2>/dev/null | sed -n 's/^BootOrder: //p' || true)"
+    for e in "$@" ${cur//,/ }; do
+        e="${e^^}"
+        [[ "$e" =~ ^[0-9A-F]{4}$ ]] || continue
+        [[ "$seen" == *" $e "* ]] && continue
+        seen+="$e "
+        out+=("$e")
+    done
+    local IFS=,
+    printf '%s\n' "${out[*]}"
+}
+
 # k_register_fallback_entry DISK PART KLDLOAD_BOOTNUM — a second firmware boot
 # entry, "kldload-fallback", pointing at the distro's GRUB (through its shim),
 # ordered straight after the kldload entry.
@@ -592,7 +620,7 @@ k_register_fallback_entry() {
         k_log "WARNING: fallback entry created but its number was not found; boot order left as it was"
         return 0
     fi
-    order="${first},${num}"
+    order="$(k_efi_order_front "$first" "$num")"
     if efibootmgr -o "$order" >&7 2>&1; then
         k_log "Fallback firmware entry Boot${num} → ${loader} (GRUB: ZBM, then direct kernel); boot order ${order}"
     else
@@ -2143,9 +2171,13 @@ DRACUT
         # swallow: grep exits 1 when no kldload entry exists yet; the empty case is handled below
         _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'kldload' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+' || true)
         if [[ -n "$_uefi_bootnum" ]]; then
-            efibootmgr -o "${_uefi_bootnum}" >&7 2>&1 ||
-                k_log "WARNING: Could not set boot order"
-            k_log "Boot order set: ${_uefi_bootnum} (shim → signed GRUB → ZFSBootMenu)"
+            local _order
+            _order="$(k_efi_order_front "${_uefi_bootnum}")"
+            if efibootmgr -o "${_order}" >&7 2>&1; then
+                k_log "Boot order set: ${_order} (kldload first; the network and every other entry kept after it)"
+            else
+                k_log "WARNING: Could not set boot order (${_order})"
+            fi
         fi
         k_register_fallback_entry "$disk" "$part_num" "$_uefi_bootnum"
 
