@@ -255,7 +255,13 @@ main() {
             return 2
         fi
         # mirrors still serving this exact NVR decides URLs vs by-name (see below)
-        if dnf repoquery --releasever="$RELEASEVER" --qf '%{version}-%{release}\n' kernel 2>/dev/null | grep -qx "$nvr"; then
+        # read first: `dnf ... | grep -q` under pipefail fails when grep exits
+        # early and dnf takes SIGPIPE (the smoke-build pipeline ratchet)
+        local mirror_nvrs
+        # swallow: a failed query reads as "not on the mirrors", which sends the
+        # pin through koji URLs -- verified fetchable above, so it still works
+        mirror_nvrs="$(dnf repoquery --releasever="$RELEASEVER" --qf '%{version}-%{release}\n' kernel 2>/dev/null || true)"
+        if grep -qx "$nvr" <<<"$mirror_nvrs"; then
             source="mirrors"
         else
             source="koji"
