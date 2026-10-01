@@ -280,8 +280,8 @@ STAGED_COMMIT="${STAGED_COMMIT%-dirty}"
     echo
     echo "Image: \`${STAGED_COMMIT:-unknown}\`"
     echo
-    echo '| edition | distro/profile | install | verdict | pass | fail | warn | lifecycle | verify | k8s offline | report |'
-    echo '|---|---|---|---|---|---|---|---|---|---|---|'
+    echo '| edition | distro/profile | install | verdict | pass | fail | warn | lifecycle | verify | k8s offline | snapshots | report |'
+    echo '|---|---|---|---|---|---|---|---|---|---|---|---|'
 } >"$SUMMARY"
 
 say "sweep ${RUN_ID}: ${#EDITIONS[@]} edition(s) — ${EDITIONS[*]}"
@@ -675,6 +675,29 @@ while ((_QI < ${#_QUEUE[@]})); do
     read -r sp sf sw < <(sed -n 's/^PASS \([0-9]*\)   FAIL \([0-9]*\)   WARN \([0-9]*\)$/\1 \2 \3/p' "${OUT}/report.md" | head -1) || true
     sp="${sp:-n/a}" sf="${sf:-n/a}" sw="${sw:-n/a}"
 
+    # 5a. Snapshots, NVIDIA and the display (tests/smoke-snapshots.sh).
+    #
+    # profile-report passed build 168's 5-desktop while its screen was black
+    # (nvidia.ko built at first boot, gdm gave up), and nothing checked that a
+    # dataset made after first boot's apply was in the snapshot policy
+    # (11-storage, same build). Its own column; a FAIL fails the edition. It
+    # runs before the lifecycle, which clones goldens and makes datasets.
+    _snap="DID NOT RUN"
+    # A failed copy is DID NOT RUN, never "run whatever /tmp already holds":
+    # with the copy swallowed, a stale script from an earlier run answered
+    # instead (caught exercising this step on fiend, 2026-10-01).
+    if ! scp_to "$ip" "${REPO}/tests/smoke-snapshots.sh" /tmp/ >/dev/null 2>&1; then
+        _snap="DID NOT RUN (could not copy tests/smoke-snapshots.sh)"
+        : >"${OUT}/snapshots.txt"
+    elif SSH_T=600 ssh_bench "$ip" 'sudo -n bash /tmp/smoke-snapshots.sh' >"${OUT}/snapshots.txt" 2>&1; then
+        _snap="ok ($(grep -c '^PASS' "${OUT}/snapshots.txt") checks)"
+    elif grep -q '^RESULT fails=' "${OUT}/snapshots.txt"; then
+        _snap="FAILED: $(sed -n 's/^FAIL \([^:]*\):.*/\1/p' "${OUT}/snapshots.txt" | paste -sd, -)"
+    else
+        _snap="DID NOT RUN ($(tail -1 "${OUT}/snapshots.txt" | cut -c1-80))"
+    fi
+    say "${ed}: snapshots: ${_snap}"
+
     # 5b. The ACTIVE estate test, where there is a hypervisor to run it on.
     #
     # profile-report covers the static picture (are the VMs in the inventory,
@@ -828,9 +851,9 @@ while ((_QI < ${#_QUEUE[@]})); do
 
     # 7. the row
     # The machine's own distro/profile, confirmed above -- not the answers file's.
-    printf '| %s | %s/%s | %s | %s | %s | %s | %s | %s | %s | %s | [report](%s/report.md) |\n' \
+    printf '| %s | %s/%s | %s | %s | %s | %s | %s | %s | %s | %s | %s | [report](%s/report.md) |\n' \
         "$ed" "$got_distro" "$got_profile" "$_install_col" "${verdict:-?}" "$sp" "$sf" "$sw" \
-        "${_lifecycle:-not run}" "$_verify" "$_k8soff" "$ed" >>"$SUMMARY"
+        "${_lifecycle:-not run}" "$_verify" "$_k8soff" "$_snap" "$ed" >>"$SUMMARY"
     # The report's verdict alone printed "11-storage: PASS" over a verify that
     # had FAILED (build 159, 2026-09-29): the row and RC were right, the line
     # an operator reads first was not. Every failing column goes on the line.
@@ -838,12 +861,16 @@ while ((_QI < ${#_QUEUE[@]})); do
     [[ "$_verify" == *FAILED* || "$_verify" == *"DID NOT RUN"* ]] && _also+=("$_verify")
     [[ "$_k8soff" == FAILED* || "$_k8soff" == "DID NOT"* ]] && _also+=("k8s offline ${_k8soff%%:*}")
     [[ "${_lifecycle:-}" == *failed:* || "${_lifecycle:-}" == *"0 goldens though"* ]] && _also+=("$_lifecycle")
+    [[ "$_snap" == FAILED* || "$_snap" == "DID NOT RUN"* ]] && _also+=("snapshots ${_snap}")
     if ((${#_also[@]})); then
         say "${ed}: FAIL — report ${verdict:-no verdict}; $(printf '%s; ' "${_also[@]}" | sed 's/; $//')"
     else
         say "${ed}: ${verdict:-no verdict}"
     fi
     [[ "$verdict" == PASS* ]] || RC=1
+    # every failing column fails the sweep, not only the report's verdict:
+    # a FAILED verify printed FAIL here and still exited 0 before this line
+    ((${#_also[@]} == 0)) || RC=1
 done
 
 # Count what ran against what was GIVEN. A sweep that skipped every edition
