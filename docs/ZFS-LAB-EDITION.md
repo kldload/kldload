@@ -636,7 +636,14 @@ and the form come after.
 
 ## 14. Open decisions
 
-00. **Debian needs Debian's packaging, not OpenZFS's (found 2026-09-30).**
+00. **RESOLVED 2026-09-30 19:20: phase 0 proven on Fedora AND Debian.**
+   `tools/zfslab-factory` (feat/zfslab ffa47a02) builds both repositories;
+   the Debian VM install from build 167 took zfsutils-linux, zfs-dkms,
+   zfs-initramfs, zfs-zed at 2.4.4-1~bpo13+1+kldload1 from the lab (module
+   the same), sanoid beside them, zfs-fuse absent, root on rpool, smoke
+   60/0. The apt pins (named lab record 1001, same names elsewhere -1,
+   zfs-fuse -1) make substitution impossible. History below.
+   **Debian needs Debian's packaging, not OpenZFS's (found 2026-09-30).**
    Phase 0 on Fedora is proven: a VM install took zfs, zfs-dkms and
    zfs-dracut 2.4.4 from the lab's own build (build host = the factory
    container), module 2.4.4 loaded, root on rpool, smoke 61/0. On Debian,
