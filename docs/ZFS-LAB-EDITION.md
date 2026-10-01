@@ -6,7 +6,79 @@ the tree (with paths, checked on the day), the gaps, and the open decisions.
 Occasion: kldload has a slot at the OpenZFS summit for kldload and the ZFS
 test suite.
 
+## 0. Delivery model (operator, 2026-09-30, supersedes where it conflicts)
+
+One engine, two deliveries, one plan format:
+
+1. **The fifth ISO is a self-driving test appliance.** Boot it on the
+   machine under test. It asks the basics (which disks it may wipe, which
+   plan: a preset such as "same kernel and ZFS across every distro" or your
+   own lines, where results go), then runs the plan unattended, using the
+   reinstall as the loop:
+   1. the live system takes the next plan item and installs it (distro,
+      kernel, ZFS version, extra modules such as NVIDIA, tools such as the
+      LSI/Broadcom utilities);
+   2. it sets `BootNext` to the installed disk and reboots;
+   3. the build's first boot runs the suite, writes results off the disk
+      under test, sets `BootNext` back to the stick, reboots;
+   4. the live system records the result and takes the next item;
+   5. at the end, a report and power-off.
+   The plan and results live on a writable partition of the USB stick
+   (`kldload burn` creates it), so no second machine is needed. A build
+   that does not boot comes back to the stick through the firmware's
+   fallback and is recorded as "did not boot": a result, not a dead box
+   (build 166's bootloader, 2026-09-30, is exactly that case).
+2. **Fleet mode:** a lab host serves the same plan over netboot to any
+   number of benches with power control, and collects the results
+   centrally (sections 10 and 12).
+
+### Dispatch: plans to benches (operator, 2026-09-30)
+
+Arm many benches with their workloads, press go. Four modes, one plan:
+
+| Mode | Operator says | Behaviour |
+|---|---|---|
+| pinned | "server 1 gets this, server 2 gets that" | each item to its named bench; all arm at once and run in parallel |
+| pool | "these items, these benches" | a queue drained by whichever bench is idle; scaling is adding boxes |
+| single | "all of them on this one" | the items in order on one bench, each from a wiped disk (what the appliance ISO does alone) |
+| every | "this item on all my benches" | one build across different hardware; the diff between benches is the hardware |
+
+Rules: only enrolled MACs can be armed (abyss); per-bench state idle /
+installing / testing / reporting / off / failed; a dead bench is a failed
+item, requeued once in pool mode and never forever; power records make a
+bench cold-to-cold, otherwise it waits for a button; results are keyed by
+build AND bench. Already present: `kldload-netboot-server arm-all <dir>`
+arms many MACs from per-MAC answers files, and `tests/estate-sweep.sh` runs
+the per-bench loop serially on one MAC. The dispatcher is the layer between
+them: plan to per-bench answers, then one sweep loop per bench.
+
+Plan lines, for example:
+```
+fedora 44  kernel=7.2  zfs=2.4.4  modules=nvidia  tools=lsi  suite=full
+*          kernel=7.2  zfs=2.4.4                             suite=quick
+```
+Impossible pairs are refused at the question stage: ZFS 2.4.4 declares a
+kernel maximum of 7.2 (read from its package's Conflicts on 2026-09-30), so
+"2.4.4 on 7.3" is offered as 2.4.4 on 7.2 or master on 7.3, never started.
+
+Adds to the build list: `BootNext` handoff with fallback; the results
+partition on the stick; hardware extras as plan fields; the kernel axis
+(phase 4) and the refusal logic move onto the question screen. The
+single-machine appliance is the headline of the download and the easier
+summit demo (one stick, one machine, a report); fleet mode is the scale-out.
+
 ## 1. What it is
+
+*Checked 2026-09-30 against openzfs/zfs `.github/workflows`:* upstream CI
+(`zfs-qemu.yml`) runs on GitHub-hosted Ubuntu runners, each booting a QEMU
+VM from a vendor cloud image (AlmaLinux 8/9/10, CentOS Stream 9/10, Debian
+11-13, Fedora 43/44, Ubuntu 22/24/26, FreeBSD 14/15/16; Arch and Tumbleweed
+available), building the PR and running ZTS, with a manual Fedora kernel
+version input and per-step time limits; plus `zloop` (ztest), package
+builds, ARM, unit tests and static analysis. So distro breadth and real
+distro kernels are already covered. kldload's distinct ground is: ZFS as
+the root and the boot path, real hardware, the failing machine kept, a
+pinned package set, and multi-boot life cycles. Do not claim more.
 
 A fifth download, dedicated to testing OpenZFS. The operator picks a
 distribution (and its release), a kernel and a ZFS version; kldload **builds**
@@ -363,9 +435,10 @@ first kind as running.
 
 ### Two paragraphs
 
-Every one of you tests OpenZFS on a filesystem that is not ZFS. CI boots a
-kernel it did not choose, on an ext4 root, and runs the suite against files.
-That covers ZFS the code. It never touches ZFS the system: the module that
+OpenZFS's CI is serious: every pull request is built and run through the
+suite in QEMU VMs on about fourteen systems, FreeBSD included, from the
+vendors' cloud images. But every one of those VMs boots from ext4 or xfs and
+tests ZFS on pools made of files. That covers ZFS the code. It never touches ZFS the system: the module that
 has to build and load before the root exists, the initramfs that has to
 import and unlock it, the kernel update that has to rebuild it, the rollback
 that has to boot. Those are the paths that break for users, and no runner
@@ -574,6 +647,49 @@ failed test. Kernel axis, scheduler, GitHub check, workload tier, retention
 and the form come after.
 
 ## 14. Open decisions
+
+00. **Debian needs Debian's packaging, not OpenZFS's (found 2026-09-30).**
+   Phase 0 on Fedora is proven: a VM install took zfs, zfs-dkms and
+   zfs-dracut 2.4.4 from the lab's own build (build host = the factory
+   container), module 2.4.4 loaded, root on rpool, smoke 61/0. On Debian,
+   OpenZFS's native `make native-deb-utils` packages (`openzfs-*`) installed,
+   then the profile's `sanoid` (Depends: zfsutils-linux | zfs-fuse) was
+   satisfied with zfs-fuse, which Conflicts with openzfs-zfsutils, so apt
+   REMOVED the real ZFS userland and zed and never installed the initramfs
+   package; the rebuilt initramfs had no ZFS and the machine dropped to
+   BusyBox ("bad address 'zfs'"). The openzfs-* names do not Provide the
+   distro names. Factory decision: on Debian/Ubuntu rebuild Debian's own
+   source package (zfs-linux) at the chosen upstream version, so the
+   packages are zfsutils-linux, zfs-dkms, zfs-initramfs, zfs-zed and every
+   dependent keeps working; keep openzfs-* only as an explicit variant.
+   Also: in lab mode pin zfs-fuse to -1 so a substitution can never be
+   silent again.
+   Side finding, same evening: the kernel command line after ZBM ends with
+   `spl.spl_hostid=0x00bab10c`, appended by ZFSBootMenu, while the
+   installer's spl_hostid pin is absent from it: the reason a fresh
+   install's first-boot session stamps the pool 0x00bab10c.
+
+0. **The suite beside a live root pool (verify first).** On bare metal the
+   machine's root is itself a ZFS pool, and ZTS creates, imports and exports
+   pools on the spare disks. Check the suite's source for anything that acts
+   on every pool (import or export of all pools, pool-wide cleanup) before
+   promising bare-metal runs; tests that must touch the running system's
+   pool belong to the root-on-ZFS suite (a disposable build, rebooted).
+   Hardware mode is VM-free and ZFS-on-root throughout; the VM tier stays as
+   an optional, labelled lower-fidelity path for developers without benches.
+   **Checked 2026-09-30 against openzfs/zfs master:** `zfs-tests.sh` keeps
+   every pool already imported out of its cleanup (`KEEP`, default `rpool`,
+   passed as `__ZFS_POOL_EXCLUDE`), but eight functional tests use the
+   pool-wide forms, and
+   `cli_root/zpool_export/zpool_export_parallel_pos.ksh` line 114 runs a
+   bare `log_must zpool export -a`: on a ZFS-root host it tries to export
+   the busy root pool (a false failure) and exports any other pool present.
+   Others: `zpool_import_all_001_pos`, `zpool_import_parallel_pos`,
+   `zpool_scrub_multiple_pools`, `zpool_iostat_interval_{all,some}`,
+   `mmp_reset_interval`, `cli_user/misc/zpool_import_001_neg` (each to be
+   read before classifying). Handling: run them only in the root-on-ZFS
+   suite on a disposable build, or list them as not applicable on ZFS-root
+   hosts. Upstream contribution for the summit: make them respect `KEEP`.
 
 1. **Summit date.** Decides whether root-on-ZFS builds make the first cut.
 2. **ZFS sources:** release tags only, or any commit or pull-request branch?
