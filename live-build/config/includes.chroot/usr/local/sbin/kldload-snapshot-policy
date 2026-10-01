@@ -49,6 +49,8 @@
 # Env:     GUARD_HIGH (default 80), GUARD_LOW (default 70): percent full.
 #          SANOID_CONF (default /etc/sanoid/sanoid.conf), for tests.
 #          POLICY_UNITS=0 makes apply leave systemd units alone, for tests.
+#          NETBOOT_ENV (default /etc/kldload/netboot.env): its NETBOOT_PAYLOAD
+#          and NETBOOT_PAYLOAD_NET are also never-snapshot datasets.
 # Exit:    0 done; 1 a step failed (each is named on stderr); 2 usage.
 # Notes:   the pool defaults to the one the root filesystem is on. Datasets
 #          not in CLASSES (a backup replica under <pool>/backup, a received
@@ -112,6 +114,38 @@ REGENERABLE_DIRS=(
     "var/lib/libvirt/images"
     "var/lib/kldload-netboot"
 )
+
+# The netboot server's payload directory is per-site: onyx's netboot.env sets
+# NETBOOT_PAYLOAD=/var/lib/kldload-netboot-new (20 GB, rewritten every
+# build) and NETBOOT_PAYLOAD_NET, and the fixed name above missed both, so
+# root snapshots kept pinning a copy per build (2026-10-01). So the payload
+# paths are read from that file too -- PARSED, never sourced -- and each must
+# be a plain path under /var/lib or /srv, because apply copies it and then
+# removes the original.
+NETBOOT_ENV="${NETBOOT_ENV:-/etc/kldload/netboot.env}"
+
+# load_netboot_env — append the netboot payload dirs from $NETBOOT_ENV to
+# REGENERABLE_DIRS and CLASSES (as "none"). Refuses, with a log line, any
+# value that is not /var/lib/... or /srv/... made of plain path components.
+load_netboot_env() {
+    [[ -r "$NETBOOT_ENV" ]] || return 0
+    local key val rel c have
+    for key in NETBOOT_PAYLOAD NETBOOT_PAYLOAD_NET; do
+        val="$(sed -n "s/^[[:space:]]*${key}=[\"']\{0,1\}\([^\"'#[:space:]]*\)[\"']\{0,1\}[[:space:]]*\$/\1/p" "$NETBOOT_ENV" | tail -1)"
+        [[ -n "$val" ]] || continue
+        if [[ ! "$val" =~ ^/(var/lib|srv)(/[A-Za-z0-9._-]+)+$ || "$val" == *"/.."* || "$val" == *"/./"* ]]; then
+            log "netboot.env: ${key}=${val} is not a plain path under /var/lib or /srv; not managed"
+            continue
+        fi
+        rel="${val#/}"
+        have=0
+        for c in "${REGENERABLE_DIRS[@]}"; do [[ "$c" == "$rel" ]] && have=1; done
+        ((have)) || REGENERABLE_DIRS+=("$rel")
+        have=0
+        for c in "${CLASSES[@]}"; do [[ "${c%%|*}" == "$rel" ]] && have=1; done
+        ((have)) || CLASSES+=("${rel}|none|yes")
+    done
+}
 
 LEGACY_TIMERS=(kldload-snapshot.timer kldload-srv-snapshot.timer kvm-snapshot.timer)
 GUARD_HIGH="${GUARD_HIGH:-80}"
@@ -491,6 +525,9 @@ done
     usage >&2
     exit 2
 }
+# before every verb: conf, sync, apply and status must all see the same set
+load_netboot_env
+
 if [[ "$VERB" == conf ]]; then
     [[ -n "$POOL" ]] || {
         echo "kldload-snapshot-policy: conf needs --pool" >&2
