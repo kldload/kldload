@@ -53,6 +53,21 @@
 set -Eeuo pipefail
 trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
+# PXE_PICK_AWK — reads `efibootmgr -v`, prints the IPv4 network entry for
+# mac (no colons) that is IN BootOrder, else the first one listed. The first
+# listed is not enough: fiend's firmware leaves an orphaned duplicate PXE
+# entry outside BootOrder when an install drops the network from the order,
+# BootNext to the orphan is ignored, and the machine boots its installed
+# system instead (build 167, three editions, 2026-09-30). The same program is
+# in tests/estate-sweep.sh; keep the two in step.
+PXE_PICK_AWK='/^BootOrder:/ { n = split($2, o, ","); for (i = 1; i <= n; i++) ord[toupper(o[i])] = i }
+toupper($0) ~ /IPV4/ && index(toupper($0), "MAC(" toupper(mac)) { c[++k] = toupper(substr($1, 5, 4)) }
+END {
+    for (i = 1; i <= k; i++) if ((c[i] in ord) && (b == "" || ord[c[i]] < ord[b])) b = c[i]
+    if (b == "" && k) b = c[1]
+    if (b != "") print b
+}'
+
 # KLDLOAD_REPO overrides where the checkout is (the script normally lives in its ci/).
 REPO="${KLDLOAD_REPO:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
 IC="$REPO/live-build/config/includes.chroot"
@@ -485,7 +500,8 @@ if should_run boot; then
         # and a 10G card both present (fiend, 2026-09-13), the first IPv4 entry can be
         # the port the answers file was not armed for, and the netboot would never ask
         # for the armed snippet. efibootmgr -v prints MAC(f02f74cd2750,0) per entry.
-        entry="$(tssh "$ip" "efibootmgr -v | grep -iE 'IPv4' | grep -i 'MAC(${MAC//-/}' | head -n 1 | sed -n 's/^Boot\\([0-9A-Fa-f]\\{4\\}\\).*/\\1/p'" 2>/dev/null)" || entry=""
+        # ...and the one IN BootOrder: see PXE_PICK_AWK.
+        entry="$(tssh "$ip" "efibootmgr -v" 2>/dev/null | awk -v mac="${MAC//-/}" "$PXE_PICK_AWK")" || entry=""
         [[ "$entry" =~ ^[0-9A-F]{4}$ ]] || continue
         # Firmware Secure Boot on + an answers file without it = an unattended run
         # that cannot finish: the iPXE loader is refused, and each install's fresh

@@ -189,12 +189,28 @@ find_bench() {
     return 1
 }
 
+# PXE_PICK_AWK — reads `efibootmgr -v`, prints the IPv4 network entry for
+# mac (no colons) that is IN BootOrder, else the first one listed. The first
+# listed is not enough: fiend's firmware leaves an orphaned duplicate PXE
+# entry outside BootOrder when an install drops the network from the order,
+# BootNext to the orphan is ignored, and the machine boots its installed
+# system instead (build 167, three editions, 2026-09-30). The same program is
+# in ci/kldload-netboot-run; keep the two in step.
+PXE_PICK_AWK='/^BootOrder:/ { n = split($2, o, ","); for (i = 1; i <= n; i++) ord[toupper(o[i])] = i }
+toupper($0) ~ /IPV4/ && index(toupper($0), "MAC(" toupper(mac)) { c[++k] = toupper(substr($1, 5, 4)) }
+END {
+    for (i = 1; i <= k; i++) if ((c[i] in ord) && (b == "" || ord[c[i]] < ord[b])) b = c[i]
+    if (b == "" && k) b = c[1]
+    if (b != "") print b
+}'
+
 # kick_pxe <ip> — one-time PXE boot. Returns 1 if the machine could not be told.
 kick_pxe() {
-    local ip="$1" macre
+    local ip="$1" macre e
     macre="$(tr -d ':' <<<"$MAC")"
-    # shellcheck disable=SC2016 # expanded on the bench machine, not here
-    ssh_bench "$ip" 'e=$(sudo -n efibootmgr -v | grep -i "MAC('"$macre"'" | grep -i IPv4 | head -n1 | sed -n "s/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p"); [ -n "$e" ] || exit 3; sudo -n efibootmgr -n "$e" >/dev/null && (sleep 2; sudo -n systemctl reboot) >/dev/null 2>&1 &'
+    e="$(ssh_bench "$ip" 'sudo -n efibootmgr -v' | awk -v mac="$macre" "$PXE_PICK_AWK")" || return 1
+    [[ "$e" =~ ^[0-9A-F]{4}$ ]] || return 1
+    ssh_bench "$ip" "sudo -n efibootmgr -n $e >/dev/null && (sleep 2; sudo -n systemctl reboot) >/dev/null 2>&1 &"
 }
 
 # ─── Out-of-band power (kldload-power) ───────────────────────────────────────
