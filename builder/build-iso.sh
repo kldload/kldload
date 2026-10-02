@@ -4072,7 +4072,7 @@ _show_src=/build/live-build/config/includes.chroot/usr/lib/dracut/modules.d/95kl
 _show_dst="${ROOTFS}/usr/lib/dracut/modules.d/95kldload-show"
 install -d -m 0755 "$_show_dst"
 install -m 0755 "${_show_src}/module-setup.sh" "${_show_src}/kldload-initrd-show.sh" \
-    "${_show_src}/kldload-show-generator" "$_show_dst/" ||
+    "${_show_src}/kldload-show-generator" "${_show_src}/kldload-livenet-stall.sh" "$_show_dst/" ||
     die "kldload-show: could not install the dracut module"
 install -m 0644 "${_show_src}/kldload-initrd-show.service" "$_show_dst/" ||
     die "kldload-show: could not install the unit"
@@ -4092,11 +4092,12 @@ for _f in usr/bin/kldload-initrd-show \
     usr/lib/systemd/system/kldload-initrd-show.service \
     usr/lib/systemd/system-generators/kldload-show-generator \
     usr/bin/od usr/bin/dd \
-    etc/systemd/system/sysinit.target.wants/kldload-initrd-show.service; do
+    etc/systemd/system/sysinit.target.wants/kldload-initrd-show.service \
+    var/lib/dracut/hooks/cmdline/28-kldload-livenet-stall.sh; do
     grep -qF -- " ${_f}" <<<"$_show_have" ||
         die "kldload-show: ${_f} is not in the initramfs"
 done
-log "Initramfs install show: present"
+log "Initramfs install show: present (with the livenet stall timeout)"
 
 # ---------------------------------------------------------------------------
 # Step 4: Create squashfs
