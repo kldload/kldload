@@ -15,7 +15,8 @@
 #      destroys exactly one scheduled snapshot and no protected one -- read
 #      from the guard's own "destroyed" lines, never a pool diff.
 #   5. apply again changes nothing; package snapshots exist; rollback lists.
-#   0. vmx, vmxctl and the kld alias (every edition, before the core stop).
+#   0. vmx, vmxctl and the kld alias on every non-core edition; on core,
+#      that all three are absent (core ships no kldload tools).
 #   6. NVIDIA (when present): loaded, no NVRM assertion, the module written
 #      before first boot, loaded early. Display (when gdm is on): gdm did not
 #      give up, no gnome-shell crash, a greeter or shell running.
@@ -43,8 +44,11 @@ f() {
 }
 w() { echo "WARN $*"; }
 
-# vmx_checks: the console binaries every edition ships since the 2026-09-30
-# switch-over (vmx = the TUI, was kld; vmxctl = jobs; kld = an alias of vmx).
+# vmx_checks: the console binaries every non-core edition ships since the
+# 2026-09-30 switch-over (vmx = the TUI, was kld; vmxctl = jobs; kld = an
+# alias of vmx). Core gets none of the kldload tools by design (profiles.sh
+# skips the whole copy), so there it asserts their ABSENCE instead -- build
+# 173's 1-core failed six checks for tools it was never meant to have.
 # Here because this script already runs on every edition the sweep installs;
 # the ISO-level checks are in smoke-build.sh and prove only that they were
 # built, not that the installer carried them to the target.
@@ -55,7 +59,10 @@ vmx_checks() {
         out="$("$b" --version 2>&1 || true)"
         [[ "$out" == "$b "* ]] && p "vmx-bin-$b: ${out%%$'\n'*}" || f "vmx-bin-$b: '$(head -c 120 <<<"$out")'"
     done
-    [[ "$(readlink /usr/local/bin/kld 2>/dev/null)" == vmx ]] && p "vmx-alias: kld -> vmx" || f "vmx-alias: /usr/local/bin/kld is not a symlink to vmx ($(ls -l /usr/local/bin/kld 2>&1 | cut -c1-100))"
+    # readlink alone, no `ls | cut`: under pipefail a missing kld made that
+    # pipeline trip the ERR trap (1-core, build 173)
+    out="$(readlink /usr/local/bin/kld 2>&1 || true)" # swallow: the answer is checked next
+    [[ "$out" == vmx ]] && p "vmx-alias: kld -> vmx" || f "vmx-alias: /usr/local/bin/kld is not a symlink to vmx (readlink: '${out:0:100}')"
     # vmxctl with no arguments is a usage error by contract (exit 2)
     n=0
     vmxctl >/dev/null 2>&1 || n=$?
@@ -64,27 +71,57 @@ vmx_checks() {
     n="$(vmxctl --appliances 2>/dev/null | grep -c . || true)"
     ((n > 0)) && p "vmx-catalog: vmxctl --appliances printed ${n} lines" || f "vmx-catalog: vmxctl --appliances printed nothing"
 }
-vmx_checks
+core_no_vmx() {
+    local b
+    for b in vmx vmxctl kld; do
+        if command -v "$b" >/dev/null 2>&1; then
+            f "core-no-$b: $b is on PATH ($(command -v "$b")) on core, which ships no kldload tools"
+        else
+            p "core-no-$b: absent (core ships no kldload tools, by design)"
+        fi
+    done
+}
 T=/usr/local/sbin/kldload-snapshot-policy
 C=/etc/sanoid/sanoid.conf
 pool=rpool
 
-if ! command -v sanoid >/dev/null 2>&1; then
-    # core: no sanoid by design
+# Which path: the installed profile from the install manifest, the same
+# source profile-report.sh reads. Not "is sanoid there": build 173's
+# deb-1-core HAD sanoid (a packaging defect, since fixed), so the old test
+# ran the full policy checks on a core machine and reported eight datasets
+# that were really its own parse error. sanoid's presence is only the
+# fallback for a machine with no manifest.
+prof="$(sed -n 's/^KLDLOAD_PROFILE=//p' /etc/kldload/install-manifest.env 2>/dev/null | tr -d "\"'" | tail -1 || true)" # swallow: no manifest falls back below
+if [[ -z "$prof" ]]; then
+    command -v sanoid >/dev/null 2>&1 && prof=unknown || prof=core
+    w "profile: no KLDLOAD_PROFILE in /etc/kldload/install-manifest.env; judged '${prof}' from sanoid's presence"
+fi
+if [[ "$prof" == core ]]; then
+    # core: no sanoid, no kldload tools, by design
+    core_no_vmx
+    if command -v sanoid >/dev/null 2>&1; then f "core-no-sanoid-pkg: sanoid is installed ($(command -v sanoid))"; else p "core-no-sanoid-pkg: sanoid not installed"; fi
     if systemctl is-active sanoid.timer >/dev/null 2>&1; then f "core-no-sanoid: sanoid.timer active"; else p "core-no-sanoid: no sanoid, no timer (by design)"; fi
     if [[ ! -f /var/log/kldload/firstboot.log ]]; then
-        p "core-firstboot-note: no firstboot.log at all (core installs no kldload first boot; $(systemctl is-enabled kldload-firstboot.service 2>&1 | head -1))"
+        p "core-firstboot-note: no firstboot.log at all (core installs no kldload first boot; $(systemctl is-enabled kldload-firstboot.service 2>&1 | head -1 || true))" # swallow: is-enabled exits non-zero for an absent unit; its words are the note
     elif grep -q 'no sanoid on this profile' /var/log/kldload/firstboot.log; then
         p "core-firstboot-note: firstboot logged the no-sanoid case"
     else
         w "core-firstboot-note: firstboot.log exists but has no no-sanoid line: $(grep -c . /var/log/kldload/firstboot.log) lines, last: $(tail -1 /var/log/kldload/firstboot.log | cut -c1-120)"
     fi
     echo "RESULT fails=${fails}"
-    ((fails == 0))
-    exit
+    # an explicit status: a false (( )) as the last command tripped the ERR
+    # trap and printed a bogus internal FAIL (1-core, build 173)
+    exit $((fails == 0 ? 0 : 1))
 fi
+vmx_checks
 
 [[ -x "$T" ]] && p "tool: $T present" || f "tool: $T missing"
+if [[ ! -f "$C" ]]; then
+    # one clear FAIL, then read an empty file: parsing an absent conf put the
+    # ERR trap's own words in the section list (deb-1-core, build 173)
+    f "conf-present: $C does not exist"
+    C=/dev/null
+fi
 grep -q 'WRITTEN BY kldload-snapshot-policy' "$C" && p "conf-owner: sanoid.conf written by the policy" || f "conf-owner: $C not written by the policy"
 ds_all="$(zfs list -H -o name -t filesystem,volume -r "$pool")"
 missing=0
@@ -242,14 +279,21 @@ if grep -qi nvidia <<<"$gpus"; then
     # DKMS, so an RPM-name check failed a machine that was fine): ask the
     # kernel which file it loaded, and compare that file's time with the
     # start of first boot.
+    # WHY ctime, not mtime: Fedora's rpmbuild clamps file mtimes to the spec's
+    # changelog date (clamp_mtime_to_source_date_epoch), so an akmods-built
+    # nvidia.ko carries a date weeks old however late it was built -- build
+    # 173's 9-ai passed this with "written 2026-09-13 17:00:00", and onyx's
+    # module reads 08-02 17:00 though rpm installed it 08-30. ctime is set when
+    # the file lands and nothing can set it back; a later metadata change only
+    # moves it forward, which errs toward a FAIL, never a false PASS.
     mf="$(/usr/sbin/modinfo -n nvidia 2>/dev/null || modinfo -n nvidia 2>/dev/null || true)" # absent module is reported just below
     bt="$(date -d "$(uptime -s)" +%s)"
     fb="$(sed -n 's/^\[\([0-9-]* [0-9:]*\)\].*/\1/p' /var/log/kldload/firstboot.log 2>/dev/null | head -1)"
     fbt="$([[ -n "$fb" ]] && date -d "$fb" +%s || echo "$bt")"
     if [[ -n "$mf" && -f "$mf" ]]; then
-        mt="$(stat -c %Y "$mf")"
-        ((mt < fbt - 60)) && p "nvidia-kmod-at-install: ${mf##*/} written $(date -d @"$mt" '+%F %T'), before first boot" ||
-            f "nvidia-kmod-at-install: ${mf} written $(date -d @"$mt" +%T), first boot started $(date -d @"$fbt" +%T) -- built at first boot"
+        mt="$(stat -c %Z "$mf")"
+        ((mt < fbt - 60)) && p "nvidia-kmod-at-install: ${mf##*/} landed $(date -d @"$mt" '+%F %T'), before first boot" ||
+            f "nvidia-kmod-at-install: ${mf} landed $(date -d @"$mt" +%T), first boot started $(date -d @"$fbt" +%T) -- built at first boot"
     else
         f "nvidia-kmod-at-install: modinfo cannot find the nvidia module file"
     fi
@@ -272,4 +316,4 @@ if systemctl list-unit-files gdm.service >/dev/null 2>&1 && systemctl is-enabled
     fi
 fi
 echo "RESULT fails=${fails}"
-((fails == 0))
+exit $((fails == 0 ? 0 : 1))
