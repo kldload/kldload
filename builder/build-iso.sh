@@ -887,27 +887,6 @@ if [[ "$EDITION" != "core" ]]; then
     # live tty1 and every operator habit keep working for a release. kld/ is
     # no longer built: it is the pre-move copy, kept until the tools that
     # still read it (the website manual) move over.
-    cp -a "$_kld_src" /tmp/kld-src
-    rm -f /tmp/kld-src/kld /tmp/kld-src/.buildnum
-    _kld_commit="$(git -C /build rev-parse HEAD 2>/dev/null || echo unknown)"
-    if (cd /tmp/kld-src &&
-        HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-            CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_kld_commit:0:8}" -o /tmp/kld-bin .) >>"$LOG_FILE" 2>&1; then
-        install -Dm0755 /tmp/kld-bin "${ROOTFS}/usr/local/bin/kld" ||
-            die "FATAL: kld install failed."
-        # Outcome, not exit code: the binary answers --version from the rootfs.
-        "${ROOTFS}/usr/local/bin/kld" --version >>"$LOG_FILE" 2>&1 ||
-            die "FATAL: kld installed but does not run (--version failed)."
-        log "kld installed (static, ${_kld_commit:0:8})."
-    else
-        die "FATAL: kld build failed — refusing to ship an ISO without the console hub."
-    fi
-    [[ -r /tmp/kld-src/docs/kld.1 ]] ||
-        die "FATAL: kld manual absent (kld/docs/kld.1) — a shipped tool ships its man page."
-    install -Dm0644 /tmp/kld-src/docs/kld.1 "${ROOTFS}/usr/share/man/man1/kld.1" ||
-        die "FATAL: kld manual install failed."
-    rm -f /tmp/kld-bin
-    rm -rf /tmp/kld-src
 
     # ── kldload-buildmon — build progress and install audit, from in-tree
     # buildmon/. In-tree for the same reason wg/ is: it reads
