@@ -387,7 +387,11 @@ cmd_apply() {
             >"${SANOID_DROPIN}.new"
         mv -f "${SANOID_DROPIN}.new" "$SANOID_DROPIN"
         systemctl daemon-reload
-        if systemctl cat sanoid.service 2>/dev/null | grep -q 'kldload-snapshot-policy sync'; then
+        # read the unit first: grep -q closing the pipe early would SIGPIPE
+        # systemctl and pipefail would read a match as a miss
+        local _unit
+        _unit="$(systemctl cat sanoid.service 2>/dev/null)" || _unit=""
+        if grep -q 'kldload-snapshot-policy sync' <<<"$_unit"; then
             log "sanoid.service: syncs the policy before every run"
         else
             log "sanoid.service does not show the sync drop-in: datasets made after this apply stay uncovered"
