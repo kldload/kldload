@@ -881,16 +881,12 @@ if [[ "$EDITION" != "core" ]]; then
     rm -f /tmp/wgx-bin
     rm -rf /tmp/wgx-src
 
-    # ── kld — the operator console hub, from in-tree kld/ (2026-09-26).
-    # One static binary, the eight sections of the web console for ssh; it
-    # opens vmxplore, zxplore, wgx and k9s on Enter and acts through the
-    # shipped bash verbs. Static and cgo-free on purpose: it has to run on
-    # the core profile, where there is a terminal and nothing else.
-    _kld_src="/build/kld"
-    [[ -f "${_kld_src}/main.go" ]] ||
-        die "FATAL: kld/ missing from the repo — the console hub lives in-tree."
-    log "Building kld from in-tree kld/ ..."
-    rm -rf /tmp/kld-src
+    # ── kld is vmx now (2026-09-30). The terminal console moved from the
+    # in-tree kld/ into the vmxplore repo (cmd/vmx) and is built with
+    # vmxplore below; `kld` stays as a symlink to it, so `kld install` on the
+    # live tty1 and every operator habit keep working for a release. kld/ is
+    # no longer built: it is the pre-move copy, kept until the tools that
+    # still read it (the website manual) move over.
     cp -a "$_kld_src" /tmp/kld-src
     rm -f /tmp/kld-src/kld /tmp/kld-src/.buildnum
     _kld_commit="$(git -C /build rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -1086,28 +1082,42 @@ if [[ "$EDITION" != "core" ]]; then
     log "vmxplore commit: ${_vmx_commit}"
     printf '%s\n' "$_vmx_commit" >"${ROOTFS}/etc/kldload/vmxplore-commit"
 
-    # the static TUI first: it is the one every profile gets
-    if (cd /tmp/vmx-src &&
-        HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-            CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_vmx_commit:0:8}" -o /tmp/vmx-bin .) >>"$LOG_FILE" 2>&1; then
-        install -Dm0755 /tmp/vmx-bin "${ROOTFS}/usr/local/bin/vmx" ||
-            die "FATAL: vmx (static TUI) install failed."
-        log "vmx installed (static TUI, all profiles)."
-    else
-        die "FATAL: vmxplore TUI build failed — refusing to ship an ISO without the KVM console."
-    fi
-    rm -f /tmp/vmx-bin
+    # the static binaries first: every profile gets them. Since the one-tool
+    # split (vmxplore, 2026-09-30) there are two: `vmx`, the terminal console
+    # (./cmd/vmx -- what kld was), and `vmxctl`, the jobs (--build-all,
+    # --enroll, --appliances ...; the root package without the GUI tag). Each
+    # is asked for --version from the rootfs: outcome, not exit code.
+    for _vmx_b in "vmx:./cmd/vmx" "vmxctl:."; do
+        _b="${_vmx_b%%:*}" _pkg="${_vmx_b#*:}"
+        if (cd /tmp/vmx-src &&
+            HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+                CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_vmx_commit:0:8}" -o "/tmp/${_b}-bin" "$_pkg") >>"$LOG_FILE" 2>&1; then
+            install -Dm0755 "/tmp/${_b}-bin" "${ROOTFS}/usr/local/bin/${_b}" ||
+                die "FATAL: ${_b} install failed."
+            "${ROOTFS}/usr/local/bin/${_b}" --version >>"$LOG_FILE" 2>&1 ||
+                die "FATAL: ${_b} installed but does not run (--version failed)."
+            log "${_b} installed (static, all profiles)."
+        else
+            die "FATAL: ${_b} build failed (vmxplore ${_pkg}) — refusing to ship an ISO without it."
+        fi
+        rm -f "/tmp/${_b}-bin"
+    done
+    # kld, the old name of vmx: an alias for one release (see above)
+    ln -sfn vmx "${ROOTFS}/usr/local/bin/kld" ||
+        die "FATAL: the kld -> vmx alias could not be made."
 
     # the man page travels with either build: a console on a stranger's box
     # must not be undocumented, and `man vmxplore` is the first thing an
     # operator tries.
-    if [[ -r /tmp/vmx-src/docs/vmxplore.1 ]]; then
-        install -Dm0644 /tmp/vmx-src/docs/vmxplore.1 \
-            "${ROOTFS}/usr/share/man/man1/vmxplore.1" ||
-            die "FATAL: vmxplore man page install failed."
-    else
-        die "FATAL: vmxplore man page absent (docs/vmxplore.1) — upstream moved it."
-    fi
+    for _vmx_m in vmxplore vmx vmxctl; do
+        [[ -r "/tmp/vmx-src/docs/${_vmx_m}.1" ]] ||
+            die "FATAL: ${_vmx_m} man page absent (docs/${_vmx_m}.1) — upstream moved it."
+        install -Dm0644 "/tmp/vmx-src/docs/${_vmx_m}.1" \
+            "${ROOTFS}/usr/share/man/man1/${_vmx_m}.1" ||
+            die "FATAL: ${_vmx_m} man page install failed."
+    done
+    ln -sfn vmx.1 "${ROOTFS}/usr/share/man/man1/kld.1" ||
+        die "FATAL: the kld.1 -> vmx.1 alias could not be made."
 
     # the GUI, only where the rootfs can actually run it
     if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
@@ -1130,6 +1140,13 @@ if [[ "$EDITION" != "core" ]]; then
             install -Dm0644 /tmp/vmx-src/packaging/vmxplore.svg \
                 "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/vmxplore.svg" ||
                 die "FATAL: vmxplore icon install failed."
+            # vmx's own icon: vmxplore-tui.desktop names Icon=vmx, and without
+            # it the terminal console's launcher had no picture
+            [[ -r /tmp/vmx-src/packaging/vmx.svg ]] ||
+                die "FATAL: vmx icon absent (packaging/vmx.svg) — upstream moved it."
+            install -Dm0644 /tmp/vmx-src/packaging/vmx.svg \
+                "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/vmx.svg" ||
+                die "FATAL: vmx icon install failed."
             for _vmx_desk in vmxplore.desktop vmxplore-tui.desktop; do
                 [[ -r "/tmp/vmx-src/packaging/${_vmx_desk}" ]] ||
                     die "FATAL: vmxplore launcher absent (packaging/${_vmx_desk}) — upstream moved it."
@@ -1142,7 +1159,7 @@ if [[ "$EDITION" != "core" ]]; then
             die "FATAL: vmxplore GUI build failed — refusing to ship a GUI ISO without the KVM console."
         fi
     else
-        log "vmxplore: headless rootfs — static vmx only, no GUI."
+        log "vmxplore: headless rootfs — static vmx and vmxctl only, no GUI."
     fi
     rm -f /tmp/vmxplore-bin
     rm -rf /tmp/vmx-src

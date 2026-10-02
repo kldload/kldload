@@ -368,7 +368,7 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
         # path — memory: squashfs-verify-usrmerge-path)
         declare -a TUI_FILES=(usr/local/bin/kldload-tty1
             etc/systemd/system/getty@tty1.service.d/kldload-tty1.conf
-            root/.bash_profile usr/local/bin/kld)
+            root/.bash_profile usr/local/bin/vmx)
         _tui_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${TUI_FILES[@]}" 2>/dev/null)" || _tui_list="" # absent paths make unsquashfs exit non-zero
         _tui_bad=""
         for _df in "${TUI_FILES[@]}"; do
@@ -378,19 +378,28 @@ if _iso_mount_err="$("${_SUDO[@]}" mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>&1)";
         awk '/^menuentry/ {e = $0} /kldload\.tui=1/ && e ~ /install or provision/ {f = 1} END {exit !f}' "$MOUNTPOINT/EFI/BOOT/grub.cfg" 2>/dev/null ||
             _tui_bad+=" (the 'install or provision' GRUB entry does not carry kldload.tui=1)"
         if [[ -z "$_tui_bad" ]]; then
-            _pass "live install menu in the image (kldload-tty1, getty drop-in, root profile, kld, GRUB default with kldload.tui=1)"
+            _pass "live install menu in the image (kldload-tty1, getty drop-in, root profile, vmx, GRUB default with kldload.tui=1)"
         else
             _fail "live install menu in the image" "missing:${_tui_bad} — the USB would boot to a login prompt"
         fi
-        # kld, the console hub, is built from kld/ by build-iso.sh and dies
-        # there if the build fails; this asks the sealed image, because a
-        # build that dies after mksquashfs (2026-09-26 VERSION lesson) or a
-        # path typo would still ship an ISO with no hub and no error here.
-        if unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" usr/local/bin/kld 2>/dev/null |
-            awk '$NF == "squashfs-root/usr/local/bin/kld" && $1 ~ /^-rwx/ {f = 1} END {exit !f}'; then
-            _pass "kld console hub in the image (usr/local/bin/kld, executable)"
+        # vmx (the terminal console, was kld) and vmxctl (the jobs) are built
+        # from the vmxplore repo by build-iso.sh and die there if the build
+        # fails; this asks the sealed image, because a build that dies after
+        # mksquashfs (2026-09-26 VERSION lesson) or a path typo would still
+        # ship an ISO with no console and no error here. kld must be the
+        # alias of vmx, not a stale binary of its own.
+        _cons_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" usr/local/bin/vmx usr/local/bin/vmxctl usr/local/bin/kld 2>/dev/null)" || _cons_list="" # absent paths make unsquashfs exit non-zero; reported below
+        for _cb in vmx vmxctl; do
+            if awk -v p="squashfs-root/usr/local/bin/$_cb" '$NF == p && $1 ~ /^-rwx/ {f = 1} END {exit !f}' <<<"$_cons_list"; then
+                _pass "$_cb in the image (usr/local/bin/$_cb, executable)"
+            else
+                _fail "$_cb in the image" "usr/local/bin/$_cb is missing or not executable in the rootfs"
+            fi
+        done
+        if awk '$1 ~ /^l/ && $(NF-2) == "squashfs-root/usr/local/bin/kld" && $NF == "vmx" {f = 1} END {exit !f}' <<<"$_cons_list"; then
+            _pass "kld is the alias of vmx in the image"
         else
-            _fail "kld console hub in the image" "usr/local/bin/kld is missing or not executable in the rootfs"
+            _fail "kld alias" "usr/local/bin/kld is not a symlink to vmx in the rootfs"
         fi
         _nb_list="$(unsquashfs -lls "$MOUNTPOINT/LiveOS/squashfs.img" "${NB_FILES[@]}" 2>/dev/null)" || _nb_list="" # absent paths make unsquashfs exit non-zero; the loop below names them
         _nb_bad=""
@@ -1027,13 +1036,13 @@ else
     _pass "kube-cluster cloud image listing and download fall back to the Fedora master"
 fi
 
-# vmx --build-all prints generated appliance passwords. autodeploy.log is 0644
+# vmxctl --build-all prints generated appliance passwords. autodeploy.log is 0644
 # (fiend 2026-09-13: the Web Stack's PostgreSQL and Valkey passwords were
 # world-readable), so its output reaches that log only through the redaction.
 _ad="${ROOT}/live-build/config/includes.chroot/usr/sbin/kldload-autodeploy"
-if grep -qE 'vmx --build-all[^|]*>>[[:space:]]*"\$LOG_FILE"' "$_ad"; then
-    _fail "appliance passwords in autodeploy.log" "vmx --build-all output is appended to the world-readable log unredacted"
-elif grep -qE 'vmx --build-all 2>&1 \| tee "\$_apps_summary"' "$_ad" && grep -qF '(PASS|PASSWORD|PASSPHRASE|SECRET|TOKEN|KEY)' "$_ad"; then
+if grep -qE 'vmxctl --build-all[^|]*>>[[:space:]]*"\$LOG_FILE"' "$_ad"; then
+    _fail "appliance passwords in autodeploy.log" "vmxctl --build-all output is appended to the world-readable log unredacted"
+elif grep -qE 'vmxctl --build-all 2>&1 \| tee "\$_apps_summary"' "$_ad" && grep -qF '(PASS|PASSWORD|PASSPHRASE|SECRET|TOKEN|KEY)' "$_ad"; then
     _pass "appliance passwords: build-all summary to a 0600 root file, masked in autodeploy.log"
 else
     _fail "appliance passwords in autodeploy.log" "the build-all redaction (tee to /root/kldload-appliances.txt, sed mask) is gone"

@@ -1815,7 +1815,7 @@ _reclaim_ai_darksite
 # thirteen appliance tiles were a button in vmxplore, and the Firecracker
 # golden of each was a right-click after that: fiend 2026-09-05, Build Images
 # ticked at install, thirteen app VMs built by hand at 13:14, `kfire goldens`
-# empty, /var/lib/kfire absent. vmx --build-all builds the catalog one tile
+# empty, /var/lib/kfire absent. vmxctl --build-all builds the catalog one tile
 # at a time with the host's spare cores (~4 min each), powers each one off
 # and snapshots it as a golden itself; tiles that already exist are skipped,
 # so a second boot resumes rather than rebuilds. Last, because it is the one
@@ -1826,7 +1826,7 @@ if [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && command -v vmx >/dev/null 2>&1; 
     if [[ -f "${STATE_DIR}/appliances-ready" ]]; then
         log "[apps] appliance goldens already marked ready — skipping"
     else
-        log "[apps] building the appliance catalog: vmx --build-all (~4 min per tile, several at a time where RAM allows); each finished tile is shut off and kept as a Firecracker golden"
+        log "[apps] building the appliance catalog: vmxctl --build-all (~4 min per tile, several at a time where RAM allows); each finished tile is shut off and kept as a Firecracker golden"
         # In parallel where the RAM allows: vmxplore builds one tile at a time
         # unless told otherwise (five at once thrashed a 32 GB desktop, its own
         # HISTORY), and this host has just booted with nothing else running.
@@ -1849,7 +1849,7 @@ if [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && command -v vmx >/dev/null 2>&1; 
             umask 077
             : >"$_apps_summary"
         )
-        if VMX_BUILD_JOBS="$_vmx_jobs" vmx --build-all 2>&1 | tee "$_apps_summary" |
+        if VMX_BUILD_JOBS="$_vmx_jobs" vmxctl --build-all 2>&1 | tee "$_apps_summary" |
             sed -uE 's/^([[:space:]]+[^()]*\([A-Z0-9_]*(PASS|PASSWORD|PASSPHRASE|SECRET|TOKEN|KEY)\): ).+$/\1(redacted; root can read it in \/root\/kldload-appliances.txt)/' >>"$LOG_FILE"; then
             touch "${STATE_DIR}/appliances-ready"
             # vmx's exit status counts failed TILES; a tile whose Firecracker
@@ -1863,7 +1863,7 @@ if [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && command -v vmx >/dev/null 2>&1; 
             fi
             log "[apps] appliance VMs ready; $(ls -1d /var/lib/kfire/goldens/*/ 2>/dev/null | wc -l) Firecracker golden(s) -- list: kfire goldens · clone: kfire clone <golden> · logins: /root/kldload-appliances.txt"
         else
-            log "[apps] WARNING: appliance build incomplete — see $LOG_FILE; rerun with: vmx --build-all (built tiles are skipped)"
+            log "[apps] WARNING: appliance build incomplete — see $LOG_FILE; rerun with: vmxctl --build-all (built tiles are skipped)"
         fi
     fi
 fi

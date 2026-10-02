@@ -2320,12 +2320,16 @@ DASHSTART
         # globs mean the NEXT one ships without anyone remembering this line.
         for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* \
             /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob* \
-            /usr/local/bin/wgx /usr/local/bin/vmxplore /usr/local/bin/vmx \
+            /usr/local/bin/wgx /usr/local/bin/vmxplore /usr/local/bin/vmx /usr/local/bin/vmxctl \
             /usr/local/bin/ztx /usr/local/bin/ztx-tui /usr/local/bin/timer \
             /usr/local/bin/*_exporter /usr/local/bin/*-exporter \
             /usr/local/bin/loki /usr/local/bin/promtail; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
+            # kld is a symlink to vmx (since 2026-09-30): the k* glob matches
+            # it, and cp would copy vmx's contents under the old name. It is
+            # linked after the loop instead.
+            [[ "$_name" == kld && -L "$_src" ]] && continue
             # ZFS Console is an installer checkbox (default on) — honor an
             # explicit opt-out. KLDLOAD_ENABLE_ZXPLORE from bootstrap.sh.
             [[ "$_name" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
@@ -2334,6 +2338,11 @@ DASHSTART
             chmod +x "${target}/usr/local/bin/${_name}"
         done
         shopt -u nullglob
+        # kld, the old name of vmx, stays as an alias for one release
+        if [[ -x "${target}/usr/local/bin/vmx" ]]; then
+            ln -sfn vmx "${target}/usr/local/bin/kld" ||
+                k_log "WARNING: could not link kld -> vmx on the target; use vmx"
+        fi
 
         # A count is not a result: compare what the live image HAS against what
         # the target GOT, per tool, and name every one that did not make it.

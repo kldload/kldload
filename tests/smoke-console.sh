@@ -147,11 +147,28 @@ else
     _fail "console actions answered" "${_n} of 12 lines reported — the rest never answered"
 fi
 
-_section "kld, the terminal hub"
+_section "vmx, the terminal hub (kld is its old name, kept as an alias)"
+# vmx came from vmxplore's cmd/vmx on 2026-09-30; kld is a symlink to it.
+# The rest of this section drives it AS kld on purpose, so the alias is
+# exercised by every check below, not just found.
+for _b in vmx vmxctl; do
+    # swallow: a missing binary is the FAIL in the else branch
+    _v="$("$_b" --version 2>/dev/null || true)"
+    if [[ "$_v" == "$_b "* ]]; then
+        _pass "$_b --version"
+    else
+        _fail "$_b --version" "missing or not answering as $_b"
+    fi
+done
+if [[ "$(readlink "$(command -v kld 2>/dev/null || echo /nonexistent)" 2>/dev/null)" == vmx ]]; then
+    _pass "kld is the alias of vmx"
+else
+    _fail "kld alias" "kld is not a symlink to vmx"
+fi
 if ! command -v kld >/dev/null 2>&1; then
     _fail "kld installed" "not on PATH"
 else
-    kld --help 2>/dev/null | grep -q 'operator console' && _pass "kld --help" || _fail "kld --help" "no usage text"
+    kld --help 2>/dev/null | grep -qE 'terminal console|operator console' && _pass "kld --help" || _fail "kld --help" "no usage text"
     # Every sub-tab of every section prints its rail and its own name; the
     # data under it is the tool's answer or the tool's error, both acceptable
     # to this gate — the tools have their own. The list is the console's:
@@ -244,8 +261,13 @@ TABS
     else
         # the digits alone: a "[0-9]*$" after the closing quote matched empty
         _port="$(sudo -n virsh dumpxml "$_live_vm" | grep -o "<graphics type='vnc' port='[0-9]*'" | head -1 | tr -dc '0-9')"
-        if (cd "${SCRIPT_DIR}/../kld" && KLD_VNC_LIVE="127.0.0.1:${_port}" GOTMPDIR="${SCRIPT_DIR}/../kld/.gotmp" go test -run TestRFBLive . >/dev/null 2>&1); then
-            _pass "vnc wire client: lit frame from ${_live_vm} :${_port}"
+        # The wire client's source is vmxplore's cmd/vmx now; VMXPLORE_SRC
+        # names a checkout, else the in-tree kld/ copy (same client, frozen
+        # 2026-09-30) is tested and the pass says which.
+        _vsrc="${VMXPLORE_SRC:+${VMXPLORE_SRC}/cmd/vmx}"
+        [[ -n "$_vsrc" && -d "$_vsrc" ]] || _vsrc="${SCRIPT_DIR}/../kld"
+        if (cd "$_vsrc" && KLD_VNC_LIVE="127.0.0.1:${_port}" GOTMPDIR="${_vsrc}/.gotmp" go test -run TestRFBLive . >/dev/null 2>&1); then
+            _pass "vnc wire client ($(basename "$(dirname "$_vsrc")")/$(basename "$_vsrc")): lit frame from ${_live_vm} :${_port}"
         else
             _fail "vnc wire client" "no lit frame from ${_live_vm} :${_port}"
         fi

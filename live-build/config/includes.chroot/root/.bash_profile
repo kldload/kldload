@@ -9,7 +9,7 @@
 if [[ "$(tty 2>/dev/null)" == /dev/tty1 ]] && grep -qwE 'kldload\.tui=1' /proc/cmdline 2>/dev/null; then
     for _m in /run/initramfs/live /run/live/medium /lib/live/mount/medium; do
         if [[ -d "$_m" ]] && command -v kld >/dev/null 2>&1; then
-            kld install
+            vmx install
             break
         fi
     done
