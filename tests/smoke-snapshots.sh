@@ -242,14 +242,21 @@ if grep -qi nvidia <<<"$gpus"; then
     # DKMS, so an RPM-name check failed a machine that was fine): ask the
     # kernel which file it loaded, and compare that file's time with the
     # start of first boot.
+    # WHY ctime, not mtime: Fedora's rpmbuild clamps file mtimes to the spec's
+    # changelog date (clamp_mtime_to_source_date_epoch), so an akmods-built
+    # nvidia.ko carries a date weeks old however late it was built -- build
+    # 173's 9-ai passed this with "written 2026-09-13 17:00:00", and onyx's
+    # module reads 08-02 17:00 though rpm installed it 08-30. ctime is set when
+    # the file lands and nothing can set it back; a later metadata change only
+    # moves it forward, which errs toward a FAIL, never a false PASS.
     mf="$(/usr/sbin/modinfo -n nvidia 2>/dev/null || modinfo -n nvidia 2>/dev/null || true)" # absent module is reported just below
     bt="$(date -d "$(uptime -s)" +%s)"
     fb="$(sed -n 's/^\[\([0-9-]* [0-9:]*\)\].*/\1/p' /var/log/kldload/firstboot.log 2>/dev/null | head -1)"
     fbt="$([[ -n "$fb" ]] && date -d "$fb" +%s || echo "$bt")"
     if [[ -n "$mf" && -f "$mf" ]]; then
-        mt="$(stat -c %Y "$mf")"
-        ((mt < fbt - 60)) && p "nvidia-kmod-at-install: ${mf##*/} written $(date -d @"$mt" '+%F %T'), before first boot" ||
-            f "nvidia-kmod-at-install: ${mf} written $(date -d @"$mt" +%T), first boot started $(date -d @"$fbt" +%T) -- built at first boot"
+        mt="$(stat -c %Z "$mf")"
+        ((mt < fbt - 60)) && p "nvidia-kmod-at-install: ${mf##*/} landed $(date -d @"$mt" '+%F %T'), before first boot" ||
+            f "nvidia-kmod-at-install: ${mf} landed $(date -d @"$mt" +%T), first boot started $(date -d @"$fbt" +%T) -- built at first boot"
     else
         f "nvidia-kmod-at-install: modinfo cannot find the nvidia module file"
     fi
