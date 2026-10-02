@@ -15,6 +15,7 @@
 #      destroys exactly one scheduled snapshot and no protected one -- read
 #      from the guard's own "destroyed" lines, never a pool diff.
 #   5. apply again changes nothing; package snapshots exist; rollback lists.
+#   0. vmx, vmxctl and the kld alias (every edition, before the core stop).
 #   6. NVIDIA (when present): loaded, no NVRM assertion, the module written
 #      before first boot, loaded early. Display (when gdm is on): gdm did not
 #      give up, no gnome-shell crash, a greeter or shell running.
@@ -41,6 +42,29 @@ f() {
     fails=$((fails + 1))
 }
 w() { echo "WARN $*"; }
+
+# vmx_checks: the console binaries every edition ships since the 2026-09-30
+# switch-over (vmx = the TUI, was kld; vmxctl = jobs; kld = an alias of vmx).
+# Here because this script already runs on every edition the sweep installs;
+# the ISO-level checks are in smoke-build.sh and prove only that they were
+# built, not that the installer carried them to the target.
+vmx_checks() {
+    local b out n
+    for b in vmx vmxctl; do
+        # swallow: a missing or broken binary is the FAIL on the next line
+        out="$("$b" --version 2>&1 || true)"
+        [[ "$out" == "$b "* ]] && p "vmx-bin-$b: ${out%%$'\n'*}" || f "vmx-bin-$b: '$(head -c 120 <<<"$out")'"
+    done
+    [[ "$(readlink /usr/local/bin/kld 2>/dev/null)" == vmx ]] && p "vmx-alias: kld -> vmx" || f "vmx-alias: /usr/local/bin/kld is not a symlink to vmx ($(ls -l /usr/local/bin/kld 2>&1 | cut -c1-100))"
+    # vmxctl with no arguments is a usage error by contract (exit 2)
+    n=0
+    vmxctl >/dev/null 2>&1 || n=$?
+    ((n == 2)) && p "vmx-ctl-usage: bare vmxctl exits 2" || f "vmx-ctl-usage: bare vmxctl exited ${n}, want 2"
+    # swallow: an empty catalog is the FAIL on the next line
+    n="$(vmxctl --appliances 2>/dev/null | grep -c . || true)"
+    ((n > 0)) && p "vmx-catalog: vmxctl --appliances printed ${n} lines" || f "vmx-catalog: vmxctl --appliances printed nothing"
+}
+vmx_checks
 T=/usr/local/sbin/kldload-snapshot-policy
 C=/etc/sanoid/sanoid.conf
 pool=rpool
