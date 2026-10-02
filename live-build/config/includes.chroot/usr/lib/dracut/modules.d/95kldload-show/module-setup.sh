@@ -51,4 +51,9 @@ install() {
     inst_simple "$moddir/kldload-initrd-show.service" "$systemdsystemunitdir/kldload-initrd-show.service"
     inst_script "$moddir/kldload-show-generator" "$systemdutildir/system-generators/kldload-show-generator"
     $SYSTEMCTL -q --root "$initdir" add-wants sysinit.target kldload-initrd-show.service
+
+    # Hook 28, one before livenet's 29-parse-livenet: a stalled image download
+    # becomes a curl error livenetroot retries, instead of a hang (fiend, build
+    # 173). Netboot-only like the rest of this module; see the hook's header.
+    inst_hook cmdline 28 "$moddir/kldload-livenet-stall.sh"
 }
