@@ -725,7 +725,13 @@ k_profile_optional_packages() {
         elif [[ "$_distro" == "arch" ]]; then
             out+=(zfs-dkms zfs-utils)
         else
-            out+=(zfsutils-linux zfs-zed zfs-initramfs zfs-dkms sanoid)
+            out+=(zfsutils-linux zfs-zed zfs-initramfs zfs-dkms)
+            # HISTORY build 173 (fiend, 2026-10-02): sanoid sat in this list
+            # unconditionally, so Debian/Ubuntu core got the package and its
+            # enabled sanoid.timer -- firing every 15 min against no config --
+            # while Fedora core, whose sanoid comes from the tools copy core
+            # skips, had none. Core is "no kldload tools, no sanoid" (header).
+            [[ "$_profile" == core ]] || out+=(sanoid)
         fi
     fi
 
