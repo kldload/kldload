@@ -85,9 +85,21 @@ T=/usr/local/sbin/kldload-snapshot-policy
 C=/etc/sanoid/sanoid.conf
 pool=rpool
 
-if ! command -v sanoid >/dev/null 2>&1; then
-    # core: no sanoid by design
+# Which path: the installed profile from the install manifest, the same
+# source profile-report.sh reads. Not "is sanoid there": build 173's
+# deb-1-core HAD sanoid (a packaging defect, since fixed), so the old test
+# ran the full policy checks on a core machine and reported eight datasets
+# that were really its own parse error. sanoid's presence is only the
+# fallback for a machine with no manifest.
+prof="$(sed -n 's/^KLDLOAD_PROFILE=//p' /etc/kldload/install-manifest.env 2>/dev/null | tr -d "\"'" | tail -1 || true)" # swallow: no manifest falls back below
+if [[ -z "$prof" ]]; then
+    command -v sanoid >/dev/null 2>&1 && prof=unknown || prof=core
+    w "profile: no KLDLOAD_PROFILE in /etc/kldload/install-manifest.env; judged '${prof}' from sanoid's presence"
+fi
+if [[ "$prof" == core ]]; then
+    # core: no sanoid, no kldload tools, by design
     core_no_vmx
+    if command -v sanoid >/dev/null 2>&1; then f "core-no-sanoid-pkg: sanoid is installed ($(command -v sanoid))"; else p "core-no-sanoid-pkg: sanoid not installed"; fi
     if systemctl is-active sanoid.timer >/dev/null 2>&1; then f "core-no-sanoid: sanoid.timer active"; else p "core-no-sanoid: no sanoid, no timer (by design)"; fi
     if [[ ! -f /var/log/kldload/firstboot.log ]]; then
         p "core-firstboot-note: no firstboot.log at all (core installs no kldload first boot; $(systemctl is-enabled kldload-firstboot.service 2>&1 | head -1 || true))" # swallow: is-enabled exits non-zero for an absent unit; its words are the note
@@ -104,6 +116,12 @@ fi
 vmx_checks
 
 [[ -x "$T" ]] && p "tool: $T present" || f "tool: $T missing"
+if [[ ! -f "$C" ]]; then
+    # one clear FAIL, then read an empty file: parsing an absent conf put the
+    # ERR trap's own words in the section list (deb-1-core, build 173)
+    f "conf-present: $C does not exist"
+    C=/dev/null
+fi
 grep -q 'WRITTEN BY kldload-snapshot-policy' "$C" && p "conf-owner: sanoid.conf written by the policy" || f "conf-owner: $C not written by the policy"
 ds_all="$(zfs list -H -o name -t filesystem,volume -r "$pool")"
 missing=0
